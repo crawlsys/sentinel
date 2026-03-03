@@ -9,6 +9,7 @@
 use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
+mod api;
 mod daemon_cmd;
 mod hook_cmd;
 mod stats_cmd;

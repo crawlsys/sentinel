@@ -12,16 +12,14 @@ pub async fn run(port: u16) -> Result<()> {
     info!("Sentinel daemon starting on port {port}");
 
     let state = Arc::new(RwLock::new(SessionState::new("daemon")));
+    let app_state = crate::api::AppState { session: state };
 
-    // Start dashboard API server
-    let app = axum::Router::new()
-        .route("/api/health", axum::routing::get(health))
-        .layer(
-            tower_http::cors::CorsLayer::new()
-                .allow_origin(tower_http::cors::Any)
-                .allow_methods(tower_http::cors::Any)
-                .allow_headers(tower_http::cors::Any),
-        );
+    let app = crate::api::router(app_state).layer(
+        tower_http::cors::CorsLayer::new()
+            .allow_origin(tower_http::cors::Any)
+            .allow_methods(tower_http::cors::Any)
+            .allow_headers(tower_http::cors::Any),
+    );
 
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}")).await?;
     info!("Dashboard API listening on http://localhost:{port}");
@@ -29,12 +27,4 @@ pub async fn run(port: u16) -> Result<()> {
     axum::serve(listener, app).await?;
 
     Ok(())
-}
-
-async fn health() -> axum::Json<serde_json::Value> {
-    axum::Json(serde_json::json!({
-        "status": "ok",
-        "version": env!("CARGO_PKG_VERSION"),
-        "engine": "sentinel"
-    }))
 }
