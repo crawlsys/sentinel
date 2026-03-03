@@ -7,6 +7,7 @@
 pub mod classifier;
 pub mod engine;
 pub mod gate;
+pub mod hooks;
 pub mod judge_service;
 pub mod mcp_handler;
 pub mod proof_engine;
