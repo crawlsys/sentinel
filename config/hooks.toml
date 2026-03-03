@@ -1,0 +1,115 @@
+# Sentinel Hook Registrations
+#
+# Each hook has: id, event, matcher (optional), depends_on, has_api_call.
+# The dependency graph determines execution order within each event.
+
+# === SessionStart ===
+
+[[hooks]]
+id = "session-init"
+event = "SessionStart"
+description = "Initialize session state, generate CLAUDE.md"
+depends_on = []
+has_api_call = false
+
+# === UserPromptSubmit ===
+
+[[hooks]]
+id = "skill-router"
+event = "UserPromptSubmit"
+description = "Detect skill from user message (regex + AI classifier)"
+depends_on = []
+has_api_call = true  # Uses Sonnet for AI classification
+
+[[hooks]]
+id = "todo-loader"
+event = "UserPromptSubmit"
+description = "Inject persistent todos into context"
+depends_on = []
+has_api_call = false
+
+[[hooks]]
+id = "phase-validator"
+event = "UserPromptSubmit"
+description = "Validate phase completion and inject progress"
+depends_on = ["skill-router"]
+has_api_call = true  # Uses Haiku for validation
+
+[[hooks]]
+id = "hygiene-override"
+event = "UserPromptSubmit"
+description = "Override hygiene rules when appropriate"
+depends_on = []
+has_api_call = false
+
+# === PreToolUse ===
+
+[[hooks]]
+id = "phase-gate"
+event = "PreToolUse"
+description = "Block tool use if skill phases are skipped"
+depends_on = ["skill-router"]
+has_api_call = false
+
+[[hooks]]
+id = "git-hygiene-gate"
+event = "PreToolUse"
+matcher = ["Edit", "Write"]
+description = "Block edits when uncommitted changes exceed thresholds"
+depends_on = []
+has_api_call = false
+
+[[hooks]]
+id = "todo-interceptor"
+event = "PreToolUse"
+description = "Track todo-related tool calls"
+depends_on = []
+has_api_call = false
+
+# === PostToolUse ===
+
+[[hooks]]
+id = "evidence-collector"
+event = "PostToolUse"
+description = "Collect tool results as evidence for proof chain"
+depends_on = []
+has_api_call = false
+
+# === Stop ===
+
+[[hooks]]
+id = "context-monitor"
+event = "Stop"
+description = "Track context window usage percentage"
+depends_on = []
+has_api_call = false
+
+[[hooks]]
+id = "commit-hygiene"
+event = "Stop"
+description = "Warn about uncommitted changes at end of response"
+depends_on = []
+has_api_call = false
+
+[[hooks]]
+id = "execution-log"
+event = "Stop"
+description = "Capture [RUN]/[STEP]/[PHASE] markers from transcript"
+depends_on = []
+has_api_call = false
+
+[[hooks]]
+id = "skill-telemetry"
+event = "Stop"
+description = "Record skill usage analytics"
+depends_on = ["execution-log"]
+has_api_call = false
+
+# === PreCompact ===
+
+[[hooks]]
+id = "pre-compact"
+event = "PreCompact"
+description = "Preserve critical context before auto-compact"
+depends_on = []
+has_api_call = false
