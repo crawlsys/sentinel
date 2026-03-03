@@ -1,96 +1,118 @@
 # Quality Gate Skill — Step Definitions
-# 16 individually trackable steps across 4 phases
+# 22 individually trackable steps across 4 phases
 #
-# Phases: collect → evaluate → fix → report
+# Phases: discover → consolidate → execute → verify
+# NOTE: Phase names match SKILL.md exactly — parallel agent model
 
 # ============================================================================
-# Phase 1: Collect
+# Phase 1: Discover — Launch 6 parallel review agents
 # ============================================================================
 
 [[phases]]
-id = "collect"
+id = "discover"
 
 [[phases.steps]]
 id = "1.1"
-description = "Chain review skill and collect findings"
+description = "Launch maintainability reviewer agent"
 
 [[phases.steps]]
 id = "1.2"
-description = "Chain lint skill and collect violations"
+description = "Launch security auditor agent"
 
 [[phases.steps]]
 id = "1.3"
-description = "Chain test skill and collect results"
+description = "Launch architecture (atomic) auditor agent"
 
 [[phases.steps]]
 id = "1.4"
-description = "Gather all results into unified dataset"
+description = "Launch style reviewer agent"
+
+[[phases.steps]]
+id = "1.5"
+description = "Launch visual + accessibility auditor agent (Steel)"
+
+[[phases.steps]]
+id = "1.6"
+description = "Launch React hooks linter agent"
+
+[[phases.steps]]
+id = "1.7"
+description = "Collect results from all agents"
+
+[[phases.steps]]
+id = "1.8"
+description = "Merge and deduplicate findings across agents"
 
 # ============================================================================
-# Phase 2: Evaluate
+# Phase 2: Consolidate — Create tagged todos from findings
 # ============================================================================
 
 [[phases]]
-id = "evaluate"
+id = "consolidate"
 
 [[phases.steps]]
 id = "2.1"
-description = "Aggregate scores across all quality dimensions"
+description = "Classify findings by severity (critical/high/medium/low)"
 
 [[phases.steps]]
 id = "2.2"
-description = "Apply pass/fail criteria per dimension"
+description = "Tag findings by source (#dry, #security, #atomic, #lint, #visual, #a11y, #hooks)"
 
 [[phases.steps]]
 id = "2.3"
-description = "Identify blocking issues"
+description = "Create todos with severity icons and tags"
 
 [[phases.steps]]
 id = "2.4"
-description = "No critical quality issues"
+description = "No critical quality issues found"
 blocker = true
 
 # ============================================================================
-# Phase 3: Fix
+# Phase 3: Execute — Fix todos in priority order
 # ============================================================================
 
 [[phases]]
-id = "fix"
+id = "execute"
 
 [[phases.steps]]
 id = "3.1"
-description = "Address blocking quality issues"
+description = "Fix critical severity issues first"
 
 [[phases.steps]]
 id = "3.2"
-description = "Re-run failed quality checks"
+description = "Fix high severity issues"
 
 [[phases.steps]]
 id = "3.3"
-description = "Verify fixes resolve blockers"
+description = "Fix medium severity issues (if time permits)"
 
 [[phases.steps]]
 id = "3.4"
+description = "Run relevant checks after each fix"
+
+[[phases.steps]]
+id = "3.5"
 description = "Commit quality fixes"
 
 # ============================================================================
-# Phase 4: Report
+# Phase 4: Verify — Re-run checks and generate report
 # ============================================================================
 
 [[phases]]
-id = "report"
+id = "verify"
 
 [[phases.steps]]
 id = "4.1"
-description = "Create quality gate report with all dimensions"
+description = "Re-run all quality checks"
 
 [[phases.steps]]
 id = "4.2"
-description = "Update tracking with quality metrics"
+description = "Confirm 0 critical and 0 high issues remaining"
+blocker = true
 
 [[phases.steps]]
 id = "4.3"
-description = "Recommend improvements for future work"
+description = "Generate quality report with before/after counts"
 
 [[phases.steps]]
 id = "4.4"

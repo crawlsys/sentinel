@@ -1,10 +1,10 @@
 # Document Skill — Step Definitions
-# 25 individually trackable steps across 5 phases
+# 30 individually trackable steps across 6 phases
 #
-# Phases: audit → clean → organize → generate → verify
+# Phases: audit → clean → organize → generate → update → maintain
 
 # ============================================================================
-# Phase 1: Audit
+# Phase 1: Audit — Find all docs, flag junk/outdated
 # ============================================================================
 
 [[phases]]
@@ -31,7 +31,7 @@ id = "1.5"
 description = "Identify undocumented public APIs"
 
 # ============================================================================
-# Phase 2: Clean
+# Phase 2: Clean — Delete obsolete, duplicate, empty docs
 # ============================================================================
 
 [[phases]]
@@ -58,7 +58,7 @@ id = "2.5"
 description = "Update incorrect code references"
 
 # ============================================================================
-# Phase 3: Organize
+# Phase 3: Organize — Create folder structure, move files
 # ============================================================================
 
 [[phases]]
@@ -81,7 +81,7 @@ id = "3.4"
 description = "Establish naming conventions for doc files"
 
 # ============================================================================
-# Phase 4: Generate
+# Phase 4: Generate — Create missing docs
 # ============================================================================
 
 [[phases]]
@@ -108,28 +108,51 @@ id = "4.5"
 description = "Generate changelog entries"
 
 # ============================================================================
-# Phase 5: Verify
+# Phase 5: Update — Sync existing docs with current code
 # ============================================================================
 
 [[phases]]
-id = "verify"
+id = "update"
 
 [[phases.steps]]
 id = "5.1"
-description = "Check all internal links resolve"
+description = "Cross-reference docs against current code state"
 
 [[phases.steps]]
 id = "5.2"
-description = "Verify code examples compile or run"
+description = "Update code examples and snippets"
 
 [[phases.steps]]
 id = "5.3"
-description = "Ensure docs match current code state"
+description = "Refresh screenshots via Steel (if UI docs)"
 
 [[phases.steps]]
 id = "5.4"
-description = "Commit all documentation changes"
+description = "Extract Loom video content into docs (if available)"
 
 [[phases.steps]]
 id = "5.5"
+description = "Commit all documentation updates"
+
+# ============================================================================
+# Phase 6: Maintain — Ongoing doc health checks
+# ============================================================================
+
+[[phases]]
+id = "maintain"
+
+[[phases.steps]]
+id = "6.1"
+description = "Check all internal links resolve"
+
+[[phases.steps]]
+id = "6.2"
+description = "Verify code examples compile or run"
+
+[[phases.steps]]
+id = "6.3"
+description = "Ensure docs match current code state"
+
+[[phases.steps]]
+id = "6.4"
 description = "Report documentation coverage summary"

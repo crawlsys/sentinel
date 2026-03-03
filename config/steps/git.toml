@@ -1,14 +1,15 @@
 # Git Skill — Step Definitions
-# Branch management, commits, push, and PR creation
+# 17 individually trackable steps across 6 phases (2 workflows)
 #
-# 3 phases, ~10 steps
+# Workflow 1 (commit): analyze → generate → execute
+# Workflow 2 (PR): pr-gather → pr-generate → pr-create
 
 # ============================================================================
-# Phase 1: Prepare — Assess current git state
+# Workflow 1, Phase 1: Analyze — Assess current git state
 # ============================================================================
 
 [[phases]]
-id = "prepare"
+id = "analyze"
 
 [[phases.steps]]
 id = "1.1"
@@ -20,47 +21,97 @@ description = "Detect staged and unstaged changes"
 
 [[phases.steps]]
 id = "1.3"
-description = "Determine commit scope and message format"
+description = "Load recent commit style reference"
 
 [[phases.steps]]
 id = "1.4"
 description = "Create feature branch if on main"
 
 # ============================================================================
-# Phase 2: Execute — Perform git operations
+# Workflow 1, Phase 2: Generate — Create commit message
+# ============================================================================
+
+[[phases]]
+id = "generate"
+
+[[phases.steps]]
+id = "2.1"
+description = "Determine conventional commit type and scope"
+
+[[phases.steps]]
+id = "2.2"
+description = "Generate commit message body"
+
+# ============================================================================
+# Workflow 1, Phase 3: Execute — Stage, commit, verify
 # ============================================================================
 
 [[phases]]
 id = "execute"
 
 [[phases.steps]]
-id = "2.1"
+id = "3.1"
 description = "Stage relevant files"
 
 [[phases.steps]]
-id = "2.2"
+id = "3.2"
 description = "Create commit with conventional message"
 blocker = true
 
 [[phases.steps]]
-id = "2.3"
-description = "Push to remote if requested"
-
-[[phases.steps]]
-id = "2.4"
-description = "Create pull request if requested"
+id = "3.3"
+description = "Verify commit exists in log"
 
 # ============================================================================
-# Phase 3: Verify — Confirm operations succeeded
+# Workflow 2, Phase 4: PR Gather — Collect PR context
 # ============================================================================
 
 [[phases]]
-id = "verify"
+id = "pr-gather"
 
 [[phases.steps]]
-id = "3.1"
-description = "Verify commit exists in log"
+id = "4.1"
+description = "Get current branch name"
 
 [[phases.steps]]
-id = "3.2"
-description = "Confirm push succeeded (if applicable)"
+id = "4.2"
+description = "List commits since divergence from main"
+
+[[phases.steps]]
+id = "4.3"
+description = "Get files changed stat"
+
+# ============================================================================
+# Workflow 2, Phase 5: PR Generate — Create PR description
+# ============================================================================
+
+[[phases]]
+id = "pr-generate"
+
+[[phases.steps]]
+id = "5.1"
+description = "Generate PR summary and changes list"
+
+[[phases.steps]]
+id = "5.2"
+description = "Generate test plan checklist"
+
+# ============================================================================
+# Workflow 2, Phase 6: PR Create — Push and create PR
+# ============================================================================
+
+[[phases]]
+id = "pr-create"
+
+[[phases.steps]]
+id = "6.1"
+description = "Push branch to remote with -u flag"
+
+[[phases.steps]]
+id = "6.2"
+description = "Create PR via gh pr create"
+blocker = true
+
+[[phases.steps]]
+id = "6.3"
+description = "Report PR URL"

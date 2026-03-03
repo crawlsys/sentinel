@@ -1,155 +1,170 @@
 # Debug Skill — Step Definitions
-# 28 individually trackable steps across 5 phases
+# 30 individually trackable steps across 7 phases
 #
-# Phases: reproduce → isolate → investigate → fix → verify-prevent
+# Phases: gather → reproduce → isolate → investigate → fix → verify → prevent
+# NOTE: gather is the FIRST phase (collect error info before reproduction)
 
 # ============================================================================
-# Phase 1: Reproduce
+# Phase 1: Gather — Collect error info
+# ============================================================================
+
+[[phases]]
+id = "gather"
+
+[[phases.steps]]
+id = "1.1"
+description = "Collect error message and stack trace"
+
+[[phases.steps]]
+id = "1.2"
+description = "Note reproduction steps from user"
+
+[[phases.steps]]
+id = "1.3"
+description = "Document environment (OS, versions, config)"
+
+[[phases.steps]]
+id = "1.4"
+description = "Identify affected files from error location"
+
+# ============================================================================
+# Phase 2: Reproduce — Trigger bug consistently
 # ============================================================================
 
 [[phases]]
 id = "reproduce"
 
 [[phases.steps]]
-id = "1.1"
-description = "Gather error info (logs, stack traces, screenshots)"
+id = "2.1"
+description = "Identify trigger conditions"
 
 [[phases.steps]]
-id = "1.2"
-description = "Identify triggers and preconditions"
-
-[[phases.steps]]
-id = "1.3"
+id = "2.2"
 description = "Run reproduction steps"
 
 [[phases.steps]]
-id = "1.4"
+id = "2.3"
 description = "Confirm consistent reproducibility"
 
 [[phases.steps]]
-id = "1.5"
+id = "2.4"
 description = "Document reproduction steps"
 
 [[phases.steps]]
-id = "1.6"
+id = "2.5"
 description = "Reproducible or documented as intermittent"
 blocker = true
 
 # ============================================================================
-# Phase 2: Isolate
+# Phase 3: Isolate — Narrow to specific code
 # ============================================================================
 
 [[phases]]
 id = "isolate"
 
 [[phases.steps]]
-id = "2.1"
+id = "3.1"
 description = "Trace code path from error origin"
 
 [[phases.steps]]
-id = "2.2"
+id = "3.2"
 description = "Check recent changes (git log/blame)"
 
 [[phases.steps]]
-id = "2.3"
+id = "3.3"
 description = "Analyze stack trace and call chain"
 
 [[phases.steps]]
-id = "2.4"
+id = "3.4"
 description = "Narrow to specific component or module"
 
 [[phases.steps]]
-id = "2.5"
+id = "3.5"
 description = "Identify related code and side effects"
 
 # ============================================================================
-# Phase 3: Investigate
+# Phase 4: Investigate — Parallel agents, root cause
 # ============================================================================
 
 [[phases]]
 id = "investigate"
 
 [[phases.steps]]
-id = "3.1"
+id = "4.1"
 description = "Spawn investigation agents for parallel analysis"
 
 [[phases.steps]]
-id = "3.2"
+id = "4.2"
 description = "Correlate findings across code paths"
 
 [[phases.steps]]
-id = "3.3"
-description = "Form hypothesis for root cause"
+id = "4.3"
+description = "Form and validate hypothesis for root cause"
 
 [[phases.steps]]
-id = "3.4"
-description = "Validate hypothesis with code evidence"
-
-[[phases.steps]]
-id = "3.5"
-description = "Identify root cause"
+id = "4.4"
+description = "Identify root cause with code evidence"
 blocker = true
 
-[[phases.steps]]
-id = "3.6"
-description = "Document root cause analysis"
-
 # ============================================================================
-# Phase 4: Fix
+# Phase 5: Fix — Implement minimal correction
 # ============================================================================
 
 [[phases]]
 id = "fix"
 
 [[phases.steps]]
-id = "4.1"
+id = "5.1"
 description = "Design minimal fix targeting root cause"
 
 [[phases.steps]]
-id = "4.2"
+id = "5.2"
 description = "Implement fix"
 
 [[phases.steps]]
-id = "4.3"
+id = "5.3"
 description = "Verify no side effects on adjacent code"
 
 [[phases.steps]]
-id = "4.4"
-description = "Handle edge cases identified during investigation"
-
-[[phases.steps]]
-id = "4.5"
+id = "5.4"
 description = "Commit fix with descriptive message"
 
 # ============================================================================
-# Phase 5: Verify & Prevent
+# Phase 6: Verify — Confirm fix works
 # ============================================================================
 
 [[phases]]
-id = "verify-prevent"
+id = "verify"
 
 [[phases.steps]]
-id = "5.1"
+id = "6.1"
 description = "Run reproduction steps (confirm fixed)"
 blocker = true
 
 [[phases.steps]]
-id = "5.2"
+id = "6.2"
 description = "Run full test suite"
 
 [[phases.steps]]
-id = "5.3"
+id = "6.3"
 description = "Check for regressions in related code"
 
+# ============================================================================
+# Phase 7: Prevent — Regression test
+# ============================================================================
+
+[[phases]]
+id = "prevent"
+
 [[phases.steps]]
-id = "5.4"
+id = "7.1"
 description = "Add regression test for the bug"
 
 [[phases.steps]]
-id = "5.5"
+id = "7.2"
 description = "Commit regression test"
 
 [[phases.steps]]
-id = "5.6"
+id = "7.3"
 description = "No regressions confirmed"
 blocker = true

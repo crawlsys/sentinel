@@ -8,9 +8,9 @@
 #   0 = Reference only (no workflow): skill-registry, skill-router, web-design, mui,
 #       react, nextjs, atomic-design, ddd-hexagonal, claude-code-guide, claude-md,
 #       react-hooks-linter
-#   1 = Simple (2-3 phases): 18 skills
-#   2 = Moderate (4-5 phases): 22 skills
-#   3 = Complex (6-8 phases): 7 skills
+#   1 = Simple (2-3 phases): 15 skills
+#   2 = Moderate (4-5 phases): 18 skills
+#   3 = Complex (6-8 phases): 12 skills
 
 # ==============================================================================
 # TIER 3 — Complex Workflows (6-8 phases)
@@ -363,16 +363,23 @@ description = "Generate API docs, create examples, publish"
 # TIER 2 — Moderate Workflows (4-5 phases)
 # ==============================================================================
 
-# --- debug (5 phases) ---
+# --- debug (7 phases) ---
 [[workflows]]
 skill = "debug"
+
+[[workflows.phases]]
+id = "gather"
+file = "gather.md"
+required = true
+judge = "haiku"
+description = "Collect error message, stack trace, repro steps, environment info"
 
 [[workflows.phases]]
 id = "reproduce"
 file = "reproduce.md"
 required = true
 judge = "sonnet"
-description = "Gather error info, identify triggers, confirm reproduction"
+description = "Identify triggers, run reproduction steps, confirm consistency"
 
 [[workflows.phases]]
 id = "isolate"
@@ -386,21 +393,28 @@ id = "investigate"
 file = "investigate.md"
 required = true
 judge = "sonnet"
-description = "Form hypothesis, validate with evidence, identify root cause"
+description = "Spawn parallel agents, correlate findings, identify root cause"
 
 [[workflows.phases]]
 id = "fix"
 file = "fix.md"
 required = true
 judge = "sonnet"
-description = "Design minimal fix, implement, handle edge cases"
+description = "Design minimal fix, implement, verify no side effects"
 
 [[workflows.phases]]
-id = "verify-prevent"
-file = "verify-prevent.md"
+id = "verify"
+file = "verify.md"
 required = true
 judge = "sonnet"
-description = "Confirm fix works, add regression test, verify no regressions"
+description = "Confirm fix works, run full test suite, check regressions"
+
+[[workflows.phases]]
+id = "prevent"
+file = "prevent.md"
+required = true
+judge = "sonnet"
+description = "Add regression test, commit, verify no regressions"
 
 # --- review (5 phases) ---
 [[workflows]]
@@ -414,25 +428,25 @@ judge = "haiku"
 description = "Get changed files, read PR description, detect linked issues"
 
 [[workflows.phases]]
-id = "analyze"
-file = "analyze.md"
+id = "spec"
+file = "spec.md"
 required = true
 judge = "sonnet"
-description = "Check spec compliance, identify missing items, assess complexity"
+description = "Stage 1: spec-compliance check — requirements match, YAGNI, missing items"
 
 [[workflows.phases]]
 id = "quality"
 file = "quality.md"
 required = true
 judge = "sonnet"
-description = "Run parallel review agents: correctness, security, performance, style"
+description = "Stage 2: parallel review agents — correctness, security, performance, maintainability, test coverage"
 
 [[workflows.phases]]
 id = "consolidate"
 file = "consolidate.md"
 required = true
 judge = "sonnet"
-description = "Merge findings, format report, present to user"
+description = "Merge findings from both stages, prioritize, format, extract Loom context"
 
 [[workflows.phases]]
 id = "track"
@@ -480,7 +494,7 @@ required = false
 judge = "haiku"
 description = "Compare coverage before/after, identify remaining gaps"
 
-# --- security (5 phases) ---
+# --- security (4 phases) ---
 [[workflows]]
 skill = "security"
 
@@ -496,28 +510,21 @@ id = "scan"
 file = "scan.md"
 required = true
 judge = "sonnet"
-description = "Run OWASP top 10 checks, audit auth flows, check secrets exposure"
+description = "Launch 5 parallel agents: injection, auth, access, deps, secrets"
 
 [[workflows.phases]]
-id = "analyze"
-file = "analyze.md"
+id = "consolidate"
+file = "consolidate.md"
 required = true
 judge = "opus"
-description = "Classify by severity, verify each finding with code evidence"
-
-[[workflows.phases]]
-id = "remediate"
-file = "remediate.md"
-required = true
-judge = "sonnet"
-description = "Fix critical/high vulnerabilities, update deps, add validation"
+description = "Verify findings with code evidence, eliminate false positives, classify severity"
 
 [[workflows.phases]]
 id = "report"
 file = "report.md"
 required = false
 judge = "haiku"
-description = "Create security report, track findings, recommend prevention"
+description = "Create security report, track findings as todos, recommend prevention"
 
 # --- refactor (5 phases) ---
 [[workflows]]
@@ -558,7 +565,7 @@ required = true
 judge = "sonnet"
 description = "Run full test suite, compare coverage, verify no regressions"
 
-# --- document (5 phases) ---
+# --- document (6 phases) ---
 [[workflows]]
 skill = "document"
 
@@ -591,11 +598,18 @@ judge = "sonnet"
 description = "Create/update README, API docs, architecture docs, inline comments"
 
 [[workflows.phases]]
-id = "verify"
-file = "verify.md"
+id = "update"
+file = "update.md"
+required = true
+judge = "sonnet"
+description = "Sync docs with code, update examples, refresh screenshots, extract Loom content"
+
+[[workflows.phases]]
+id = "maintain"
+file = "maintain.md"
 required = false
 judge = "haiku"
-description = "Check all links work, verify code examples, ensure docs match code"
+description = "Check links resolve, verify code examples, report coverage summary"
 
 # --- explore (4 phases) ---
 [[workflows]]
@@ -762,32 +776,32 @@ description = "Measure improvements, compare before/after, verify no regressions
 skill = "quality-gate"
 
 [[workflows.phases]]
-id = "collect"
-file = "collect.md"
+id = "discover"
+file = "discover.md"
 required = true
 judge = "haiku"
-description = "Chain review, lint, and test skills, gather all results"
+description = "Launch 6 parallel agents: maintainability, security, architecture, style, visual/a11y, hooks"
 
 [[workflows.phases]]
-id = "evaluate"
-file = "evaluate.md"
+id = "consolidate"
+file = "consolidate.md"
 required = true
 judge = "sonnet"
-description = "Aggregate scores, apply pass/fail criteria, identify blockers"
+description = "Classify severity, tag by source, create todos"
 
 [[workflows.phases]]
-id = "fix"
-file = "fix.md"
+id = "execute"
+file = "execute.md"
 required = true
 judge = "sonnet"
-description = "Address blocking issues, re-run failed checks"
+description = "Fix critical/high/medium issues in priority order"
 
 [[workflows.phases]]
-id = "report"
-file = "report.md"
-required = false
-judge = "haiku"
-description = "Create quality report, update tracking, recommend improvements"
+id = "verify"
+file = "verify.md"
+required = true
+judge = "sonnet"
+description = "Re-run all checks, confirm 0 critical/high, generate quality report"
 
 # --- reality-check (4 phases) ---
 [[workflows]]
@@ -872,18 +886,18 @@ judge = "sonnet"
 description = "Verify each candidate is truly unused, check dynamic usage, assess risk"
 
 [[workflows.phases]]
-id = "remove"
-file = "remove.md"
-required = true
-judge = "sonnet"
-description = "Delete dead code, remove unused deps, clean imports"
-
-[[workflows.phases]]
 id = "verify"
 file = "verify.md"
 required = true
 judge = "sonnet"
-description = "Run full test suite, check no broken references, verify build succeeds"
+description = "Run tests, check references, verify build BEFORE any removal"
+
+[[workflows.phases]]
+id = "remove"
+file = "remove.md"
+required = true
+judge = "sonnet"
+description = "Delete dead code, remove unused deps, clean imports, commit changes"
 
 # --- research (4 phases) ---
 [[workflows]]
@@ -1313,30 +1327,51 @@ required = true
 judge = "haiku"
 description = "Validate skills load, check counts match, report changes"
 
-# --- git (3 phases) ---
+# --- git (6 phases, 2 workflows) ---
 [[workflows]]
 skill = "git"
 
 [[workflows.phases]]
-id = "prepare"
-file = "prepare.md"
+id = "analyze"
+file = "analyze.md"
 required = true
 judge = "haiku"
-description = "Check branch state, detect changes, determine commit scope"
+description = "Check branch state, detect changes, load commit style reference"
+
+[[workflows.phases]]
+id = "generate"
+file = "generate.md"
+required = true
+judge = "sonnet"
+description = "Determine conventional commit type/scope, generate message"
 
 [[workflows.phases]]
 id = "execute"
 file = "execute.md"
 required = true
 judge = "sonnet"
-description = "Stage files, create commit, push if requested, create PR"
+description = "Stage files, create commit, verify in log"
 
 [[workflows.phases]]
-id = "verify"
-file = "verify.md"
-required = true
+id = "pr-gather"
+file = "pr-gather.md"
+required = false
 judge = "haiku"
-description = "Verify commit exists, check push succeeded, confirm PR created"
+description = "Get branch, list commits since main, get files changed"
+
+[[workflows.phases]]
+id = "pr-generate"
+file = "pr-generate.md"
+required = false
+judge = "sonnet"
+description = "Generate PR summary, changes list, test plan"
+
+[[workflows.phases]]
+id = "pr-create"
+file = "pr-create.md"
+required = false
+judge = "sonnet"
+description = "Push branch, create PR via gh, report URL"
 
 # --- git-worktree (3 phases) ---
 [[workflows]]
@@ -1442,7 +1477,7 @@ required = false
 judge = "haiku"
 description = "Stop tunnel, release resources, report URL used"
 
-# --- steel-tester (3 phases) ---
+# --- steel-tester (8 phases) ---
 [[workflows]]
 skill = "steel-tester"
 
@@ -1451,21 +1486,56 @@ id = "setup"
 file = "setup.md"
 required = true
 judge = "haiku"
-description = "Create Steel session, determine target URL, configure options"
+description = "Determine target, load config, get credentials, create Steel session"
+
+[[workflows.phases]]
+id = "crawl"
+file = "crawl.md"
+required = true
+judge = "sonnet"
+description = "Navigate homepage, extract links, build test plan"
+
+[[workflows.phases]]
+id = "login"
+file = "login.md"
+required = false
+judge = "sonnet"
+description = "Navigate to login, fill credentials, verify authenticated"
 
 [[workflows.phases]]
 id = "test"
 file = "test.md"
 required = true
 judge = "sonnet"
-description = "Navigate, check console errors, test interactions, take screenshots"
+description = "Per-page: navigate, screenshot, health check, console errors, interactive elements"
+
+[[workflows.phases]]
+id = "a11y"
+file = "a11y.md"
+required = true
+judge = "sonnet"
+description = "Inject axe-core, run accessibility audit, classify violations"
+
+[[workflows.phases]]
+id = "file-issues"
+file = "file-issues.md"
+required = true
+judge = "sonnet"
+description = "Determine severity, check duplicates, create Linear issues"
 
 [[workflows.phases]]
 id = "report"
 file = "report.md"
 required = true
-judge = "sonnet"
-description = "Release session, compile findings, create Linear issues for bugs"
+judge = "haiku"
+description = "Compile evidence, generate summary report"
+
+[[workflows.phases]]
+id = "cleanup"
+file = "cleanup.md"
+required = true
+judge = "haiku"
+description = "Release Steel session, kill Cloudflare tunnel"
 
 # --- telemetry (2 phases) ---
 [[workflows]]

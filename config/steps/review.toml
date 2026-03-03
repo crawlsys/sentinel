@@ -1,10 +1,11 @@
 # Review Skill — Step Definitions
-# 25 individually trackable steps across 5 phases
+# 22 individually trackable steps across 5 phases
 #
-# Phases: gather → analyze → quality → consolidate → track
+# Phases: gather → spec → quality → consolidate → track
+# NOTE: Two-stage review — spec compliance first, then quality agents
 
 # ============================================================================
-# Phase 1: Gather
+# Phase 1: Gather — Context and changed files
 # ============================================================================
 
 [[phases]]
@@ -12,7 +13,7 @@ id = "gather"
 
 [[phases.steps]]
 id = "1.1"
-description = "Get list of changed files (diff)"
+description = "Get list of changed files (git diff)"
 
 [[phases.steps]]
 id = "1.2"
@@ -24,30 +25,26 @@ description = "Detect linked issues and requirements"
 
 [[phases.steps]]
 id = "1.4"
-description = "Load relevant specs and acceptance criteria"
-
-[[phases.steps]]
-id = "1.5"
 description = "Identify review scope and boundaries"
 
 # ============================================================================
-# Phase 2: Analyze
+# Phase 2: Spec Compliance — Stage 1 (requirements match)
 # ============================================================================
 
 [[phases]]
-id = "analyze"
+id = "spec"
 
 [[phases.steps]]
 id = "2.1"
-description = "Check spec compliance for each changed file"
+description = "Load spec-compliance agent"
 
 [[phases.steps]]
 id = "2.2"
-description = "Identify missing items (tests, docs, types)"
+description = "Check requirements match against spec/acceptance criteria"
 
 [[phases.steps]]
 id = "2.3"
-description = "Assess complexity and risk level"
+description = "Identify YAGNI (code that exceeds requirements)"
 
 [[phases.steps]]
 id = "2.4"
@@ -55,7 +52,7 @@ description = "Verify no critical missing items"
 blocker = true
 
 # ============================================================================
-# Phase 3: Quality
+# Phase 3: Quality — Stage 2 (parallel review agents)
 # ============================================================================
 
 [[phases]]
@@ -63,34 +60,30 @@ id = "quality"
 
 [[phases.steps]]
 id = "3.1"
-description = "Spawn correctness review agent"
+description = "Launch correctness review agent"
 
 [[phases.steps]]
 id = "3.2"
-description = "Spawn security review agent"
+description = "Launch security review agent"
 
 [[phases.steps]]
 id = "3.3"
-description = "Spawn performance review agent"
+description = "Launch performance review agent"
 
 [[phases.steps]]
 id = "3.4"
-description = "Spawn style review agent"
+description = "Launch maintainability review agent"
 
 [[phases.steps]]
 id = "3.5"
-description = "Collect results from all agents"
+description = "Launch test coverage review agent"
 
 [[phases.steps]]
 id = "3.6"
-description = "Deduplicate findings across agents"
-
-[[phases.steps]]
-id = "3.7"
-description = "Prioritize findings by severity"
+description = "Collect and deduplicate agent findings"
 
 # ============================================================================
-# Phase 4: Consolidate
+# Phase 4: Consolidate — Merge, prioritize, format
 # ============================================================================
 
 [[phases]]
@@ -98,18 +91,22 @@ id = "consolidate"
 
 [[phases.steps]]
 id = "4.1"
-description = "Merge findings into unified report"
+description = "Merge findings from both stages"
 
 [[phases.steps]]
 id = "4.2"
-description = "Format report with code references"
+description = "Prioritize findings by severity"
 
 [[phases.steps]]
 id = "4.3"
-description = "Present findings to user for review"
+description = "Format review report with code references"
+
+[[phases.steps]]
+id = "4.4"
+description = "Extract Loom walkthrough context (if PR has Loom URL)"
 
 # ============================================================================
-# Phase 5: Track
+# Phase 5: Track — Create todos for findings
 # ============================================================================
 
 [[phases]]

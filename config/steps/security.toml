@@ -1,10 +1,12 @@
 # Security Skill — Step Definitions
-# 30 individually trackable steps across 5 phases
+# 20 individually trackable steps across 4 phases
 #
-# Phases: scope → scan → analyze → remediate → report
+# Phases: scope → scan → consolidate → report
+# NOTE: Scan phase launches 5 parallel agents (injection, auth, access, deps, secrets)
+# This matches the SKILL.md parallel agent model
 
 # ============================================================================
-# Phase 1: Scope
+# Phase 1: Scope — Identify attack surface
 # ============================================================================
 
 [[phases]]
@@ -24,18 +26,14 @@ description = "Detect technologies and frameworks in use"
 
 [[phases.steps]]
 id = "1.4"
-description = "Check dependency tree for known vulnerabilities"
-
-[[phases.steps]]
-id = "1.5"
 description = "Map authentication and authorization flows"
 
 [[phases.steps]]
-id = "1.6"
+id = "1.5"
 description = "Identify data storage and transmission points"
 
 # ============================================================================
-# Phase 2: Scan
+# Phase 2: Scan — Launch 5 parallel security agents
 # ============================================================================
 
 [[phases]]
@@ -43,110 +41,71 @@ id = "scan"
 
 [[phases.steps]]
 id = "2.1"
-description = "Check for SQL/NoSQL injection vulnerabilities"
+description = "Launch injection scanner agent (SQL, XSS, command)"
 
 [[phases.steps]]
 id = "2.2"
-description = "Check for XSS vulnerabilities"
+description = "Launch authentication auditor agent"
 
 [[phases.steps]]
 id = "2.3"
-description = "Check for CSRF vulnerabilities"
+description = "Launch access control checker agent (IDOR, RBAC)"
 
 [[phases.steps]]
 id = "2.4"
-description = "Audit authentication flows for weaknesses"
+description = "Launch dependency auditor agent (CVEs)"
 
 [[phases.steps]]
 id = "2.5"
-description = "Check for secrets exposure (env vars, hardcoded keys)"
+description = "Launch secrets scanner agent"
 
 [[phases.steps]]
 id = "2.6"
-description = "Scan for insecure deserialization"
-
-[[phases.steps]]
-id = "2.7"
-description = "Check for broken access control patterns"
-
-[[phases.steps]]
-id = "2.8"
-description = "Audit API endpoints for missing auth checks"
+description = "Collect results from all agents"
 
 # ============================================================================
-# Phase 3: Analyze
+# Phase 3: Consolidate — Verify, classify, prioritize
 # ============================================================================
 
 [[phases]]
-id = "analyze"
+id = "consolidate"
 
 [[phases.steps]]
 id = "3.1"
-description = "Classify findings by CVSS severity"
-
-[[phases.steps]]
-id = "3.2"
 description = "Verify each finding with code evidence"
 
 [[phases.steps]]
-id = "3.3"
+id = "3.2"
 description = "Eliminate false positives"
 
 [[phases.steps]]
-id = "3.4"
-description = "Assess exploitability of each finding"
+id = "3.3"
+description = "Classify findings by CVSS severity"
 
 [[phases.steps]]
-id = "3.5"
+id = "3.4"
 description = "All findings verified or dismissed"
 blocker = true
 
 # ============================================================================
-# Phase 4: Remediate
-# ============================================================================
-
-[[phases]]
-id = "remediate"
-
-[[phases.steps]]
-id = "4.1"
-description = "Fix critical severity vulnerabilities"
-
-[[phases.steps]]
-id = "4.2"
-description = "Fix high severity vulnerabilities"
-
-[[phases.steps]]
-id = "4.3"
-description = "Update vulnerable dependencies"
-
-[[phases.steps]]
-id = "4.4"
-description = "Add input validation and sanitization"
-
-[[phases.steps]]
-id = "4.5"
-description = "Commit security fixes"
-
-# ============================================================================
-# Phase 5: Report
+# Phase 4: Report — Assessment and tracking
 # ============================================================================
 
 [[phases]]
 id = "report"
 
 [[phases.steps]]
-id = "5.1"
+id = "4.1"
 description = "Create security assessment report"
 
 [[phases.steps]]
-id = "5.2"
+id = "4.2"
 description = "Track findings as todos with severity tags"
 
 [[phases.steps]]
-id = "5.3"
+id = "4.3"
 description = "Recommend preventive measures"
 
 [[phases.steps]]
-id = "5.4"
+id = "4.4"
 description = "Document security posture summary"
