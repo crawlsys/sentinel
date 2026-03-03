@@ -8,7 +8,7 @@ use tracing::debug;
 use sentinel_application::hooks;
 use sentinel_domain::events::{HookEvent, HookOutput};
 use sentinel_domain::state::SessionState;
-use sentinel_domain::workflow::SkillWorkflow;
+use sentinel_domain::workflow::{SkillSteps, SkillWorkflow};
 
 /// Infrastructure implementation of GitStatusPort
 struct RealGit;
@@ -47,6 +47,17 @@ pub async fn run(event: &str, matcher: Option<&str>, standalone: bool) -> Result
         HashMap::new()
     };
 
+    // Load step configs for all known skills
+    let step_configs: HashMap<String, SkillSteps> = workflows
+        .keys()
+        .filter_map(|skill| {
+            sentinel_infrastructure::config::load_skill_steps(&config_dir, skill)
+                .ok()
+                .flatten()
+                .map(|steps| (skill.clone(), steps))
+        })
+        .collect();
+
     // Load or create session state
     let session_id = input.session_id.as_deref().unwrap_or("unknown");
     let mut state = sentinel_infrastructure::state_store::load(session_id)?
@@ -71,8 +82,8 @@ pub async fn run(event: &str, matcher: Option<&str>, standalone: bool) -> Result
                 }
             }
 
-            // Phase validator — inject phase progress context
-            let validator_output = hooks::phase_validator::process(&input, &state, &workflows);
+            // Phase validator — inject phase + step progress context
+            let validator_output = hooks::phase_validator::process(&input, &state, &workflows, &step_configs);
             output.merge(&validator_output);
         }
 

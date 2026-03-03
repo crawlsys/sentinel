@@ -3,12 +3,13 @@
 //! Runs on UserPromptSubmit and injects phase progress into the context.
 //! Mirrors the Node.js phase-validator.js hook behavior:
 //! - Shows current phase progress (e.g., "3/7 phases loaded")
+//! - Shows step-level progress when step configs are available
 //! - Warns when phases are being skipped
 //! - Tells Claude which phase file to Read() next
 
 use sentinel_domain::events::{HookEvent, HookInput, HookOutput};
 use sentinel_domain::state::SessionState;
-use sentinel_domain::workflow::SkillWorkflow;
+use sentinel_domain::workflow::{SkillSteps, SkillWorkflow, StepStatus};
 use std::collections::HashMap;
 
 /// Process a phase-validator hook event (UserPromptSubmit)
@@ -16,6 +17,7 @@ pub fn process(
     _input: &HookInput,
     state: &SessionState,
     workflows: &HashMap<String, SkillWorkflow>,
+    step_configs: &HashMap<String, SkillSteps>,
 ) -> HookOutput {
     // Only act when there's an active skill with a workflow
     let skill_name = match &state.active_skill {
@@ -36,12 +38,9 @@ pub fn process(
     let next_file = state.next_required_phase_file(workflow);
 
     // Build progress context
-    let context = if state.tool_calls > 0 && loaded == 0 {
+    let mut context = if state.tool_calls > 0 && loaded == 0 {
         // Tool calls happening but no phases loaded — strong warning
-        format!(
-            "{}",
-            format_warning_box(skill_name, total_required, total)
-        )
+        format_warning_box(skill_name, total_required, total)
     } else if let Some(ref next) = next_file {
         // Normal progress — show status and next step
         format_progress_box(skill_name, loaded, total_required, total, next)
@@ -52,6 +51,17 @@ pub fn process(
             skill_name, total_required, total
         )
     };
+
+    // Append step-level progress if step configs exist
+    if let Some(steps_config) = step_configs.get(skill_name) {
+        if let Some(wf_state) = state.workflows.get(skill_name) {
+            let step_context = format_step_progress(wf_state, steps_config, workflow);
+            if !step_context.is_empty() {
+                context.push('\n');
+                context.push_str(&step_context);
+            }
+        }
+    }
 
     HookOutput::inject_context(HookEvent::UserPromptSubmit, context)
 }
@@ -92,11 +102,109 @@ fn format_progress_box(
     )
 }
 
+/// Format step-level progress from workflow state + step config
+fn format_step_progress(
+    wf_state: &sentinel_domain::workflow::WorkflowState,
+    steps_config: &SkillSteps,
+    workflow: &SkillWorkflow,
+) -> String {
+    let total_steps = steps_config.total_steps();
+    if total_steps == 0 {
+        return String::new();
+    }
+
+    let completed = wf_state.total_steps_completed();
+
+    // Find the current phase (based on what's in progress)
+    let current_phase_id = wf_state
+        .current_step
+        .as_ref()
+        .and_then(|step_id| {
+            wf_state
+                .step_states
+                .iter()
+                .find(|s| s.step_id == *step_id)
+                .map(|s| s.phase_id.clone())
+        })
+        .or_else(|| {
+            // Fall back to the next incomplete required phase
+            wf_state
+                .next_required_phase(workflow)
+                .map(|p| p.id.clone())
+        });
+
+    let pct = if total_steps > 0 {
+        (completed as f64 / total_steps as f64 * 100.0) as u32
+    } else {
+        0
+    };
+
+    let mut lines = vec![format!(
+        "[Step Progress] Overall: {}/{} steps ({}%)",
+        completed, total_steps, pct
+    )];
+
+    // Show detail for the current phase
+    if let Some(ref phase_id) = current_phase_id {
+        if let Some(phase_steps) = steps_config.phase_steps(phase_id) {
+            let phase_completed = wf_state.phase_steps_completed(phase_id);
+            let phase_total = phase_steps.steps.len();
+
+            lines.push(format!(
+                "  Phase: {} ({}/{} steps)",
+                phase_id, phase_completed, phase_total
+            ));
+
+            // Show up to 5 steps for the current phase (context window friendly)
+            let step_states = wf_state.phase_step_states(phase_id);
+            let mut shown = 0;
+            for step_def in &phase_steps.steps {
+                if shown >= 5 {
+                    let remaining = phase_total - shown;
+                    if remaining > 0 {
+                        lines.push(format!("    ... +{} more steps", remaining));
+                    }
+                    break;
+                }
+
+                let status_icon = step_states
+                    .iter()
+                    .find(|s| s.step_id == step_def.id)
+                    .map(|s| match s.status {
+                        StepStatus::Completed => "\u{2713}",  // checkmark
+                        StepStatus::InProgress => "\u{2192}", // arrow
+                        StepStatus::Skipped => "\u{2014}",    // em-dash
+                        StepStatus::Blocked => "\u{2717}",    // X
+                        StepStatus::Pending => "\u{25CB}",    // circle
+                    })
+                    .unwrap_or("\u{25CB}"); // default: circle (pending)
+
+                let blocker_tag = if step_def.blocker { " [BLOCKER]" } else { "" };
+
+                let summary = step_states
+                    .iter()
+                    .find(|s| s.step_id == step_def.id)
+                    .and_then(|s| s.summary.as_deref())
+                    .map(|s| format!(" \u{2014} {}", s))
+                    .unwrap_or_default();
+
+                lines.push(format!(
+                    "    {} {}: {}{}{}",
+                    status_icon, step_def.id, step_def.description, blocker_tag, summary
+                ));
+                shown += 1;
+            }
+        }
+    }
+
+    lines.join("\n")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use sentinel_domain::judge::JudgeModel;
-    use sentinel_domain::workflow::WorkflowPhase;
+    use sentinel_domain::workflow::{PhaseSteps, WorkflowPhase, WorkflowStep};
 
     fn test_workflow() -> SkillWorkflow {
         SkillWorkflow {
@@ -134,13 +242,37 @@ mod tests {
         }
     }
 
+    fn test_steps() -> SkillSteps {
+        SkillSteps {
+            skill: "linear".to_string(),
+            phases: vec![
+                PhaseSteps {
+                    phase_id: "claim".to_string(),
+                    steps: vec![
+                        WorkflowStep { id: "0.1".to_string(), description: "Look up started state".to_string(), blocker: false },
+                        WorkflowStep { id: "0.2".to_string(), description: "Get current user".to_string(), blocker: false },
+                        WorkflowStep { id: "0.3".to_string(), description: "Set In Progress".to_string(), blocker: true },
+                    ],
+                },
+                PhaseSteps {
+                    phase_id: "fetch".to_string(),
+                    steps: vec![
+                        WorkflowStep { id: "1.1".to_string(), description: "Get issue".to_string(), blocker: false },
+                        WorkflowStep { id: "1.2".to_string(), description: "Get comments".to_string(), blocker: false },
+                    ],
+                },
+            ],
+        }
+    }
+
     #[test]
     fn test_no_active_skill_passes_through() {
         let state = SessionState::new("sess-1");
         let workflows = HashMap::new();
+        let step_configs = HashMap::new();
         let input = HookInput::default();
 
-        let output = process(&input, &state, &workflows);
+        let output = process(&input, &state, &workflows, &step_configs);
         assert!(output.hook_specific_output.is_none());
     }
 
@@ -150,9 +282,10 @@ mod tests {
         state.set_active_skill("linear");
         let mut workflows = HashMap::new();
         workflows.insert("linear".to_string(), test_workflow());
+        let step_configs = HashMap::new();
         let input = HookInput::default();
 
-        let output = process(&input, &state, &workflows);
+        let output = process(&input, &state, &workflows, &step_configs);
         let ctx = output.hook_specific_output.unwrap().additional_context;
         assert!(ctx.contains("Phases loaded: 0/4"));
         assert!(ctx.contains("claim.md"));
@@ -167,9 +300,10 @@ mod tests {
 
         let mut workflows = HashMap::new();
         workflows.insert("linear".to_string(), test_workflow());
+        let step_configs = HashMap::new();
         let input = HookInput::default();
 
-        let output = process(&input, &state, &workflows);
+        let output = process(&input, &state, &workflows, &step_configs);
         let ctx = output.hook_specific_output.unwrap().additional_context;
         assert!(ctx.contains("Phases loaded: 2/4"));
         assert!(ctx.contains("intelligence.md"));
@@ -184,9 +318,10 @@ mod tests {
 
         let mut workflows = HashMap::new();
         workflows.insert("linear".to_string(), test_workflow());
+        let step_configs = HashMap::new();
         let input = HookInput::default();
 
-        let output = process(&input, &state, &workflows);
+        let output = process(&input, &state, &workflows, &step_configs);
         let ctx = output.hook_specific_output.unwrap().additional_context;
         assert!(ctx.contains("WARNING"));
         assert!(ctx.contains("Phase Execution Required"));
@@ -202,10 +337,64 @@ mod tests {
 
         let mut workflows = HashMap::new();
         workflows.insert("linear".to_string(), test_workflow());
+        let step_configs = HashMap::new();
         let input = HookInput::default();
 
-        let output = process(&input, &state, &workflows);
+        let output = process(&input, &state, &workflows, &step_configs);
         let ctx = output.hook_specific_output.unwrap().additional_context;
         assert!(ctx.contains("All 3/4 required phases loaded"));
+    }
+
+    #[test]
+    fn test_step_progress_injection() {
+        let mut state = SessionState::new("sess-1");
+        state.set_active_skill("linear");
+        state.record_phase_read("claim.md");
+
+        // Update some steps in the workflow state
+        if let Some(wf) = state.active_workflow_mut() {
+            wf.update_step("claim", "0.1", StepStatus::Completed, Some("Found state ID".to_string()));
+            wf.update_step("claim", "0.2", StepStatus::InProgress, None);
+        }
+
+        let mut workflows = HashMap::new();
+        workflows.insert("linear".to_string(), test_workflow());
+        let mut step_configs = HashMap::new();
+        step_configs.insert("linear".to_string(), test_steps());
+        let input = HookInput::default();
+
+        let output = process(&input, &state, &workflows, &step_configs);
+        let ctx = output.hook_specific_output.unwrap().additional_context;
+
+        // Should contain step progress line
+        assert!(ctx.contains("[Step Progress]"));
+        assert!(ctx.contains("Overall: 1/5 steps (20%)"));
+        // Should show claim phase detail
+        assert!(ctx.contains("Phase: claim (1/3 steps)"));
+        // Should show individual steps
+        assert!(ctx.contains("0.1: Look up started state"));
+        assert!(ctx.contains("0.3: Set In Progress"));
+        assert!(ctx.contains("[BLOCKER]"));
+    }
+
+    #[test]
+    fn test_step_progress_without_config() {
+        let mut state = SessionState::new("sess-1");
+        state.set_active_skill("linear");
+        state.record_phase_read("claim.md");
+
+        let mut workflows = HashMap::new();
+        workflows.insert("linear".to_string(), test_workflow());
+        // No step configs — should produce normal output without step details
+        let step_configs = HashMap::new();
+        let input = HookInput::default();
+
+        let output = process(&input, &state, &workflows, &step_configs);
+        let ctx = output.hook_specific_output.unwrap().additional_context;
+
+        // Should NOT contain step progress
+        assert!(!ctx.contains("[Step Progress]"));
+        // Should still contain normal phase progress
+        assert!(ctx.contains("Phases loaded: 1/4"));
     }
 }
