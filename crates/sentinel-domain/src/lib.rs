@@ -1,0 +1,24 @@
+//! Sentinel Domain Layer
+//!
+//! Pure business logic with no IO dependencies.
+//! Defines proof chains, workflows, evidence, hooks, and routing.
+
+pub mod dependency;
+pub mod events;
+pub mod evidence;
+pub mod hooks;
+pub mod judge;
+pub mod proof;
+pub mod routing;
+pub mod state;
+pub mod workflow;
+
+// Re-export commonly used types
+pub use events::HookEvent;
+pub use evidence::{Evidence, EvidenceEntry};
+pub use hooks::{HookId, HookResult, HookSpec};
+pub use judge::{JudgeRequest, JudgeVerdict};
+pub use proof::{PhaseProof, ProofChain};
+pub use routing::RegexRouter;
+pub use state::SessionState;
+pub use workflow::{SkillWorkflow, WorkflowPhase};

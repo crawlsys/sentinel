@@ -1,0 +1,25 @@
+[package]
+name = "sentinel-domain"
+description = "Pure business logic for Sentinel — proof chains, workflows, evidence, routing"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+regex = { workspace = true }
+petgraph = { workspace = true }
+sha2 = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

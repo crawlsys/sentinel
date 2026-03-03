@@ -1,0 +1,33 @@
+[package]
+name = "sentinel-infrastructure"
+description = "IO adapters — stdin, git, Anthropic API, crypto, state store, MCP transport, IPC"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+sentinel-domain = { workspace = true }
+sentinel-application = { workspace = true }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+reqwest = { workspace = true }
+chrono = { workspace = true }
+dirs = { workspace = true }
+sha2 = { workspace = true }
+uuid = { workspace = true }
+glob = { workspace = true }
+regex = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true
