@@ -10,7 +10,7 @@ use serde::Deserialize;
 use sentinel_domain::events::HookEvent;
 use sentinel_domain::hooks::{HookId, HookSpec};
 use sentinel_domain::judge::JudgeModel;
-use sentinel_domain::workflow::{SkillWorkflow, WorkflowPhase};
+use sentinel_domain::workflow::{PhaseSteps, SkillSteps, SkillWorkflow, WorkflowPhase, WorkflowStep};
 
 /// Raw TOML config for hooks
 #[derive(Debug, Deserialize)]
@@ -152,6 +152,65 @@ pub fn load_workflows(config_path: &Path) -> Result<Vec<SkillWorkflow>> {
     Ok(workflows)
 }
 
+/// Raw TOML config for skill steps
+#[derive(Debug, Deserialize)]
+struct StepsConfig {
+    phases: Vec<StepsPhaseToml>,
+}
+
+#[derive(Debug, Deserialize)]
+struct StepsPhaseToml {
+    id: String,
+    #[serde(default)]
+    steps: Vec<StepToml>,
+}
+
+#[derive(Debug, Deserialize)]
+struct StepToml {
+    id: String,
+    description: String,
+    #[serde(default)]
+    blocker: bool,
+}
+
+/// Load step definitions for a skill from `config/steps/<skill>.toml`
+///
+/// Returns `None` if the file doesn't exist (steps are optional).
+pub fn load_skill_steps(config_path: &Path, skill: &str) -> Result<Option<SkillSteps>> {
+    let toml_path = config_path.join("steps").join(format!("{skill}.toml"));
+    if !toml_path.exists() {
+        return Ok(None);
+    }
+
+    let content = std::fs::read_to_string(&toml_path)
+        .with_context(|| format!("Failed to read {}", toml_path.display()))?;
+
+    let config: StepsConfig =
+        toml::from_str(&content).with_context(|| format!("Failed to parse {}", toml_path.display()))?;
+
+    let skill_steps = SkillSteps {
+        skill: skill.to_string(),
+        phases: config
+            .phases
+            .into_iter()
+            .map(|p| PhaseSteps {
+                phase_id: p.id,
+                steps: p
+                    .steps
+                    .into_iter()
+                    .map(|s| WorkflowStep {
+                        id: s.id,
+                        description: s.description,
+                        blocker: s.blocker,
+                    })
+                    .collect(),
+            })
+            .collect(),
+    };
+
+    Ok(Some(skill_steps))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -251,6 +310,65 @@ description = "Cleanup"
         let dir = tempfile::tempdir().unwrap();
         let result = load_hooks(dir.path());
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_load_skill_steps_from_toml() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("steps")).unwrap();
+
+        let steps_toml = r#"
+[[phases]]
+id = "claim"
+
+[[phases.steps]]
+id = "-0.1"
+description = "Verify issue exists"
+blocker = true
+
+[[phases.steps]]
+id = "0.1"
+description = "Look up started state"
+
+[[phases.steps]]
+id = "0.2"
+description = "Get current user"
+
+[[phases]]
+id = "fetch"
+
+[[phases.steps]]
+id = "1.1"
+description = "Get issue"
+
+[[phases.steps]]
+id = "1.2"
+description = "Get comments"
+"#;
+        let path = dir.path().join("steps").join("linear.toml");
+        let mut f = std::fs::File::create(&path).unwrap();
+        f.write_all(steps_toml.as_bytes()).unwrap();
+
+        let result = load_skill_steps(dir.path(), "linear").unwrap();
+        assert!(result.is_some());
+
+        let steps = result.unwrap();
+        assert_eq!(steps.skill, "linear");
+        assert_eq!(steps.phases.len(), 2);
+        assert_eq!(steps.phases[0].phase_id, "claim");
+        assert_eq!(steps.phases[0].steps.len(), 3);
+        assert!(steps.phases[0].steps[0].blocker);
+        assert!(!steps.phases[0].steps[1].blocker);
+        assert_eq!(steps.phases[1].phase_id, "fetch");
+        assert_eq!(steps.phases[1].steps.len(), 2);
+        assert_eq!(steps.total_steps(), 5);
+    }
+
+    #[test]
+    fn test_load_skill_steps_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let result = load_skill_steps(dir.path(), "nonexistent").unwrap();
+        assert!(result.is_none());
     }
 
     #[test]
