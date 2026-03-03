@@ -1,0 +1,198 @@
+# Deploy Skill — Step Definitions
+# ~35 individually trackable steps across 6 phases
+#
+# Each phase maps to a workflow phase in config/workflows.toml.
+# Steps marked blocker = true must pass before the phase can advance.
+
+# ============================================================================
+# Phase 1: Preflight Checks
+# ============================================================================
+
+[[phases]]
+id = "preflight"
+
+[[phases.steps]]
+id = "1.1"
+description = "Verify working tree is clean (no uncommitted changes)"
+blocker = true
+
+[[phases.steps]]
+id = "1.2"
+description = "Verify current branch matches expected release branch"
+
+[[phases.steps]]
+id = "1.3"
+description = "Run full test suite"
+blocker = true
+
+[[phases.steps]]
+id = "1.4"
+description = "Run type checker (tsc --noEmit)"
+blocker = true
+
+[[phases.steps]]
+id = "1.5"
+description = "Run linter (no errors)"
+blocker = true
+
+[[phases.steps]]
+id = "1.6"
+description = "Check remote is reachable and up to date"
+blocker = true
+
+[[phases.steps]]
+id = "1.7"
+description = "Verify no open blockers in Linear"
+
+# ============================================================================
+# Phase 2: Version Bump
+# ============================================================================
+
+[[phases]]
+id = "version"
+
+[[phases.steps]]
+id = "2.1"
+description = "Detect version files (package.json, Cargo.toml, pyproject.toml)"
+
+[[phases.steps]]
+id = "2.2"
+description = "Read current version"
+
+[[phases.steps]]
+id = "2.3"
+description = "Calculate version bump (major/minor/patch from commit history)"
+
+[[phases.steps]]
+id = "2.4"
+description = "Update version in all detected files"
+
+[[phases.steps]]
+id = "2.5"
+description = "Verify version consistency across files"
+blocker = true
+
+# ============================================================================
+# Phase 3: Changelog
+# ============================================================================
+
+[[phases]]
+id = "changelog"
+
+[[phases.steps]]
+id = "3.1"
+description = "Parse unreleased section from CHANGELOG.md"
+
+[[phases.steps]]
+id = "3.2"
+description = "Categorize entries (feat, fix, refactor, breaking)"
+
+[[phases.steps]]
+id = "3.3"
+description = "Add version header with date"
+
+[[phases.steps]]
+id = "3.4"
+description = "Format changelog entries per Keep a Changelog spec"
+
+[[phases.steps]]
+id = "3.5"
+description = "Reset unreleased section"
+
+[[phases.steps]]
+id = "3.6"
+description = "Verify changelog is well-formed"
+
+# ============================================================================
+# Phase 4: Release (Git Operations)
+# ============================================================================
+
+[[phases]]
+id = "release"
+
+[[phases.steps]]
+id = "4.1"
+description = "Stage version files and changelog"
+
+[[phases.steps]]
+id = "4.2"
+description = "Create release commit (chore: release vX.Y.Z)"
+
+[[phases.steps]]
+id = "4.3"
+description = "Create annotated git tag (vX.Y.Z)"
+
+[[phases.steps]]
+id = "4.4"
+description = "Push commits to remote"
+blocker = true
+
+[[phases.steps]]
+id = "4.5"
+description = "Push tags to remote"
+blocker = true
+
+[[phases.steps]]
+id = "4.6"
+description = "Verify remote has new tag"
+
+# ============================================================================
+# Phase 5: Validate Deployment
+# ============================================================================
+
+[[phases]]
+id = "validate"
+
+[[phases.steps]]
+id = "5.1"
+description = "Wait for CI/CD pipeline to complete"
+blocker = true
+
+[[phases.steps]]
+id = "5.2"
+description = "Poll health endpoint until healthy"
+blocker = true
+
+[[phases.steps]]
+id = "5.3"
+description = "Verify version endpoint returns new version"
+
+[[phases.steps]]
+id = "5.4"
+description = "Take Steel screenshot of deployed app"
+
+[[phases.steps]]
+id = "5.5"
+description = "Check for console errors via Steel"
+
+[[phases.steps]]
+id = "5.6"
+description = "Run smoke test against production URL"
+blocker = true
+
+# ============================================================================
+# Phase 6: Report
+# ============================================================================
+
+[[phases]]
+id = "report"
+
+[[phases.steps]]
+id = "6.1"
+description = "Update Linear issues to deployed status"
+
+[[phases.steps]]
+id = "6.2"
+description = "Post release comment on Linear issues with version and changelog"
+
+[[phases.steps]]
+id = "6.3"
+description = "Create GitHub release with changelog body"
+
+[[phases.steps]]
+id = "6.4"
+description = "Notify team (Slack/Discord) of successful deploy"
+
+[[phases.steps]]
+id = "6.5"
+description = "Log deployment to metrics"

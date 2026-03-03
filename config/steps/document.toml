@@ -1,0 +1,135 @@
+# Document Skill — Step Definitions
+# 25 individually trackable steps across 5 phases
+#
+# Phases: audit → clean → organize → generate → verify
+
+# ============================================================================
+# Phase 1: Audit
+# ============================================================================
+
+[[phases]]
+id = "audit"
+
+[[phases.steps]]
+id = "1.1"
+description = "Scan for existing documentation files"
+
+[[phases.steps]]
+id = "1.2"
+description = "Find orphaned docs (no matching code)"
+
+[[phases.steps]]
+id = "1.3"
+description = "Check for stale content (outdated references)"
+
+[[phases.steps]]
+id = "1.4"
+description = "Inventory all doc types (README, API, inline, arch)"
+
+[[phases.steps]]
+id = "1.5"
+description = "Identify undocumented public APIs"
+
+# ============================================================================
+# Phase 2: Clean
+# ============================================================================
+
+[[phases]]
+id = "clean"
+
+[[phases.steps]]
+id = "2.1"
+description = "Remove orphaned documentation files"
+
+[[phases.steps]]
+id = "2.2"
+description = "Archive outdated content"
+
+[[phases.steps]]
+id = "2.3"
+description = "Fix broken internal links"
+
+[[phases.steps]]
+id = "2.4"
+description = "Remove duplicate documentation"
+
+[[phases.steps]]
+id = "2.5"
+description = "Update incorrect code references"
+
+# ============================================================================
+# Phase 3: Organize
+# ============================================================================
+
+[[phases]]
+id = "organize"
+
+[[phases.steps]]
+id = "3.1"
+description = "Create or update folder structure"
+
+[[phases.steps]]
+id = "3.2"
+description = "Categorize docs by type and audience"
+
+[[phases.steps]]
+id = "3.3"
+description = "Add index and navigation links"
+
+[[phases.steps]]
+id = "3.4"
+description = "Establish naming conventions for doc files"
+
+# ============================================================================
+# Phase 4: Generate
+# ============================================================================
+
+[[phases]]
+id = "generate"
+
+[[phases.steps]]
+id = "4.1"
+description = "Create or update project README"
+
+[[phases.steps]]
+id = "4.2"
+description = "Generate API documentation"
+
+[[phases.steps]]
+id = "4.3"
+description = "Create architecture overview docs"
+
+[[phases.steps]]
+id = "4.4"
+description = "Add inline comments for complex logic"
+
+[[phases.steps]]
+id = "4.5"
+description = "Generate changelog entries"
+
+# ============================================================================
+# Phase 5: Verify
+# ============================================================================
+
+[[phases]]
+id = "verify"
+
+[[phases.steps]]
+id = "5.1"
+description = "Check all internal links resolve"
+
+[[phases.steps]]
+id = "5.2"
+description = "Verify code examples compile or run"
+
+[[phases.steps]]
+id = "5.3"
+description = "Ensure docs match current code state"
+
+[[phases.steps]]
+id = "5.4"
+description = "Commit all documentation changes"
+
+[[phases.steps]]
+id = "5.5"
+description = "Report documentation coverage summary"

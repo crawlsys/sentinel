@@ -1,0 +1,42 @@
+# Telemetry Skill — Step Definitions
+# Metrics collection and analytics reporting
+#
+# 2 phases, ~6 steps
+
+# ============================================================================
+# Phase 1: Collect — Read and parse metrics data
+# ============================================================================
+
+[[phases]]
+id = "collect"
+
+[[phases.steps]]
+id = "1.1"
+description = "Read metrics files from ~/.claude/metrics/"
+
+[[phases.steps]]
+id = "1.2"
+description = "Parse JSONL entries and validate schema"
+
+[[phases.steps]]
+id = "1.3"
+description = "Aggregate statistics by skill, time period, and outcome"
+
+# ============================================================================
+# Phase 2: Report — Format and present analytics
+# ============================================================================
+
+[[phases]]
+id = "report"
+
+[[phases.steps]]
+id = "2.1"
+description = "Format analytics into readable report"
+
+[[phases.steps]]
+id = "2.2"
+description = "Identify usage trends and anomalies"
+
+[[phases.steps]]
+id = "2.3"
+description = "Present skill usage summary with top skills"

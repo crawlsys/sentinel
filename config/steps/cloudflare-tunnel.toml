@@ -1,0 +1,64 @@
+# Cloudflare Tunnel Skill — Step Definitions
+# Expose local server via cloudflared quick tunnel
+#
+# 3 phases, ~8 steps
+
+# ============================================================================
+# Phase 1: Setup — Prepare tunnel prerequisites
+# ============================================================================
+
+[[phases]]
+id = "setup"
+
+[[phases.steps]]
+id = "1.1"
+description = "Detect local server and determine port"
+
+[[phases.steps]]
+id = "1.2"
+description = "Check cloudflared is installed and available"
+blocker = true
+
+[[phases.steps]]
+id = "1.3"
+description = "Verify local server is running and responsive"
+
+# ============================================================================
+# Phase 2: Expose — Start tunnel and verify
+# ============================================================================
+
+[[phases]]
+id = "expose"
+
+[[phases.steps]]
+id = "2.1"
+description = "Start cloudflared quick tunnel on target port"
+
+[[phases.steps]]
+id = "2.2"
+description = "Capture public URL from tunnel output"
+blocker = true
+
+[[phases.steps]]
+id = "2.3"
+description = "Verify public URL is accessible externally"
+blocker = true
+
+# ============================================================================
+# Phase 3: Cleanup — Tear down tunnel
+# ============================================================================
+
+[[phases]]
+id = "cleanup"
+
+[[phases.steps]]
+id = "3.1"
+description = "Stop cloudflared tunnel process"
+
+[[phases.steps]]
+id = "3.2"
+description = "Release allocated resources"
+
+[[phases.steps]]
+id = "3.3"
+description = "Report public URL used and session duration"

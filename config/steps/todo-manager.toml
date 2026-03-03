@@ -1,0 +1,96 @@
+# Todo Manager Skill — Step Definitions
+# 16 individually trackable steps across 4 phases
+#
+# Phases: load → process → execute → persist
+
+# ============================================================================
+# Phase 1: Load
+# ============================================================================
+
+[[phases]]
+id = "load"
+
+[[phases.steps]]
+id = "1.1"
+description = "Read existing todos from persistent storage"
+
+[[phases.steps]]
+id = "1.2"
+description = "Check task list for active items"
+
+[[phases.steps]]
+id = "1.3"
+description = "Identify priorities and deadlines"
+
+[[phases.steps]]
+id = "1.4"
+description = "Detect blocked items and dependencies"
+
+# ============================================================================
+# Phase 2: Process
+# ============================================================================
+
+[[phases]]
+id = "process"
+
+[[phases.steps]]
+id = "2.1"
+description = "Route each todo to appropriate skill"
+
+[[phases.steps]]
+id = "2.2"
+description = "Update statuses for completed items"
+
+[[phases.steps]]
+id = "2.3"
+description = "Resolve dependency chains"
+
+[[phases.steps]]
+id = "2.4"
+description = "Merge duplicate todos"
+
+# ============================================================================
+# Phase 3: Execute
+# ============================================================================
+
+[[phases]]
+id = "execute"
+
+[[phases.steps]]
+id = "3.1"
+description = "Work on highest priority unblocked item"
+
+[[phases.steps]]
+id = "3.2"
+description = "Track progress during execution"
+
+[[phases.steps]]
+id = "3.3"
+description = "Handle failures and requeue"
+
+[[phases.steps]]
+id = "3.4"
+description = "Discover and capture new todos from work"
+
+# ============================================================================
+# Phase 4: Persist
+# ============================================================================
+
+[[phases]]
+id = "persist"
+
+[[phases.steps]]
+id = "4.1"
+description = "Save updated todo state"
+
+[[phases.steps]]
+id = "4.2"
+description = "Report completed items"
+
+[[phases.steps]]
+id = "4.3"
+description = "List remaining and new todos"
+
+[[phases.steps]]
+id = "4.4"
+description = "Generate progress summary"

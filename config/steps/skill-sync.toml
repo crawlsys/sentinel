@@ -1,0 +1,62 @@
+# Skill Sync — Step Definitions
+# Git-based skill synchronization with validation
+#
+# 3 phases, ~8 steps
+
+# ============================================================================
+# Phase 1: Fetch — Compare local vs remote
+# ============================================================================
+
+[[phases]]
+id = "fetch"
+
+[[phases.steps]]
+id = "1.1"
+description = "Git fetch origin to get latest remote state"
+
+[[phases.steps]]
+id = "1.2"
+description = "Compare local vs remote file trees"
+
+[[phases.steps]]
+id = "1.3"
+description = "Identify added, modified, and deleted files"
+
+# ============================================================================
+# Phase 2: Apply — Sync file changes
+# ============================================================================
+
+[[phases]]
+id = "apply"
+
+[[phases.steps]]
+id = "2.1"
+description = "Copy updated files to installed location"
+
+[[phases.steps]]
+id = "2.2"
+description = "Remove deleted files from installed location"
+
+[[phases.steps]]
+id = "2.3"
+description = "Update skill registry with new counts"
+
+# ============================================================================
+# Phase 3: Verify — Validate sync result
+# ============================================================================
+
+[[phases]]
+id = "verify"
+
+[[phases.steps]]
+id = "3.1"
+description = "Validate all synced skills load without errors"
+blocker = true
+
+[[phases.steps]]
+id = "3.2"
+description = "Check file counts match between repo and installed"
+
+[[phases.steps]]
+id = "3.3"
+description = "Report sync summary (added/modified/deleted)"

@@ -1,0 +1,132 @@
+# Review Skill — Step Definitions
+# 25 individually trackable steps across 5 phases
+#
+# Phases: gather → analyze → quality → consolidate → track
+
+# ============================================================================
+# Phase 1: Gather
+# ============================================================================
+
+[[phases]]
+id = "gather"
+
+[[phases.steps]]
+id = "1.1"
+description = "Get list of changed files (diff)"
+
+[[phases.steps]]
+id = "1.2"
+description = "Read PR description and metadata"
+
+[[phases.steps]]
+id = "1.3"
+description = "Detect linked issues and requirements"
+
+[[phases.steps]]
+id = "1.4"
+description = "Load relevant specs and acceptance criteria"
+
+[[phases.steps]]
+id = "1.5"
+description = "Identify review scope and boundaries"
+
+# ============================================================================
+# Phase 2: Analyze
+# ============================================================================
+
+[[phases]]
+id = "analyze"
+
+[[phases.steps]]
+id = "2.1"
+description = "Check spec compliance for each changed file"
+
+[[phases.steps]]
+id = "2.2"
+description = "Identify missing items (tests, docs, types)"
+
+[[phases.steps]]
+id = "2.3"
+description = "Assess complexity and risk level"
+
+[[phases.steps]]
+id = "2.4"
+description = "Verify no critical missing items"
+blocker = true
+
+# ============================================================================
+# Phase 3: Quality
+# ============================================================================
+
+[[phases]]
+id = "quality"
+
+[[phases.steps]]
+id = "3.1"
+description = "Spawn correctness review agent"
+
+[[phases.steps]]
+id = "3.2"
+description = "Spawn security review agent"
+
+[[phases.steps]]
+id = "3.3"
+description = "Spawn performance review agent"
+
+[[phases.steps]]
+id = "3.4"
+description = "Spawn style review agent"
+
+[[phases.steps]]
+id = "3.5"
+description = "Collect results from all agents"
+
+[[phases.steps]]
+id = "3.6"
+description = "Deduplicate findings across agents"
+
+[[phases.steps]]
+id = "3.7"
+description = "Prioritize findings by severity"
+
+# ============================================================================
+# Phase 4: Consolidate
+# ============================================================================
+
+[[phases]]
+id = "consolidate"
+
+[[phases.steps]]
+id = "4.1"
+description = "Merge findings into unified report"
+
+[[phases.steps]]
+id = "4.2"
+description = "Format report with code references"
+
+[[phases.steps]]
+id = "4.3"
+description = "Present findings to user for review"
+
+# ============================================================================
+# Phase 5: Track
+# ============================================================================
+
+[[phases]]
+id = "track"
+
+[[phases.steps]]
+id = "5.1"
+description = "Create todos for each actionable finding"
+
+[[phases.steps]]
+id = "5.2"
+description = "Tag findings with severity labels"
+
+[[phases.steps]]
+id = "5.3"
+description = "Generate review summary with statistics"
+
+[[phases.steps]]
+id = "5.4"
+description = "Report final pass/fail status"

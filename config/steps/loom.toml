@@ -1,0 +1,104 @@
+# Loom Skill — Step Definitions
+# 18 individually trackable steps across 4 phases
+#
+# Phases: fetch → analyze → extract → report
+
+# ============================================================================
+# Phase 1: Fetch
+# ============================================================================
+
+[[phases]]
+id = "fetch"
+
+[[phases.steps]]
+id = "1.1"
+description = "Identify target video URL or ID"
+
+[[phases.steps]]
+id = "1.2"
+description = "Get video details and metadata"
+
+[[phases.steps]]
+id = "1.3"
+description = "Download transcript"
+
+[[phases.steps]]
+id = "1.4"
+description = "Check for existing analysis results"
+
+# ============================================================================
+# Phase 2: Analyze
+# ============================================================================
+
+[[phases]]
+id = "analyze"
+
+[[phases.steps]]
+id = "2.1"
+description = "Process video with Gemini model"
+
+[[phases.steps]]
+id = "2.2"
+description = "Extract key points and themes"
+
+[[phases.steps]]
+id = "2.3"
+description = "Identify action items and decisions"
+
+[[phases.steps]]
+id = "2.4"
+description = "Note timestamps for important segments"
+
+[[phases.steps]]
+id = "2.5"
+description = "Cross-reference content with codebase context"
+
+# ============================================================================
+# Phase 3: Extract
+# ============================================================================
+
+[[phases]]
+id = "extract"
+
+[[phases.steps]]
+id = "3.1"
+description = "Create task list from action items"
+
+[[phases.steps]]
+id = "3.2"
+description = "Cross-reference tasks with existing code"
+
+[[phases.steps]]
+id = "3.3"
+description = "Map tasks to requirements or issues"
+
+[[phases.steps]]
+id = "3.4"
+description = "Prioritize extracted items"
+
+# ============================================================================
+# Phase 4: Report
+# ============================================================================
+
+[[phases]]
+id = "report"
+
+[[phases.steps]]
+id = "4.1"
+description = "Format analysis summary with timestamps"
+
+[[phases.steps]]
+id = "4.2"
+description = "Create Linear issues from action items (if applicable)"
+
+[[phases.steps]]
+id = "4.3"
+description = "Post summary as Loom comment"
+
+[[phases.steps]]
+id = "4.4"
+description = "Report extracted insights and next steps"
+
+[[phases.steps]]
+id = "4.5"
+description = "Link analysis to relevant project artifacts"

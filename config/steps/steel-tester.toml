@@ -1,0 +1,79 @@
+# Steel Tester Skill — Step Definitions
+# Cloud browser smoke testing with Steel sessions
+#
+# 3 phases, ~12 steps
+
+# ============================================================================
+# Phase 1: Setup — Create Steel session and configure
+# ============================================================================
+
+[[phases]]
+id = "setup"
+
+[[phases.steps]]
+id = "1.1"
+description = "Create Steel cloud browser session"
+blocker = true
+
+[[phases.steps]]
+id = "1.2"
+description = "Determine target URL for testing"
+
+[[phases.steps]]
+id = "1.3"
+description = "Configure session options (viewport, captcha solving)"
+
+[[phases.steps]]
+id = "1.4"
+description = "Verify session is active and responsive"
+blocker = true
+
+# ============================================================================
+# Phase 2: Test — Navigate, interact, and verify
+# ============================================================================
+
+[[phases]]
+id = "test"
+
+[[phases.steps]]
+id = "2.1"
+description = "Navigate to target pages"
+
+[[phases.steps]]
+id = "2.2"
+description = "Check browser console for errors"
+
+[[phases.steps]]
+id = "2.3"
+description = "Test user interactions (clicks, forms, navigation)"
+
+[[phases.steps]]
+id = "2.4"
+description = "Take screenshots at key states"
+
+[[phases.steps]]
+id = "2.5"
+description = "Verify accessibility basics (alt text, focus order)"
+
+# ============================================================================
+# Phase 3: Report — Compile findings and clean up
+# ============================================================================
+
+[[phases]]
+id = "report"
+
+[[phases.steps]]
+id = "3.1"
+description = "Release Steel session"
+
+[[phases.steps]]
+id = "3.2"
+description = "Compile test findings with screenshots"
+
+[[phases.steps]]
+id = "3.3"
+description = "Create Linear issues for discovered bugs"
+
+[[phases.steps]]
+id = "3.4"
+description = "Attach screenshots to issue comments"

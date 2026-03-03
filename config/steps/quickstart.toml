@@ -1,0 +1,63 @@
+# Quickstart Skill — Step Definitions
+# Environment detection, prerequisite installation, and verification
+#
+# 3 phases, ~8 steps
+
+# ============================================================================
+# Phase 1: Detect — Identify environment and prerequisites
+# ============================================================================
+
+[[phases]]
+id = "detect"
+
+[[phases.steps]]
+id = "1.1"
+description = "Identify operating system and shell environment"
+
+[[phases.steps]]
+id = "1.2"
+description = "Check prerequisites (Node.js, git, etc.)"
+
+[[phases.steps]]
+id = "1.3"
+description = "Find missing tools and dependencies"
+
+# ============================================================================
+# Phase 2: Configure — Install and set up components
+# ============================================================================
+
+[[phases]]
+id = "configure"
+
+[[phases.steps]]
+id = "2.1"
+description = "Install missing components"
+
+[[phases.steps]]
+id = "2.2"
+description = "Set up configuration files"
+
+[[phases.steps]]
+id = "2.3"
+description = "Initialize settings and environment variables"
+
+# ============================================================================
+# Phase 3: Verify — Confirm working state
+# ============================================================================
+
+[[phases]]
+id = "verify"
+
+[[phases.steps]]
+id = "3.1"
+description = "Run validation checks on all components"
+blocker = true
+
+[[phases.steps]]
+id = "3.2"
+description = "Confirm working state end-to-end"
+blocker = true
+
+[[phases.steps]]
+id = "3.3"
+description = "Present next steps and usage guide"

@@ -1,0 +1,113 @@
+# Cleanup Skill — Step Definitions
+# 20 individually trackable steps across 4 phases
+#
+# Phases: identify → analyze → remove → verify
+
+# ============================================================================
+# Phase 1: Identify
+# ============================================================================
+
+[[phases]]
+id = "identify"
+
+[[phases.steps]]
+id = "1.1"
+description = "Find unused exports and public APIs"
+
+[[phases.steps]]
+id = "1.2"
+description = "Find dead imports and require statements"
+
+[[phases.steps]]
+id = "1.3"
+description = "Find unreachable code and dead branches"
+
+[[phases.steps]]
+id = "1.4"
+description = "Find empty files and placeholder modules"
+
+[[phases.steps]]
+id = "1.5"
+description = "Find orphaned test files (no matching source)"
+
+# ============================================================================
+# Phase 2: Analyze
+# ============================================================================
+
+[[phases]]
+id = "analyze"
+
+[[phases.steps]]
+id = "2.1"
+description = "Verify each candidate is truly unused"
+
+[[phases.steps]]
+id = "2.2"
+description = "Check for dynamic usage (reflection, eval, string refs)"
+
+[[phases.steps]]
+id = "2.3"
+description = "Assess removal risk for each candidate"
+
+[[phases.steps]]
+id = "2.4"
+description = "Check for external consumers (published packages)"
+
+[[phases.steps]]
+id = "2.5"
+description = "Classify by confidence level (safe, likely safe, risky)"
+
+# ============================================================================
+# Phase 3: Remove
+# ============================================================================
+
+[[phases]]
+id = "remove"
+
+[[phases.steps]]
+id = "3.1"
+description = "Delete confirmed dead code"
+
+[[phases.steps]]
+id = "3.2"
+description = "Remove unused dependencies from package files"
+
+[[phases.steps]]
+id = "3.3"
+description = "Clean up orphaned imports"
+
+[[phases.steps]]
+id = "3.4"
+description = "Remove empty and placeholder files"
+
+[[phases.steps]]
+id = "3.5"
+description = "Tests still pass after all removals"
+blocker = true
+
+# ============================================================================
+# Phase 4: Verify
+# ============================================================================
+
+[[phases]]
+id = "verify"
+
+[[phases.steps]]
+id = "4.1"
+description = "Run full test suite"
+
+[[phases.steps]]
+id = "4.2"
+description = "Check no broken references remain"
+
+[[phases.steps]]
+id = "4.3"
+description = "Verify build succeeds"
+
+[[phases.steps]]
+id = "4.4"
+description = "Commit cleanup changes"
+
+[[phases.steps]]
+id = "4.5"
+description = "Report items removed and space reclaimed"

@@ -3,7 +3,20 @@
 # Each workflow defines ordered phases with judge model assignments.
 # Phases are executed sequentially — each must produce evidence
 # that is verified by the assigned judge before advancing.
+#
+# Tiers:
+#   0 = Reference only (no workflow): skill-registry, skill-router, web-design, mui,
+#       react, nextjs, atomic-design, ddd-hexagonal, claude-code-guide, claude-md,
+#       react-hooks-linter
+#   1 = Simple (2-3 phases): 18 skills
+#   2 = Moderate (4-5 phases): 22 skills
+#   3 = Complex (6-8 phases): 7 skills
 
+# ==============================================================================
+# TIER 3 — Complex Workflows (6-8 phases)
+# ==============================================================================
+
+# --- linear (8 phases) ---
 [[workflows]]
 skill = "linear"
 
@@ -62,3 +75,1455 @@ file = "cleanup.md"
 required = false
 judge = "sonnet"
 description = "Remove worktree, update Linear status, close PR"
+
+# --- deploy (6 phases) ---
+[[workflows]]
+skill = "deploy"
+
+[[workflows.phases]]
+id = "preflight"
+file = "preflight.md"
+required = true
+judge = "sonnet"
+description = "Verify branch clean, tests pass, remote accessible"
+
+[[workflows.phases]]
+id = "version"
+file = "version.md"
+required = true
+judge = "haiku"
+description = "Detect version files, calculate bump, update version strings"
+
+[[workflows.phases]]
+id = "changelog"
+file = "changelog.md"
+required = true
+judge = "haiku"
+description = "Move unreleased items, add version header and date"
+
+[[workflows.phases]]
+id = "release"
+file = "release.md"
+required = true
+judge = "sonnet"
+description = "Stage, commit, tag, push commits and tags"
+
+[[workflows.phases]]
+id = "validate"
+file = "validate.md"
+required = true
+judge = "opus"
+description = "Poll health endpoint, Steel smoke test, verify deployment"
+
+[[workflows.phases]]
+id = "report"
+file = "report.md"
+required = false
+judge = "haiku"
+description = "Update Linear status, post deployment comment, notify"
+
+# --- incident (7 phases) ---
+[[workflows]]
+skill = "incident"
+
+[[workflows.phases]]
+id = "detect"
+file = "detect.md"
+required = true
+judge = "sonnet"
+description = "Receive alert, classify service, initial assessment"
+
+[[workflows.phases]]
+id = "triage"
+file = "triage.md"
+required = true
+judge = "sonnet"
+description = "Assess severity, blast radius, affected users, recent deploys"
+
+[[workflows.phases]]
+id = "communicate"
+file = "communicate.md"
+required = true
+judge = "haiku"
+description = "Update status channel, notify stakeholders, set timeline"
+
+[[workflows.phases]]
+id = "mitigate"
+file = "mitigate.md"
+required = true
+judge = "opus"
+description = "Apply mitigation strategy, verify bleeding stopped"
+
+[[workflows.phases]]
+id = "resolve"
+file = "resolve.md"
+required = true
+judge = "opus"
+description = "Root cause investigation, implement fix, deploy, verify"
+
+[[workflows.phases]]
+id = "postmortem"
+file = "postmortem.md"
+required = true
+judge = "sonnet"
+description = "Build timeline, document root cause, create action items"
+
+[[workflows.phases]]
+id = "follow-up"
+file = "follow-up.md"
+required = false
+judge = "haiku"
+description = "Create tracking issues, schedule review, close incident"
+
+# --- migrate (6 phases) ---
+[[workflows]]
+skill = "migrate"
+
+[[workflows.phases]]
+id = "plan"
+file = "plan.md"
+required = true
+judge = "sonnet"
+description = "Analyze current schema, design migration, plan rollback strategy"
+
+[[workflows.phases]]
+id = "write"
+file = "write.md"
+required = true
+judge = "sonnet"
+description = "Create migration files, write up/down, validate SQL"
+
+[[workflows.phases]]
+id = "test-local"
+file = "test-local.md"
+required = true
+judge = "sonnet"
+description = "Run migration locally, verify schema, run app tests"
+
+[[workflows.phases]]
+id = "test-staging"
+file = "test-staging.md"
+required = true
+judge = "opus"
+description = "Apply to staging, run integration tests, verify data integrity"
+
+[[workflows.phases]]
+id = "apply"
+file = "apply.md"
+required = true
+judge = "opus"
+description = "Backup production, apply migration, verify schema"
+
+[[workflows.phases]]
+id = "verify"
+file = "verify.md"
+required = true
+judge = "sonnet"
+description = "Run smoke tests, check data integrity, monitor errors"
+
+# --- doppler (6 phases) ---
+[[workflows]]
+skill = "doppler"
+
+[[workflows.phases]]
+id = "discover"
+file = "discover.md"
+required = true
+judge = "haiku"
+description = "List projects, identify target, check current config"
+
+[[workflows.phases]]
+id = "audit"
+file = "audit.md"
+required = true
+judge = "sonnet"
+description = "List secrets, check for stale/unused, check rotation dates"
+
+[[workflows.phases]]
+id = "manage"
+file = "manage.md"
+required = true
+judge = "sonnet"
+description = "Set/update secrets, manage service tokens, configure integrations"
+
+[[workflows.phases]]
+id = "sync"
+file = "sync.md"
+required = true
+judge = "sonnet"
+description = "Trigger syncs, verify sync status, check connected services"
+
+[[workflows.phases]]
+id = "verify"
+file = "verify.md"
+required = true
+judge = "sonnet"
+description = "Download secrets, validate format, test with app"
+
+[[workflows.phases]]
+id = "document"
+file = "document.md"
+required = false
+judge = "haiku"
+description = "Update docs, log changes, notify team"
+
+# --- steel (6 phases) ---
+[[workflows]]
+skill = "steel"
+
+[[workflows.phases]]
+id = "setup"
+file = "setup.md"
+required = true
+judge = "haiku"
+description = "Create browser session, configure options, verify active"
+
+[[workflows.phases]]
+id = "navigate"
+file = "navigate.md"
+required = true
+judge = "haiku"
+description = "Navigate to URL, wait for load, handle redirects"
+
+[[workflows.phases]]
+id = "interact"
+file = "interact.md"
+required = true
+judge = "sonnet"
+description = "Click elements, fill forms, execute JS, handle captchas"
+
+[[workflows.phases]]
+id = "capture"
+file = "capture.md"
+required = true
+judge = "sonnet"
+description = "Take screenshots, scrape content, generate PDF, download files"
+
+[[workflows.phases]]
+id = "validate"
+file = "validate.md"
+required = true
+judge = "opus"
+description = "Check console errors, verify elements, compare against expected"
+
+[[workflows.phases]]
+id = "cleanup"
+file = "cleanup.md"
+required = true
+judge = "haiku"
+description = "Release session, save artifacts, report results"
+
+# --- api-design (6 phases) ---
+[[workflows]]
+skill = "api-design"
+
+[[workflows.phases]]
+id = "requirements"
+file = "requirements.md"
+required = true
+judge = "sonnet"
+description = "Gather API needs, identify consumers, define scope"
+
+[[workflows.phases]]
+id = "design"
+file = "design.md"
+required = true
+judge = "sonnet"
+description = "Define endpoints, design schemas, plan auth, set rate limits"
+
+[[workflows.phases]]
+id = "validate"
+file = "validate.md"
+required = true
+judge = "opus"
+description = "Review against REST/GraphQL best practices, check conventions"
+
+[[workflows.phases]]
+id = "generate"
+file = "generate.md"
+required = true
+judge = "sonnet"
+description = "Create OpenAPI spec, generate types, create route stubs"
+
+[[workflows.phases]]
+id = "test"
+file = "test.md"
+required = true
+judge = "sonnet"
+description = "Write contract tests, run against spec, verify error responses"
+
+[[workflows.phases]]
+id = "document"
+file = "document.md"
+required = false
+judge = "haiku"
+description = "Generate API docs, create examples, publish"
+
+# ==============================================================================
+# TIER 2 — Moderate Workflows (4-5 phases)
+# ==============================================================================
+
+# --- debug (5 phases) ---
+[[workflows]]
+skill = "debug"
+
+[[workflows.phases]]
+id = "reproduce"
+file = "reproduce.md"
+required = true
+judge = "sonnet"
+description = "Gather error info, identify triggers, confirm reproduction"
+
+[[workflows.phases]]
+id = "isolate"
+file = "isolate.md"
+required = true
+judge = "sonnet"
+description = "Trace code path, analyze stack, narrow to component"
+
+[[workflows.phases]]
+id = "investigate"
+file = "investigate.md"
+required = true
+judge = "sonnet"
+description = "Form hypothesis, validate with evidence, identify root cause"
+
+[[workflows.phases]]
+id = "fix"
+file = "fix.md"
+required = true
+judge = "sonnet"
+description = "Design minimal fix, implement, handle edge cases"
+
+[[workflows.phases]]
+id = "verify-prevent"
+file = "verify-prevent.md"
+required = true
+judge = "sonnet"
+description = "Confirm fix works, add regression test, verify no regressions"
+
+# --- review (5 phases) ---
+[[workflows]]
+skill = "review"
+
+[[workflows.phases]]
+id = "gather"
+file = "gather.md"
+required = true
+judge = "haiku"
+description = "Get changed files, read PR description, detect linked issues"
+
+[[workflows.phases]]
+id = "analyze"
+file = "analyze.md"
+required = true
+judge = "sonnet"
+description = "Check spec compliance, identify missing items, assess complexity"
+
+[[workflows.phases]]
+id = "quality"
+file = "quality.md"
+required = true
+judge = "sonnet"
+description = "Run parallel review agents: correctness, security, performance, style"
+
+[[workflows.phases]]
+id = "consolidate"
+file = "consolidate.md"
+required = true
+judge = "sonnet"
+description = "Merge findings, format report, present to user"
+
+[[workflows.phases]]
+id = "track"
+file = "track.md"
+required = false
+judge = "haiku"
+description = "Create todos for findings, tag with severity, report summary"
+
+# --- test (5 phases) ---
+[[workflows]]
+skill = "test"
+
+[[workflows.phases]]
+id = "discover"
+file = "discover.md"
+required = true
+judge = "haiku"
+description = "Detect test framework, find existing tests, identify coverage gaps"
+
+[[workflows.phases]]
+id = "plan"
+file = "plan.md"
+required = true
+judge = "sonnet"
+description = "Prioritize test creation, identify edge cases, choose strategy"
+
+[[workflows.phases]]
+id = "generate"
+file = "generate.md"
+required = true
+judge = "sonnet"
+description = "Write unit tests, integration tests, e2e tests, create fixtures"
+
+[[workflows.phases]]
+id = "run"
+file = "run.md"
+required = true
+judge = "sonnet"
+description = "Execute all tests, capture output, measure coverage"
+
+[[workflows.phases]]
+id = "analyze"
+file = "analyze.md"
+required = false
+judge = "haiku"
+description = "Compare coverage before/after, identify remaining gaps"
+
+# --- security (5 phases) ---
+[[workflows]]
+skill = "security"
+
+[[workflows.phases]]
+id = "scope"
+file = "scope.md"
+required = true
+judge = "sonnet"
+description = "Identify attack surface, list entry points, detect technologies"
+
+[[workflows.phases]]
+id = "scan"
+file = "scan.md"
+required = true
+judge = "sonnet"
+description = "Run OWASP top 10 checks, audit auth flows, check secrets exposure"
+
+[[workflows.phases]]
+id = "analyze"
+file = "analyze.md"
+required = true
+judge = "opus"
+description = "Classify by severity, verify each finding with code evidence"
+
+[[workflows.phases]]
+id = "remediate"
+file = "remediate.md"
+required = true
+judge = "sonnet"
+description = "Fix critical/high vulnerabilities, update deps, add validation"
+
+[[workflows.phases]]
+id = "report"
+file = "report.md"
+required = false
+judge = "haiku"
+description = "Create security report, track findings, recommend prevention"
+
+# --- refactor (5 phases) ---
+[[workflows]]
+skill = "refactor"
+
+[[workflows.phases]]
+id = "analyze"
+file = "analyze.md"
+required = true
+judge = "sonnet"
+description = "Identify code smells, measure complexity, find duplication"
+
+[[workflows.phases]]
+id = "plan"
+file = "plan.md"
+required = true
+judge = "sonnet"
+description = "Choose strategy, identify affected tests, plan incremental steps"
+
+[[workflows.phases]]
+id = "baseline"
+file = "baseline.md"
+required = true
+judge = "haiku"
+description = "Run all tests, capture coverage, verify passing"
+
+[[workflows.phases]]
+id = "refactor"
+file = "refactor.md"
+required = true
+judge = "sonnet"
+description = "Apply changes incrementally, verify behavior preserved"
+
+[[workflows.phases]]
+id = "verify"
+file = "verify.md"
+required = true
+judge = "sonnet"
+description = "Run full test suite, compare coverage, verify no regressions"
+
+# --- document (5 phases) ---
+[[workflows]]
+skill = "document"
+
+[[workflows.phases]]
+id = "audit"
+file = "audit.md"
+required = true
+judge = "haiku"
+description = "Scan for existing docs, find orphaned docs, check for stale content"
+
+[[workflows.phases]]
+id = "clean"
+file = "clean.md"
+required = true
+judge = "haiku"
+description = "Remove orphaned docs, archive outdated content, fix broken links"
+
+[[workflows.phases]]
+id = "organize"
+file = "organize.md"
+required = true
+judge = "sonnet"
+description = "Create folder structure, categorize docs, add navigation"
+
+[[workflows.phases]]
+id = "generate"
+file = "generate.md"
+required = true
+judge = "sonnet"
+description = "Create/update README, API docs, architecture docs, inline comments"
+
+[[workflows.phases]]
+id = "verify"
+file = "verify.md"
+required = false
+judge = "haiku"
+description = "Check all links work, verify code examples, ensure docs match code"
+
+# --- explore (4 phases) ---
+[[workflows]]
+skill = "explore"
+
+[[workflows.phases]]
+id = "classify"
+file = "classify.md"
+required = true
+judge = "haiku"
+description = "Understand request type, determine search depth, identify target areas"
+
+[[workflows.phases]]
+id = "search"
+file = "search.md"
+required = true
+judge = "haiku"
+description = "Run Glob patterns, Grep for keywords, scan directory structure"
+
+[[workflows.phases]]
+id = "analyze"
+file = "analyze.md"
+required = true
+judge = "sonnet"
+description = "Read key files, trace code paths, identify patterns, map dependencies"
+
+[[workflows.phases]]
+id = "report"
+file = "report.md"
+required = true
+judge = "haiku"
+description = "Summarize findings, provide file locations, answer original question"
+
+# --- plan (4 phases) ---
+[[workflows]]
+skill = "plan"
+
+[[workflows.phases]]
+id = "gather"
+file = "gather.md"
+required = true
+judge = "haiku"
+description = "Understand requirements, explore existing code, identify constraints"
+
+[[workflows.phases]]
+id = "analyze"
+file = "analyze.md"
+required = true
+judge = "sonnet"
+description = "Evaluate approaches, assess risks, identify dependencies"
+
+[[workflows.phases]]
+id = "design"
+file = "design.md"
+required = true
+judge = "sonnet"
+description = "Create implementation plan, define milestones, identify critical path"
+
+[[workflows.phases]]
+id = "present"
+file = "present.md"
+required = true
+judge = "haiku"
+description = "Format plan document, present for approval, incorporate feedback"
+
+# --- execute (4 phases) ---
+[[workflows]]
+skill = "execute"
+
+[[workflows.phases]]
+id = "load"
+file = "load.md"
+required = true
+judge = "haiku"
+description = "Read task requirements, load dependencies, identify target files"
+
+[[workflows.phases]]
+id = "spawn"
+file = "spawn.md"
+required = true
+judge = "sonnet"
+description = "Create task list, assign to agents, configure parallel work"
+
+[[workflows.phases]]
+id = "monitor"
+file = "monitor.md"
+required = true
+judge = "sonnet"
+description = "Track agent progress, handle failures, collect results"
+
+[[workflows.phases]]
+id = "verify"
+file = "verify.md"
+required = true
+judge = "sonnet"
+description = "Validate all tasks complete, check quality, report results"
+
+# --- lint (4 phases) ---
+[[workflows]]
+skill = "lint"
+
+[[workflows.phases]]
+id = "detect"
+file = "detect.md"
+required = true
+judge = "haiku"
+description = "Identify languages, find lint configs, detect formatters"
+
+[[workflows.phases]]
+id = "scan"
+file = "scan.md"
+required = true
+judge = "sonnet"
+description = "Run all linters, run formatters in check mode, collect violations"
+
+[[workflows.phases]]
+id = "fix"
+file = "fix.md"
+required = true
+judge = "sonnet"
+description = "Auto-fix what's possible, manually fix remaining"
+
+[[workflows.phases]]
+id = "verify"
+file = "verify.md"
+required = true
+judge = "haiku"
+description = "Re-run linters (confirm clean), run tests, commit fixes"
+
+# --- performance (4 phases) ---
+[[workflows]]
+skill = "performance"
+
+[[workflows.phases]]
+id = "profile"
+file = "profile.md"
+required = true
+judge = "sonnet"
+description = "Identify bottlenecks, measure response times, check memory usage"
+
+[[workflows.phases]]
+id = "analyze"
+file = "analyze.md"
+required = true
+judge = "sonnet"
+description = "Rank issues by impact, identify root causes, find optimization opportunities"
+
+[[workflows.phases]]
+id = "optimize"
+file = "optimize.md"
+required = true
+judge = "sonnet"
+description = "Implement fixes, apply caching, reduce bundle, optimize queries"
+
+[[workflows.phases]]
+id = "benchmark"
+file = "benchmark.md"
+required = true
+judge = "sonnet"
+description = "Measure improvements, compare before/after, verify no regressions"
+
+# --- quality-gate (4 phases) ---
+[[workflows]]
+skill = "quality-gate"
+
+[[workflows.phases]]
+id = "collect"
+file = "collect.md"
+required = true
+judge = "haiku"
+description = "Chain review, lint, and test skills, gather all results"
+
+[[workflows.phases]]
+id = "evaluate"
+file = "evaluate.md"
+required = true
+judge = "sonnet"
+description = "Aggregate scores, apply pass/fail criteria, identify blockers"
+
+[[workflows.phases]]
+id = "fix"
+file = "fix.md"
+required = true
+judge = "sonnet"
+description = "Address blocking issues, re-run failed checks"
+
+[[workflows.phases]]
+id = "report"
+file = "report.md"
+required = false
+judge = "haiku"
+description = "Create quality report, update tracking, recommend improvements"
+
+# --- reality-check (4 phases) ---
+[[workflows]]
+skill = "reality-check"
+
+[[workflows.phases]]
+id = "scan"
+file = "scan.md"
+required = true
+judge = "haiku"
+description = "Find feature declarations, route definitions, component exports"
+
+[[workflows.phases]]
+id = "verify"
+file = "verify.md"
+required = true
+judge = "sonnet"
+description = "Test each feature works, check for stubs, find phantom features"
+
+[[workflows.phases]]
+id = "report"
+file = "report.md"
+required = true
+judge = "sonnet"
+description = "List verified features, phantom features, stubs, severity rating"
+
+[[workflows.phases]]
+id = "fix"
+file = "fix.md"
+required = false
+judge = "sonnet"
+description = "Remove or complete stubs, update documentation, create todos"
+
+# --- tech-debt (4 phases) ---
+[[workflows]]
+skill = "tech-debt"
+
+[[workflows.phases]]
+id = "scan"
+file = "scan.md"
+required = true
+judge = "haiku"
+description = "Search for TODO/FIXME/HACK markers, find deprecated usage, detect dead code"
+
+[[workflows.phases]]
+id = "assess"
+file = "assess.md"
+required = true
+judge = "sonnet"
+description = "Classify by severity, estimate fix effort, identify quick wins"
+
+[[workflows.phases]]
+id = "prioritize"
+file = "prioritize.md"
+required = true
+judge = "sonnet"
+description = "Rank by impact/effort ratio, group related items"
+
+[[workflows.phases]]
+id = "track"
+file = "track.md"
+required = false
+judge = "haiku"
+description = "Create todos for each item, assign severity labels, report summary"
+
+# --- cleanup (4 phases) ---
+[[workflows]]
+skill = "cleanup"
+
+[[workflows.phases]]
+id = "identify"
+file = "identify.md"
+required = true
+judge = "haiku"
+description = "Find unused exports, dead imports, unreachable code, empty files"
+
+[[workflows.phases]]
+id = "analyze"
+file = "analyze.md"
+required = true
+judge = "sonnet"
+description = "Verify each candidate is truly unused, check dynamic usage, assess risk"
+
+[[workflows.phases]]
+id = "remove"
+file = "remove.md"
+required = true
+judge = "sonnet"
+description = "Delete dead code, remove unused deps, clean imports"
+
+[[workflows.phases]]
+id = "verify"
+file = "verify.md"
+required = true
+judge = "sonnet"
+description = "Run full test suite, check no broken references, verify build succeeds"
+
+# --- research (4 phases) ---
+[[workflows]]
+skill = "research"
+
+[[workflows.phases]]
+id = "scope"
+file = "scope.md"
+required = true
+judge = "haiku"
+description = "Define research question, identify sources, determine depth"
+
+[[workflows.phases]]
+id = "search"
+file = "search.md"
+required = true
+judge = "sonnet"
+description = "WebSearch for information, fetch documentation, find examples"
+
+[[workflows.phases]]
+id = "analyze"
+file = "analyze.md"
+required = true
+judge = "sonnet"
+description = "Evaluate sources, cross-reference findings, identify best practices"
+
+[[workflows.phases]]
+id = "synthesize"
+file = "synthesize.md"
+required = true
+judge = "sonnet"
+description = "Compile findings, create summary, provide recommendations"
+
+# --- estimate (4 phases) ---
+[[workflows]]
+skill = "estimate"
+
+[[workflows.phases]]
+id = "analyze"
+file = "analyze.md"
+required = true
+judge = "haiku"
+description = "Understand requirements, explore codebase scope, identify unknowns"
+
+[[workflows.phases]]
+id = "decompose"
+file = "decompose.md"
+required = true
+judge = "sonnet"
+description = "Break into subtasks, identify dependencies, classify complexity"
+
+[[workflows.phases]]
+id = "size"
+file = "size.md"
+required = true
+judge = "sonnet"
+description = "Apply estimation model, calculate ranges, identify widening risks"
+
+[[workflows.phases]]
+id = "present"
+file = "present.md"
+required = true
+judge = "haiku"
+description = "Format estimate with ranges, explain assumptions, recommend approach"
+
+# --- loom (4 phases) ---
+[[workflows]]
+skill = "loom"
+
+[[workflows.phases]]
+id = "fetch"
+file = "fetch.md"
+required = true
+judge = "haiku"
+description = "Identify target video, get video details, download transcript"
+
+[[workflows.phases]]
+id = "analyze"
+file = "analyze.md"
+required = true
+judge = "sonnet"
+description = "Process with Gemini, extract key points, identify action items"
+
+[[workflows.phases]]
+id = "extract"
+file = "extract.md"
+required = true
+judge = "sonnet"
+description = "Create task list from video, cross-reference with code"
+
+[[workflows.phases]]
+id = "report"
+file = "report.md"
+required = false
+judge = "haiku"
+description = "Format analysis, create Linear issues if applicable, post summary"
+
+# --- todo-manager (4 phases) ---
+[[workflows]]
+skill = "todo-manager"
+
+[[workflows.phases]]
+id = "load"
+file = "load.md"
+required = true
+judge = "haiku"
+description = "Read existing todos, check task list, identify priorities"
+
+[[workflows.phases]]
+id = "process"
+file = "process.md"
+required = true
+judge = "sonnet"
+description = "Route each todo to appropriate skill, update statuses"
+
+[[workflows.phases]]
+id = "execute"
+file = "execute.md"
+required = true
+judge = "sonnet"
+description = "Work on highest priority items, track progress"
+
+[[workflows.phases]]
+id = "persist"
+file = "persist.md"
+required = true
+judge = "haiku"
+description = "Save updated state, report completed items, identify new todos"
+
+# --- onboard (5 phases) ---
+[[workflows]]
+skill = "onboard"
+
+[[workflows.phases]]
+id = "map"
+file = "map.md"
+required = true
+judge = "haiku"
+description = "Scan project structure, identify tech stack, find entry points"
+
+[[workflows.phases]]
+id = "explore"
+file = "explore.md"
+required = true
+judge = "sonnet"
+description = "Trace key code paths, identify patterns, understand data flow"
+
+[[workflows.phases]]
+id = "guide"
+file = "guide.md"
+required = true
+judge = "sonnet"
+description = "Create setup instructions, document dev workflow, list prerequisites"
+
+[[workflows.phases]]
+id = "checklist"
+file = "checklist.md"
+required = true
+judge = "sonnet"
+description = "Build onboarding checklist, create environment setup, document gotchas"
+
+[[workflows.phases]]
+id = "walkthrough"
+file = "walkthrough.md"
+required = false
+judge = "haiku"
+description = "Create annotated code tour, highlight key files, explain conventions"
+
+# --- skill-creator (5 phases) ---
+[[workflows]]
+skill = "skill-creator"
+
+[[workflows.phases]]
+id = "design"
+file = "design.md"
+required = true
+judge = "sonnet"
+description = "Define skill purpose, identify triggers, plan phases, choose dependencies"
+
+[[workflows.phases]]
+id = "scaffold"
+file = "scaffold.md"
+required = true
+judge = "haiku"
+description = "Create directory, generate SKILL.md from template, create config files"
+
+[[workflows.phases]]
+id = "configure"
+file = "configure.md"
+required = true
+judge = "sonnet"
+description = "Add to skill-registry, configure routing rules, set up phase files"
+
+[[workflows.phases]]
+id = "register"
+file = "register.md"
+required = true
+judge = "sonnet"
+description = "Update install.js, add sentinel workflow, create step definitions"
+
+[[workflows.phases]]
+id = "validate"
+file = "validate.md"
+required = true
+judge = "sonnet"
+description = "Test skill routing, verify phase gates, check skill loads correctly"
+
+# --- project-setup (5 phases) ---
+[[workflows]]
+skill = "project-setup"
+
+[[workflows.phases]]
+id = "detect"
+file = "detect.md"
+required = true
+judge = "haiku"
+description = "Identify project type, scan for existing configs, determine services"
+
+[[workflows.phases]]
+id = "configure"
+file = "configure.md"
+required = true
+judge = "sonnet"
+description = "Set up Doppler project, configure Linear project, set deploy targets"
+
+[[workflows.phases]]
+id = "secrets"
+file = "secrets.md"
+required = true
+judge = "sonnet"
+description = "Create secrets in Doppler, generate service tokens, verify access"
+
+[[workflows.phases]]
+id = "generate"
+file = "generate.md"
+required = true
+judge = "sonnet"
+description = "Create project config file, update CLAUDE.md, configure hooks"
+
+[[workflows.phases]]
+id = "verify"
+file = "verify.md"
+required = true
+judge = "sonnet"
+description = "Test Doppler access, test Linear access, verify deploy config"
+
+# ==============================================================================
+# TIER 1 — Simple Workflows (2-3 phases)
+# ==============================================================================
+
+# --- sequential-thinking (2 phases) ---
+[[workflows]]
+skill = "sequential-thinking"
+
+[[workflows.phases]]
+id = "setup"
+file = "setup.md"
+required = true
+judge = "haiku"
+description = "Define problem, determine thought count, set constraints"
+
+[[workflows.phases]]
+id = "execute"
+file = "execute.md"
+required = true
+judge = "sonnet"
+description = "Run sequential thoughts, validate reasoning chain, produce conclusion"
+
+# --- codex (3 phases) ---
+[[workflows]]
+skill = "codex"
+
+[[workflows.phases]]
+id = "gather"
+file = "gather.md"
+required = true
+judge = "haiku"
+description = "Collect code context, prepare prompt, determine reasoning effort"
+
+[[workflows.phases]]
+id = "execute"
+file = "execute.md"
+required = true
+judge = "sonnet"
+description = "Send to Codex MCP, parse response"
+
+[[workflows.phases]]
+id = "apply"
+file = "apply.md"
+required = false
+judge = "haiku"
+description = "Apply recommendations, verify changes, report results"
+
+# --- traffic-light (3 phases) ---
+[[workflows]]
+skill = "traffic-light"
+
+[[workflows.phases]]
+id = "discover"
+file = "discover.md"
+required = true
+judge = "haiku"
+description = "List integrations, detect API endpoints, check existing status"
+
+[[workflows.phases]]
+id = "assess"
+file = "assess.md"
+required = true
+judge = "sonnet"
+description = "Test each integration, measure response times, classify status"
+
+[[workflows.phases]]
+id = "report"
+file = "report.md"
+required = true
+judge = "haiku"
+description = "Format traffic light report, update tracking, flag degraded"
+
+# --- session-resume (2 phases) ---
+[[workflows]]
+skill = "session-resume"
+
+[[workflows.phases]]
+id = "find"
+file = "find.md"
+required = true
+judge = "haiku"
+description = "Locate session logs, identify last session, read JSONL entries"
+
+[[workflows.phases]]
+id = "summarize"
+file = "summarize.md"
+required = true
+judge = "sonnet"
+description = "Extract key actions, identify pending work, present summary"
+
+# --- brainstorming (2 phases) ---
+[[workflows]]
+skill = "brainstorming"
+
+[[workflows.phases]]
+id = "generate"
+file = "generate.md"
+required = true
+judge = "sonnet"
+description = "Understand prompt, produce diverse ideas, explore edge cases"
+
+[[workflows.phases]]
+id = "synthesize"
+file = "synthesize.md"
+required = true
+judge = "haiku"
+description = "Group by theme, rank by feasibility, present top recommendations"
+
+# --- quickstart (3 phases) ---
+[[workflows]]
+skill = "quickstart"
+
+[[workflows.phases]]
+id = "detect"
+file = "detect.md"
+required = true
+judge = "haiku"
+description = "Identify environment, check prerequisites, find missing tools"
+
+[[workflows.phases]]
+id = "configure"
+file = "configure.md"
+required = true
+judge = "sonnet"
+description = "Install components, set up configs, initialize settings"
+
+[[workflows.phases]]
+id = "verify"
+file = "verify.md"
+required = true
+judge = "haiku"
+description = "Run validation checks, confirm working state, present next steps"
+
+# --- auto-setup (3 phases) ---
+[[workflows]]
+skill = "auto-setup"
+
+[[workflows.phases]]
+id = "detect"
+file = "detect.md"
+required = true
+judge = "haiku"
+description = "Scan system, identify OS, check existing installs"
+
+[[workflows.phases]]
+id = "install"
+file = "install.md"
+required = true
+judge = "sonnet"
+description = "Install skills, configure hooks, set up MCP servers"
+
+[[workflows.phases]]
+id = "verify"
+file = "verify.md"
+required = true
+judge = "haiku"
+description = "Validate installation, check hook registration, confirm working"
+
+# --- skill-sync (3 phases) ---
+[[workflows]]
+skill = "skill-sync"
+
+[[workflows.phases]]
+id = "fetch"
+file = "fetch.md"
+required = true
+judge = "haiku"
+description = "Git fetch origin, compare local vs remote, identify changes"
+
+[[workflows.phases]]
+id = "apply"
+file = "apply.md"
+required = true
+judge = "sonnet"
+description = "Copy updated files, remove deleted files, update registry"
+
+[[workflows.phases]]
+id = "verify"
+file = "verify.md"
+required = true
+judge = "haiku"
+description = "Validate skills load, check counts match, report changes"
+
+# --- git (3 phases) ---
+[[workflows]]
+skill = "git"
+
+[[workflows.phases]]
+id = "prepare"
+file = "prepare.md"
+required = true
+judge = "haiku"
+description = "Check branch state, detect changes, determine commit scope"
+
+[[workflows.phases]]
+id = "execute"
+file = "execute.md"
+required = true
+judge = "sonnet"
+description = "Stage files, create commit, push if requested, create PR"
+
+[[workflows.phases]]
+id = "verify"
+file = "verify.md"
+required = true
+judge = "haiku"
+description = "Verify commit exists, check push succeeded, confirm PR created"
+
+# --- git-worktree (3 phases) ---
+[[workflows]]
+skill = "git-worktree"
+
+[[workflows.phases]]
+id = "create"
+file = "create.md"
+required = true
+judge = "haiku"
+description = "Determine branch name, create worktree directory, checkout branch"
+
+[[workflows.phases]]
+id = "work"
+file = "work.md"
+required = true
+judge = "sonnet"
+description = "Install dependencies, verify working state, hand off"
+
+[[workflows.phases]]
+id = "cleanup"
+file = "cleanup.md"
+required = false
+judge = "haiku"
+description = "Remove worktree, delete branch if merged, prune references"
+
+# --- ssh (2 phases) ---
+[[workflows]]
+skill = "ssh"
+
+[[workflows.phases]]
+id = "connect"
+file = "connect.md"
+required = true
+judge = "haiku"
+description = "Load host config, establish connection, verify access"
+
+[[workflows.phases]]
+id = "execute"
+file = "execute.md"
+required = true
+judge = "sonnet"
+description = "Run commands, capture output, report results"
+
+# --- tailscale (2 phases) ---
+[[workflows]]
+skill = "tailscale"
+
+[[workflows.phases]]
+id = "connect"
+file = "connect.md"
+required = true
+judge = "haiku"
+description = "Check Tailscale status, identify target device, verify network path"
+
+[[workflows.phases]]
+id = "transfer"
+file = "transfer.md"
+required = true
+judge = "haiku"
+description = "Send/receive files via Taildrop, verify transfer, report completion"
+
+# --- chrome-extension-loader (2 phases) ---
+[[workflows]]
+skill = "chrome-extension-loader"
+
+[[workflows.phases]]
+id = "load"
+file = "load.md"
+required = true
+judge = "haiku"
+description = "Detect extension path, launch Chrome for Testing, load unpacked"
+
+[[workflows.phases]]
+id = "verify"
+file = "verify.md"
+required = true
+judge = "sonnet"
+description = "Check extension loaded, verify manifest, test functions"
+
+# --- cloudflare-tunnel (3 phases) ---
+[[workflows]]
+skill = "cloudflare-tunnel"
+
+[[workflows.phases]]
+id = "setup"
+file = "setup.md"
+required = true
+judge = "haiku"
+description = "Detect local server, check cloudflared installed, determine port"
+
+[[workflows.phases]]
+id = "expose"
+file = "expose.md"
+required = true
+judge = "sonnet"
+description = "Start tunnel, capture public URL, verify connectivity"
+
+[[workflows.phases]]
+id = "cleanup"
+file = "cleanup.md"
+required = false
+judge = "haiku"
+description = "Stop tunnel, release resources, report URL used"
+
+# --- steel-tester (3 phases) ---
+[[workflows]]
+skill = "steel-tester"
+
+[[workflows.phases]]
+id = "setup"
+file = "setup.md"
+required = true
+judge = "haiku"
+description = "Create Steel session, determine target URL, configure options"
+
+[[workflows.phases]]
+id = "test"
+file = "test.md"
+required = true
+judge = "sonnet"
+description = "Navigate, check console errors, test interactions, take screenshots"
+
+[[workflows.phases]]
+id = "report"
+file = "report.md"
+required = true
+judge = "sonnet"
+description = "Release session, compile findings, create Linear issues for bugs"
+
+# --- telemetry (2 phases) ---
+[[workflows]]
+skill = "telemetry"
+
+[[workflows.phases]]
+id = "collect"
+file = "collect.md"
+required = true
+judge = "haiku"
+description = "Read metrics files, parse JSONL entries, aggregate statistics"
+
+[[workflows.phases]]
+id = "report"
+file = "report.md"
+required = true
+judge = "haiku"
+description = "Format analytics, identify trends, present skill usage summary"
+
+# --- mcp-manager (3 phases) ---
+[[workflows]]
+skill = "mcp-manager"
+
+[[workflows.phases]]
+id = "detect"
+file = "detect.md"
+required = true
+judge = "haiku"
+description = "List configured servers, check health status, identify issues"
+
+[[workflows.phases]]
+id = "manage"
+file = "manage.md"
+required = true
+judge = "sonnet"
+description = "Install/update servers, configure settings, fix broken connections"
+
+[[workflows.phases]]
+id = "verify"
+file = "verify.md"
+required = true
+judge = "haiku"
+description = "Health check all servers, verify tool counts, report status"
+
+# --- gemini-video (2 phases) ---
+[[workflows]]
+skill = "gemini-video"
+
+[[workflows.phases]]
+id = "send"
+file = "send.md"
+required = true
+judge = "haiku"
+description = "Identify media source, prepare prompt, send to Gemini MCP"
+
+[[workflows.phases]]
+id = "analyze"
+file = "analyze.md"
+required = true
+judge = "sonnet"
+description = "Parse response, extract key insights, format report"

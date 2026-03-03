@@ -1,0 +1,42 @@
+# Session Resume Skill — Step Definitions
+# Locate and summarize previous session context
+#
+# 2 phases, ~6 steps
+
+# ============================================================================
+# Phase 1: Find — Locate previous session data
+# ============================================================================
+
+[[phases]]
+id = "find"
+
+[[phases.steps]]
+id = "1.1"
+description = "Locate session log files in metrics directory"
+
+[[phases.steps]]
+id = "1.2"
+description = "Identify the most recent session by timestamp"
+
+[[phases.steps]]
+id = "1.3"
+description = "Read JSONL entries from session log"
+
+# ============================================================================
+# Phase 2: Summarize — Present actionable context
+# ============================================================================
+
+[[phases]]
+id = "summarize"
+
+[[phases.steps]]
+id = "2.1"
+description = "Extract key actions and tool calls from session"
+
+[[phases.steps]]
+id = "2.2"
+description = "Identify pending or incomplete work items"
+
+[[phases.steps]]
+id = "2.3"
+description = "Present session summary with next steps"

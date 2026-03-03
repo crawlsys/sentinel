@@ -1,0 +1,104 @@
+# Tech Debt Skill — Step Definitions
+# 18 individually trackable steps across 4 phases
+#
+# Phases: scan → assess → prioritize → track
+
+# ============================================================================
+# Phase 1: Scan
+# ============================================================================
+
+[[phases]]
+id = "scan"
+
+[[phases.steps]]
+id = "1.1"
+description = "Search for TODO/FIXME/HACK/XXX markers"
+
+[[phases.steps]]
+id = "1.2"
+description = "Find deprecated API usage"
+
+[[phases.steps]]
+id = "1.3"
+description = "Detect stale imports and unused dependencies"
+
+[[phases.steps]]
+id = "1.4"
+description = "Find dead code and unreachable branches"
+
+[[phases.steps]]
+id = "1.5"
+description = "Identify outdated patterns and anti-patterns"
+
+# ============================================================================
+# Phase 2: Assess
+# ============================================================================
+
+[[phases]]
+id = "assess"
+
+[[phases.steps]]
+id = "2.1"
+description = "Classify each item by severity (critical, high, medium, low)"
+
+[[phases.steps]]
+id = "2.2"
+description = "Estimate fix effort for each item"
+
+[[phases.steps]]
+id = "2.3"
+description = "Identify quick wins (high impact, low effort)"
+
+[[phases.steps]]
+id = "2.4"
+description = "Assess blast radius of each debt item"
+
+# ============================================================================
+# Phase 3: Prioritize
+# ============================================================================
+
+[[phases]]
+id = "prioritize"
+
+[[phases.steps]]
+id = "3.1"
+description = "Rank by impact-to-effort ratio"
+
+[[phases.steps]]
+id = "3.2"
+description = "Group related items for batch fixing"
+
+[[phases.steps]]
+id = "3.3"
+description = "Create dependency graph for ordered resolution"
+
+[[phases.steps]]
+id = "3.4"
+description = "Identify items blocking other improvements"
+
+# ============================================================================
+# Phase 4: Track
+# ============================================================================
+
+[[phases]]
+id = "track"
+
+[[phases.steps]]
+id = "4.1"
+description = "Create todos for each debt item"
+
+[[phases.steps]]
+id = "4.2"
+description = "Assign severity and effort labels"
+
+[[phases.steps]]
+id = "4.3"
+description = "Generate tech debt summary report"
+
+[[phases.steps]]
+id = "4.4"
+description = "Recommend sprint allocation for debt paydown"
+
+[[phases.steps]]
+id = "4.5"
+description = "Report total debt inventory with metrics"

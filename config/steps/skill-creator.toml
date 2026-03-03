@@ -1,0 +1,128 @@
+# Skill Creator Skill — Step Definitions
+# 22 individually trackable steps across 5 phases
+#
+# Phases: design → scaffold → configure → register → validate
+
+# ============================================================================
+# Phase 1: Design
+# ============================================================================
+
+[[phases]]
+id = "design"
+
+[[phases.steps]]
+id = "1.1"
+description = "Define skill purpose and scope"
+
+[[phases.steps]]
+id = "1.2"
+description = "Identify trigger keywords for routing"
+
+[[phases.steps]]
+id = "1.3"
+description = "Plan phases and step structure"
+
+[[phases.steps]]
+id = "1.4"
+description = "Choose skill dependencies (@use)"
+
+[[phases.steps]]
+id = "1.5"
+description = "Define blocker gates and success criteria"
+
+# ============================================================================
+# Phase 2: Scaffold
+# ============================================================================
+
+[[phases]]
+id = "scaffold"
+
+[[phases.steps]]
+id = "2.1"
+description = "Create skill directory"
+
+[[phases.steps]]
+id = "2.2"
+description = "Generate SKILL.md from hub template"
+
+[[phases.steps]]
+id = "2.3"
+description = "Create phase sub-files if needed"
+
+[[phases.steps]]
+id = "2.4"
+description = "Create configuration files"
+
+# ============================================================================
+# Phase 3: Configure
+# ============================================================================
+
+[[phases]]
+id = "configure"
+
+[[phases.steps]]
+id = "3.1"
+description = "Add to skill-registry with version and triggers"
+
+[[phases.steps]]
+id = "3.2"
+description = "Configure routing rules in skill-router"
+
+[[phases.steps]]
+id = "3.3"
+description = "Set up phase gate configuration"
+
+[[phases.steps]]
+id = "3.4"
+description = "Define telemetry tracking"
+
+# ============================================================================
+# Phase 4: Register
+# ============================================================================
+
+[[phases]]
+id = "register"
+
+[[phases.steps]]
+id = "4.1"
+description = "Update install.js to include new skill"
+
+[[phases.steps]]
+id = "4.2"
+description = "Add sentinel workflow entry"
+
+[[phases.steps]]
+id = "4.3"
+description = "Create step definitions TOML file"
+
+[[phases.steps]]
+id = "4.4"
+description = "Update marketplace counts"
+
+# ============================================================================
+# Phase 5: Validate
+# ============================================================================
+
+[[phases]]
+id = "validate"
+
+[[phases.steps]]
+id = "5.1"
+description = "Test skill routing triggers correctly"
+
+[[phases.steps]]
+id = "5.2"
+description = "Verify phase gates enforce order"
+
+[[phases.steps]]
+id = "5.3"
+description = "Check skill loads and activates"
+
+[[phases.steps]]
+id = "5.4"
+description = "Routing and activation confirmed"
+blocker = true
+
+[[phases.steps]]
+id = "5.5"
+description = "Commit and push new skill"

@@ -1,0 +1,66 @@
+# MCP Manager Skill — Step Definitions
+# MCP server lifecycle management and health monitoring
+#
+# 3 phases, ~10 steps
+
+# ============================================================================
+# Phase 1: Detect — Inventory configured servers
+# ============================================================================
+
+[[phases]]
+id = "detect"
+
+[[phases.steps]]
+id = "1.1"
+description = "List all configured MCP servers from .claude.json"
+
+[[phases.steps]]
+id = "1.2"
+description = "Check health status of each server"
+
+[[phases.steps]]
+id = "1.3"
+description = "Identify servers with errors or degraded performance"
+
+# ============================================================================
+# Phase 2: Manage — Install, update, or fix servers
+# ============================================================================
+
+[[phases]]
+id = "manage"
+
+[[phases.steps]]
+id = "2.1"
+description = "Install new MCP servers if requested"
+
+[[phases.steps]]
+id = "2.2"
+description = "Update server configurations and settings"
+
+[[phases.steps]]
+id = "2.3"
+description = "Fix broken connections or restart failed servers"
+
+[[phases.steps]]
+id = "2.4"
+description = "Update .claude.json with configuration changes"
+
+# ============================================================================
+# Phase 3: Verify — Confirm all servers operational
+# ============================================================================
+
+[[phases]]
+id = "verify"
+
+[[phases.steps]]
+id = "3.1"
+description = "Health check all MCP servers"
+blocker = true
+
+[[phases.steps]]
+id = "3.2"
+description = "Verify tool counts match expected values"
+
+[[phases.steps]]
+id = "3.3"
+description = "Report overall MCP server status summary"

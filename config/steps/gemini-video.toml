@@ -1,0 +1,43 @@
+# Gemini Video Skill — Step Definitions
+# Video/audio analysis via Gemini MCP server
+#
+# 2 phases, ~6 steps
+
+# ============================================================================
+# Phase 1: Send — Prepare and submit media for analysis
+# ============================================================================
+
+[[phases]]
+id = "send"
+
+[[phases.steps]]
+id = "1.1"
+description = "Identify media source (URL, file path, or Loom link)"
+
+[[phases.steps]]
+id = "1.2"
+description = "Prepare analysis prompt with specific questions"
+
+[[phases.steps]]
+id = "1.3"
+description = "Send media to Gemini MCP server"
+blocker = true
+
+# ============================================================================
+# Phase 2: Analyze — Parse and format results
+# ============================================================================
+
+[[phases]]
+id = "analyze"
+
+[[phases.steps]]
+id = "2.1"
+description = "Parse Gemini response and extract insights"
+
+[[phases.steps]]
+id = "2.2"
+description = "Cross-reference findings with code context if applicable"
+
+[[phases.steps]]
+id = "2.3"
+description = "Format analysis report with key takeaways"

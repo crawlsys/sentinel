@@ -1,0 +1,192 @@
+# Migrate Skill — Step Definitions
+# ~30 individually trackable steps across 6 phases
+#
+# Each phase maps to a workflow phase in config/workflows.toml.
+# Steps marked blocker = true must pass before the phase can advance.
+
+# ============================================================================
+# Phase 1: Plan Migration
+# ============================================================================
+
+[[phases]]
+id = "plan"
+
+[[phases.steps]]
+id = "1.1"
+description = "Analyze current database schema"
+
+[[phases.steps]]
+id = "1.2"
+description = "Identify tables/columns affected by migration"
+
+[[phases.steps]]
+id = "1.3"
+description = "Design target schema changes"
+
+[[phases.steps]]
+id = "1.4"
+description = "Assess data transformation requirements"
+
+[[phases.steps]]
+id = "1.5"
+description = "Identify rollback strategy (reversible vs irreversible)"
+blocker = true
+
+[[phases.steps]]
+id = "1.6"
+description = "Estimate migration duration and downtime window"
+
+# ============================================================================
+# Phase 2: Write Migration
+# ============================================================================
+
+[[phases]]
+id = "write"
+
+[[phases.steps]]
+id = "2.1"
+description = "Create migration file with timestamp"
+
+[[phases.steps]]
+id = "2.2"
+description = "Write up migration (apply changes)"
+
+[[phases.steps]]
+id = "2.3"
+description = "Write down migration (rollback changes)"
+
+[[phases.steps]]
+id = "2.4"
+description = "Write data transformation queries if needed"
+
+[[phases.steps]]
+id = "2.5"
+description = "Validate SQL syntax"
+blocker = true
+
+[[phases.steps]]
+id = "2.6"
+description = "Add migration to version control"
+
+# ============================================================================
+# Phase 3: Test Locally
+# ============================================================================
+
+[[phases]]
+id = "test-local"
+
+[[phases.steps]]
+id = "3.1"
+description = "Run migration up on local database"
+
+[[phases.steps]]
+id = "3.2"
+description = "Verify schema matches expected state"
+
+[[phases.steps]]
+id = "3.3"
+description = "Run migration down (rollback test)"
+
+[[phases.steps]]
+id = "3.4"
+description = "Re-run migration up"
+
+[[phases.steps]]
+id = "3.5"
+description = "Run application test suite"
+blocker = true
+
+[[phases.steps]]
+id = "3.6"
+description = "Verify ORM/query compatibility"
+
+# ============================================================================
+# Phase 4: Test on Staging
+# ============================================================================
+
+[[phases]]
+id = "test-staging"
+
+[[phases.steps]]
+id = "4.1"
+description = "Apply migration to staging database"
+
+[[phases.steps]]
+id = "4.2"
+description = "Run integration tests against staging"
+blocker = true
+
+[[phases.steps]]
+id = "4.3"
+description = "Verify data integrity (row counts, constraints)"
+blocker = true
+
+[[phases.steps]]
+id = "4.4"
+description = "Run staging app smoke test (Steel)"
+
+[[phases.steps]]
+id = "4.5"
+description = "Check for query performance regressions"
+
+# ============================================================================
+# Phase 5: Apply to Production
+# ============================================================================
+
+[[phases]]
+id = "apply"
+
+[[phases.steps]]
+id = "5.1"
+description = "Create production database backup"
+blocker = true
+
+[[phases.steps]]
+id = "5.2"
+description = "Verify backup is complete and restorable"
+blocker = true
+
+[[phases.steps]]
+id = "5.3"
+description = "Apply migration to production database"
+
+[[phases.steps]]
+id = "5.4"
+description = "Verify production schema matches expected state"
+blocker = true
+
+[[phases.steps]]
+id = "5.5"
+description = "Confirm application is healthy post-migration"
+blocker = true
+
+# ============================================================================
+# Phase 6: Verify
+# ============================================================================
+
+[[phases]]
+id = "verify"
+
+[[phases.steps]]
+id = "6.1"
+description = "Run production smoke tests"
+
+[[phases.steps]]
+id = "6.2"
+description = "Check data integrity on production"
+
+[[phases.steps]]
+id = "6.3"
+description = "Monitor error rates for anomalies"
+
+[[phases.steps]]
+id = "6.4"
+description = "Verify no query performance degradation"
+
+[[phases.steps]]
+id = "6.5"
+description = "Log migration completion to metrics"
+
+[[phases.steps]]
+id = "6.6"
+description = "Update Linear issue with migration status"

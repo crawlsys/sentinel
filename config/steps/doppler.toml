@@ -1,0 +1,174 @@
+# Doppler Skill — Step Definitions
+# ~30 individually trackable steps across 6 phases
+#
+# Each phase maps to a workflow phase in config/workflows.toml.
+# Steps marked blocker = true must pass before the phase can advance.
+
+# ============================================================================
+# Phase 1: Discover
+# ============================================================================
+
+[[phases]]
+id = "discover"
+
+[[phases.steps]]
+id = "1.1"
+description = "List all Doppler projects"
+
+[[phases.steps]]
+id = "1.2"
+description = "Identify target project and environment"
+
+[[phases.steps]]
+id = "1.3"
+description = "Check current config (dev/stg/prd)"
+
+[[phases.steps]]
+id = "1.4"
+description = "List available environments for project"
+
+[[phases.steps]]
+id = "1.5"
+description = "Verify Doppler access and permissions"
+blocker = true
+
+# ============================================================================
+# Phase 2: Audit
+# ============================================================================
+
+[[phases]]
+id = "audit"
+
+[[phases.steps]]
+id = "2.1"
+description = "List all secrets in target config"
+
+[[phases.steps]]
+id = "2.2"
+description = "Check for stale or unused secrets"
+
+[[phases.steps]]
+id = "2.3"
+description = "Check secret rotation dates"
+
+[[phases.steps]]
+id = "2.4"
+description = "Identify secrets shared across environments"
+
+[[phases.steps]]
+id = "2.5"
+description = "Verify naming convention compliance"
+
+[[phases.steps]]
+id = "2.6"
+description = "Flag secrets missing from required environments"
+
+# ============================================================================
+# Phase 3: Manage
+# ============================================================================
+
+[[phases]]
+id = "manage"
+
+[[phases.steps]]
+id = "3.1"
+description = "Set or update target secrets"
+
+[[phases.steps]]
+id = "3.2"
+description = "Manage service tokens (create/revoke)"
+
+[[phases.steps]]
+id = "3.3"
+description = "Configure integrations (Railway, AWS, GitHub, Vercel)"
+
+[[phases.steps]]
+id = "3.4"
+description = "Update secret notes and documentation"
+
+[[phases.steps]]
+id = "3.5"
+description = "Apply changes across environments if needed"
+
+# ============================================================================
+# Phase 4: Sync
+# ============================================================================
+
+[[phases]]
+id = "sync"
+
+[[phases.steps]]
+id = "4.1"
+description = "Trigger sync to connected services"
+
+[[phases.steps]]
+id = "4.2"
+description = "Verify sync status for each integration"
+
+[[phases.steps]]
+id = "4.3"
+description = "Check connected service received updated values"
+
+[[phases.steps]]
+id = "4.4"
+description = "Resolve any sync failures"
+
+[[phases.steps]]
+id = "4.5"
+description = "Confirm all syncs are healthy"
+blocker = true
+
+# ============================================================================
+# Phase 5: Verify
+# ============================================================================
+
+[[phases]]
+id = "verify"
+
+[[phases.steps]]
+id = "5.1"
+description = "Download secrets in target format (json/env/yaml)"
+
+[[phases.steps]]
+id = "5.2"
+description = "Validate secret format and structure"
+
+[[phases.steps]]
+id = "5.3"
+description = "Test application startup with new secrets"
+blocker = true
+
+[[phases.steps]]
+id = "5.4"
+description = "Verify external service connectivity (DB, API keys)"
+
+[[phases.steps]]
+id = "5.5"
+description = "Run health check against dependent services"
+
+# ============================================================================
+# Phase 6: Document
+# ============================================================================
+
+[[phases]]
+id = "document"
+
+[[phases.steps]]
+id = "6.1"
+description = "Update project documentation with secret changes"
+
+[[phases.steps]]
+id = "6.2"
+description = "Log changes to activity audit trail"
+
+[[phases.steps]]
+id = "6.3"
+description = "Notify team of secret updates"
+
+[[phases.steps]]
+id = "6.4"
+description = "Update Linear issue with Doppler changes"
+
+[[phases.steps]]
+id = "6.5"
+description = "Record secret rotation schedule for next audit"

@@ -1,0 +1,135 @@
+# Onboard Skill — Step Definitions
+# 25 individually trackable steps across 5 phases
+#
+# Phases: map → explore → guide → checklist → walkthrough
+
+# ============================================================================
+# Phase 1: Map
+# ============================================================================
+
+[[phases]]
+id = "map"
+
+[[phases.steps]]
+id = "1.1"
+description = "Scan project directory structure"
+
+[[phases.steps]]
+id = "1.2"
+description = "Identify tech stack (languages, frameworks, tools)"
+
+[[phases.steps]]
+id = "1.3"
+description = "Find entry points (main, index, app)"
+
+[[phases.steps]]
+id = "1.4"
+description = "Map high-level architecture (frontend, backend, infra)"
+
+[[phases.steps]]
+id = "1.5"
+description = "Identify build and deploy configuration"
+
+# ============================================================================
+# Phase 2: Explore
+# ============================================================================
+
+[[phases]]
+id = "explore"
+
+[[phases.steps]]
+id = "2.1"
+description = "Trace key code paths (request lifecycle)"
+
+[[phases.steps]]
+id = "2.2"
+description = "Identify patterns and conventions in use"
+
+[[phases.steps]]
+id = "2.3"
+description = "Find configuration files and env requirements"
+
+[[phases.steps]]
+id = "2.4"
+description = "Understand data flow (DB, APIs, state)"
+
+[[phases.steps]]
+id = "2.5"
+description = "Identify test structure and coverage"
+
+# ============================================================================
+# Phase 3: Guide
+# ============================================================================
+
+[[phases]]
+id = "guide"
+
+[[phases.steps]]
+id = "3.1"
+description = "Create local setup instructions"
+
+[[phases.steps]]
+id = "3.2"
+description = "Document development workflow"
+
+[[phases.steps]]
+id = "3.3"
+description = "List prerequisites and dependencies"
+
+[[phases.steps]]
+id = "3.4"
+description = "Document environment variable requirements"
+
+[[phases.steps]]
+id = "3.5"
+description = "Explain branching and PR process"
+
+# ============================================================================
+# Phase 4: Checklist
+# ============================================================================
+
+[[phases]]
+id = "checklist"
+
+[[phases.steps]]
+id = "4.1"
+description = "Build onboarding checklist (step-by-step)"
+
+[[phases.steps]]
+id = "4.2"
+description = "Create environment setup script or commands"
+
+[[phases.steps]]
+id = "4.3"
+description = "Document common gotchas and pitfalls"
+
+[[phases.steps]]
+id = "4.4"
+description = "List useful commands and shortcuts"
+
+# ============================================================================
+# Phase 5: Walkthrough
+# ============================================================================
+
+[[phases]]
+id = "walkthrough"
+
+[[phases.steps]]
+id = "5.1"
+description = "Create annotated code tour of key files"
+
+[[phases.steps]]
+id = "5.2"
+description = "Highlight critical files and their purposes"
+
+[[phases.steps]]
+id = "5.3"
+description = "Explain naming conventions and patterns"
+
+[[phases.steps]]
+id = "5.4"
+description = "Provide architecture decision context"
+
+[[phases.steps]]
+id = "5.5"
+description = "Generate onboarding summary document"

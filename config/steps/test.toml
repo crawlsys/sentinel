@@ -1,0 +1,160 @@
+# Test Skill — Step Definitions
+# 30 individually trackable steps across 5 phases
+#
+# Phases: discover → plan → generate → run → analyze
+
+# ============================================================================
+# Phase 1: Discover
+# ============================================================================
+
+[[phases]]
+id = "discover"
+
+[[phases.steps]]
+id = "1.1"
+description = "Detect test framework (vitest, jest, pytest, etc.)"
+
+[[phases.steps]]
+id = "1.2"
+description = "Find existing test files and suites"
+
+[[phases.steps]]
+id = "1.3"
+description = "Identify coverage gaps in current tests"
+
+[[phases.steps]]
+id = "1.4"
+description = "Map test types needed (unit, integration, e2e)"
+
+[[phases.steps]]
+id = "1.5"
+description = "Locate test configuration files"
+
+[[phases.steps]]
+id = "1.6"
+description = "Check test runner availability and versions"
+
+# ============================================================================
+# Phase 2: Plan
+# ============================================================================
+
+[[phases]]
+id = "plan"
+
+[[phases.steps]]
+id = "2.1"
+description = "Prioritize test creation by risk and coverage"
+
+[[phases.steps]]
+id = "2.2"
+description = "Identify edge cases and boundary conditions"
+
+[[phases.steps]]
+id = "2.3"
+description = "Plan test data and fixtures needed"
+
+[[phases.steps]]
+id = "2.4"
+description = "Choose test strategy (TDD, snapshot, property-based)"
+
+[[phases.steps]]
+id = "2.5"
+description = "Define expected behaviors for each test case"
+
+[[phases.steps]]
+id = "2.6"
+description = "Identify mocks and stubs required"
+
+# ============================================================================
+# Phase 3: Generate
+# ============================================================================
+
+[[phases]]
+id = "generate"
+
+[[phases.steps]]
+id = "3.1"
+description = "Create test fixtures and helpers"
+
+[[phases.steps]]
+id = "3.2"
+description = "Write unit tests for core logic"
+
+[[phases.steps]]
+id = "3.3"
+description = "Write integration tests for module interactions"
+
+[[phases.steps]]
+id = "3.4"
+description = "Write e2e tests (if applicable)"
+
+[[phases.steps]]
+id = "3.5"
+description = "Create mock implementations"
+
+[[phases.steps]]
+id = "3.6"
+description = "Add test descriptions and comments"
+
+# ============================================================================
+# Phase 4: Run
+# ============================================================================
+
+[[phases]]
+id = "run"
+
+[[phases.steps]]
+id = "4.1"
+description = "Execute all new tests"
+
+[[phases.steps]]
+id = "4.2"
+description = "Execute full existing test suite"
+
+[[phases.steps]]
+id = "4.3"
+description = "Capture test output and failures"
+
+[[phases.steps]]
+id = "4.4"
+description = "Fix failing tests"
+
+[[phases.steps]]
+id = "4.5"
+description = "Measure coverage with coverage tool"
+
+[[phases.steps]]
+id = "4.6"
+description = "All tests pass"
+blocker = true
+
+# ============================================================================
+# Phase 5: Analyze
+# ============================================================================
+
+[[phases]]
+id = "analyze"
+
+[[phases.steps]]
+id = "5.1"
+description = "Compare coverage before and after"
+
+[[phases.steps]]
+id = "5.2"
+description = "Identify remaining uncovered paths"
+
+[[phases.steps]]
+id = "5.3"
+description = "Create todos for uncovered critical paths"
+
+[[phases.steps]]
+id = "5.4"
+description = "Generate coverage report summary"
+
+[[phases.steps]]
+id = "5.5"
+description = "Report final test results and metrics"
+
+[[phases.steps]]
+id = "5.6"
+description = "Commit all test files"

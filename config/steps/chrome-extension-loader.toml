@@ -1,0 +1,43 @@
+# Chrome Extension Loader Skill — Step Definitions
+# Load and verify unpacked Chrome extensions
+#
+# 2 phases, ~6 steps
+
+# ============================================================================
+# Phase 1: Load — Launch Chrome and load extension
+# ============================================================================
+
+[[phases]]
+id = "load"
+
+[[phases.steps]]
+id = "1.1"
+description = "Detect extension path and validate manifest"
+
+[[phases.steps]]
+id = "1.2"
+description = "Launch Chrome for Testing with remote debugging"
+
+[[phases.steps]]
+id = "1.3"
+description = "Load unpacked extension into browser"
+
+# ============================================================================
+# Phase 2: Verify — Confirm extension is active
+# ============================================================================
+
+[[phases]]
+id = "verify"
+
+[[phases.steps]]
+id = "2.1"
+description = "Check extension appears in chrome://extensions"
+
+[[phases.steps]]
+id = "2.2"
+description = "Verify manifest version and permissions"
+
+[[phases.steps]]
+id = "2.3"
+description = "Test extension functionality responds"
+blocker = true

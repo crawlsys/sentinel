@@ -1,0 +1,128 @@
+# Project Setup Skill — Step Definitions
+# 22 individually trackable steps across 5 phases
+#
+# Phases: detect → configure → secrets → generate → verify
+
+# ============================================================================
+# Phase 1: Detect
+# ============================================================================
+
+[[phases]]
+id = "detect"
+
+[[phases.steps]]
+id = "1.1"
+description = "Identify project type and framework"
+
+[[phases.steps]]
+id = "1.2"
+description = "Scan for existing configurations"
+
+[[phases.steps]]
+id = "1.3"
+description = "Determine required services (DB, auth, deploy)"
+
+[[phases.steps]]
+id = "1.4"
+description = "Check for existing Doppler/Linear/deploy configs"
+
+# ============================================================================
+# Phase 2: Configure
+# ============================================================================
+
+[[phases]]
+id = "configure"
+
+[[phases.steps]]
+id = "2.1"
+description = "Set up Doppler project and environments"
+
+[[phases.steps]]
+id = "2.2"
+description = "Configure Linear project and team"
+
+[[phases.steps]]
+id = "2.3"
+description = "Set deploy targets (Vercel, Railway, Cloudflare)"
+
+[[phases.steps]]
+id = "2.4"
+description = "Create CI/CD pipeline configuration"
+
+[[phases.steps]]
+id = "2.5"
+description = "Configure monitoring and alerting"
+
+# ============================================================================
+# Phase 3: Secrets
+# ============================================================================
+
+[[phases]]
+id = "secrets"
+
+[[phases.steps]]
+id = "3.1"
+description = "Create secrets in Doppler for each environment"
+
+[[phases.steps]]
+id = "3.2"
+description = "Generate service tokens for CI/CD"
+
+[[phases.steps]]
+id = "3.3"
+description = "Configure deploy platform env vars"
+
+[[phases.steps]]
+id = "3.4"
+description = "Verify all secrets are accessible"
+
+# ============================================================================
+# Phase 4: Generate
+# ============================================================================
+
+[[phases]]
+id = "generate"
+
+[[phases.steps]]
+id = "4.1"
+description = "Create project config file (skills/linear/projects/)"
+
+[[phases.steps]]
+id = "4.2"
+description = "Update CLAUDE.md references"
+
+[[phases.steps]]
+id = "4.3"
+description = "Configure project-specific hooks"
+
+[[phases.steps]]
+id = "4.4"
+description = "Generate README and setup docs"
+
+[[phases.steps]]
+id = "4.5"
+description = "Create .env.example template"
+
+# ============================================================================
+# Phase 5: Verify
+# ============================================================================
+
+[[phases]]
+id = "verify"
+
+[[phases.steps]]
+id = "5.1"
+description = "Test Doppler access from all environments"
+
+[[phases.steps]]
+id = "5.2"
+description = "Test Linear access and issue creation"
+
+[[phases.steps]]
+id = "5.3"
+description = "Verify deploy config works (dry run)"
+
+[[phases.steps]]
+id = "5.4"
+description = "All services accessible and configured"
+blocker = true

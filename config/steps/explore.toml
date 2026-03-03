@@ -1,0 +1,112 @@
+# Explore Skill — Step Definitions
+# 20 individually trackable steps across 4 phases
+#
+# Phases: classify → search → analyze → report
+
+# ============================================================================
+# Phase 1: Classify
+# ============================================================================
+
+[[phases]]
+id = "classify"
+
+[[phases.steps]]
+id = "1.1"
+description = "Understand request type (file search, code search, architecture)"
+
+[[phases.steps]]
+id = "1.2"
+description = "Determine search depth needed (shallow, deep, exhaustive)"
+
+[[phases.steps]]
+id = "1.3"
+description = "Identify target areas and directories"
+
+[[phases.steps]]
+id = "1.4"
+description = "Choose search strategy (Glob, Grep, or combined)"
+
+[[phases.steps]]
+id = "1.5"
+description = "Define search boundaries and exclusions"
+
+# ============================================================================
+# Phase 2: Search
+# ============================================================================
+
+[[phases]]
+id = "search"
+
+[[phases.steps]]
+id = "2.1"
+description = "Run Glob patterns for file discovery"
+
+[[phases.steps]]
+id = "2.2"
+description = "Run Grep for keyword and pattern matching"
+
+[[phases.steps]]
+id = "2.3"
+description = "Scan directory structure for organization patterns"
+
+[[phases.steps]]
+id = "2.4"
+description = "Find related files (imports, configs, tests)"
+
+[[phases.steps]]
+id = "2.5"
+description = "Expand search if initial results insufficient"
+
+# ============================================================================
+# Phase 3: Analyze
+# ============================================================================
+
+[[phases]]
+id = "analyze"
+
+[[phases.steps]]
+id = "3.1"
+description = "Read key files identified in search"
+
+[[phases.steps]]
+id = "3.2"
+description = "Trace code paths and call chains"
+
+[[phases.steps]]
+id = "3.3"
+description = "Identify patterns and conventions"
+
+[[phases.steps]]
+id = "3.4"
+description = "Map dependencies between components"
+
+[[phases.steps]]
+id = "3.5"
+description = "Synthesize understanding of codebase area"
+
+# ============================================================================
+# Phase 4: Report
+# ============================================================================
+
+[[phases]]
+id = "report"
+
+[[phases.steps]]
+id = "4.1"
+description = "Summarize findings with key insights"
+
+[[phases.steps]]
+id = "4.2"
+description = "Provide file locations with line numbers"
+
+[[phases.steps]]
+id = "4.3"
+description = "Answer the original exploration question"
+
+[[phases.steps]]
+id = "4.4"
+description = "Suggest related areas for further investigation"
+
+[[phases.steps]]
+id = "4.5"
+description = "Format output for readability"

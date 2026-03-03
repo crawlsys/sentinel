@@ -1,0 +1,62 @@
+# Git Worktree Skill — Step Definitions
+# Isolated development via git worktrees
+#
+# 3 phases, ~8 steps
+
+# ============================================================================
+# Phase 1: Create — Set up isolated worktree
+# ============================================================================
+
+[[phases]]
+id = "create"
+
+[[phases.steps]]
+id = "1.1"
+description = "Determine branch name from task context"
+
+[[phases.steps]]
+id = "1.2"
+description = "Create worktree directory and checkout branch"
+blocker = true
+
+[[phases.steps]]
+id = "1.3"
+description = "Verify worktree is clean and on correct branch"
+
+# ============================================================================
+# Phase 2: Work — Prepare worktree for development
+# ============================================================================
+
+[[phases]]
+id = "work"
+
+[[phases.steps]]
+id = "2.1"
+description = "Install dependencies in worktree"
+
+[[phases.steps]]
+id = "2.2"
+description = "Verify working state (builds, tests pass)"
+
+[[phases.steps]]
+id = "2.3"
+description = "Hand off to user for development"
+
+# ============================================================================
+# Phase 3: Cleanup — Remove worktree after merge
+# ============================================================================
+
+[[phases]]
+id = "cleanup"
+
+[[phases.steps]]
+id = "3.1"
+description = "Remove worktree directory"
+
+[[phases.steps]]
+id = "3.2"
+description = "Delete branch if merged"
+
+[[phases.steps]]
+id = "3.3"
+description = "Prune stale references"

@@ -1,0 +1,66 @@
+# Git Skill — Step Definitions
+# Branch management, commits, push, and PR creation
+#
+# 3 phases, ~10 steps
+
+# ============================================================================
+# Phase 1: Prepare — Assess current git state
+# ============================================================================
+
+[[phases]]
+id = "prepare"
+
+[[phases.steps]]
+id = "1.1"
+description = "Check current branch and working tree status"
+
+[[phases.steps]]
+id = "1.2"
+description = "Detect staged and unstaged changes"
+
+[[phases.steps]]
+id = "1.3"
+description = "Determine commit scope and message format"
+
+[[phases.steps]]
+id = "1.4"
+description = "Create feature branch if on main"
+
+# ============================================================================
+# Phase 2: Execute — Perform git operations
+# ============================================================================
+
+[[phases]]
+id = "execute"
+
+[[phases.steps]]
+id = "2.1"
+description = "Stage relevant files"
+
+[[phases.steps]]
+id = "2.2"
+description = "Create commit with conventional message"
+blocker = true
+
+[[phases.steps]]
+id = "2.3"
+description = "Push to remote if requested"
+
+[[phases.steps]]
+id = "2.4"
+description = "Create pull request if requested"
+
+# ============================================================================
+# Phase 3: Verify — Confirm operations succeeded
+# ============================================================================
+
+[[phases]]
+id = "verify"
+
+[[phases.steps]]
+id = "3.1"
+description = "Verify commit exists in log"
+
+[[phases.steps]]
+id = "3.2"
+description = "Confirm push succeeded (if applicable)"

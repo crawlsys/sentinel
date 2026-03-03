@@ -1,0 +1,44 @@
+# Sequential Thinking Skill — Step Definitions
+# Structured reasoning via MCP sequential-thinking server
+#
+# 2 phases, ~6 steps
+
+# ============================================================================
+# Phase 1: Setup — Define the reasoning problem
+# ============================================================================
+
+[[phases]]
+id = "setup"
+
+[[phases.steps]]
+id = "1.1"
+description = "Define the problem statement clearly"
+blocker = true
+
+[[phases.steps]]
+id = "1.2"
+description = "Determine total thought count based on complexity"
+
+[[phases.steps]]
+id = "1.3"
+description = "Set constraints and boundaries for reasoning"
+
+# ============================================================================
+# Phase 2: Execute — Run sequential thought chain
+# ============================================================================
+
+[[phases]]
+id = "execute"
+
+[[phases.steps]]
+id = "2.1"
+description = "Run sequential thoughts via MCP server"
+blocker = true
+
+[[phases.steps]]
+id = "2.2"
+description = "Validate reasoning chain coherence"
+
+[[phases.steps]]
+id = "2.3"
+description = "Produce final conclusion and recommendation"

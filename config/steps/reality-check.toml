@@ -1,0 +1,113 @@
+# Reality Check Skill — Step Definitions
+# 20 individually trackable steps across 4 phases
+#
+# Phases: scan → verify → report → fix
+
+# ============================================================================
+# Phase 1: Scan
+# ============================================================================
+
+[[phases]]
+id = "scan"
+
+[[phases.steps]]
+id = "1.1"
+description = "Find feature declarations and exports"
+
+[[phases.steps]]
+id = "1.2"
+description = "Find route definitions and endpoints"
+
+[[phases.steps]]
+id = "1.3"
+description = "Find component exports and registrations"
+
+[[phases.steps]]
+id = "1.4"
+description = "Find API endpoint handlers"
+
+[[phases.steps]]
+id = "1.5"
+description = "Inventory all claimed features from docs/README"
+
+# ============================================================================
+# Phase 2: Verify
+# ============================================================================
+
+[[phases]]
+id = "verify"
+
+[[phases.steps]]
+id = "2.1"
+description = "Test each feature actually works end-to-end"
+
+[[phases.steps]]
+id = "2.2"
+description = "Check for stub implementations (TODO, NotImplemented)"
+
+[[phases.steps]]
+id = "2.3"
+description = "Find phantom features (declared but non-functional)"
+
+[[phases.steps]]
+id = "2.4"
+description = "Verify data flows complete from input to output"
+
+[[phases.steps]]
+id = "2.5"
+description = "Check for dead routes and unreachable endpoints"
+
+[[phases.steps]]
+id = "2.6"
+description = "All claims verified or flagged"
+blocker = true
+
+# ============================================================================
+# Phase 3: Report
+# ============================================================================
+
+[[phases]]
+id = "report"
+
+[[phases.steps]]
+id = "3.1"
+description = "List verified working features"
+
+[[phases.steps]]
+id = "3.2"
+description = "List phantom features (claimed but broken)"
+
+[[phases.steps]]
+id = "3.3"
+description = "List stub implementations"
+
+[[phases.steps]]
+id = "3.4"
+description = "Assign severity rating to each finding"
+
+# ============================================================================
+# Phase 4: Fix
+# ============================================================================
+
+[[phases]]
+id = "fix"
+
+[[phases.steps]]
+id = "4.1"
+description = "Remove or complete stub implementations"
+
+[[phases.steps]]
+id = "4.2"
+description = "Update documentation to match reality"
+
+[[phases.steps]]
+id = "4.3"
+description = "Create todos for incomplete features"
+
+[[phases.steps]]
+id = "4.4"
+description = "Commit fixes and doc updates"
+
+[[phases.steps]]
+id = "4.5"
+description = "Report final reality check summary"

@@ -1,0 +1,138 @@
+# Refactor Skill — Step Definitions
+# 25 individually trackable steps across 5 phases
+#
+# Phases: analyze → plan → baseline → refactor → verify
+
+# ============================================================================
+# Phase 1: Analyze
+# ============================================================================
+
+[[phases]]
+id = "analyze"
+
+[[phases.steps]]
+id = "1.1"
+description = "Identify code smells and anti-patterns"
+
+[[phases.steps]]
+id = "1.2"
+description = "Measure cyclomatic complexity"
+
+[[phases.steps]]
+id = "1.3"
+description = "Find code duplication"
+
+[[phases.steps]]
+id = "1.4"
+description = "Assess coupling between modules"
+
+[[phases.steps]]
+id = "1.5"
+description = "Map dependency graph of affected code"
+
+# ============================================================================
+# Phase 2: Plan
+# ============================================================================
+
+[[phases]]
+id = "plan"
+
+[[phases.steps]]
+id = "2.1"
+description = "Choose refactoring strategy and patterns"
+
+[[phases.steps]]
+id = "2.2"
+description = "Identify affected tests"
+
+[[phases.steps]]
+id = "2.3"
+description = "Plan incremental steps to minimize risk"
+
+[[phases.steps]]
+id = "2.4"
+description = "Define success criteria (metrics to improve)"
+
+[[phases.steps]]
+id = "2.5"
+description = "Identify rollback points"
+
+# ============================================================================
+# Phase 3: Baseline
+# ============================================================================
+
+[[phases]]
+id = "baseline"
+
+[[phases.steps]]
+id = "3.1"
+description = "Run all tests and capture results"
+
+[[phases.steps]]
+id = "3.2"
+description = "Capture coverage metrics"
+
+[[phases.steps]]
+id = "3.3"
+description = "Verify all tests pass"
+blocker = true
+
+[[phases.steps]]
+id = "3.4"
+description = "Record baseline complexity metrics"
+
+# ============================================================================
+# Phase 4: Refactor
+# ============================================================================
+
+[[phases]]
+id = "refactor"
+
+[[phases.steps]]
+id = "4.1"
+description = "Apply refactoring changes incrementally"
+
+[[phases.steps]]
+id = "4.2"
+description = "Verify behavior preserved after each step"
+
+[[phases.steps]]
+id = "4.3"
+description = "Run tests after each incremental change"
+
+[[phases.steps]]
+id = "4.4"
+description = "Commit after each successful increment"
+
+[[phases.steps]]
+id = "4.5"
+description = "Update affected imports and references"
+
+# ============================================================================
+# Phase 5: Verify
+# ============================================================================
+
+[[phases]]
+id = "verify"
+
+[[phases.steps]]
+id = "5.1"
+description = "Run full test suite"
+
+[[phases.steps]]
+id = "5.2"
+description = "Compare coverage against baseline"
+
+[[phases.steps]]
+id = "5.3"
+description = "Verify no regressions"
+blocker = true
+
+[[phases.steps]]
+id = "5.4"
+description = "Review diff for unintended changes"
+
+[[phases.steps]]
+id = "5.5"
+description = "Tests pass with no regressions confirmed"
+blocker = true

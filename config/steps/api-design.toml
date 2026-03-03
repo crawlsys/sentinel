@@ -1,0 +1,203 @@
+# API Design Skill — Step Definitions
+# ~35 individually trackable steps across 6 phases
+#
+# Each phase maps to a workflow phase in config/workflows.toml.
+# Steps marked blocker = true must pass before the phase can advance.
+
+# ============================================================================
+# Phase 1: Requirements
+# ============================================================================
+
+[[phases]]
+id = "requirements"
+
+[[phases.steps]]
+id = "1.1"
+description = "Gather API requirements from issue/spec"
+
+[[phases.steps]]
+id = "1.2"
+description = "Identify API consumers (frontend, mobile, third-party)"
+
+[[phases.steps]]
+id = "1.3"
+description = "Define scope (which resources and operations)"
+
+[[phases.steps]]
+id = "1.4"
+description = "Identify existing API patterns in codebase"
+
+[[phases.steps]]
+id = "1.5"
+description = "Determine API style (REST, GraphQL, RPC)"
+
+[[phases.steps]]
+id = "1.6"
+description = "Document non-functional requirements (rate limits, latency, auth)"
+
+# ============================================================================
+# Phase 2: Design
+# ============================================================================
+
+[[phases]]
+id = "design"
+
+[[phases.steps]]
+id = "2.1"
+description = "Define resource endpoints and URL structure"
+
+[[phases.steps]]
+id = "2.2"
+description = "Design request schemas (params, body, headers)"
+
+[[phases.steps]]
+id = "2.3"
+description = "Design response schemas (success and error formats)"
+
+[[phases.steps]]
+id = "2.4"
+description = "Plan authentication and authorization model"
+
+[[phases.steps]]
+id = "2.5"
+description = "Define rate limiting rules per endpoint"
+
+[[phases.steps]]
+id = "2.6"
+description = "Design pagination strategy (cursor vs offset)"
+
+[[phases.steps]]
+id = "2.7"
+description = "Plan versioning strategy (URL, header, or query param)"
+
+[[phases.steps]]
+id = "2.8"
+description = "Define error response format and error codes"
+
+# ============================================================================
+# Phase 3: Validate Design
+# ============================================================================
+
+[[phases]]
+id = "validate"
+
+[[phases.steps]]
+id = "3.1"
+description = "Review against REST/GraphQL best practices"
+
+[[phases.steps]]
+id = "3.2"
+description = "Check naming conventions (plural nouns, kebab-case)"
+
+[[phases.steps]]
+id = "3.3"
+description = "Verify HTTP method semantics (GET=read, POST=create, etc.)"
+
+[[phases.steps]]
+id = "3.4"
+description = "Verify idempotency for PUT/DELETE operations"
+
+[[phases.steps]]
+id = "3.5"
+description = "Check for consistent error handling across endpoints"
+
+[[phases.steps]]
+id = "3.6"
+description = "Validate against security checklist (OWASP API Top 10)"
+blocker = true
+
+[[phases.steps]]
+id = "3.7"
+description = "Confirm no breaking changes to existing consumers"
+blocker = true
+
+# ============================================================================
+# Phase 4: Generate
+# ============================================================================
+
+[[phases]]
+id = "generate"
+
+[[phases.steps]]
+id = "4.1"
+description = "Create OpenAPI/Swagger specification"
+
+[[phases.steps]]
+id = "4.2"
+description = "Generate TypeScript request/response types"
+
+[[phases.steps]]
+id = "4.3"
+description = "Create route handler stubs with correct signatures"
+
+[[phases.steps]]
+id = "4.4"
+description = "Generate validation schemas (Zod, Joi, or similar)"
+
+[[phases.steps]]
+id = "4.5"
+description = "Create middleware stubs (auth, rate limit, validation)"
+
+# ============================================================================
+# Phase 5: Test
+# ============================================================================
+
+[[phases]]
+id = "test"
+
+[[phases.steps]]
+id = "5.1"
+description = "Write contract tests from OpenAPI spec"
+
+[[phases.steps]]
+id = "5.2"
+description = "Write request validation tests (valid and invalid inputs)"
+
+[[phases.steps]]
+id = "5.3"
+description = "Write response format tests"
+
+[[phases.steps]]
+id = "5.4"
+description = "Write error response tests (4xx and 5xx scenarios)"
+
+[[phases.steps]]
+id = "5.5"
+description = "Run all API tests"
+blocker = true
+
+[[phases.steps]]
+id = "5.6"
+description = "Verify 100% endpoint coverage"
+blocker = true
+
+# ============================================================================
+# Phase 6: Document
+# ============================================================================
+
+[[phases]]
+id = "document"
+
+[[phases.steps]]
+id = "6.1"
+description = "Generate API documentation from OpenAPI spec"
+
+[[phases.steps]]
+id = "6.2"
+description = "Write usage examples for each endpoint"
+
+[[phases.steps]]
+id = "6.3"
+description = "Document authentication flow with examples"
+
+[[phases.steps]]
+id = "6.4"
+description = "Create error code reference table"
+
+[[phases.steps]]
+id = "6.5"
+description = "Add rate limit documentation"
+
+[[phases.steps]]
+id = "6.6"
+description = "Publish documentation to project docs"

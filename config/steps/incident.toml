@@ -1,0 +1,241 @@
+# Incident Skill — Step Definitions
+# ~40 individually trackable steps across 7 phases
+#
+# Each phase maps to a workflow phase in config/workflows.toml.
+# Steps marked blocker = true must pass before the phase can advance.
+
+# ============================================================================
+# Phase 1: Detect
+# ============================================================================
+
+[[phases]]
+id = "detect"
+
+[[phases.steps]]
+id = "1.1"
+description = "Receive alert (Sentry, health check, user report, monitoring)"
+
+[[phases.steps]]
+id = "1.2"
+description = "Classify affected service (API, web, database, infra)"
+
+[[phases.steps]]
+id = "1.3"
+description = "Capture initial error details (stack trace, logs, timestamps)"
+
+[[phases.steps]]
+id = "1.4"
+description = "Verify alert is genuine (not false positive)"
+blocker = true
+
+[[phases.steps]]
+id = "1.5"
+description = "Create incident record in Linear"
+
+# ============================================================================
+# Phase 2: Triage
+# ============================================================================
+
+[[phases]]
+id = "triage"
+
+[[phases.steps]]
+id = "2.1"
+description = "Assess severity (P0-critical, P1-high, P2-medium, P3-low)"
+blocker = true
+
+[[phases.steps]]
+id = "2.2"
+description = "Determine blast radius (number of affected users/services)"
+
+[[phases.steps]]
+id = "2.3"
+description = "Identify affected user segments"
+
+[[phases.steps]]
+id = "2.4"
+description = "Check recent deploys for correlation"
+
+[[phases.steps]]
+id = "2.5"
+description = "Check recent config changes (Doppler, env vars)"
+
+[[phases.steps]]
+id = "2.6"
+description = "Take Steel screenshot of error state"
+
+[[phases.steps]]
+id = "2.7"
+description = "Update incident severity and labels in Linear"
+
+# ============================================================================
+# Phase 3: Communicate
+# ============================================================================
+
+[[phases]]
+id = "communicate"
+
+[[phases.steps]]
+id = "3.1"
+description = "Post initial status update to incident channel"
+
+[[phases.steps]]
+id = "3.2"
+description = "Notify affected stakeholders based on severity"
+
+[[phases.steps]]
+id = "3.3"
+description = "Set expected update timeline based on severity"
+
+[[phases.steps]]
+id = "3.4"
+description = "Update status page if customer-facing"
+
+[[phases.steps]]
+id = "3.5"
+description = "Assign incident commander"
+
+# ============================================================================
+# Phase 4: Mitigate
+# ============================================================================
+
+[[phases]]
+id = "mitigate"
+
+[[phases.steps]]
+id = "4.1"
+description = "Choose mitigation strategy (rollback, hotfix, feature flag, scale)"
+
+[[phases.steps]]
+id = "4.2"
+description = "Apply mitigation (execute chosen strategy)"
+
+[[phases.steps]]
+id = "4.3"
+description = "Verify bleeding has stopped (error rate dropping)"
+blocker = true
+
+[[phases.steps]]
+id = "4.4"
+description = "Monitor metrics for stabilization"
+
+[[phases.steps]]
+id = "4.5"
+description = "Post mitigation status update"
+
+[[phases.steps]]
+id = "4.6"
+description = "Confirm user impact is contained"
+blocker = true
+
+# ============================================================================
+# Phase 5: Resolve
+# ============================================================================
+
+[[phases]]
+id = "resolve"
+
+[[phases.steps]]
+id = "5.1"
+description = "Investigate root cause (logs, traces, code)"
+
+[[phases.steps]]
+id = "5.2"
+description = "Correlate findings across services"
+
+[[phases.steps]]
+id = "5.3"
+description = "Implement permanent fix"
+
+[[phases.steps]]
+id = "5.4"
+description = "Write tests covering the failure scenario"
+
+[[phases.steps]]
+id = "5.5"
+description = "Run full test suite"
+blocker = true
+
+[[phases.steps]]
+id = "5.6"
+description = "Deploy fix to staging"
+
+[[phases.steps]]
+id = "5.7"
+description = "Verify fix on staging (Steel smoke test)"
+blocker = true
+
+[[phases.steps]]
+id = "5.8"
+description = "Deploy fix to production"
+
+[[phases.steps]]
+id = "5.9"
+description = "Verify fix on production"
+blocker = true
+
+# ============================================================================
+# Phase 6: Postmortem
+# ============================================================================
+
+[[phases]]
+id = "postmortem"
+
+[[phases.steps]]
+id = "6.1"
+description = "Build incident timeline (detect → mitigate → resolve)"
+
+[[phases.steps]]
+id = "6.2"
+description = "Document root cause analysis"
+
+[[phases.steps]]
+id = "6.3"
+description = "List what went well"
+
+[[phases.steps]]
+id = "6.4"
+description = "List what went wrong"
+
+[[phases.steps]]
+id = "6.5"
+description = "Identify action items to prevent recurrence"
+
+[[phases.steps]]
+id = "6.6"
+description = "Write postmortem document"
+
+[[phases.steps]]
+id = "6.7"
+description = "Attach postmortem to incident Linear issue"
+
+# ============================================================================
+# Phase 7: Follow-up
+# ============================================================================
+
+[[phases]]
+id = "follow-up"
+
+[[phases.steps]]
+id = "7.1"
+description = "Create tracking issues for each action item in Linear"
+
+[[phases.steps]]
+id = "7.2"
+description = "Schedule postmortem review meeting"
+
+[[phases.steps]]
+id = "7.3"
+description = "Update runbooks with lessons learned"
+
+[[phases.steps]]
+id = "7.4"
+description = "Add monitoring/alerting for the failure mode"
+
+[[phases.steps]]
+id = "7.5"
+description = "Close incident in Linear"
+
+[[phases.steps]]
+id = "7.6"
+description = "Post final status update to incident channel"

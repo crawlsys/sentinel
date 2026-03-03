@@ -1,0 +1,43 @@
+# Brainstorming Skill — Step Definitions
+# Structured idea generation and synthesis
+#
+# 2 phases, ~6 steps
+
+# ============================================================================
+# Phase 1: Generate — Produce diverse ideas
+# ============================================================================
+
+[[phases]]
+id = "generate"
+
+[[phases.steps]]
+id = "1.1"
+description = "Understand the prompt and constraints"
+blocker = true
+
+[[phases.steps]]
+id = "1.2"
+description = "Produce diverse ideas across multiple angles"
+
+[[phases.steps]]
+id = "1.3"
+description = "Explore edge cases and unconventional approaches"
+
+# ============================================================================
+# Phase 2: Synthesize — Organize and rank results
+# ============================================================================
+
+[[phases]]
+id = "synthesize"
+
+[[phases.steps]]
+id = "2.1"
+description = "Group ideas by theme or category"
+
+[[phases.steps]]
+id = "2.2"
+description = "Rank by feasibility and impact"
+
+[[phases.steps]]
+id = "2.3"
+description = "Present top recommendations with rationale"

@@ -1,0 +1,96 @@
+# Research Skill — Step Definitions
+# 16 individually trackable steps across 4 phases
+#
+# Phases: scope → search → analyze → synthesize
+
+# ============================================================================
+# Phase 1: Scope
+# ============================================================================
+
+[[phases]]
+id = "scope"
+
+[[phases.steps]]
+id = "1.1"
+description = "Define research question precisely"
+
+[[phases.steps]]
+id = "1.2"
+description = "Identify authoritative sources to consult"
+
+[[phases.steps]]
+id = "1.3"
+description = "Determine depth needed (quick scan vs deep dive)"
+
+[[phases.steps]]
+id = "1.4"
+description = "Set research boundaries and constraints"
+
+# ============================================================================
+# Phase 2: Search
+# ============================================================================
+
+[[phases]]
+id = "search"
+
+[[phases.steps]]
+id = "2.1"
+description = "WebSearch for primary information"
+
+[[phases.steps]]
+id = "2.2"
+description = "Fetch documentation from official sources"
+
+[[phases.steps]]
+id = "2.3"
+description = "Find relevant code examples and implementations"
+
+[[phases.steps]]
+id = "2.4"
+description = "Gather community discussions and best practices"
+
+# ============================================================================
+# Phase 3: Analyze
+# ============================================================================
+
+[[phases]]
+id = "analyze"
+
+[[phases.steps]]
+id = "3.1"
+description = "Evaluate source credibility and recency"
+
+[[phases.steps]]
+id = "3.2"
+description = "Cross-reference findings across sources"
+
+[[phases.steps]]
+id = "3.3"
+description = "Identify consensus and conflicting opinions"
+
+[[phases.steps]]
+id = "3.4"
+description = "Extract best practices and patterns"
+
+# ============================================================================
+# Phase 4: Synthesize
+# ============================================================================
+
+[[phases]]
+id = "synthesize"
+
+[[phases.steps]]
+id = "4.1"
+description = "Compile findings into structured summary"
+
+[[phases.steps]]
+id = "4.2"
+description = "Provide actionable recommendations"
+
+[[phases.steps]]
+id = "4.3"
+description = "Include citations and source links"
+
+[[phases.steps]]
+id = "4.4"
+description = "Highlight trade-offs and caveats"

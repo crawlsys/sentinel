@@ -1,0 +1,97 @@
+# Quality Gate Skill — Step Definitions
+# 16 individually trackable steps across 4 phases
+#
+# Phases: collect → evaluate → fix → report
+
+# ============================================================================
+# Phase 1: Collect
+# ============================================================================
+
+[[phases]]
+id = "collect"
+
+[[phases.steps]]
+id = "1.1"
+description = "Chain review skill and collect findings"
+
+[[phases.steps]]
+id = "1.2"
+description = "Chain lint skill and collect violations"
+
+[[phases.steps]]
+id = "1.3"
+description = "Chain test skill and collect results"
+
+[[phases.steps]]
+id = "1.4"
+description = "Gather all results into unified dataset"
+
+# ============================================================================
+# Phase 2: Evaluate
+# ============================================================================
+
+[[phases]]
+id = "evaluate"
+
+[[phases.steps]]
+id = "2.1"
+description = "Aggregate scores across all quality dimensions"
+
+[[phases.steps]]
+id = "2.2"
+description = "Apply pass/fail criteria per dimension"
+
+[[phases.steps]]
+id = "2.3"
+description = "Identify blocking issues"
+
+[[phases.steps]]
+id = "2.4"
+description = "No critical quality issues"
+blocker = true
+
+# ============================================================================
+# Phase 3: Fix
+# ============================================================================
+
+[[phases]]
+id = "fix"
+
+[[phases.steps]]
+id = "3.1"
+description = "Address blocking quality issues"
+
+[[phases.steps]]
+id = "3.2"
+description = "Re-run failed quality checks"
+
+[[phases.steps]]
+id = "3.3"
+description = "Verify fixes resolve blockers"
+
+[[phases.steps]]
+id = "3.4"
+description = "Commit quality fixes"
+
+# ============================================================================
+# Phase 4: Report
+# ============================================================================
+
+[[phases]]
+id = "report"
+
+[[phases.steps]]
+id = "4.1"
+description = "Create quality gate report with all dimensions"
+
+[[phases.steps]]
+id = "4.2"
+description = "Update tracking with quality metrics"
+
+[[phases.steps]]
+id = "4.3"
+description = "Recommend improvements for future work"
+
+[[phases.steps]]
+id = "4.4"
+description = "Report final pass/fail gate status"

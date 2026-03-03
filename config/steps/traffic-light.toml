@@ -1,0 +1,61 @@
+# Traffic Light Skill — Step Definitions
+# Integration health assessment with green/yellow/red classification
+#
+# 3 phases, ~8 steps
+
+# ============================================================================
+# Phase 1: Discover — Identify integrations to check
+# ============================================================================
+
+[[phases]]
+id = "discover"
+
+[[phases.steps]]
+id = "1.1"
+description = "List configured integrations and MCP servers"
+
+[[phases.steps]]
+id = "1.2"
+description = "Detect API endpoints and service URLs"
+
+[[phases.steps]]
+id = "1.3"
+description = "Check existing health status from last run"
+
+# ============================================================================
+# Phase 2: Assess — Test each integration
+# ============================================================================
+
+[[phases]]
+id = "assess"
+
+[[phases.steps]]
+id = "2.1"
+description = "Test each integration endpoint"
+
+[[phases.steps]]
+id = "2.2"
+description = "Measure response times and error rates"
+
+[[phases.steps]]
+id = "2.3"
+description = "Classify each as green/yellow/red"
+
+# ============================================================================
+# Phase 3: Report — Format and present results
+# ============================================================================
+
+[[phases]]
+id = "report"
+
+[[phases.steps]]
+id = "3.1"
+description = "Format traffic light status report"
+
+[[phases.steps]]
+id = "3.2"
+description = "Update tracking with current status"
+
+[[phases.steps]]
+id = "3.3"
+description = "Flag degraded services for attention"

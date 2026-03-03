@@ -1,0 +1,43 @@
+# SSH Skill — Step Definitions
+# Remote server connection and command execution
+#
+# 2 phases, ~6 steps
+
+# ============================================================================
+# Phase 1: Connect — Establish SSH session
+# ============================================================================
+
+[[phases]]
+id = "connect"
+
+[[phases.steps]]
+id = "1.1"
+description = "Load host configuration from hosts/ directory"
+
+[[phases.steps]]
+id = "1.2"
+description = "Establish SSH connection to target host"
+blocker = true
+
+[[phases.steps]]
+id = "1.3"
+description = "Verify access and shell availability"
+
+# ============================================================================
+# Phase 2: Execute — Run remote commands
+# ============================================================================
+
+[[phases]]
+id = "execute"
+
+[[phases.steps]]
+id = "2.1"
+description = "Run requested commands on remote host"
+
+[[phases.steps]]
+id = "2.2"
+description = "Capture stdout and stderr output"
+
+[[phases.steps]]
+id = "2.3"
+description = "Report results and exit codes"

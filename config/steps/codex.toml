@@ -1,0 +1,59 @@
+# Codex Skill — Step Definitions
+# GPT-5.3 code analysis and second-opinion review via MCP
+#
+# 3 phases, ~8 steps
+
+# ============================================================================
+# Phase 1: Gather — Collect code context for analysis
+# ============================================================================
+
+[[phases]]
+id = "gather"
+
+[[phases.steps]]
+id = "1.1"
+description = "Collect code context (files, diffs, snippets)"
+
+[[phases.steps]]
+id = "1.2"
+description = "Prepare prompt with relevant context"
+
+[[phases.steps]]
+id = "1.3"
+description = "Determine reasoning effort level (low/medium/high)"
+
+# ============================================================================
+# Phase 2: Execute — Send to Codex and parse response
+# ============================================================================
+
+[[phases]]
+id = "execute"
+
+[[phases.steps]]
+id = "2.1"
+description = "Send prompt to Codex MCP server"
+blocker = true
+
+[[phases.steps]]
+id = "2.2"
+description = "Parse and validate response"
+blocker = true
+
+# ============================================================================
+# Phase 3: Apply — Act on Codex recommendations
+# ============================================================================
+
+[[phases]]
+id = "apply"
+
+[[phases.steps]]
+id = "3.1"
+description = "Apply recommended code changes"
+
+[[phases.steps]]
+id = "3.2"
+description = "Verify changes compile and pass tests"
+
+[[phases.steps]]
+id = "3.3"
+description = "Report results and findings summary"

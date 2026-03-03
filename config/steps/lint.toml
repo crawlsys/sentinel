@@ -1,0 +1,105 @@
+# Lint Skill — Step Definitions
+# 18 individually trackable steps across 4 phases
+#
+# Phases: detect → scan → fix → verify
+
+# ============================================================================
+# Phase 1: Detect
+# ============================================================================
+
+[[phases]]
+id = "detect"
+
+[[phases.steps]]
+id = "1.1"
+description = "Identify languages in project"
+
+[[phases.steps]]
+id = "1.2"
+description = "Find lint configuration files"
+
+[[phases.steps]]
+id = "1.3"
+description = "Detect formatters (Prettier, Black, rustfmt, etc.)"
+
+[[phases.steps]]
+id = "1.4"
+description = "Check tool availability and versions"
+
+[[phases.steps]]
+id = "1.5"
+description = "Identify custom lint rules"
+
+# ============================================================================
+# Phase 2: Scan
+# ============================================================================
+
+[[phases]]
+id = "scan"
+
+[[phases.steps]]
+id = "2.1"
+description = "Run all configured linters"
+
+[[phases.steps]]
+id = "2.2"
+description = "Run formatters in check mode"
+
+[[phases.steps]]
+id = "2.3"
+description = "Collect all violations and warnings"
+
+[[phases.steps]]
+id = "2.4"
+description = "Classify violations by severity"
+
+# ============================================================================
+# Phase 3: Fix
+# ============================================================================
+
+[[phases]]
+id = "fix"
+
+[[phases.steps]]
+id = "3.1"
+description = "Auto-fix violations where possible"
+
+[[phases.steps]]
+id = "3.2"
+description = "Manually fix remaining violations"
+
+[[phases.steps]]
+id = "3.3"
+description = "Verify fixes do not break tests"
+
+[[phases.steps]]
+id = "3.4"
+description = "No critical violations remain"
+blocker = true
+
+# ============================================================================
+# Phase 4: Verify
+# ============================================================================
+
+[[phases]]
+id = "verify"
+
+[[phases.steps]]
+id = "4.1"
+description = "Re-run all linters (confirm clean)"
+
+[[phases.steps]]
+id = "4.2"
+description = "Re-run formatters (confirm clean)"
+
+[[phases.steps]]
+id = "4.3"
+description = "Run test suite to verify no regressions"
+
+[[phases.steps]]
+id = "4.4"
+description = "Commit lint fixes"
+
+[[phases.steps]]
+id = "4.5"
+description = "Report violations fixed and remaining"
