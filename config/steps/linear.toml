@@ -1,0 +1,465 @@
+# Linear Skill — Step Definitions
+# 120+ individually trackable steps across 8 phases
+#
+# Each phase maps to a workflow phase in config/workflows.toml.
+# Steps marked blocker = true must pass before the phase can advance.
+# Sub-steps (e.g. "1.5.3a") are transforms that run in parallel.
+
+# ============================================================================
+# Phase -0 & Phase 0: Pre-Claim Guardrail + Claim Issue
+# ============================================================================
+
+[[phases]]
+id = "claim"
+
+[[phases.steps]]
+id = "-0.1"
+description = "Verify issue exists and is actionable"
+blocker = true
+
+[[phases.steps]]
+id = "-0.2"
+description = "Check existing assignee"
+blocker = true
+
+[[phases.steps]]
+id = "-0.3"
+description = "Duplicate/spam check"
+blocker = true
+
+[[phases.steps]]
+id = "-0.4"
+description = "Team ownership check"
+blocker = true
+
+[[phases.steps]]
+id = "0.1"
+description = "Look up started state ID (by type)"
+
+[[phases.steps]]
+id = "0.2"
+description = "Get current user (viewer)"
+
+[[phases.steps]]
+id = "0.3"
+description = "Set In Progress + assign self"
+
+[[phases.steps]]
+id = "0.4"
+description = "Confirm claim"
+
+# ============================================================================
+# Phase 1: Fetch Issue
+# ============================================================================
+
+[[phases]]
+id = "fetch"
+
+[[phases.steps]]
+id = "1.1"
+description = "Get issue (includeRelations)"
+
+[[phases.steps]]
+id = "1.2"
+description = "Get comments"
+
+[[phases.steps]]
+id = "1.3"
+description = "Get attachments (+ Loom download sub-step)"
+
+[[phases.steps]]
+id = "1.4"
+description = "Get relations"
+
+[[phases.steps]]
+id = "1.5"
+description = "Summarize issue context"
+
+[[phases.steps]]
+id = "1.6"
+description = "Proceed to intelligence phase"
+
+# ============================================================================
+# Phase 1.5: Intelligence + Transformation
+# ============================================================================
+
+[[phases]]
+id = "intelligence"
+
+[[phases.steps]]
+id = "1.5.1"
+description = "Assess complexity (sizing)"
+
+[[phases.steps]]
+id = "1.5.2"
+description = "Auto-decomposition (if Large)"
+blocker = true
+
+[[phases.steps]]
+id = "1.5.3a"
+description = "Transform — priority"
+
+[[phases.steps]]
+id = "1.5.3b"
+description = "Transform — type label"
+
+[[phases.steps]]
+id = "1.5.3c"
+description = "Transform — area label"
+
+[[phases.steps]]
+id = "1.5.3d"
+description = "Transform — scope label"
+
+[[phases.steps]]
+id = "1.5.3e"
+description = "Transform — estimate"
+
+[[phases.steps]]
+id = "1.5.3f"
+description = "Transform — acceptance criteria"
+
+[[phases.steps]]
+id = "1.5.3g"
+description = "Transform — project"
+
+[[phases.steps]]
+id = "1.5.3h"
+description = "Transform — cycle"
+
+[[phases.steps]]
+id = "1.5.3i"
+description = "Transform — relations search"
+
+[[phases.steps]]
+id = "1.5.3j"
+description = "Transform — description quality"
+
+[[phases.steps]]
+id = "1.5.3k"
+description = "Transform — subscribe"
+
+[[phases.steps]]
+id = "1.5.3l"
+description = "Transform — acknowledge comments"
+
+# ============================================================================
+# Phase 1.75: Plan Document (conditional — skipped for Small)
+# ============================================================================
+
+[[phases]]
+id = "plan-doc"
+
+[[phases.steps]]
+id = "1.75.1"
+description = "Enter plan mode (read-only analysis)"
+
+[[phases.steps]]
+id = "1.75.2"
+description = "Format plan as markdown"
+
+[[phases.steps]]
+id = "1.75.3"
+description = "Check idempotency (existing plan doc)"
+
+[[phases.steps]]
+id = "1.75.4"
+description = "Create Linear document"
+
+[[phases.steps]]
+id = "1.75.5"
+description = "Link document from issue comment"
+
+# ============================================================================
+# Phase 2: Worktree + Implementation
+# ============================================================================
+
+[[phases]]
+id = "worktree"
+
+[[phases.steps]]
+id = "2.1"
+description = "Determine branch name"
+
+[[phases.steps]]
+id = "2.2"
+description = "Create git worktree"
+
+[[phases.steps]]
+id = "2.3"
+description = "Install dependencies"
+
+[[phases.steps]]
+id = "2.4"
+description = "Run server test baseline"
+blocker = true
+
+[[phases.steps]]
+id = "2.5"
+description = "Run client test baseline"
+blocker = true
+
+[[phases.steps]]
+id = "2.6"
+description = "Post baseline comment to Linear"
+
+[[phases.steps]]
+id = "2.7"
+description = "Implement changes"
+
+# ============================================================================
+# Phase 3: Review — 6-Layer Pipeline
+# ============================================================================
+
+[[phases]]
+id = "review"
+
+# --- Layer 0: Tests ---
+
+[[phases.steps]]
+id = "3.L0.1"
+description = "Run server tests post-implementation"
+blocker = true
+
+[[phases.steps]]
+id = "3.L0.2"
+description = "Run client tests"
+blocker = true
+
+[[phases.steps]]
+id = "3.L0.3"
+description = "Compare against baseline"
+blocker = true
+
+[[phases.steps]]
+id = "3.L0.4"
+description = "Write new tests"
+
+[[phases.steps]]
+id = "3.L0.5"
+description = "Confirm all pass"
+blocker = true
+
+# --- Layer 1: Code Review Agent ---
+
+[[phases.steps]]
+id = "3.L1.1"
+description = "Spawn code-reviewer agent"
+
+[[phases.steps]]
+id = "3.L1.2"
+description = "Fix all issues found"
+
+[[phases.steps]]
+id = "3.L1.3"
+description = "Confirm clean"
+
+# --- Layer 2: Codex (GPT-5.3) ---
+
+[[phases.steps]]
+id = "3.L2.1"
+description = "Get diff"
+
+[[phases.steps]]
+id = "3.L2.2"
+description = "Send to Codex"
+blocker = true
+
+[[phases.steps]]
+id = "3.L2.3"
+description = "Parse Codex response"
+
+[[phases.steps]]
+id = "3.L2.4"
+description = "Fix critical/high issues"
+
+[[phases.steps]]
+id = "3.L2.5"
+description = "Confirm gate passed"
+blocker = true
+
+# --- Layer 3: PR ---
+
+[[phases.steps]]
+id = "3.L3.1"
+description = "Push branch"
+
+[[phases.steps]]
+id = "3.L3.2"
+description = "Create PR"
+
+[[phases.steps]]
+id = "3.L3.3"
+description = "Link PR to Linear issue"
+
+# --- Layer 4: CI + CodeRabbit ---
+
+[[phases.steps]]
+id = "3.L4.1"
+description = "Wait for CI"
+blocker = true
+
+[[phases.steps]]
+id = "3.L4.2"
+description = "Read CodeRabbit comments"
+
+[[phases.steps]]
+id = "3.L4.3"
+description = "Fix all CI/CodeRabbit issues"
+
+# --- Layer 5: Final Gate ---
+
+[[phases.steps]]
+id = "3.L5.1"
+description = "Verify all layers pass"
+blocker = true
+
+[[phases.steps]]
+id = "3.L5.2"
+description = "Merge PR"
+
+# ============================================================================
+# Phase 3.5: QA Handoff
+# ============================================================================
+
+[[phases]]
+id = "qa-handoff"
+
+# --- Step 0: Local Steel Smoke Test ---
+
+[[phases.steps]]
+id = "3.5.0.1"
+description = "Label check (frontend vs backend)"
+
+[[phases.steps]]
+id = "3.5.0.2"
+description = "Prerequisites check (cloudflared)"
+
+[[phases.steps]]
+id = "3.5.0.3"
+description = "Start Cloudflare tunnel"
+
+[[phases.steps]]
+id = "3.5.0.4"
+description = "Create Steel session"
+
+[[phases.steps]]
+id = "3.5.0.5"
+description = "Navigate and screenshot homepage"
+
+[[phases.steps]]
+id = "3.5.0.6"
+description = "Login as test bot"
+
+[[phases.steps]]
+id = "3.5.0.7"
+description = "Navigate to feature"
+
+[[phases.steps]]
+id = "3.5.0.8"
+description = "Verify elements + test flow"
+
+[[phases.steps]]
+id = "3.5.0.9"
+description = "Release session + kill cloudflared"
+
+[[phases.steps]]
+id = "3.5.0.10"
+description = "Local Steel gate"
+blocker = true
+
+# --- Step 1: Deploy ---
+
+[[phases.steps]]
+id = "3.5.1.1"
+description = "Run deploy command"
+
+[[phases.steps]]
+id = "3.5.1.2"
+description = "Verify deployment health"
+
+# --- Step 2: Staging Steel Smoke Test ---
+
+[[phases.steps]]
+id = "3.5.2.1"
+description = "Create Steel session"
+
+[[phases.steps]]
+id = "3.5.2.2"
+description = "Login as test bot on staging"
+
+[[phases.steps]]
+id = "3.5.2.3"
+description = "Navigate to feature"
+
+[[phases.steps]]
+id = "3.5.2.4"
+description = "Verify elements + test flow"
+
+[[phases.steps]]
+id = "3.5.2.5"
+description = "Release session"
+
+[[phases.steps]]
+id = "3.5.2.6"
+description = "Staging Steel gate"
+blocker = true
+
+# --- Step 3: Loom Pipeline ---
+
+[[phases.steps]]
+id = "3.5.3.1"
+description = "Collect screenshots"
+
+[[phases.steps]]
+id = "3.5.3.2"
+description = "Check ffmpeg availability"
+
+[[phases.steps]]
+id = "3.5.3.3"
+description = "Create video from screenshots"
+
+[[phases.steps]]
+id = "3.5.3.4"
+description = "Upload to Loom"
+
+[[phases.steps]]
+id = "3.5.3.5"
+description = "Get share URL"
+
+# --- Steps 4-6: Linear Updates ---
+
+[[phases.steps]]
+id = "3.5.4"
+description = "Update Linear status to review"
+
+[[phases.steps]]
+id = "3.5.5"
+description = "Assign to QA tester"
+
+[[phases.steps]]
+id = "3.5.6"
+description = "Post implementation comment"
+
+# ============================================================================
+# Phase 4: Cleanup
+# ============================================================================
+
+[[phases]]
+id = "cleanup"
+
+[[phases.steps]]
+id = "4.1"
+description = "Remove worktree"
+
+[[phases.steps]]
+id = "4.2"
+description = "Delete local branch"
+
+[[phases.steps]]
+id = "4.3"
+description = "Prune stale references"
+
+[[phases.steps]]
+id = "4.4"
+description = "Confirm cleanup"
