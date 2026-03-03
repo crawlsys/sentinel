@@ -275,13 +275,18 @@ async fn handle_submit_phase(
         .unwrap_or("")
         .to_string();
 
-    // Update state — mark phase complete, advance workflow
+    // Update state — mark phase complete, advance workflow, record phase read
     let mut s = state.write().await;
     s.set_active_skill(&skill);
 
     if let Some(wf) = s.workflows.get_mut(&skill) {
         wf.advance(&phase_id);
     }
+
+    // Submitting a phase implies you've read and completed it.
+    // Record the phase file as read (e.g., phase_id "claim" -> "claim.md").
+    let phase_file = format!("{}.md", phase_id);
+    s.record_phase_read(&phase_file);
 
     let completed = s
         .workflows

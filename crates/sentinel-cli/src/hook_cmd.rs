@@ -70,12 +70,22 @@ pub async fn run(event: &str, matcher: Option<&str>, standalone: bool) -> Result
                     state.set_active_skill(&skill);
                 }
             }
+
+            // Phase validator — inject phase progress context
+            let validator_output = hooks::phase_validator::process(&input, &state, &workflows);
+            output.merge(&validator_output);
         }
 
         HookEvent::PreToolUse => {
-            // Phase gate — check workflow state
-            let gate_output = hooks::phase_gate::process(&input, &state, &workflows);
+            // Phase gate — check workflow state + track Read() calls on phase files
+            // NOTE: process() takes &mut state because it records phase reads and tool calls
+            let gate_output = hooks::phase_gate::process(&input, &mut state, &workflows);
             output.merge(&gate_output);
+
+            // If phase gate blocked, record it
+            if gate_output.blocked == Some(true) {
+                state.record_blocked();
+            }
 
             // Git hygiene — check uncommitted changes (only for Edit/Write)
             if matches!(input.tool_name.as_deref(), Some("Edit" | "Write")) {
@@ -110,11 +120,11 @@ pub async fn run(event: &str, matcher: Option<&str>, standalone: bool) -> Result
         }
     }
 
-    // Save state
-    let _ = sentinel_infrastructure::state_store::save(&state);
-
     // Record hook invocation
     state.record_hook_invocation(event, 0);
+
+    // Save state AFTER all processing (so phase reads and tool calls are persisted)
+    let _ = sentinel_infrastructure::state_store::save(&state);
 
     // Write output to stdout
     sentinel_infrastructure::stdout::write_hook_output(&output)?;

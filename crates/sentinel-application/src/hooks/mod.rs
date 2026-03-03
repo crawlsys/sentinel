@@ -8,6 +8,7 @@ pub mod context_monitor;
 pub mod evidence_collector;
 pub mod git_hygiene;
 pub mod phase_gate;
+pub mod phase_validator;
 pub mod skill_router;
 
 /// Port for git status queries — implemented by the infrastructure layer.

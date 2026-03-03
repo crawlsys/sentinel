@@ -43,20 +43,6 @@ judge = "sonnet"
 description = "Create git worktree for isolated development"
 
 [[workflows.phases]]
-id = "implement"
-file = "implement.md"
-required = true
-judge = "sonnet"
-description = "Implement the changes following the plan"
-
-[[workflows.phases]]
-id = "test"
-file = "test.md"
-required = true
-judge = "sonnet"
-description = "Write and run tests, ensure coverage"
-
-[[workflows.phases]]
 id = "review"
 file = "review.md"
 required = true

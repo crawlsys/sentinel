@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::evidence::EvidenceCollector;
 use crate::proof::ProofChain;
-use crate::workflow::WorkflowState;
+use crate::workflow::{SkillWorkflow, WorkflowState};
 
 /// Full session state — shared across all sentinel modes
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -35,6 +35,14 @@ pub struct SessionState {
 
     /// Whether the session is still active
     pub active: bool,
+
+    /// Phase files that have been Read() by Claude (e.g., "claim.md", "fetch.md")
+    #[serde(default)]
+    pub phases_read: Vec<String>,
+
+    /// Total tool calls in this session (for phase-skip detection)
+    #[serde(default)]
+    pub tool_calls: u32,
 }
 
 /// Aggregated hook execution statistics
@@ -65,6 +73,8 @@ impl SessionState {
             proof_chains: HashMap::new(),
             hook_stats: HookStats::default(),
             active: true,
+            phases_read: Vec::new(),
+            tool_calls: 0,
         }
     }
 
@@ -132,6 +142,38 @@ impl SessionState {
     /// Record a blocked tool call
     pub fn record_blocked(&mut self) {
         self.hook_stats.total_blocked += 1;
+    }
+
+    /// Record that a phase file has been Read() by Claude.
+    /// Only adds if not already present (idempotent).
+    pub fn record_phase_read(&mut self, phase_file: &str) {
+        let file = phase_file.to_string();
+        if !self.phases_read.contains(&file) {
+            self.phases_read.push(file);
+        }
+    }
+
+    /// Number of phase files that have been read
+    #[must_use]
+    pub fn phases_read_count(&self) -> usize {
+        self.phases_read.len()
+    }
+
+    /// Returns the file name of the next required phase that hasn't been read yet.
+    /// Uses the workflow definition to determine phase ordering.
+    #[must_use]
+    pub fn next_required_phase_file(&self, workflow: &SkillWorkflow) -> Option<String> {
+        for phase in &workflow.phases {
+            if phase.required && !self.phases_read.contains(&phase.file) {
+                return Some(phase.file.clone());
+            }
+        }
+        None
+    }
+
+    /// Record a tool call (increments counter)
+    pub fn record_tool_call(&mut self) {
+        self.tool_calls += 1;
     }
 }
 
@@ -221,5 +263,94 @@ mod tests {
         // Setting same skill again should NOT reset the workflow
         state.set_active_skill("linear");
         assert!(state.active_workflow().unwrap().is_phase_complete("claim"));
+    }
+
+    #[test]
+    fn test_record_phase_read() {
+        let mut state = SessionState::new("sess-1");
+        assert_eq!(state.phases_read_count(), 0);
+
+        state.record_phase_read("claim.md");
+        assert_eq!(state.phases_read_count(), 1);
+        assert!(state.phases_read.contains(&"claim.md".to_string()));
+
+        // Idempotent — recording same file twice doesn't duplicate
+        state.record_phase_read("claim.md");
+        assert_eq!(state.phases_read_count(), 1);
+
+        state.record_phase_read("fetch.md");
+        assert_eq!(state.phases_read_count(), 2);
+    }
+
+    #[test]
+    fn test_next_required_phase_file() {
+        use crate::judge::JudgeModel;
+        use crate::workflow::WorkflowPhase;
+
+        let workflow = SkillWorkflow {
+            skill: "linear".to_string(),
+            phases: vec![
+                WorkflowPhase {
+                    id: "claim".to_string(),
+                    file: "claim.md".to_string(),
+                    required: true,
+                    judge: JudgeModel::Sonnet,
+                    description: String::new(),
+                },
+                WorkflowPhase {
+                    id: "fetch".to_string(),
+                    file: "fetch.md".to_string(),
+                    required: true,
+                    judge: JudgeModel::Sonnet,
+                    description: String::new(),
+                },
+                WorkflowPhase {
+                    id: "cleanup".to_string(),
+                    file: "cleanup.md".to_string(),
+                    required: false,
+                    judge: JudgeModel::Sonnet,
+                    description: String::new(),
+                },
+            ],
+        };
+
+        let mut state = SessionState::new("sess-1");
+
+        // First required phase is claim.md
+        assert_eq!(
+            state.next_required_phase_file(&workflow),
+            Some("claim.md".to_string())
+        );
+
+        // After reading claim.md, next is fetch.md
+        state.record_phase_read("claim.md");
+        assert_eq!(
+            state.next_required_phase_file(&workflow),
+            Some("fetch.md".to_string())
+        );
+
+        // After reading fetch.md, no more required phases
+        state.record_phase_read("fetch.md");
+        assert_eq!(state.next_required_phase_file(&workflow), None);
+    }
+
+    #[test]
+    fn test_tool_call_counter() {
+        let mut state = SessionState::new("sess-1");
+        assert_eq!(state.tool_calls, 0);
+
+        state.record_tool_call();
+        assert_eq!(state.tool_calls, 1);
+
+        state.record_tool_call();
+        state.record_tool_call();
+        assert_eq!(state.tool_calls, 3);
+    }
+
+    #[test]
+    fn test_new_state_has_empty_phases() {
+        let state = SessionState::new("sess-1");
+        assert!(state.phases_read.is_empty());
+        assert_eq!(state.tool_calls, 0);
     }
 }
