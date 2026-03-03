@@ -23,6 +23,14 @@ pub struct Evidence {
     /// Phase-specific custom evidence (e.g., test results, PR URL, Linear issue ID)
     #[serde(default)]
     pub custom: serde_json::Value,
+
+    /// Step IDs completed during this phase
+    #[serde(default)]
+    pub steps_completed: Vec<String>,
+
+    /// Step IDs skipped during this phase
+    #[serde(default)]
+    pub steps_skipped: Vec<String>,
 }
 
 /// A tool call Claude made

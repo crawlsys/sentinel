@@ -3,9 +3,69 @@
 //! Defines ordered phases for skills like Linear.
 //! Enforces sequential phase execution with proof requirements.
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::judge::JudgeModel;
+
+// ============================================================================
+// Step definitions (loaded from config/steps/<skill>.toml)
+// ============================================================================
+
+/// A trackable step within a phase
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkflowStep {
+    /// Step identifier (e.g., "-0.1", "3.L2.3")
+    pub id: String,
+
+    /// Human-readable description
+    pub description: String,
+
+    /// Whether this step is a blocker/gate (failure stops progress)
+    #[serde(default)]
+    pub blocker: bool,
+}
+
+/// Steps for a single phase
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PhaseSteps {
+    /// Phase this belongs to (e.g., "claim", "review")
+    #[serde(rename = "id")]
+    pub phase_id: String,
+
+    /// Ordered list of steps
+    #[serde(default)]
+    pub steps: Vec<WorkflowStep>,
+}
+
+/// All step definitions for a skill
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillSteps {
+    /// Skill name
+    #[serde(skip)]
+    pub skill: String,
+
+    /// Steps per phase
+    pub phases: Vec<PhaseSteps>,
+}
+
+impl SkillSteps {
+    /// Get steps for a specific phase
+    #[must_use]
+    pub fn phase_steps(&self, phase_id: &str) -> Option<&PhaseSteps> {
+        self.phases.iter().find(|p| p.phase_id == phase_id)
+    }
+
+    /// Total number of steps across all phases
+    #[must_use]
+    pub fn total_steps(&self) -> usize {
+        self.phases.iter().map(|p| p.steps.len()).sum()
+    }
+}
+
+// ============================================================================
+// Phase definitions (loaded from config/workflows.toml)
+// ============================================================================
 
 /// A single phase in a skill workflow
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -64,6 +124,50 @@ pub struct WorkflowState {
 
     /// Whether the workflow is fully complete
     pub complete: bool,
+
+    /// Step-level tracking within phases
+    #[serde(default)]
+    pub step_states: Vec<StepState>,
+
+    /// Currently active step ID
+    #[serde(default)]
+    pub current_step: Option<String>,
+}
+
+/// Runtime state of a single step within a phase
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StepState {
+    /// Step identifier (e.g., "0.1", "3.L2.3")
+    pub step_id: String,
+
+    /// Phase this step belongs to
+    pub phase_id: String,
+
+    /// Current status
+    pub status: StepStatus,
+
+    /// When this step started
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<DateTime<Utc>>,
+
+    /// When this step completed
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_at: Option<DateTime<Utc>>,
+
+    /// Brief summary of what happened
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+}
+
+/// Status of a workflow step
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum StepStatus {
+    Pending,
+    InProgress,
+    Completed,
+    Skipped,
+    Blocked,
 }
 
 impl WorkflowState {
@@ -76,6 +180,8 @@ impl WorkflowState {
             current_phase: None,
             completed_phases: Vec::new(),
             complete: false,
+            step_states: Vec::new(),
+            current_step: None,
         }
     }
 
@@ -172,6 +278,100 @@ impl WorkflowState {
         }
 
         None
+    }
+
+    // ========================================================================
+    // Step tracking methods
+    // ========================================================================
+
+    /// Update a step's status. Creates the step state if it doesn't exist.
+    pub fn update_step(
+        &mut self,
+        phase_id: &str,
+        step_id: &str,
+        status: StepStatus,
+        summary: Option<String>,
+    ) {
+        let now = Utc::now();
+
+        if let Some(existing) = self
+            .step_states
+            .iter_mut()
+            .find(|s| s.step_id == step_id && s.phase_id == phase_id)
+        {
+            existing.status = status.clone();
+            existing.summary = summary;
+            if status == StepStatus::Completed || status == StepStatus::Skipped {
+                existing.completed_at = Some(now);
+            }
+        } else {
+            self.step_states.push(StepState {
+                step_id: step_id.to_string(),
+                phase_id: phase_id.to_string(),
+                status: status.clone(),
+                started_at: Some(now),
+                completed_at: if status == StepStatus::Completed || status == StepStatus::Skipped {
+                    Some(now)
+                } else {
+                    None
+                },
+                summary,
+            });
+        }
+
+        if status == StepStatus::InProgress {
+            self.current_step = Some(step_id.to_string());
+        }
+    }
+
+    /// Get all step states for a specific phase
+    #[must_use]
+    pub fn phase_step_states(&self, phase_id: &str) -> Vec<&StepState> {
+        self.step_states
+            .iter()
+            .filter(|s| s.phase_id == phase_id)
+            .collect()
+    }
+
+    /// Count completed steps for a specific phase
+    #[must_use]
+    pub fn phase_steps_completed(&self, phase_id: &str) -> usize {
+        self.step_states
+            .iter()
+            .filter(|s| {
+                s.phase_id == phase_id
+                    && (s.status == StepStatus::Completed || s.status == StepStatus::Skipped)
+            })
+            .count()
+    }
+
+    /// Count total completed steps across all phases
+    #[must_use]
+    pub fn total_steps_completed(&self) -> usize {
+        self.step_states
+            .iter()
+            .filter(|s| s.status == StepStatus::Completed || s.status == StepStatus::Skipped)
+            .count()
+    }
+
+    /// Get completed step IDs for a specific phase (for evidence)
+    #[must_use]
+    pub fn completed_step_ids(&self, phase_id: &str) -> Vec<String> {
+        self.step_states
+            .iter()
+            .filter(|s| s.phase_id == phase_id && s.status == StepStatus::Completed)
+            .map(|s| s.step_id.clone())
+            .collect()
+    }
+
+    /// Get skipped step IDs for a specific phase (for evidence)
+    #[must_use]
+    pub fn skipped_step_ids(&self, phase_id: &str) -> Vec<String> {
+        self.step_states
+            .iter()
+            .filter(|s| s.phase_id == phase_id && s.status == StepStatus::Skipped)
+            .map(|s| s.step_id.clone())
+            .collect()
     }
 }
 
