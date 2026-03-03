@@ -70,7 +70,7 @@ pub async fn run(event: &str, matcher: Option<&str>, standalone: bool) -> Result
 
     match hook_event {
         HookEvent::UserPromptSubmit => {
-            // Skill router
+            // Skill router — classify and route to matching skill
             let router = hooks::skill_router::default_router();
             let router_output = hooks::skill_router::process(&input, &router);
             output.merge(&router_output);
@@ -85,15 +85,25 @@ pub async fn run(event: &str, matcher: Option<&str>, standalone: bool) -> Result
             // Phase validator — inject phase + step progress context
             let validator_output = hooks::phase_validator::process(&input, &state, &workflows, &step_configs);
             output.merge(&validator_output);
+
+            // Error reporter — inject Linear filing instructions for unresolved errors
+            let error_output = hooks::error_reporter::process(&input);
+            output.merge(&error_output);
+
+            // Hygiene override — detect override commands in prompt
+            let override_output = hooks::hygiene_override::process(&input);
+            output.merge(&override_output);
+
+            // Todo loader — inject active todos into context
+            let todo_output = hooks::todo_loader::process(&input);
+            output.merge(&todo_output);
         }
 
         HookEvent::PreToolUse => {
             // Phase gate — check workflow state + track Read() calls on phase files
-            // NOTE: process() takes &mut state because it records phase reads and tool calls
             let gate_output = hooks::phase_gate::process(&input, &mut state, &workflows);
             output.merge(&gate_output);
 
-            // If phase gate blocked, record it
             if gate_output.blocked == Some(true) {
                 state.record_blocked();
             }
@@ -103,31 +113,65 @@ pub async fn run(event: &str, matcher: Option<&str>, standalone: bool) -> Result
                 let hygiene_output = hooks::git_hygiene::process(&input, &git);
                 output.merge(&hygiene_output);
             }
+
+            // Pre-commit verification — block git commit/push without test evidence (Bash only)
+            if matches!(input.tool_name.as_deref(), Some("Bash")) {
+                let commit_output = hooks::pre_commit_verification::process(&input);
+                output.merge(&commit_output);
+
+                // Pre-push Steel test — block git push without Steel test (Bash only)
+                let steel_output = hooks::pre_push_steel_test::process(&input);
+                output.merge(&steel_output);
+            }
         }
 
         HookEvent::PostToolUse => {
-            // Evidence collector runs but needs a phase collection state
-            // which only exists during active phase execution
-            // For now, just pass through
+            // MCP health — detect MCP server failures and log to errors.jsonl
+            let mcp_output = hooks::mcp_health::process(&input);
+            output.merge(&mcp_output);
+
+            // Todo interceptor — persist rich todos from TodoWrite calls
+            let todo_output = hooks::todo_interceptor::process(&input);
+            output.merge(&todo_output);
         }
 
         HookEvent::Stop => {
-            // Context monitor
+            // Context monitor — log context window usage
             let ctx_output = hooks::context_monitor::process(&input);
             output.merge(&ctx_output);
 
-            // Commit hygiene
+            // Commit hygiene — warn about uncommitted changes
             let hygiene_output = hooks::commit_hygiene::process(&input, &git);
             output.merge(&hygiene_output);
+
+            // Execution log — capture [RUN]/[STEP]/[PHASE] markers from transcript
+            let exec_output = hooks::execution_log::process(&input);
+            output.merge(&exec_output);
+
+            // Skill telemetry — aggregate skill usage metrics
+            let telemetry_output = hooks::skill_telemetry::process(&input);
+            output.merge(&telemetry_output);
+
+            // Doc cleanup — scan for orphaned/empty docs
+            let doc_output = hooks::doc_cleanup::process(&input);
+            output.merge(&doc_output);
+
+            // Verification gate — match completion claims against evidence
+            let verify_output = hooks::verification_gate::process(&input);
+            output.merge(&verify_output);
         }
 
         HookEvent::SessionStart => {
             // Initialize fresh state
             state = SessionState::new(session_id);
+
+            // Session init — log session, sync marketplace repo, inject startup context
+            let init_output = hooks::session_init::process(&input);
+            output.merge(&init_output);
         }
 
         HookEvent::PreCompact => {
-            // Preserve context — no-op for now
+            // Preserve context — placeholder for future context preservation logic
         }
     }
 
