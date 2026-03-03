@@ -4,6 +4,7 @@
 //!   sentinel daemon     — Start MCP server + hook listener + dashboard API
 //!   sentinel hook       — Thin client, forwards to daemon (or standalone)
 //!   sentinel verify     — Verify a session's proof chain
+//!   sentinel mcp        — MCP server over stdio (Claude Code connects here)
 //!   sentinel stats      — Hook execution statistics
 
 use clap::{Parser, Subcommand};
@@ -12,6 +13,7 @@ use tracing_subscriber::EnvFilter;
 mod api;
 mod daemon_cmd;
 mod hook_cmd;
+mod mcp_cmd;
 mod stats_cmd;
 mod verify_cmd;
 
@@ -54,6 +56,9 @@ enum Commands {
         session: String,
     },
 
+    /// Start the MCP server over stdio (Claude Code connects here)
+    Mcp,
+
     /// Show hook execution statistics
     Stats,
 }
@@ -78,6 +83,7 @@ async fn main() -> anyhow::Result<()> {
             standalone,
         } => hook_cmd::run(&event, matcher.as_deref(), standalone).await,
         Commands::Verify { session } => verify_cmd::run(&session).await,
+        Commands::Mcp => mcp_cmd::run().await,
         Commands::Stats => stats_cmd::run().await,
     }
 }
