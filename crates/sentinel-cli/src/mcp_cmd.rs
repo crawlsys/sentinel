@@ -7,13 +7,16 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::Result;
+use chrono::Utc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::RwLock;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 use sentinel_application::judge_service::FallbackJudge;
 use sentinel_application::mcp_handler::{McpHandler, McpToolCall};
 use sentinel_application::proof_engine::ProofEngine;
+use sentinel_domain::evidence::Evidence;
+use sentinel_domain::judge::JudgeModel;
 use sentinel_domain::state::SessionState;
 use sentinel_domain::workflow::{SkillSteps, StepStatus, WorkflowState};
 use sentinel_infrastructure::mcp_transport::{JsonRpcRequest, JsonRpcResponse};
@@ -177,7 +180,23 @@ fn server_info() -> serde_json::Value {
 }
 
 pub async fn run() -> Result<()> {
-    let state = Arc::new(RwLock::new(SessionState::new("mcp-session")));
+    // Use real session ID from environment, falling back to timestamped ID
+    let session_id = std::env::var("SESSION_ID")
+        .or_else(|_| std::env::var("CLAUDE_SESSION_ID"))
+        .unwrap_or_else(|_| format!("mcp-{}", Utc::now().timestamp()));
+
+    // Try loading existing state from disk (so MCP and hooks share state)
+    let state = match sentinel_infrastructure::state_store::load(&session_id) {
+        Ok(Some(existing)) => {
+            info!(session_id = %session_id, "Loaded existing session state from disk");
+            Arc::new(RwLock::new(existing))
+        }
+        _ => {
+            info!(session_id = %session_id, "Creating new session state");
+            Arc::new(RwLock::new(SessionState::new(&session_id)))
+        }
+    };
+
     let judge: Arc<dyn sentinel_application::judge_service::JudgeService> =
         match sentinel_infrastructure::anthropic::AnthropicClient::from_env() {
             Ok(client) => Arc::new(client),
@@ -186,8 +205,8 @@ pub async fn run() -> Result<()> {
                 Arc::new(FallbackJudge)
             }
         };
-    let proof_engine = Arc::new(ProofEngine::new(state.clone(), judge));
-    let handler = McpHandler::new(state.clone(), proof_engine);
+    let proof_engine = Arc::new(ProofEngine::new(state.clone(), judge.clone()));
+    let handler = McpHandler::new(state.clone(), proof_engine.clone());
 
     let stdin = tokio::io::stdin();
     let mut stdout = tokio::io::stdout();
@@ -217,7 +236,7 @@ pub async fn run() -> Result<()> {
             }
         };
 
-        let response = handle_request(&request, &handler, &state).await;
+        let response = handle_request(&request, &handler, &state, &proof_engine).await;
 
         let json = serde_json::to_string(&response)?;
         stdout.write_all(json.as_bytes()).await?;
@@ -232,6 +251,7 @@ async fn handle_request(
     request: &JsonRpcRequest,
     handler: &McpHandler,
     state: &Arc<RwLock<SessionState>>,
+    proof_engine: &Arc<ProofEngine>,
 ) -> JsonRpcResponse {
     match request.method.as_str() {
         // MCP lifecycle
@@ -258,9 +278,9 @@ async fn handle_request(
                 .cloned()
                 .unwrap_or_default();
 
-            // Handle submit_phase_complete specially (needs state mutation)
+            // Handle submit_phase_complete specially (needs state mutation + proof generation)
             if tool_name == "sentinel__submit_phase_complete" {
-                return handle_submit_phase(request, &arguments, state).await;
+                return handle_submit_phase(request, &arguments, state, proof_engine).await;
             }
 
             // Handle step tracking tools specially (need state mutation)
@@ -326,6 +346,7 @@ async fn handle_submit_phase(
     request: &JsonRpcRequest,
     args: &serde_json::Value,
     state: &Arc<RwLock<SessionState>>,
+    proof_engine: &Arc<ProofEngine>,
 ) -> JsonRpcResponse {
     let skill = match args.get("skill").and_then(|v| v.as_str()) {
         Some(s) => s.to_string(),
@@ -351,38 +372,120 @@ async fn handle_submit_phase(
         .unwrap_or("")
         .to_string();
 
-    // Update state — mark phase complete, advance workflow, record phase read
-    let mut s = state.write().await;
-    s.set_active_skill(&skill);
-
-    if let Some(wf) = s.workflows.get_mut(&skill) {
-        wf.advance(&phase_id);
+    // Record phase read in state (submitting implies the phase was read)
+    let phase_file = format!("{}.md", phase_id);
+    {
+        let mut s = state.write().await;
+        s.set_active_skill(&skill);
+        s.record_phase_read(&phase_file);
     }
 
-    // Submitting a phase implies you've read and completed it.
-    // Record the phase file as read (e.g., phase_id "claim" -> "claim.md").
-    let phase_file = format!("{}.md", phase_id);
-    s.record_phase_read(&phase_file);
-
-    let completed = s
-        .workflows
+    // Look up phase config for judge model + objectives from workflows.toml
+    let workflow_configs = load_workflow_configs();
+    let (judge_model, phase_objectives) = workflow_configs
         .get(&skill)
-        .map(|w| w.completed_phases.clone())
-        .unwrap_or_default();
+        .and_then(|wf| wf.phases.iter().find(|p| p.id == phase_id))
+        .map(|phase| {
+            let desc = if phase.description.is_empty() {
+                format!("Complete the {} phase", phase_id)
+            } else {
+                phase.description.clone()
+            };
+            (phase.judge, desc)
+        })
+        .unwrap_or((
+            JudgeModel::Sonnet,
+            format!("Complete the {} phase", phase_id),
+        ));
 
-    JsonRpcResponse::success(
-        request.id.clone(),
-        mcp_tool_result(
-            true,
-            serde_json::json!({
-                "phase_id": phase_id,
-                "skill": skill,
-                "summary": summary,
-                "completed_phases": completed,
-                "message": format!("Phase '{}' marked complete", phase_id)
-            }),
-        ),
-    )
+    // Build evidence from the summary + state context
+    let evidence = {
+        let s = state.read().await;
+        let mut ev = Evidence::default();
+        ev.phase_file_read = true;
+        ev.custom = serde_json::json!({
+            "summary": summary,
+            "phases_read": s.phases_read,
+            "tool_calls_in_session": s.tool_calls,
+        });
+
+        // Include step evidence if steps were tracked for this phase
+        if let Some(wf) = s.workflows.get(&skill) {
+            let step_states = wf.phase_step_states(&phase_id);
+            for ss in &step_states {
+                match ss.status {
+                    StepStatus::Completed => ev.steps_completed.push(ss.step_id.clone()),
+                    StepStatus::Skipped => ev.steps_skipped.push(ss.step_id.clone()),
+                    _ => {}
+                }
+            }
+        }
+        ev
+    };
+
+    // Generate cryptographic proof via the proof engine
+    let started_at = Utc::now() - chrono::Duration::seconds(1); // Approximate phase start
+    let proof_result = proof_engine
+        .submit_evidence(&skill, &phase_id, &phase_objectives, evidence, judge_model, started_at)
+        .await;
+
+    // Get completed phases and proof info
+    let (completed, proof_info) = {
+        let s = state.read().await;
+        let completed = s
+            .workflows
+            .get(&skill)
+            .map(|w| w.completed_phases.clone())
+            .unwrap_or_default();
+        let proof_info = s
+            .proof_chains
+            .get(&skill)
+            .and_then(|chain| chain.proofs.last())
+            .map(|p| {
+                serde_json::json!({
+                    "tessera_hash": &p.combined_hash[..12],
+                    "evidence_hash": &p.evidence_hash[..12],
+                    "judge_model": p.judge_model,
+                    "judge_sufficient": p.judge_verdict.sufficient,
+                    "judge_confidence": p.judge_verdict.confidence,
+                })
+            });
+        (completed, proof_info)
+    };
+
+    // Persist state to disk (so hooks can see the proof chain)
+    {
+        let s = state.read().await;
+        let _ = sentinel_infrastructure::state_store::save(&s);
+    }
+
+    let mut result = serde_json::json!({
+        "phase_id": phase_id,
+        "skill": skill,
+        "summary": summary,
+        "completed_phases": completed,
+        "message": format!("Phase '{}' proven and recorded", phase_id),
+    });
+
+    match proof_result {
+        Ok(_) => {
+            if let Some(pi) = proof_info {
+                result
+                    .as_object_mut()
+                    .unwrap()
+                    .insert("proof".to_string(), pi);
+            }
+        }
+        Err(e) => {
+            warn!(phase = %phase_id, error = %e, "Proof generation failed — phase still tracked");
+            result.as_object_mut().unwrap().insert(
+                "proof_error".to_string(),
+                serde_json::json!(e.to_string()),
+            );
+        }
+    }
+
+    JsonRpcResponse::success(request.id.clone(), mcp_tool_result(true, result))
 }
 
 /// Helper: Load skill steps config from the config directory
