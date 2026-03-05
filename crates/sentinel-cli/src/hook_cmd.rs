@@ -119,6 +119,10 @@ pub async fn run(event: &str, matcher: Option<&str>, standalone: bool) -> Result
             // Verification gate — remind to verify before claiming completion
             let verify_prompt_output = hooks::verification_gate::process_prompt(&input);
             output.merge(&verify_prompt_output);
+
+            // Activity tracker — inject session activity summary when context is elevated
+            let activity_prompt_output = hooks::activity_tracker::process_prompt(&input);
+            output.merge(&activity_prompt_output);
         }
 
         HookEvent::PreToolUse => {
@@ -141,6 +145,10 @@ pub async fn run(event: &str, matcher: Option<&str>, standalone: bool) -> Result
                 let commit_output = hooks::pre_commit_verification::process(&input);
                 output.merge(&commit_output);
 
+                // Commit message validator — enforce conventional commits (Bash only)
+                let msg_output = hooks::commit_message_validator::process(&input);
+                output.merge(&msg_output);
+
                 // Pre-push Steel test — block git push without Steel test (Bash only)
                 let steel_output = hooks::pre_push_steel_test::process(&input);
                 output.merge(&steel_output);
@@ -155,6 +163,15 @@ pub async fn run(event: &str, matcher: Option<&str>, standalone: bool) -> Result
             // Todo interceptor — persist rich todos from TodoWrite calls
             let todo_output = hooks::todo_interceptor::process(&input);
             output.merge(&todo_output);
+
+            // Evidence collector — capture tool results for proof chains
+            // Passes None when no active phase collection (gracefully skips)
+            let evidence_output = hooks::evidence_collector::process(&input, None);
+            output.merge(&evidence_output);
+
+            // Activity tracker — log every tool call to activity-log.jsonl
+            let activity_output = hooks::activity_tracker::process_post_tool(&input);
+            output.merge(&activity_output);
         }
 
         HookEvent::Stop => {
@@ -187,6 +204,10 @@ pub async fn run(event: &str, matcher: Option<&str>, standalone: bool) -> Result
             // Verification gate — detect unverified completion claims
             let verify_output = hooks::verification_gate::process_stop(&input);
             output.merge(&verify_output);
+
+            // Activity tracker — build session summary from activity log
+            let activity_stop_output = hooks::activity_tracker::process_stop(&input);
+            output.merge(&activity_stop_output);
         }
 
         HookEvent::SessionStart => {
@@ -199,7 +220,9 @@ pub async fn run(event: &str, matcher: Option<&str>, standalone: bool) -> Result
         }
 
         HookEvent::PreCompact => {
-            // Preserve context — placeholder for future context preservation logic
+            // Pre-compact snapshot — save session state before context compaction
+            let compact_output = hooks::pre_compact::process(&input);
+            output.merge(&compact_output);
         }
     }
 

@@ -9,7 +9,7 @@ repository.workspace = true
 rust-version.workspace = true
 
 [[bin]]
-name = "sentinel"
+name = "sentinel-engine"
 path = "src/main.rs"
 
 [dependencies]

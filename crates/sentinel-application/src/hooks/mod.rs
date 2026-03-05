@@ -4,7 +4,9 @@
 //! Each module implements one hook. Add new hooks here and
 //! update HOOK_NAMES to keep the count accurate.
 
+pub mod activity_tracker;
 pub mod commit_hygiene;
+pub mod commit_message_validator;
 pub mod context_monitor;
 pub mod doc_cleanup;
 pub mod doc_drift;
@@ -17,6 +19,7 @@ pub mod mcp_health;
 pub mod phase_gate;
 pub mod phase_validator;
 pub mod pre_commit_verification;
+pub mod pre_compact;
 pub mod pre_push_steel_test;
 pub mod session_init;
 pub mod skill_router;
@@ -28,7 +31,9 @@ pub mod verification_gate;
 /// All hook module names — used for dynamic counting.
 /// Keep in sync with the `pub mod` declarations above.
 pub const HOOK_NAMES: &[&str] = &[
+    "activity_tracker",
     "commit_hygiene",
+    "commit_message_validator",
     "context_monitor",
     "doc_cleanup",
     "doc_drift",
@@ -41,6 +46,7 @@ pub const HOOK_NAMES: &[&str] = &[
     "phase_gate",
     "phase_validator",
     "pre_commit_verification",
+    "pre_compact",
     "pre_push_steel_test",
     "session_init",
     "skill_router",
