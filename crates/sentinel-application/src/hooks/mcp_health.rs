@@ -102,13 +102,25 @@ fn log_mcp_error(
         let _ = std::fs::create_dir_all(parent);
     }
 
+    let ts = Utc::now().to_rfc3339();
+    let id = format!("err-{}-{}", chrono::Utc::now().timestamp_millis(), std::process::id());
+    let severity = if error_detail.contains("refused") || error_detail.contains("spawn") {
+        "critical"
+    } else if error_detail.contains("timeout") || error_detail.contains("timed out") {
+        "warning"
+    } else {
+        "info"
+    };
+
     let entry = serde_json::json!({
-        "timestamp": Utc::now().to_rfc3339(),
-        "tool": tool_name,
-        "server": server_name,
-        "error": error_detail,
+        "id": id,
+        "hook": "mcp-health",
+        "component": "mcp",
+        "type": format!("mcp-{}", server_name),
+        "error": format!("{}: {} ({})", server_name, error_detail, tool_name),
+        "severity": severity,
         "session_id": session_id,
-        "source": "mcp-health"
+        "ts": ts,
     });
 
     let line = format!("{}\n", serde_json::to_string(&entry).unwrap_or_default());
@@ -225,14 +237,16 @@ mod tests {
         let tmpdir = tempfile::tempdir().unwrap();
         let errors_path = tmpdir.path().join("errors.jsonl");
 
-        // Write directly to test the log format
+        // Write directly to test the log format (matches error_reporter schema)
         let entry = serde_json::json!({
-            "timestamp": Utc::now().to_rfc3339(),
-            "tool": "mcp__linear__get_issue",
-            "server": "linear",
-            "error": "connection refused",
+            "id": "err-test-12345",
+            "hook": "mcp-health",
+            "component": "mcp",
+            "type": "mcp-linear",
+            "error": "linear: connection refused (mcp__linear__get_issue)",
+            "severity": "critical",
             "session_id": "test-session",
-            "source": "mcp-health"
+            "ts": Utc::now().to_rfc3339(),
         });
         let line = format!("{}\n", serde_json::to_string(&entry).unwrap());
         std::fs::write(&errors_path, &line).unwrap();
@@ -241,6 +255,8 @@ mod tests {
         assert!(content.contains("connection refused"));
         assert!(content.contains("mcp-health"));
         assert!(content.contains("linear"));
+        assert!(content.contains("critical"));
+        assert!(content.contains("err-test-12345"));
     }
 
     #[test]
