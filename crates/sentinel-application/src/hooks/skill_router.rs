@@ -5,6 +5,8 @@
 
 use sentinel_domain::events::{HookEvent, HookInput, HookOutput};
 use sentinel_domain::routing::RegexRouter;
+use std::fs;
+use std::io::Write;
 
 /// Build the default regex router with all skill patterns
 pub fn default_router() -> RegexRouter {
@@ -14,7 +16,7 @@ pub fn default_router() -> RegexRouter {
     if let Ok(rule) = sentinel_domain::routing::RoutingRule::new(
         "linear",
         vec![
-            r"(?i)\b(fir|cor|per|eng|des|ops|sec|dat|api|mob|inf|qat|rel)-\d+\b",
+            r"(?i)\b(fir|fpcrm|cor|per|eng|des|ops|sec|dat|api|mob|inf|qat|rel)-\d+\b",
             r"(?i)\blinear\s+(issue|ticket|bug|feature|task)\b",
             r"(?i)\b(pick\s+up|claim|assign|work\s+on)\b.*\b(issue|ticket)\b",
         ],
@@ -186,7 +188,134 @@ pub fn default_router() -> RegexRouter {
         router.add_rule(rule);
     }
 
+    // Cerebras — fast inference, ZAI-GLM, Qwen models
+    if let Ok(rule) = sentinel_domain::routing::RoutingRule::new(
+        "cerebras",
+        vec![
+            r"(?i)\bcerebras\b",
+            r"(?i)\bfast\s+inference\b",
+            r"(?i)\bzai[-\s]?glm\b",
+            r"(?i)\bqwen[-\s]?3\b",
+        ],
+        60,
+    ) {
+        router.add_rule(rule);
+    }
+
+    // Windows — desktop/UI automation, PowerShell, virtual desktops
+    if let Ok(rule) = sentinel_domain::routing::RoutingRule::new(
+        "windows",
+        vec![
+            r"(?i)\bwindows\s+automation\b",
+            r"(?i)\bdesktop\s+automation\b",
+            r"(?i)\bui\s+automation\b",
+            r"(?i)\bpowershell\s+script\b",
+            r"(?i)\bscreenshot\s+window\b",
+            r"(?i)\bvirtual\s+desktop\b",
+        ],
+        65,
+    ) {
+        router.add_rule(rule);
+    }
+
+    // Centurion — Chrome extension browser automation
+    if let Ok(rule) = sentinel_domain::routing::RoutingRule::new(
+        "centurion",
+        vec![
+            r"(?i)\bcenturion\b",
+            r"(?i)\bchrome\s+extension\s+automation\b",
+        ],
+        65,
+    ) {
+        router.add_rule(rule);
+    }
+
+    // Router Guardian — network/router management
+    if let Ok(rule) = sentinel_domain::routing::RoutingRule::new(
+        "router-guardian",
+        vec![
+            r"(?i)\b(my\s+)?router\b",
+            r"(?i)\bnetgear\b",
+            r"(?i)\batt\s+gateway\b",
+            r"(?i)\bport\s+forwarding\b",
+            r"(?i)\bip\s+passthrough\b",
+            r"(?i)\bnetwork\s+health\b",
+            r"(?i)\bwan\s+bounce\b",
+            r"(?i)\bdhcp\b",
+        ],
+        60,
+    ) {
+        router.add_rule(rule);
+    }
+
+    // Claude in Chrome — in-browser assistant, tab control, GIF recording
+    if let Ok(rule) = sentinel_domain::routing::RoutingRule::new(
+        "claude-in-chrome",
+        vec![
+            r"(?i)\bclaude\s+in\s+chrome\b",
+            r"(?i)\bchrome\s+tab\b",
+            r"(?i)\bgif\s+recording\b",
+            r"(?i)\bread\s+page\b",
+            r"(?i)\bform\s+fill\s+chrome\b",
+        ],
+        65,
+    ) {
+        router.add_rule(rule);
+    }
+
     router
+}
+
+/// Write temp state files so skill_telemetry can track the execution.
+/// This mirrors the behavior of the legacy JS skill-router.js.
+fn write_telemetry_state(skill: &str, run_id: &str) {
+    let tmp = std::env::temp_dir();
+
+    // Current skill name
+    let _ = fs::write(tmp.join("claude-current-skill"), skill);
+
+    // Run ID for correlation
+    let _ = fs::write(tmp.join("claude-skill-run-id"), run_id);
+
+    // Start timestamp (epoch ms) for duration calculation
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let _ = fs::write(tmp.join("claude-skill-start-time"), now_ms.to_string());
+}
+
+/// Append a routing entry to metrics/routing.jsonl
+fn write_routing_entry(skill: &str, run_id: &str, input: &HookInput, prompt: &str) {
+    let metrics_dir = match dirs::home_dir() {
+        Some(h) => h.join(".claude").join("metrics"),
+        None => return,
+    };
+    let _ = fs::create_dir_all(&metrics_dir);
+
+    let session_id = input.session_id.as_deref().unwrap_or("unknown");
+    let cwd = input.cwd.as_deref().unwrap_or(".");
+    let ts = chrono::Utc::now().to_rfc3339();
+
+    // Truncate prompt for logging (first 100 chars)
+    let prompt_short: String = prompt.chars().take(100).collect();
+
+    let entry = serde_json::json!({
+        "run_id": run_id,
+        "session_id": session_id,
+        "event": "skill_routed",
+        "skill": skill,
+        "source": "regex",
+        "status": "started",
+        "cwd": cwd,
+        "prompt": prompt_short,
+        "ts": ts,
+    });
+
+    if let Ok(mut file) = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(metrics_dir.join("routing.jsonl"))
+    {
+        let _ = writeln!(file, "{}", serde_json::to_string(&entry).unwrap_or_default());
+    }
 }
 
 /// Process a skill-router hook event
@@ -198,6 +327,17 @@ pub fn process(input: &HookInput, router: &RegexRouter) -> HookOutput {
 
     match router.route(prompt) {
         Some(m) => {
+            // Generate a unique run ID
+            let now_ms = chrono::Utc::now().timestamp_millis();
+            let rand: u32 = (now_ms as u32) ^ 0xDEAD_BEEF;
+            let run_id = format!("{}-{}", now_ms, rand % 100000);
+
+            // Write temp state files for skill_telemetry to read on Stop
+            write_telemetry_state(&m.skill, &run_id);
+
+            // Append routing entry to metrics
+            write_routing_entry(&m.skill, &run_id, input, prompt);
+
             let skill_path = format!("~/.claude/skills/{}/SKILL.md", m.skill);
             let context = format!(
                 "[Skill Router] Detected skill: {}. \
@@ -207,7 +347,14 @@ pub fn process(input: &HookInput, router: &RegexRouter) -> HookOutput {
             );
             HookOutput::inject_context(HookEvent::UserPromptSubmit, context)
         }
-        None => HookOutput::allow(),
+        None => {
+            // Clear temp state so telemetry records "none" accurately
+            let tmp = std::env::temp_dir();
+            let _ = fs::remove_file(tmp.join("claude-current-skill"));
+            let _ = fs::remove_file(tmp.join("claude-skill-run-id"));
+            let _ = fs::remove_file(tmp.join("claude-skill-start-time"));
+            HookOutput::allow()
+        }
     }
 }
 
@@ -226,6 +373,18 @@ mod tests {
         let router = default_router();
         let input = HookInput {
             prompt: Some("Pick up FIR-123".to_string()),
+            ..Default::default()
+        };
+        let output = process(&input, &router);
+        let ctx = output.hook_specific_output.unwrap();
+        assert!(ctx.additional_context.contains("linear"));
+    }
+
+    #[test]
+    fn test_fpcrm_issue_id_routing() {
+        let router = default_router();
+        let input = HookInput {
+            prompt: Some("Pick up FPCRM-42".to_string()),
             ..Default::default()
         };
         let output = process(&input, &router);
@@ -311,5 +470,125 @@ mod tests {
         let output = process(&input, &router);
         let ctx = output.hook_specific_output.unwrap();
         assert!(ctx.additional_context.contains("security"));
+    }
+
+    #[test]
+    fn test_cerebras_routing() {
+        let router = default_router();
+        let input = HookInput {
+            prompt: Some("run this with cerebras fast inference".to_string()),
+            ..Default::default()
+        };
+        let output = process(&input, &router);
+        let ctx = output.hook_specific_output.unwrap();
+        assert!(ctx.additional_context.contains("cerebras"));
+    }
+
+    #[test]
+    fn test_cerebras_qwen_routing() {
+        let router = default_router();
+        let input = HookInput {
+            prompt: Some("use qwen-3 for this task".to_string()),
+            ..Default::default()
+        };
+        let output = process(&input, &router);
+        let ctx = output.hook_specific_output.unwrap();
+        assert!(ctx.additional_context.contains("cerebras"));
+    }
+
+    #[test]
+    fn test_windows_automation_routing() {
+        let router = default_router();
+        let input = HookInput {
+            prompt: Some("use windows automation to click the button".to_string()),
+            ..Default::default()
+        };
+        let output = process(&input, &router);
+        let ctx = output.hook_specific_output.unwrap();
+        assert!(ctx.additional_context.contains("windows"));
+    }
+
+    #[test]
+    fn test_windows_powershell_routing() {
+        let router = default_router();
+        let input = HookInput {
+            prompt: Some("run this powershell script on the machine".to_string()),
+            ..Default::default()
+        };
+        let output = process(&input, &router);
+        let ctx = output.hook_specific_output.unwrap();
+        assert!(ctx.additional_context.contains("windows"));
+    }
+
+    #[test]
+    fn test_centurion_routing() {
+        let router = default_router();
+        let input = HookInput {
+            prompt: Some("use centurion to navigate to the page".to_string()),
+            ..Default::default()
+        };
+        let output = process(&input, &router);
+        let ctx = output.hook_specific_output.unwrap();
+        assert!(ctx.additional_context.contains("centurion"));
+    }
+
+    #[test]
+    fn test_router_guardian_netgear_routing() {
+        let router = default_router();
+        let input = HookInput {
+            prompt: Some("check my netgear wifi clients".to_string()),
+            ..Default::default()
+        };
+        let output = process(&input, &router);
+        let ctx = output.hook_specific_output.unwrap();
+        assert!(ctx.additional_context.contains("router-guardian"));
+    }
+
+    #[test]
+    fn test_router_guardian_port_forwarding_routing() {
+        let router = default_router();
+        let input = HookInput {
+            prompt: Some("set up port forwarding on my router".to_string()),
+            ..Default::default()
+        };
+        let output = process(&input, &router);
+        let ctx = output.hook_specific_output.unwrap();
+        assert!(ctx.additional_context.contains("router-guardian"));
+    }
+
+    #[test]
+    fn test_router_guardian_dhcp_routing() {
+        let router = default_router();
+        let input = HookInput {
+            prompt: Some("show me the DHCP leases".to_string()),
+            ..Default::default()
+        };
+        let output = process(&input, &router);
+        let ctx = output.hook_specific_output.unwrap();
+        assert!(ctx.additional_context.contains("router-guardian"));
+    }
+
+    #[test]
+    fn test_claude_in_chrome_routing() {
+        let router = default_router();
+        let input = HookInput {
+            prompt: Some("use claude in chrome to read the page".to_string()),
+            ..Default::default()
+        };
+        let output = process(&input, &router);
+        let ctx = output.hook_specific_output.unwrap();
+        assert!(ctx.additional_context.contains("claude-in-chrome"));
+    }
+
+    #[test]
+    fn test_claude_in_chrome_gif_routing() {
+        let router = default_router();
+        let input = HookInput {
+            prompt: Some("start gif recording of this workflow".to_string()),
+            ..Default::default()
+        };
+        let output = process(&input, &router);
+        let ctx = output.hook_specific_output.unwrap();
+        assert!(ctx.additional_context.contains("claude-in-chrome"));
     }
 }

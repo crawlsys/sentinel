@@ -97,6 +97,28 @@ pub async fn run(event: &str, matcher: Option<&str>, standalone: bool) -> Result
             // Todo loader — inject active todos into context
             let todo_output = hooks::todo_loader::process(&input);
             output.merge(&todo_output);
+
+            // --- Two-phase hooks (read state written by Stop, inject instructions) ---
+
+            // Doc drift — inject update instructions for stale docs
+            let drift_output = hooks::doc_drift::process_prompt(&input);
+            output.merge(&drift_output);
+
+            // Doc cleanup — inject cleanup instructions for junk docs
+            let cleanup_output = hooks::doc_cleanup::process_prompt(&input);
+            output.merge(&cleanup_output);
+
+            // Commit hygiene — remind about uncommitted changes
+            let commit_output = hooks::commit_hygiene::process_prompt(&input);
+            output.merge(&commit_output);
+
+            // Context monitor — inject zone-specific strategy guidance
+            let ctx_prompt_output = hooks::context_monitor::process_prompt(&input);
+            output.merge(&ctx_prompt_output);
+
+            // Verification gate — remind to verify before claiming completion
+            let verify_prompt_output = hooks::verification_gate::process_prompt(&input);
+            output.merge(&verify_prompt_output);
         }
 
         HookEvent::PreToolUse => {
@@ -136,14 +158,6 @@ pub async fn run(event: &str, matcher: Option<&str>, standalone: bool) -> Result
         }
 
         HookEvent::Stop => {
-            // Context monitor — log context window usage
-            let ctx_output = hooks::context_monitor::process(&input);
-            output.merge(&ctx_output);
-
-            // Commit hygiene — warn about uncommitted changes
-            let hygiene_output = hooks::commit_hygiene::process(&input, &git);
-            output.merge(&hygiene_output);
-
             // Execution log — capture [RUN]/[STEP]/[PHASE] markers from transcript
             let exec_output = hooks::execution_log::process(&input);
             output.merge(&exec_output);
@@ -152,12 +166,26 @@ pub async fn run(event: &str, matcher: Option<&str>, standalone: bool) -> Result
             let telemetry_output = hooks::skill_telemetry::process(&input);
             output.merge(&telemetry_output);
 
-            // Doc cleanup — scan for orphaned/empty docs
-            let doc_output = hooks::doc_cleanup::process(&input);
+            // --- Two-phase hooks (detect state, write for UserPromptSubmit to read) ---
+
+            // Context monitor — capture context window usage zone
+            let ctx_output = hooks::context_monitor::process_stop(&input);
+            output.merge(&ctx_output);
+
+            // Commit hygiene — detect uncommitted changes
+            let hygiene_output = hooks::commit_hygiene::process_stop(&input, &git);
+            output.merge(&hygiene_output);
+
+            // Doc cleanup — scan for junk docs
+            let doc_output = hooks::doc_cleanup::process_stop(&input);
             output.merge(&doc_output);
 
-            // Verification gate — match completion claims against evidence
-            let verify_output = hooks::verification_gate::process(&input);
+            // Doc drift — detect stale README/CLAUDE.md/CHANGELOG
+            let drift_output = hooks::doc_drift::process_stop(&input);
+            output.merge(&drift_output);
+
+            // Verification gate — detect unverified completion claims
+            let verify_output = hooks::verification_gate::process_stop(&input);
             output.merge(&verify_output);
         }
 
@@ -180,6 +208,12 @@ pub async fn run(event: &str, matcher: Option<&str>, standalone: bool) -> Result
 
     // Save state AFTER all processing (so phase reads and tool calls are persisted)
     let _ = sentinel_infrastructure::state_store::save(&state);
+
+    // Claude Code only supports hookSpecificOutput for UserPromptSubmit and PostToolUse.
+    // For Stop/SessionStart/PreCompact, strip it to avoid JSON validation errors.
+    if matches!(hook_event, HookEvent::Stop | HookEvent::SessionStart | HookEvent::PreCompact) {
+        output.hook_specific_output = None;
+    }
 
     // Write output to stdout
     sentinel_infrastructure::stdout::write_hook_output(&output)?;

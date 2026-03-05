@@ -1,0 +1,737 @@
+//! Doc Drift — Active documentation maintenance hook
+//!
+//! Two-phase hook following the error-reporter pattern:
+//!
+//! **Stop phase:** Detects when README.md, CLAUDE.md, or CHANGELOG.md are
+//! stale relative to recent code changes. Writes drift findings to
+//! `~/.claude/metrics/doc-drift.jsonl`.
+//!
+//! **UserPromptSubmit phase:** Reads drift findings, checks cooldown (30 min),
+//! and injects explicit update instructions into Claude's context.
+
+use sentinel_domain::events::{HookEvent, HookInput, HookOutput};
+use std::collections::HashSet;
+use std::fs;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+/// Cooldown between drift reports (30 minutes — less aggressive than errors)
+const COOLDOWN_MS: u64 = 30 * 60 * 1000;
+
+/// Docs we monitor for staleness
+const MONITORED_DOCS: &[&str] = &["README.md", "CLAUDE.md", "CHANGELOG.md"];
+
+/// A single drift finding
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct DriftEntry {
+    doc: String,
+    reason: String,
+    cwd: String,
+    ts: String,
+    /// Set to true once Claude has acted on this drift
+    #[serde(default)]
+    resolved: bool,
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+fn metrics_dir() -> Option<PathBuf> {
+    let home = dirs::home_dir()?;
+    let dir = home.join(".claude").join("metrics");
+    fs::create_dir_all(&dir).ok()?;
+    Some(dir)
+}
+
+fn drift_file() -> Option<PathBuf> {
+    Some(metrics_dir()?.join("doc-drift.jsonl"))
+}
+
+fn cooldown_file() -> PathBuf {
+    std::env::temp_dir().join("claude-doc-drift-last")
+}
+
+fn cooldown_expired() -> bool {
+    let content = match fs::read_to_string(cooldown_file()) {
+        Ok(c) => c,
+        Err(_) => return true,
+    };
+    let last: u64 = match content.trim().parse() {
+        Ok(v) => v,
+        Err(_) => return true,
+    };
+    now_ms().saturating_sub(last) >= COOLDOWN_MS
+}
+
+fn write_cooldown() {
+    let _ = fs::write(cooldown_file(), now_ms().to_string());
+}
+
+// ---------------------------------------------------------------------------
+// Stop phase: detect drift and write to doc-drift.jsonl
+// ---------------------------------------------------------------------------
+
+/// Check if a file exists and return its modification time as epoch ms.
+fn file_mod_time(path: &Path) -> Option<u64> {
+    let meta = fs::metadata(path).ok()?;
+    let modified = meta.modified().ok()?;
+    let dur = modified.duration_since(UNIX_EPOCH).ok()?;
+    Some(dur.as_millis() as u64)
+}
+
+/// Get all recently modified source files (within last 5 minutes).
+fn recent_source_changes(cwd: &Path) -> Vec<String> {
+    let threshold = now_ms().saturating_sub(5 * 60 * 1000);
+    let mut changed = Vec::new();
+
+    let source_dirs = ["src", "lib", "app", "pages", "crates", "packages", "components"];
+    let source_exts = ["rs", "ts", "tsx", "js", "jsx", "py", "go", "java", "cs"];
+
+    for dir_name in &source_dirs {
+        let dir = cwd.join(dir_name);
+        if dir.is_dir() {
+            collect_recent_files(&dir, threshold, &source_exts, &mut changed, 0, 5);
+        }
+    }
+
+    // Also check root-level source files
+    if let Ok(entries) = fs::read_dir(cwd) {
+        for entry in entries.flatten() {
+            if entry.file_type().map(|ft| ft.is_file()).unwrap_or(false) {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if source_exts.iter().any(|ext| name.ends_with(&format!(".{ext}"))) {
+                    if let Some(mt) = file_mod_time(&entry.path()) {
+                        if mt >= threshold {
+                            changed.push(name);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    changed
+}
+
+fn collect_recent_files(
+    dir: &Path,
+    threshold: u64,
+    exts: &[&str],
+    results: &mut Vec<String>,
+    depth: usize,
+    max_depth: usize,
+) {
+    if depth > max_depth {
+        return;
+    }
+    let entries = match fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let ft = match entry.file_type() {
+            Ok(ft) => ft,
+            Err(_) => continue,
+        };
+        if ft.is_dir() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if !matches!(
+                name.as_str(),
+                "node_modules" | ".git" | "target" | "dist" | "build" | ".next"
+            ) {
+                collect_recent_files(&entry.path(), threshold, exts, results, depth + 1, max_depth);
+            }
+        } else if ft.is_file() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if exts.iter().any(|ext| name.ends_with(&format!(".{ext}"))) {
+                if let Some(mt) = file_mod_time(&entry.path()) {
+                    if mt >= threshold {
+                        results.push(name);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Detect drift for a specific doc file.
+fn check_doc_drift(cwd: &Path, doc_name: &str, recent_changes: &[String]) -> Option<DriftEntry> {
+    let doc_path = cwd.join(doc_name);
+    let timestamp = chrono::Utc::now().to_rfc3339();
+    let cwd_str = cwd.to_string_lossy().to_string();
+
+    match doc_name {
+        "README.md" => check_readme_drift(&doc_path, recent_changes, &cwd_str, &timestamp),
+        "CLAUDE.md" => check_claude_md_drift(&doc_path, cwd, &cwd_str, &timestamp),
+        "CHANGELOG.md" => check_changelog_drift(&doc_path, recent_changes, &cwd_str, &timestamp),
+        _ => None,
+    }
+}
+
+fn check_readme_drift(
+    path: &Path,
+    recent_changes: &[String],
+    cwd_str: &str,
+    ts: &str,
+) -> Option<DriftEntry> {
+    // Missing README with source files = drift
+    if !path.exists() {
+        let parent = path.parent()?;
+        // Only flag if there are actual source files
+        let has_sources = parent.join("src").is_dir()
+            || parent.join("lib").is_dir()
+            || parent.join("crates").is_dir()
+            || parent.join("package.json").exists()
+            || parent.join("Cargo.toml").exists();
+        if has_sources {
+            return Some(DriftEntry {
+                doc: "README.md".into(),
+                reason: "Missing README.md — project has source code but no README".into(),
+                cwd: cwd_str.into(),
+                ts: ts.into(),
+                resolved: false,
+            });
+        }
+        return None;
+    }
+
+    let content = fs::read_to_string(path).ok()?;
+
+    // Stub README (< 200 chars of real content)
+    let stripped: String = content
+        .lines()
+        .filter(|l| !l.starts_with('#') && !l.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    if stripped.split_whitespace().count() < 30 {
+        return Some(DriftEntry {
+            doc: "README.md".into(),
+            reason: "README.md is a stub — less than 30 words of content".into(),
+            cwd: cwd_str.into(),
+            ts: ts.into(),
+            resolved: false,
+        });
+    }
+
+    // README not updated but significant source changes happened
+    if recent_changes.len() >= 3 {
+        let readme_mod = file_mod_time(path).unwrap_or(0);
+        let threshold = now_ms().saturating_sub(5 * 60 * 1000);
+        if readme_mod < threshold {
+            return Some(DriftEntry {
+                doc: "README.md".into(),
+                reason: format!(
+                    "README.md may be stale — {} source files changed recently but README wasn't updated",
+                    recent_changes.len()
+                ),
+                cwd: cwd_str.into(),
+                ts: ts.into(),
+                resolved: false,
+            });
+        }
+    }
+
+    None
+}
+
+fn check_claude_md_drift(
+    path: &Path,
+    cwd: &Path,
+    cwd_str: &str,
+    ts: &str,
+) -> Option<DriftEntry> {
+    // Missing project CLAUDE.md
+    if !path.exists() {
+        let has_sources = cwd.join("src").is_dir()
+            || cwd.join("lib").is_dir()
+            || cwd.join("crates").is_dir()
+            || cwd.join("package.json").exists()
+            || cwd.join("Cargo.toml").exists();
+        if has_sources {
+            return Some(DriftEntry {
+                doc: "CLAUDE.md".into(),
+                reason: "Missing CLAUDE.md — project has source code but no project instructions file. Run /init or create one.".into(),
+                cwd: cwd_str.into(),
+                ts: ts.into(),
+                resolved: false,
+            });
+        }
+        return None;
+    }
+
+    let content = fs::read_to_string(path).ok()?;
+
+    // Stub CLAUDE.md
+    if content.len() < 200 {
+        return Some(DriftEntry {
+            doc: "CLAUDE.md".into(),
+            reason: "CLAUDE.md is a stub — less than 200 characters".into(),
+            cwd: cwd_str.into(),
+            ts: ts.into(),
+            resolved: false,
+        });
+    }
+
+    None
+}
+
+fn check_changelog_drift(
+    path: &Path,
+    recent_changes: &[String],
+    cwd_str: &str,
+    ts: &str,
+) -> Option<DriftEntry> {
+    // Only flag missing changelog if there are significant recent changes
+    if !path.exists() && recent_changes.len() >= 5 {
+        return Some(DriftEntry {
+            doc: "CHANGELOG.md".into(),
+            reason: format!(
+                "Missing CHANGELOG.md — {} source files changed recently, consider adding a changelog",
+                recent_changes.len()
+            ),
+            cwd: cwd_str.into(),
+            ts: ts.into(),
+            resolved: false,
+        });
+    }
+
+    if !path.exists() {
+        return None;
+    }
+
+    let content = fs::read_to_string(path).ok()?;
+
+    // Check if changelog has an [Unreleased] section
+    if !content.contains("[Unreleased]") && !content.contains("Unreleased") {
+        // Has a changelog but no unreleased section — might need updating
+        if recent_changes.len() >= 3 {
+            return Some(DriftEntry {
+                doc: "CHANGELOG.md".into(),
+                reason: "CHANGELOG.md has no [Unreleased] section — recent changes may not be tracked".into(),
+                cwd: cwd_str.into(),
+                ts: ts.into(),
+                resolved: false,
+            });
+        }
+    }
+
+    None
+}
+
+/// Write drift findings to doc-drift.jsonl (append mode).
+fn write_drift_entries(entries: &[DriftEntry]) {
+    let path = match drift_file() {
+        Some(p) => p,
+        None => return,
+    };
+
+    // Read existing unresolved entries to avoid duplicates
+    let existing: HashSet<String> = fs::read_to_string(&path)
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| serde_json::from_str::<DriftEntry>(l).ok())
+        .filter(|e| !e.resolved)
+        .map(|e| format!("{}:{}", e.cwd, e.doc))
+        .collect();
+
+    if let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(&path) {
+        for entry in entries {
+            let key = format!("{}:{}", entry.cwd, entry.doc);
+            if existing.contains(&key) {
+                continue; // Already have an unresolved entry for this doc
+            }
+            let _ = writeln!(file, "{}", serde_json::to_string(entry).unwrap_or_default());
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// UserPromptSubmit phase: read drift findings and inject instructions
+// ---------------------------------------------------------------------------
+
+/// Read unresolved drift entries for the given cwd.
+fn read_unresolved_drift(cwd_str: &str) -> Vec<DriftEntry> {
+    let path = match drift_file() {
+        Some(p) => p,
+        None => return Vec::new(),
+    };
+    let content = match fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+
+    content
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .filter_map(|l| serde_json::from_str::<DriftEntry>(l).ok())
+        .filter(|e| !e.resolved && e.cwd == cwd_str)
+        .collect()
+}
+
+/// Build context injection for doc drift findings.
+fn build_drift_context(entries: &[DriftEntry]) -> String {
+    let mut lines = Vec::new();
+    lines.push(format!(
+        "[Doc Drift] {} documentation issue(s) detected in this project.",
+        entries.len()
+    ));
+    lines.push(String::new());
+    lines.push("RECOMMENDED: Update the following docs when you have a natural pause in your current task.".into());
+    lines.push(String::new());
+
+    for (i, entry) in entries.iter().enumerate() {
+        lines.push(format!("{}. **{}**: {}", i + 1, entry.doc, entry.reason));
+
+        match entry.doc.as_str() {
+            "README.md" => {
+                lines.push("   - If missing: create with project name, description, quick start, and architecture overview".into());
+                lines.push("   - If stale: review recent changes and update relevant sections".into());
+            }
+            "CLAUDE.md" => {
+                lines.push("   - If missing: create with project-specific instructions, key file paths, and conventions".into());
+                lines.push("   - If stub: add architecture overview, key commands, and project-specific rules".into());
+            }
+            "CHANGELOG.md" => {
+                lines.push("   - If missing: create with Keep a Changelog format and [Unreleased] section".into());
+                lines.push("   - If no [Unreleased]: add one and log recent changes under appropriate categories (Added/Changed/Fixed/Removed)".into());
+            }
+            _ => {}
+        }
+    }
+
+    lines.push(String::new());
+    lines.push("After updating docs, the drift finding will clear automatically on next session.".into());
+
+    lines.join("\n")
+}
+
+/// Mark drift entries as resolved by rewriting the file.
+fn resolve_drift_for_cwd(cwd_str: &str) {
+    let path = match drift_file() {
+        Some(p) => p,
+        None => return,
+    };
+    let content = match fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+
+    let updated: Vec<String> = content
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| {
+            if let Ok(mut entry) = serde_json::from_str::<DriftEntry>(l) {
+                if entry.cwd == cwd_str && !entry.resolved {
+                    entry.resolved = true;
+                    return serde_json::to_string(&entry).unwrap_or_else(|_| l.to_string());
+                }
+            }
+            l.to_string()
+        })
+        .collect();
+
+    let _ = fs::write(&path, updated.join("\n") + "\n");
+}
+
+// ---------------------------------------------------------------------------
+// Public entry points
+// ---------------------------------------------------------------------------
+
+/// Process on Stop — detect drift and write findings.
+pub fn process_stop(input: &HookInput) -> HookOutput {
+    let cwd_str = input.cwd.as_deref().unwrap_or(".");
+    let cwd = Path::new(cwd_str);
+
+    if !cwd.is_dir() {
+        return HookOutput::allow();
+    }
+
+    let recent_changes = recent_source_changes(cwd);
+
+    let mut drift_entries = Vec::new();
+    for doc in MONITORED_DOCS {
+        if let Some(entry) = check_doc_drift(cwd, doc, &recent_changes) {
+            drift_entries.push(entry);
+        }
+    }
+
+    if !drift_entries.is_empty() {
+        tracing::info!(
+            count = drift_entries.len(),
+            "Doc drift detected: {:?}",
+            drift_entries.iter().map(|e| &e.doc).collect::<Vec<_>>()
+        );
+        write_drift_entries(&drift_entries);
+    } else {
+        // No drift detected — resolve any previous findings for this cwd
+        resolve_drift_for_cwd(cwd_str);
+    }
+
+    HookOutput::allow()
+}
+
+/// Process on UserPromptSubmit — inject update instructions if drift exists.
+pub fn process_prompt(input: &HookInput) -> HookOutput {
+    let cwd_str = input.cwd.as_deref().unwrap_or(".");
+
+    let entries = read_unresolved_drift(cwd_str);
+    if entries.is_empty() {
+        return HookOutput::allow();
+    }
+
+    if !cooldown_expired() {
+        return HookOutput::allow();
+    }
+
+    // Re-verify drift is still real (docs might have been updated since detection)
+    let cwd = Path::new(cwd_str);
+    let still_drifted: Vec<&DriftEntry> = entries
+        .iter()
+        .filter(|e| {
+            let doc_path = cwd.join(&e.doc);
+            match e.doc.as_str() {
+                "README.md" => {
+                    !doc_path.exists()
+                        || fs::read_to_string(&doc_path)
+                            .map(|c| c.split_whitespace().count() < 30)
+                            .unwrap_or(true)
+                }
+                "CLAUDE.md" => !doc_path.exists() || fs::metadata(&doc_path).map(|m| m.len() < 200).unwrap_or(true),
+                "CHANGELOG.md" => !doc_path.exists(),
+                _ => false,
+            }
+        })
+        .collect();
+
+    if still_drifted.is_empty() {
+        // Drift has been resolved — clean up
+        resolve_drift_for_cwd(cwd_str);
+        return HookOutput::allow();
+    }
+
+    write_cooldown();
+
+    let context = build_drift_context(&entries);
+    HookOutput::inject_context(HookEvent::UserPromptSubmit, context)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_missing_readme_with_sources() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join("src")).unwrap();
+
+        let entry = check_readme_drift(
+            &dir.path().join("README.md"),
+            &[],
+            &dir.path().to_string_lossy(),
+            "2026-03-05",
+        );
+        assert!(entry.is_some());
+        assert!(entry.unwrap().reason.contains("Missing README"));
+    }
+
+    #[test]
+    fn test_stub_readme() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("README.md"), "# Title\nShort.").unwrap();
+
+        let entry = check_readme_drift(
+            &dir.path().join("README.md"),
+            &[],
+            &dir.path().to_string_lossy(),
+            "2026-03-05",
+        );
+        assert!(entry.is_some());
+        assert!(entry.unwrap().reason.contains("stub"));
+    }
+
+    #[test]
+    fn test_good_readme_no_drift() {
+        let dir = tempfile::tempdir().unwrap();
+        let content = "# My Project\n\nThis is a comprehensive readme with enough content to describe the project, its architecture, installation instructions, usage patterns, and contribution guidelines. It has well over thirty words of real meaningful content that describes the project.";
+        fs::write(dir.path().join("README.md"), content).unwrap();
+
+        let entry = check_readme_drift(
+            &dir.path().join("README.md"),
+            &[],
+            &dir.path().to_string_lossy(),
+            "2026-03-05",
+        );
+        assert!(entry.is_none());
+    }
+
+    #[test]
+    fn test_missing_claude_md_with_sources() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join("src")).unwrap();
+
+        let entry = check_claude_md_drift(
+            &dir.path().join("CLAUDE.md"),
+            dir.path(),
+            &dir.path().to_string_lossy(),
+            "2026-03-05",
+        );
+        assert!(entry.is_some());
+        assert!(entry.unwrap().reason.contains("Missing CLAUDE.md"));
+    }
+
+    #[test]
+    fn test_stub_claude_md() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("CLAUDE.md"), "# Project\nTODO").unwrap();
+        fs::create_dir(dir.path().join("src")).unwrap();
+
+        let entry = check_claude_md_drift(
+            &dir.path().join("CLAUDE.md"),
+            dir.path(),
+            &dir.path().to_string_lossy(),
+            "2026-03-05",
+        );
+        assert!(entry.is_some());
+        assert!(entry.unwrap().reason.contains("stub"));
+    }
+
+    #[test]
+    fn test_missing_changelog_few_changes() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Only 2 changes — shouldn't flag
+        let entry = check_changelog_drift(
+            &dir.path().join("CHANGELOG.md"),
+            &["a.rs".into(), "b.rs".into()],
+            &dir.path().to_string_lossy(),
+            "2026-03-05",
+        );
+        assert!(entry.is_none());
+    }
+
+    #[test]
+    fn test_missing_changelog_many_changes() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let changes: Vec<String> = (0..6).map(|i| format!("file{i}.rs")).collect();
+        let entry = check_changelog_drift(
+            &dir.path().join("CHANGELOG.md"),
+            &changes,
+            &dir.path().to_string_lossy(),
+            "2026-03-05",
+        );
+        assert!(entry.is_some());
+    }
+
+    #[test]
+    fn test_changelog_no_unreleased_section() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("CHANGELOG.md"),
+            "# Changelog\n\n## [1.0.0] - 2026-01-01\n\n### Added\n- Initial release\n",
+        )
+        .unwrap();
+
+        let changes: Vec<String> = (0..4).map(|i| format!("file{i}.rs")).collect();
+        let entry = check_changelog_drift(
+            &dir.path().join("CHANGELOG.md"),
+            &changes,
+            &dir.path().to_string_lossy(),
+            "2026-03-05",
+        );
+        assert!(entry.is_some());
+        assert!(entry.unwrap().reason.contains("[Unreleased]"));
+    }
+
+    #[test]
+    fn test_cooldown_logic() {
+        // Fresh state — should be expired
+        let _ = fs::remove_file(cooldown_file());
+        assert!(cooldown_expired());
+
+        // After writing — should not be expired
+        write_cooldown();
+        assert!(!cooldown_expired());
+    }
+
+    #[test]
+    fn test_build_drift_context() {
+        let entries = vec![
+            DriftEntry {
+                doc: "README.md".into(),
+                reason: "Missing README".into(),
+                cwd: "/test".into(),
+                ts: "2026-03-05".into(),
+                resolved: false,
+            },
+            DriftEntry {
+                doc: "CHANGELOG.md".into(),
+                reason: "No [Unreleased] section".into(),
+                cwd: "/test".into(),
+                ts: "2026-03-05".into(),
+                resolved: false,
+            },
+        ];
+
+        let ctx = build_drift_context(&entries);
+        assert!(ctx.contains("[Doc Drift] 2 documentation issue(s)"));
+        assert!(ctx.contains("README.md"));
+        assert!(ctx.contains("CHANGELOG.md"));
+        assert!(ctx.contains("Keep a Changelog"));
+    }
+
+    #[test]
+    fn test_process_stop_no_dir() {
+        let input = HookInput {
+            cwd: Some("/nonexistent/path/that/does/not/exist".into()),
+            ..Default::default()
+        };
+        let output = process_stop(&input);
+        assert!(output.blocked.is_none());
+    }
+
+    #[test]
+    fn test_process_prompt_no_drift() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = HookInput {
+            cwd: Some(dir.path().to_string_lossy().to_string()),
+            ..Default::default()
+        };
+        let output = process_prompt(&input);
+        assert!(output.blocked.is_none());
+        assert!(output.hook_specific_output.is_none());
+    }
+
+    #[test]
+    fn test_drift_deduplication() {
+        let dir = tempfile::tempdir().unwrap();
+        let drift_path = dir.path().join("doc-drift.jsonl");
+
+        let entry = DriftEntry {
+            doc: "README.md".into(),
+            reason: "Missing".into(),
+            cwd: "/test".into(),
+            ts: "2026-03-05".into(),
+            resolved: false,
+        };
+
+        // Write same entry — should deduplicate
+        let line = serde_json::to_string(&entry).unwrap();
+        fs::write(&drift_path, format!("{line}\n")).unwrap();
+
+        let existing: HashSet<String> = fs::read_to_string(&drift_path)
+            .unwrap()
+            .lines()
+            .filter_map(|l| serde_json::from_str::<DriftEntry>(l).ok())
+            .filter(|e| !e.resolved)
+            .map(|e| format!("{}:{}", e.cwd, e.doc))
+            .collect();
+
+        assert!(existing.contains("/test:README.md"));
+    }
+}

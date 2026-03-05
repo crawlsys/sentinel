@@ -1,11 +1,13 @@
 //! Hook Implementations
 //!
-//! Each module implements one hook from the Claude Code marketplace,
-//! ported from the original Node.js hooks to Rust.
+//! All hooks run through the sentinel Rust engine.
+//! Each module implements one hook. Add new hooks here and
+//! update HOOK_NAMES to keep the count accurate.
 
 pub mod commit_hygiene;
 pub mod context_monitor;
 pub mod doc_cleanup;
+pub mod doc_drift;
 pub mod error_reporter;
 pub mod evidence_collector;
 pub mod execution_log;
@@ -22,6 +24,31 @@ pub mod skill_telemetry;
 pub mod todo_interceptor;
 pub mod todo_loader;
 pub mod verification_gate;
+
+/// All hook module names — used for dynamic counting.
+/// Keep in sync with the `pub mod` declarations above.
+pub const HOOK_NAMES: &[&str] = &[
+    "commit_hygiene",
+    "context_monitor",
+    "doc_cleanup",
+    "doc_drift",
+    "error_reporter",
+    "evidence_collector",
+    "execution_log",
+    "git_hygiene",
+    "hygiene_override",
+    "mcp_health",
+    "phase_gate",
+    "phase_validator",
+    "pre_commit_verification",
+    "pre_push_steel_test",
+    "session_init",
+    "skill_router",
+    "skill_telemetry",
+    "todo_interceptor",
+    "todo_loader",
+    "verification_gate",
+];
 
 /// Port for git status queries — implemented by the infrastructure layer.
 /// The git-dependent hooks accept this trait so the application layer

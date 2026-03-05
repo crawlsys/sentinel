@@ -45,7 +45,7 @@ fn read_current_skill() -> String {
         .ok()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "unknown".to_string())
+        .unwrap_or_else(|| "none".to_string())
 }
 
 /// Read the run ID from the temp state file written by skill-router.

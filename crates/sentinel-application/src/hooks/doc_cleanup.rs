@@ -1,13 +1,20 @@
-//! Doc Cleanup
+//! Doc Cleanup — Two-phase hook
 //!
-//! Scans the working directory for junk `.md` files and warns via stderr.
-//! Detects: empty/stub files (<100 chars), TODO-only files, and orphaned
-//! root-level docs that should live in `docs/`.
+//! **Stop phase:** Scans for junk `.md` files (empty/stub, TODO-only,
+//! orphaned root-level docs). Writes findings to
+//! `~/.claude/metrics/doc-cleanup.json`.
+//!
+//! **UserPromptSubmit phase:** Reads findings, checks cooldown (30 min),
+//! injects cleanup instructions.
 
 use regex::Regex;
-use sentinel_domain::events::{HookInput, HookOutput};
+use sentinel_domain::events::{HookEvent, HookInput, HookOutput};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+/// Cooldown between cleanup reminders (30 minutes)
+const COOLDOWN_MS: u64 = 30 * 60 * 1000;
 
 /// Root-level `.md` files that are expected and not considered orphaned.
 const ALLOWED_ROOT_MD: &[&str] = &[
@@ -33,28 +40,51 @@ const SKIP_DIRS: &[&str] = &[
     "__pycache__",
 ];
 
-/// Classification of a junk doc.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct JunkDoc {
     path: String,
-    reason: JunkReason,
+    reason: String,
 }
 
-#[derive(Debug, Clone, Copy)]
-enum JunkReason {
-    Empty,
-    TodoOnly,
-    Orphaned,
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct CleanupState {
+    cwd: String,
+    junk_docs: Vec<JunkDoc>,
+    ts: String,
 }
 
-impl JunkReason {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Empty => "empty/stub",
-            Self::TodoOnly => "TODO-only",
-            Self::Orphaned => "orphaned in root",
-        }
-    }
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+fn state_file() -> Option<PathBuf> {
+    let home = dirs::home_dir()?;
+    let dir = home.join(".claude").join("metrics");
+    fs::create_dir_all(&dir).ok()?;
+    Some(dir.join("doc-cleanup.json"))
+}
+
+fn cooldown_file() -> PathBuf {
+    std::env::temp_dir().join("claude-doc-cleanup-last")
+}
+
+fn cooldown_expired() -> bool {
+    let content = match fs::read_to_string(cooldown_file()) {
+        Ok(c) => c,
+        Err(_) => return true,
+    };
+    let last: u64 = match content.trim().parse() {
+        Ok(v) => v,
+        Err(_) => return true,
+    };
+    now_ms().saturating_sub(last) >= COOLDOWN_MS
+}
+
+fn write_cooldown() {
+    let _ = fs::write(cooldown_file(), now_ms().to_string());
 }
 
 /// Recursively scan `dir` for junk `.md` files up to `max_depth`.
@@ -115,7 +145,7 @@ fn scan_docs(dir: &Path, cwd: &Path, depth: usize, max_depth: usize, results: &m
         if stripped.len() < 100 {
             results.push(JunkDoc {
                 path: relative,
-                reason: JunkReason::Empty,
+                reason: "empty/stub (less than 100 chars of content)".into(),
             });
             continue;
         }
@@ -123,7 +153,7 @@ fn scan_docs(dir: &Path, cwd: &Path, depth: usize, max_depth: usize, results: &m
         if todo_re.is_match(&content) {
             results.push(JunkDoc {
                 path: relative,
-                reason: JunkReason::TodoOnly,
+                reason: "TODO-only placeholder".into(),
             });
             continue;
         }
@@ -135,14 +165,17 @@ fn scan_docs(dir: &Path, cwd: &Path, depth: usize, max_depth: usize, results: &m
         {
             results.push(JunkDoc {
                 path: relative,
-                reason: JunkReason::Orphaned,
+                reason: "orphaned in root (should be in docs/ or deleted)".into(),
             });
         }
     }
 }
 
-/// Process the doc-cleanup hook event (Stop).
-pub fn process(input: &HookInput) -> HookOutput {
+// ---------------------------------------------------------------------------
+// Stop phase: detect junk docs and write state
+// ---------------------------------------------------------------------------
+
+pub fn process_stop(input: &HookInput) -> HookOutput {
     let cwd_str = input.cwd.as_deref().unwrap_or(".");
     let cwd = Path::new(cwd_str);
 
@@ -154,119 +187,93 @@ pub fn process(input: &HookInput) -> HookOutput {
     scan_docs(cwd, cwd, 0, 3, &mut results);
 
     if results.is_empty() {
+        // No junk — clear any previous state
+        if let Some(path) = state_file() {
+            let _ = fs::remove_file(path);
+        }
         return HookOutput::allow();
     }
 
-    // Group by reason
-    let empty: Vec<&JunkDoc> = results
-        .iter()
-        .filter(|d| matches!(d.reason, JunkReason::Empty))
-        .collect();
-    let orphaned: Vec<&JunkDoc> = results
-        .iter()
-        .filter(|d| matches!(d.reason, JunkReason::Orphaned))
-        .collect();
-    let todo: Vec<&JunkDoc> = results
-        .iter()
-        .filter(|d| matches!(d.reason, JunkReason::TodoOnly))
-        .collect();
+    let state = CleanupState {
+        cwd: cwd_str.to_string(),
+        junk_docs: results,
+        ts: chrono::Utc::now().to_rfc3339(),
+    };
 
-    // Build warning box for stderr
-    let mut lines = Vec::new();
-    lines.push(String::new());
-    lines.push("+-----------------------------------------------------------+".to_string());
-    lines.push("|  DOC CLEANUP NEEDED                                       |".to_string());
-    lines.push("+-----------------------------------------------------------+".to_string());
-
-    if !empty.is_empty() {
-        lines.push(format!(
-            "|  Empty/stub docs: {}{}|",
-            empty.len(),
-            " ".repeat(39 - empty.len().to_string().len())
-        ));
-        for doc in empty.iter().take(3) {
-            let path_display = if doc.path.len() > 50 {
-                &doc.path[..50]
-            } else {
-                &doc.path
-            };
-            lines.push(format!(
-                "|    - {}{}|",
-                path_display,
-                " ".repeat(53 - path_display.len().min(53))
-            ));
-        }
-        if empty.len() > 3 {
-            let msg = format!("... and {} more", empty.len() - 3);
-            lines.push(format!(
-                "|    {}{}|",
-                msg,
-                " ".repeat(55 - msg.len())
-            ));
-        }
+    if let Some(path) = state_file() {
+        let _ = fs::write(&path, serde_json::to_string(&state).unwrap_or_default());
     }
 
-    if !orphaned.is_empty() {
-        lines.push(format!(
-            "|  Orphaned in root: {}{}|",
-            orphaned.len(),
-            " ".repeat(38 - orphaned.len().to_string().len())
-        ));
-        for doc in orphaned.iter().take(3) {
-            let path_display = if doc.path.len() > 50 {
-                &doc.path[..50]
-            } else {
-                &doc.path
-            };
-            lines.push(format!(
-                "|    - {}{}|",
-                path_display,
-                " ".repeat(53 - path_display.len().min(53))
-            ));
-        }
-    }
-
-    if !todo.is_empty() {
-        lines.push(format!(
-            "|  TODO-only docs: {}{}|",
-            todo.len(),
-            " ".repeat(39 - todo.len().to_string().len())
-        ));
-        for doc in todo.iter().take(3) {
-            let path_display = if doc.path.len() > 50 {
-                &doc.path[..50]
-            } else {
-                &doc.path
-            };
-            lines.push(format!(
-                "|    - {}{}|",
-                path_display,
-                " ".repeat(53 - path_display.len().min(53))
-            ));
-        }
-    }
-
-    lines.push("+-----------------------------------------------------------+".to_string());
-    lines.push("|  Run /document clean to fix                               |".to_string());
-    lines.push("+-----------------------------------------------------------+".to_string());
-    lines.push(String::new());
-
-    // Output to stderr (displayed to user in Claude Code)
-    let warning = lines.join("\n");
-    tracing::warn!("{}", warning);
-
-    // Log individual junk files for debugging
-    for doc in &results {
-        tracing::debug!(path = %doc.path, reason = doc.reason.label(), "junk doc detected");
-    }
+    tracing::info!(
+        count = state.junk_docs.len(),
+        "Junk docs detected"
+    );
 
     HookOutput::allow()
+}
+
+// ---------------------------------------------------------------------------
+// UserPromptSubmit phase: inject cleanup instructions
+// ---------------------------------------------------------------------------
+
+pub fn process_prompt(input: &HookInput) -> HookOutput {
+    let cwd = input.cwd.as_deref().unwrap_or(".");
+
+    let path = match state_file() {
+        Some(p) => p,
+        None => return HookOutput::allow(),
+    };
+
+    let content = match fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(_) => return HookOutput::allow(),
+    };
+
+    let state: CleanupState = match serde_json::from_str(&content) {
+        Ok(s) => s,
+        Err(_) => return HookOutput::allow(),
+    };
+
+    // Only inject for the current project
+    if state.cwd != cwd {
+        return HookOutput::allow();
+    }
+
+    if !cooldown_expired() {
+        return HookOutput::allow();
+    }
+
+    write_cooldown();
+
+    let doc_list: String = state
+        .junk_docs
+        .iter()
+        .take(8)
+        .map(|d| format!("  - `{}` — {}", d.path, d.reason))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let extra = if state.junk_docs.len() > 8 {
+        format!("\n  ... and {} more", state.junk_docs.len() - 8)
+    } else {
+        String::new()
+    };
+
+    let context = format!(
+        "[Doc Cleanup] {} junk documentation file(s) found in this project.\n\
+         When you have a natural pause, clean these up:\n\
+         {doc_list}{extra}\n\
+         \n\
+         Actions: delete empty stubs, flesh out TODO-only files, or move orphaned docs into `docs/`.",
+        state.junk_docs.len(),
+    );
+
+    HookOutput::inject_context(HookEvent::UserPromptSubmit, context)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
 
     #[test]
     fn test_empty_dir_no_junk() {
@@ -275,7 +282,7 @@ mod tests {
             cwd: Some(dir.path().to_string_lossy().to_string()),
             ..Default::default()
         };
-        let output = process(&input);
+        let output = process_stop(&input);
         assert!(output.blocked.is_none());
     }
 
@@ -291,7 +298,7 @@ mod tests {
             cwd: Some(dir.path().to_string_lossy().to_string()),
             ..Default::default()
         };
-        let output = process(&input);
+        let output = process_stop(&input);
         assert!(output.blocked.is_none());
     }
 
@@ -299,13 +306,10 @@ mod tests {
     fn test_empty_md_detected() {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("notes.md"), "# Notes\n\nTODO").unwrap();
-        let input = HookInput {
-            cwd: Some(dir.path().to_string_lossy().to_string()),
-            ..Default::default()
-        };
-        let output = process(&input);
-        // Should still allow (Stop hooks never block), but should have logged
-        assert!(output.blocked.is_none());
+        let mut results = Vec::new();
+        scan_docs(dir.path(), dir.path(), 0, 3, &mut results);
+        assert!(!results.is_empty());
+        assert!(results[0].reason.contains("empty/stub"));
     }
 
     #[test]
@@ -316,12 +320,10 @@ mod tests {
             "# Feature\n\nTODO: implement this feature with all the details and make sure it covers enough content to be over 100 characters of stripped content",
         )
         .unwrap();
-        let input = HookInput {
-            cwd: Some(dir.path().to_string_lossy().to_string()),
-            ..Default::default()
-        };
-        let output = process(&input);
-        assert!(output.blocked.is_none());
+        let mut results = Vec::new();
+        scan_docs(dir.path(), dir.path(), 0, 3, &mut results);
+        assert!(!results.is_empty());
+        assert!(results[0].reason.contains("TODO-only"));
     }
 
     #[test]
@@ -330,32 +332,38 @@ mod tests {
         let nm = dir.path().join("node_modules");
         fs::create_dir(&nm).unwrap();
         fs::write(nm.join("junk.md"), "").unwrap();
-        let input = HookInput {
-            cwd: Some(dir.path().to_string_lossy().to_string()),
-            ..Default::default()
-        };
-        let output = process(&input);
-        assert!(output.blocked.is_none());
+        let mut results = Vec::new();
+        scan_docs(dir.path(), dir.path(), 0, 3, &mut results);
+        assert!(results.is_empty());
     }
 
     #[test]
     fn test_scan_docs_max_depth() {
         let dir = tempfile::tempdir().unwrap();
-        // Create deeply nested file beyond max depth
         let deep = dir.path().join("a").join("b").join("c").join("d");
         fs::create_dir_all(&deep).unwrap();
         fs::write(deep.join("deep.md"), "").unwrap();
-
         let mut results = Vec::new();
         scan_docs(dir.path(), dir.path(), 0, 3, &mut results);
-        // depth 4 file should not be found
         assert!(results.is_empty());
     }
 
     #[test]
-    fn test_junk_reason_labels() {
-        assert_eq!(JunkReason::Empty.label(), "empty/stub");
-        assert_eq!(JunkReason::TodoOnly.label(), "TODO-only");
-        assert_eq!(JunkReason::Orphaned.label(), "orphaned in root");
+    fn test_prompt_no_state_returns_allow() {
+        let input = HookInput {
+            cwd: Some("/nonexistent/test/path".into()),
+            ..Default::default()
+        };
+        let output = process_prompt(&input);
+        assert!(output.hook_specific_output.is_none());
+    }
+
+    #[test]
+    fn test_cooldown_logic() {
+        let _ = fs::remove_file(cooldown_file());
+        assert!(cooldown_expired());
+        write_cooldown();
+        assert!(!cooldown_expired());
+        let _ = fs::remove_file(cooldown_file());
     }
 }

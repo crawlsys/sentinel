@@ -1,62 +1,65 @@
-//! Verification Gate
+//! Verification Gate — Two-phase hook
 //!
-//! Detects unverified completion claims in Claude's transcript and warns
-//! via stderr. Inspired by the "evidence before claims" pattern.
+//! **Stop phase:** Scans transcript for unverified completion claims
+//! (e.g. "all tests pass" without running tests). Writes findings to
+//! `~/.claude/metrics/unverified-claims.json`.
 //!
-//! Logic:
-//! 1. Read transcript for completion claims (regex fast path)
-//! 2. If no claims -> exit (no-op)
-//! 3. If claims -> scan for verification evidence (tool calls, test output)
-//! 4. If evidence found -> log success
-//! 5. If NO evidence -> warn via stderr
-//! 6. Cooldown: max 1 warning per 5 minutes
+//! **UserPromptSubmit phase:** Reads findings, checks cooldown (5 min),
+//! injects reminder to run verification before claiming completion.
 
 use regex::Regex;
-use sentinel_domain::events::{HookInput, HookOutput};
+use sentinel_domain::events::{HookEvent, HookInput, HookOutput};
 use std::fs;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Cooldown duration in milliseconds (5 minutes).
-const COOLDOWN_MS: u128 = 5 * 60 * 1000;
+/// Cooldown duration (5 minutes)
+const COOLDOWN_MS: u64 = 5 * 60 * 1000;
 
-/// Get the cooldown file path for a session.
-fn cooldown_path(session_id: &str) -> PathBuf {
-    std::env::temp_dir().join(format!("claude-verification-cooldown-{session_id}"))
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct ClaimState {
+    claims: Vec<String>,
+    session_id: String,
+    ts: String,
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+fn state_file() -> Option<PathBuf> {
+    let home = dirs::home_dir()?;
+    let dir = home.join(".claude").join("metrics");
+    fs::create_dir_all(&dir).ok()?;
+    Some(dir.join("unverified-claims.json"))
+}
+
+fn cooldown_file() -> PathBuf {
+    std::env::temp_dir().join("claude-verification-gate-last")
+}
+
+fn cooldown_expired() -> bool {
+    let content = match fs::read_to_string(cooldown_file()) {
+        Ok(c) => c,
+        Err(_) => return true,
+    };
+    let last: u64 = match content.trim().parse() {
+        Ok(v) => v,
+        Err(_) => return true,
+    };
+    now_ms().saturating_sub(last) >= COOLDOWN_MS
+}
+
+fn write_cooldown() {
+    let _ = fs::write(cooldown_file(), now_ms().to_string());
 }
 
 /// Get the offset file path for a session.
 fn offset_path(session_id: &str) -> PathBuf {
     std::env::temp_dir().join(format!("claude-verification-offset-{session_id}"))
-}
-
-/// Check if we're still within the cooldown period.
-fn is_on_cooldown(session_id: &str) -> bool {
-    let path = cooldown_path(session_id);
-    let last_warn: u128 = fs::read_to_string(path)
-        .ok()
-        .and_then(|s| s.trim().parse().ok())
-        .unwrap_or(0);
-
-    if last_warn == 0 {
-        return false;
-    }
-
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0);
-
-    now.saturating_sub(last_warn) < COOLDOWN_MS
-}
-
-/// Set the cooldown marker to now.
-fn set_cooldown(session_id: &str) {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0);
-    let _ = fs::write(cooldown_path(session_id), now.to_string());
 }
 
 /// Read transcript offset for dedup.
@@ -100,7 +103,7 @@ fn evidence_patterns() -> Vec<Regex> {
         r"(?i)\d+\s+fail(?:ing|ed)?",
         r"(?i)exit code:?\s*0",
         r"(?i)tests?\s+suites?.*passed",
-        r"[\u2713\u2714]|PASS",
+        r"[\u{2713}\u{2714}]|PASS",
         r"(?i)BUILD SUCCESS",
         r"(?i)Successfully compiled",
         r"tsc.*--noEmit",
@@ -112,7 +115,7 @@ fn evidence_patterns() -> Vec<Regex> {
     .collect()
 }
 
-/// Parse transcript and extract assistant text + tool call info.
+/// Parsed transcript data.
 struct TranscriptData {
     assistant_text: String,
     has_bash_calls: bool,
@@ -165,7 +168,6 @@ fn parse_transcript(transcript_path: &str, session_id: &str) -> TranscriptData {
             }
         }
 
-        // tool_result entries also count as evidence
         if entry.get("type").and_then(|v| v.as_str()) == Some("tool_result") {
             data.has_bash_calls = true;
         }
@@ -175,8 +177,11 @@ fn parse_transcript(transcript_path: &str, session_id: &str) -> TranscriptData {
     data
 }
 
-/// Process the verification-gate hook event (Stop).
-pub fn process(input: &HookInput) -> HookOutput {
+// ---------------------------------------------------------------------------
+// Stop phase: detect unverified claims and write state
+// ---------------------------------------------------------------------------
+
+pub fn process_stop(input: &HookInput) -> HookOutput {
     let session_id = input.session_id.as_deref().unwrap_or("unknown");
 
     let transcript_path = match &input.transcript_path {
@@ -200,6 +205,10 @@ pub fn process(input: &HookInput) -> HookOutput {
     }
 
     if claims_found.is_empty() {
+        // No claims — clear any previous state
+        if let Some(path) = state_file() {
+            let _ = fs::remove_file(path);
+        }
         return HookOutput::allow();
     }
 
@@ -217,53 +226,88 @@ pub fn process(input: &HookInput) -> HookOutput {
     }
 
     if evidence_found {
-        tracing::debug!(
-            claims = claims_found.len(),
-            "verification gate: claims verified with evidence"
-        );
+        // Claims verified — clear state
+        tracing::debug!(claims = claims_found.len(), "Claims verified with evidence");
+        if let Some(path) = state_file() {
+            let _ = fs::remove_file(path);
+        }
         return HookOutput::allow();
     }
 
-    // Claims without evidence -- warn if not on cooldown
-    if is_on_cooldown(session_id) {
-        return HookOutput::allow();
+    // Unverified claims — write state
+    let state = ClaimState {
+        claims: claims_found.into_iter().take(5).collect(),
+        session_id: session_id.to_string(),
+        ts: chrono::Utc::now().to_rfc3339(),
+    };
+
+    if let Some(path) = state_file() {
+        let _ = fs::write(&path, serde_json::to_string(&state).unwrap_or_default());
     }
 
-    set_cooldown(session_id);
-
-    // Build warning box
-    let mut warning_lines = vec![
-        String::new(),
-        "+-----------------------------------------------------------+".to_string(),
-        "|  WARNING: Completion claimed without evidence              |".to_string(),
-        "+-----------------------------------------------------------+".to_string(),
-    ];
-
-    for claim in claims_found.iter().take(3) {
-        let truncated = if claim.len() > 50 {
-            &claim[..50]
-        } else {
-            claim
-        };
-        warning_lines.push(format!(
-            "|    -> \"{}\"{}|",
-            truncated,
-            " ".repeat(55 - truncated.len().min(55) - 6)
-        ));
-    }
-
-    warning_lines.extend([
-        "|                                                           |".to_string(),
-        "|  Run tests, build, or other verification commands         |".to_string(),
-        "|  before claiming completion.                              |".to_string(),
-        "+-----------------------------------------------------------+".to_string(),
-        String::new(),
-    ]);
-
-    let warning = warning_lines.join("\n");
-    tracing::warn!("{}", warning);
+    tracing::warn!(
+        count = state.claims.len(),
+        "Unverified completion claims detected"
+    );
 
     HookOutput::allow()
+}
+
+// ---------------------------------------------------------------------------
+// UserPromptSubmit phase: inject verification reminder
+// ---------------------------------------------------------------------------
+
+pub fn process_prompt(input: &HookInput) -> HookOutput {
+    let path = match state_file() {
+        Some(p) => p,
+        None => return HookOutput::allow(),
+    };
+
+    let content = match fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(_) => return HookOutput::allow(),
+    };
+
+    let state: ClaimState = match serde_json::from_str(&content) {
+        Ok(s) => s,
+        Err(_) => return HookOutput::allow(),
+    };
+
+    // Only inject for the current session
+    let session_id = input.session_id.as_deref().unwrap_or("unknown");
+    if state.session_id != session_id {
+        return HookOutput::allow();
+    }
+
+    if !cooldown_expired() {
+        return HookOutput::allow();
+    }
+
+    write_cooldown();
+
+    let claims_list: String = state
+        .claims
+        .iter()
+        .map(|c| format!("  - \"{c}\""))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let context = format!(
+        "[Verification Gate] Your last response made completion claims without evidence:\n\
+         {claims_list}\n\
+         \n\
+         Before claiming completion, run actual verification:\n\
+         - Run tests: `cargo test`, `npm test`, `vitest`, etc.\n\
+         - Check types: `tsc --noEmit`, `cargo check`\n\
+         - Build: `cargo build`, `npm run build`\n\
+         \n\
+         Only claim success AFTER seeing passing output."
+    );
+
+    // Clear state after injecting (one-shot reminder)
+    let _ = fs::remove_file(&path);
+
+    HookOutput::inject_context(HookEvent::UserPromptSubmit, context)
 }
 
 #[cfg(test)]
@@ -283,7 +327,7 @@ mod tests {
     #[test]
     fn test_no_transcript() {
         let input = HookInput::default();
-        let output = process(&input);
+        let output = process_stop(&input);
         assert!(output.blocked.is_none());
     }
 
@@ -304,7 +348,7 @@ mod tests {
             session_id: Some("test-vg-noclaims".to_string()),
             ..Default::default()
         };
-        let output = process(&input);
+        let output = process_stop(&input);
         assert!(output.blocked.is_none());
     }
 
@@ -332,17 +376,14 @@ mod tests {
             session_id: Some("test-vg-evidence".to_string()),
             ..Default::default()
         };
-        let output = process(&input);
+        let output = process_stop(&input);
         assert!(output.blocked.is_none());
     }
 
     #[test]
-    fn test_claim_without_evidence_warns() {
-        // Use a unique session ID so cooldown doesn't interfere
+    fn test_claim_without_evidence_writes_state() {
         let session_id = format!("test-vg-warn-{}", std::process::id());
 
-        // Clear any existing cooldown
-        let _ = fs::remove_file(cooldown_path(&session_id));
         let _ = fs::remove_file(offset_path(&session_id));
 
         let transcript = make_transcript(&[json!({
@@ -360,42 +401,85 @@ mod tests {
             session_id: Some(session_id.clone()),
             ..Default::default()
         };
-        let output = process(&input);
-        // Should still allow (Stop hooks never block) but should have warned
+        let output = process_stop(&input);
         assert!(output.blocked.is_none());
 
-        // Clean up
-        let _ = fs::remove_file(cooldown_path(&session_id));
+        // State file should exist with claims
+        if let Some(path) = state_file() {
+            if path.exists() {
+                let state: ClaimState =
+                    serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+                assert!(!state.claims.is_empty());
+                let _ = fs::remove_file(&path);
+            }
+        }
+
         let _ = fs::remove_file(offset_path(&session_id));
     }
 
     #[test]
-    fn test_cooldown_prevents_repeated_warnings() {
-        let session_id = format!("test-vg-cooldown-{}", std::process::id());
+    fn test_prompt_injects_and_clears() {
+        let _ = fs::remove_file(cooldown_file());
 
-        // Set cooldown to now
-        set_cooldown(&session_id);
-        assert!(is_on_cooldown(&session_id));
+        if let Some(path) = state_file() {
+            let state = ClaimState {
+                claims: vec!["all tests pass".into()],
+                session_id: "test-vg-inject".into(),
+                ts: "2026-03-05".into(),
+            };
+            let _ = fs::write(&path, serde_json::to_string(&state).unwrap());
+        }
 
-        // Clean up
-        let _ = fs::remove_file(cooldown_path(&session_id));
+        let input = HookInput {
+            session_id: Some("test-vg-inject".into()),
+            ..Default::default()
+        };
+        let output = process_prompt(&input);
+        assert!(output.hook_specific_output.is_some());
+
+        let ctx = output.hook_specific_output.unwrap().additional_context;
+        assert!(ctx.contains("Verification Gate"));
+        assert!(ctx.contains("all tests pass"));
+
+        // State should be cleared after injection
+        if let Some(path) = state_file() {
+            assert!(!path.exists());
+        }
+
+        let _ = fs::remove_file(cooldown_file());
     }
 
     #[test]
-    fn test_expired_cooldown() {
-        let session_id = format!("test-vg-expired-{}", std::process::id());
+    fn test_prompt_wrong_session_no_inject() {
+        if let Some(path) = state_file() {
+            let state = ClaimState {
+                claims: vec!["all tests pass".into()],
+                session_id: "other-session".into(),
+                ts: "2026-03-05".into(),
+            };
+            let _ = fs::write(&path, serde_json::to_string(&state).unwrap());
+        }
 
-        // Write a cooldown timestamp from 10 minutes ago
-        let ten_min_ago = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_millis().saturating_sub(10 * 60 * 1000))
-            .unwrap_or(0);
-        let _ = fs::write(cooldown_path(&session_id), ten_min_ago.to_string());
-
-        assert!(!is_on_cooldown(&session_id));
+        let input = HookInput {
+            session_id: Some("different-session".into()),
+            ..Default::default()
+        };
+        let output = process_prompt(&input);
+        assert!(output.hook_specific_output.is_none());
 
         // Clean up
-        let _ = fs::remove_file(cooldown_path(&session_id));
+        if let Some(path) = state_file() {
+            let _ = fs::remove_file(path);
+        }
+    }
+
+    #[test]
+    fn test_cooldown_prevents_repeated_warnings() {
+        let _ = fs::remove_file(cooldown_file());
+        assert!(cooldown_expired());
+        write_cooldown();
+        assert!(!cooldown_expired());
+        let _ = fs::remove_file(cooldown_file());
     }
 
     #[test]
