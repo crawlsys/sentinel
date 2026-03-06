@@ -1,13 +1,23 @@
 //! Pre-Push Steel Test Hook
 //!
 //! Blocks `git push` commands when a Steel browser test hasn't been run
-//! in the current session. Ensures UI changes are browser-verified before
-//! code reaches the remote.
+//! in the current session AND the push includes frontend file changes.
+//! Ensures UI changes are browser-verified before code reaches the remote.
+//!
+//! This is the safety net behind Layer 2.5 (pre-push local Steel test) in
+//! the Linear review phase. If the skill-level gate was followed, the state
+//! file will already exist and this hook allows the push instantly.
 //!
 //! Session state tracked via temp file: {tmpdir}/claude-steel-test-{session_id}.json
 //! State format: {"passed": true, "sessionId": "...", "timestamp": "ISO8601"}
 //!
-//! If no project config has Steel test settings, the push is allowed.
+//! Logic:
+//! 1. Only fires on `git push` commands
+//! 2. Checks if diff includes frontend files (.tsx, .jsx, .css, .scss, .styled)
+//! 3. If no frontend files → allow (backend-only push)
+//! 4. If frontend files + recent Steel test → allow
+//! 5. If frontend files + no Steel test → block with instructions
+//! 6. If no project has Steel config → allow (Steel not configured)
 
 use chrono::Utc;
 use regex::Regex;
@@ -17,6 +27,9 @@ use std::time::Duration;
 
 /// Steel test validity window (2 hours)
 const TEST_VALIDITY: Duration = Duration::from_secs(2 * 60 * 60);
+
+/// Frontend file extensions that trigger Steel test requirement
+const FRONTEND_EXTENSIONS: &[&str] = &[".tsx", ".jsx", ".css", ".scss", ".styled"];
 
 /// Path to the Steel test state file for a given session
 fn state_file_path(session_id: &str) -> PathBuf {
@@ -113,6 +126,36 @@ fn any_project_has_steel_config() -> bool {
     any_project_has_steel_config_in(None)
 }
 
+/// Check if the git diff (staged or branch) includes frontend file changes.
+/// Uses the working directory from the hook input.
+fn diff_has_frontend_files(cwd: Option<&str>) -> bool {
+    let dir = cwd.unwrap_or(".");
+
+    // Try to get the diff stat against the tracking branch
+    let output = std::process::Command::new("git")
+        .args(["diff", "--name-only", "@{upstream}..HEAD"])
+        .current_dir(dir)
+        .output();
+
+    // Fallback: diff against origin/main if no upstream
+    let output = match output {
+        Ok(ref o) if o.status.success() && !o.stdout.is_empty() => output,
+        _ => std::process::Command::new("git")
+            .args(["diff", "--name-only", "origin/main..HEAD"])
+            .current_dir(dir)
+            .output(),
+    };
+
+    let file_list = match output {
+        Ok(ref o) if o.status.success() => String::from_utf8_lossy(&o.stdout),
+        _ => return false, // Can't determine diff — allow push
+    };
+
+    file_list
+        .lines()
+        .any(|line| FRONTEND_EXTENSIONS.iter().any(|ext| line.ends_with(ext)))
+}
+
 /// Process a pre-push Steel test hook event (PreToolUse)
 pub fn process(input: &HookInput) -> HookOutput {
     // Only act on Bash tool calls
@@ -140,6 +183,18 @@ pub fn process(input: &HookInput) -> HookOutput {
         return HookOutput::allow();
     }
 
+    // Check if any project has Steel test config
+    if !any_project_has_steel_config() {
+        return HookOutput::allow();
+    }
+
+    // Check if the diff includes frontend files
+    let cwd = input.cwd.as_deref();
+    if !diff_has_frontend_files(cwd) {
+        // Backend-only change — no Steel test needed
+        return HookOutput::allow();
+    }
+
     // Get session ID
     let session_id = input.session_id.as_deref().unwrap_or("unknown");
 
@@ -148,28 +203,23 @@ pub fn process(input: &HookInput) -> HookOutput {
         return HookOutput::allow();
     }
 
-    // Check if any project has Steel test config
-    if !any_project_has_steel_config() {
-        return HookOutput::allow();
-    }
-
-    // Block — Steel test not run
+    // Block — frontend files changed but no Steel test run
     let message = "\
 +============================================================+
-|  BLOCKED: Steel Live Test Required Before Push             |
+|  BLOCKED: Steel Test Required — Frontend Changes Detected  |
 +============================================================+
-|  A Steel browser test must pass before pushing.            |
+|  Your push includes frontend file changes (.tsx/.jsx/.css) |
+|  but no Steel browser test has been run this session.      |
 |                                                            |
-|  Run the test first:                                       |
-|  -> Local: node scripts/steel-live-test.js --local         |
-|  -> Staging: node scripts/steel-live-test.js --staging     |
+|  Run Layer 2.5 (Pre-Push Local Steel Test) first:          |
+|  1. Start local dev server                                 |
+|  2. Start cloudflared tunnel                               |
+|  3. Create Steel session → login → screenshot → verify     |
+|  4. Check console errors                                   |
 |                                                            |
 |  Or mark test as passed:                                   |
 |  -> Say \"steel test passed\" to bypass                      |
 |  -> Say \"override push\" to push anyway                     |
-+============================================================+
-|  This ensures UI changes are browser-verified before       |
-|  reaching the remote repository.                           |
 +============================================================+"
         .to_string();
 
@@ -276,5 +326,23 @@ mod tests {
         let input = HookInput::default();
         let output = process(&input);
         assert!(output.blocked.is_none());
+    }
+
+    #[test]
+    fn test_frontend_extensions_list() {
+        // Verify our extension list covers the expected files
+        assert!(FRONTEND_EXTENSIONS.contains(&".tsx"));
+        assert!(FRONTEND_EXTENSIONS.contains(&".jsx"));
+        assert!(FRONTEND_EXTENSIONS.contains(&".css"));
+        assert!(FRONTEND_EXTENSIONS.contains(&".scss"));
+        assert!(FRONTEND_EXTENSIONS.contains(&".styled"));
+    }
+
+    #[test]
+    fn test_diff_has_frontend_files_non_git_dir() {
+        // Non-git directory should return false (allow push)
+        let tmpdir = tempfile::tempdir().unwrap();
+        let result = diff_has_frontend_files(Some(tmpdir.path().to_str().unwrap()));
+        assert!(!result, "Non-git dir should return false (allow push)");
     }
 }
