@@ -293,15 +293,29 @@ pub fn process_prompt(input: &HookInput) -> HookOutput {
         .join("\n");
 
     let context = format!(
-        "[Verification Gate] Your last response made completion claims without evidence:\n\
+        "[Verification Gate] IRON LAW: No completion claims without fresh verification evidence.\n\
+         \n\
+         Your last response made these claims WITHOUT running verification:\n\
          {claims_list}\n\
          \n\
-         Before claiming completion, run actual verification:\n\
-         - Run tests: `cargo test`, `npm test`, `vitest`, etc.\n\
-         - Check types: `tsc --noEmit`, `cargo check`\n\
-         - Build: `cargo build`, `npm run build`\n\
+         BEFORE claiming completion, you MUST:\n\
+         1. Run tests: `cargo test`, `npm test`, `vitest`, etc.\n\
+         2. Check types: `tsc --noEmit`, `cargo check`\n\
+         3. Build: `cargo build`, `npm run build`\n\
+         4. See passing output in YOUR terminal (not from memory)\n\
          \n\
-         Only claim success AFTER seeing passing output."
+         COMMON RATIONALIZATIONS (all invalid):\n\
+         - \"I already tested this earlier\" — Run it AGAIN. State may have changed.\n\
+         - \"The change is too small to break anything\" — Small changes cause big bugs.\n\
+         - \"I'm confident it works\" — Confidence is not evidence. Run the tests.\n\
+         - \"The tests aren't relevant to my change\" — Let the tests prove that.\n\
+         \n\
+         RED FLAGS — If you catch yourself doing any of these, STOP:\n\
+         - Claiming tests pass without a Bash() call showing output\n\
+         - Saying \"should work\" or \"looks correct\" instead of showing proof\n\
+         - Reporting completion on a task you haven't verified end-to-end\n\
+         \n\
+         The rule is simple: EVIDENCE FIRST, THEN CLAIMS. Never the reverse."
     );
 
     // Clear state after injecting (one-shot reminder)

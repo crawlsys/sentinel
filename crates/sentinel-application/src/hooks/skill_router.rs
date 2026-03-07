@@ -64,6 +64,19 @@ pub fn default_router() -> RegexRouter {
         router.add_rule(rule);
     }
 
+    // Receiving Code Review — handle incoming review feedback
+    if let Ok(rule) = sentinel_domain::routing::RoutingRule::new(
+        "receiving-code-review",
+        vec![
+            r"(?i)\b(address|fix|handle|respond\s+to)\s+(the\s+)?(review|PR)\s+(comment|feedback|suggestion)s?\b",
+            r"(?i)\breviewer\s+said\b",
+            r"(?i)\b(review|PR)\s+(feedback|comments)\s+(from|on)\b",
+        ],
+        88,
+    ) {
+        router.add_rule(rule);
+    }
+
     // Debug
     if let Ok(rule) = sentinel_domain::routing::RoutingRule::new(
         "debug",
