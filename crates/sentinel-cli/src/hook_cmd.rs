@@ -172,6 +172,12 @@ pub async fn run(event: &str, matcher: Option<&str>, standalone: bool) -> Result
             // Activity tracker — log every tool call to activity-log.jsonl
             let activity_output = hooks::activity_tracker::process_post_tool(&input);
             output.merge(&activity_output);
+
+            // Plan organizer — inject plan file organization instructions (ExitPlanMode only)
+            if matches!(input.tool_name.as_deref(), Some("ExitPlanMode")) {
+                let plan_output = hooks::plan_organizer::process(&input);
+                output.merge(&plan_output);
+            }
         }
 
         HookEvent::Stop => {

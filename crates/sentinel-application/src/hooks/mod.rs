@@ -18,6 +18,7 @@ pub mod hygiene_override;
 pub mod mcp_health;
 pub mod phase_gate;
 pub mod phase_validator;
+pub mod plan_organizer;
 pub mod pre_commit_verification;
 pub mod pre_compact;
 pub mod pre_push_steel_test;
@@ -45,6 +46,7 @@ pub const HOOK_NAMES: &[&str] = &[
     "mcp_health",
     "phase_gate",
     "phase_validator",
+    "plan_organizer",
     "pre_commit_verification",
     "pre_compact",
     "pre_push_steel_test",
