@@ -230,6 +230,18 @@ pub async fn run(event: &str, matcher: Option<&str>, standalone: bool) -> Result
             let compact_output = hooks::pre_compact::process(&input);
             output.merge(&compact_output);
         }
+
+        HookEvent::TeammateIdle => {
+            // Team quality gate — remind teammate to check for remaining work
+            let idle_output = hooks::teammate_idle::process(&input);
+            output.merge(&idle_output);
+        }
+
+        HookEvent::TaskCompleted => {
+            // Task verification gate — verify work before marking complete
+            let completed_output = hooks::task_completed::process(&input);
+            output.merge(&completed_output);
+        }
     }
 
     // Record hook invocation

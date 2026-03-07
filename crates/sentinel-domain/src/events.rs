@@ -1,6 +1,6 @@
 //! Hook lifecycle events
 //!
-//! Maps to Claude Code's 6 hook lifecycle events.
+//! Maps to Claude Code's 8 hook lifecycle events.
 
 use serde::{Deserialize, Serialize};
 
@@ -14,6 +14,8 @@ pub enum HookEvent {
     PostToolUse,
     Stop,
     PreCompact,
+    TeammateIdle,
+    TaskCompleted,
 }
 
 impl HookEvent {
@@ -27,6 +29,8 @@ impl HookEvent {
             "PostToolUse" => Some(Self::PostToolUse),
             "Stop" => Some(Self::Stop),
             "PreCompact" => Some(Self::PreCompact),
+            "TeammateIdle" => Some(Self::TeammateIdle),
+            "TaskCompleted" => Some(Self::TaskCompleted),
             _ => None,
         }
     }
@@ -41,6 +45,8 @@ impl std::fmt::Display for HookEvent {
             Self::PostToolUse => write!(f, "PostToolUse"),
             Self::Stop => write!(f, "Stop"),
             Self::PreCompact => write!(f, "PreCompact"),
+            Self::TeammateIdle => write!(f, "TeammateIdle"),
+            Self::TaskCompleted => write!(f, "TaskCompleted"),
         }
     }
 }

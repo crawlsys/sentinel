@@ -25,6 +25,8 @@ pub mod pre_push_steel_test;
 pub mod session_init;
 pub mod skill_router;
 pub mod skill_telemetry;
+pub mod task_completed;
+pub mod teammate_idle;
 pub mod todo_interceptor;
 pub mod todo_loader;
 pub mod verification_gate;
@@ -53,6 +55,8 @@ pub const HOOK_NAMES: &[&str] = &[
     "session_init",
     "skill_router",
     "skill_telemetry",
+    "task_completed",
+    "teammate_idle",
     "todo_interceptor",
     "todo_loader",
     "verification_gate",
