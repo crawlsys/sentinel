@@ -21,13 +21,14 @@ pub fn ipc_path() -> PathBuf {
 pub fn daemon_running() -> bool {
     let path = ipc_path();
     if cfg!(windows) {
-        // On Windows, named pipes are virtual — try connecting
-        // For now, just check if we can stat it
-        path.exists() || {
-            // Named pipes on Windows don't show up in filesystem
-            // We'd need to try connecting
-            false
-        }
+        // Named pipes on Windows don't show up in filesystem.
+        // Try opening the pipe to check if a server is listening.
+        use std::fs::OpenOptions;
+        OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .is_ok()
     } else {
         path.exists()
     }

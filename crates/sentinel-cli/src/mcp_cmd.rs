@@ -197,14 +197,15 @@ pub async fn run() -> Result<()> {
         }
     };
 
-    let judge: Arc<dyn sentinel_application::judge_service::JudgeService> =
-        match sentinel_infrastructure::anthropic::AnthropicClient::from_env() {
-            Ok(client) => Arc::new(client),
-            Err(_) => {
-                info!("No ANTHROPIC_API_KEY — using fallback judge");
-                Arc::new(FallbackJudge)
-            }
-        };
+    let judge: Arc<dyn sentinel_application::judge_service::JudgeService> = {
+        let multi = sentinel_infrastructure::rig_judge::MultiModelJudge::from_env();
+        if multi.has_any_provider() {
+            Arc::new(multi)
+        } else {
+            warn!("No AI judge providers available — using blocking fallback");
+            Arc::new(FallbackJudge)
+        }
+    };
     let proof_engine = Arc::new(ProofEngine::new(state.clone(), judge.clone()));
     let handler = McpHandler::new(state.clone(), proof_engine.clone());
 
@@ -257,8 +258,8 @@ async fn handle_request(
         // MCP lifecycle
         "initialize" => JsonRpcResponse::success(request.id.clone(), server_info()),
 
-        "initialized" => {
-            // Notification — no response needed, but we send one anyway for safety
+        "initialized" | "notifications/initialized" => {
+            // JSON-RPC notification — no response required by spec
             JsonRpcResponse::success(request.id.clone(), serde_json::json!({}))
         }
 
@@ -407,6 +408,10 @@ async fn handle_submit_phase(
             "summary": summary,
             "phases_read": s.phases_read,
             "tool_calls_in_session": s.tool_calls,
+            "hook_invocations": s.hook_stats.total_invocations,
+            "blocked_count": s.hook_stats.total_blocked,
+            "completed_phases": s.workflows.get(&skill).map(|w| &w.completed_phases),
+            "active_skill": s.active_skill,
         });
 
         // Include step evidence if steps were tracked for this phase
@@ -429,63 +434,54 @@ async fn handle_submit_phase(
         .submit_evidence(&skill, &phase_id, &phase_objectives, evidence, judge_model, started_at)
         .await;
 
-    // Get completed phases and proof info
-    let (completed, proof_info) = {
+    // Get completed phases and tessera (hash only — verdict details stay sealed)
+    let (completed, tessera) = {
         let s = state.read().await;
         let completed = s
             .workflows
             .get(&skill)
             .map(|w| w.completed_phases.clone())
             .unwrap_or_default();
-        let proof_info = s
+        let tessera = s
             .proof_chains
             .get(&skill)
             .and_then(|chain| chain.proofs.last())
-            .map(|p| {
-                serde_json::json!({
-                    "tessera_hash": &p.combined_hash[..12],
-                    "evidence_hash": &p.evidence_hash[..12],
-                    "judge_model": p.judge_model,
-                    "judge_sufficient": p.judge_verdict.sufficient,
-                    "judge_confidence": p.judge_verdict.confidence,
-                })
-            });
-        (completed, proof_info)
+            .map(|p| p.combined_hash[..12].to_string());
+        (completed, tessera)
     };
 
     // Persist state to disk (so hooks can see the proof chain)
     {
         let s = state.read().await;
-        let _ = sentinel_infrastructure::state_store::save(&s);
+        if let Err(e) = sentinel_infrastructure::state_store::save(&s) {
+            warn!(error = %e, "Failed to persist session state — proof chain may be lost on crash");
+        }
     }
-
-    let mut result = serde_json::json!({
-        "phase_id": phase_id,
-        "skill": skill,
-        "summary": summary,
-        "completed_phases": completed,
-        "message": format!("Phase '{}' proven and recorded", phase_id),
-    });
 
     match proof_result {
         Ok(_) => {
-            if let Some(pi) = proof_info {
-                result
-                    .as_object_mut()
-                    .unwrap()
-                    .insert("proof".to_string(), pi);
-            }
+            // SUCCESS — minimal info, no judge reasoning exposed
+            let result = serde_json::json!({
+                "phase_id": phase_id,
+                "status": "accepted",
+                "tessera": tessera.unwrap_or_default(),
+                "completed_phases": completed,
+            });
+            JsonRpcResponse::success(request.id.clone(), mcp_tool_result(true, result))
         }
         Err(e) => {
-            warn!(phase = %phase_id, error = %e, "Proof generation failed — phase still tracked");
-            result.as_object_mut().unwrap().insert(
-                "proof_error".to_string(),
-                serde_json::json!(e.to_string()),
+            // BLOCKED — opaque error, reasoning sealed in proof store
+            warn!(phase = %phase_id, error = %e, "Phase BLOCKED by AI judge");
+            let error_msg = format!(
+                "Phase '{}' BLOCKED — evidence insufficient. Re-run the phase with complete outputs before re-submitting.",
+                phase_id
             );
+            JsonRpcResponse::success(
+                request.id.clone(),
+                mcp_tool_result(false, serde_json::json!({"error": error_msg})),
+            )
         }
     }
-
-    JsonRpcResponse::success(request.id.clone(), mcp_tool_result(true, result))
 }
 
 /// Helper: Load skill steps config from the config directory
@@ -613,7 +609,9 @@ async fn handle_update_step(
     });
 
     // Save state to disk
-    let _ = sentinel_infrastructure::state_store::save(&s);
+    if let Err(e) = sentinel_infrastructure::state_store::save(&s) {
+        tracing::warn!(error = %e, "Failed to persist state after step update");
+    }
 
     let mut result = serde_json::json!({
         "step_id": step_id,
@@ -783,11 +781,6 @@ async fn handle_get_workflow_progress(
                     .unwrap_or(false)
             {
                 "in_progress"
-            } else if wf_state
-                .map(|w| w.is_phase_complete(&phase.id))
-                .unwrap_or(false)
-            {
-                "completed"
             } else {
                 "pending"
             };

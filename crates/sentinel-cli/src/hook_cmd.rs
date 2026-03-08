@@ -24,6 +24,7 @@ impl hooks::GitStatusPort for RealGit {
 }
 
 pub async fn run(event: &str, matcher: Option<&str>, standalone: bool) -> Result<()> {
+    let start_time = std::time::Instant::now();
     debug!(event, ?matcher, standalone, "Processing hook event");
 
     // Parse event type
@@ -244,15 +245,20 @@ pub async fn run(event: &str, matcher: Option<&str>, standalone: bool) -> Result
         }
     }
 
-    // Record hook invocation
-    state.record_hook_invocation(event, 0);
+    // Record hook invocation with actual elapsed time
+    let elapsed_ms = start_time.elapsed().as_millis() as u64;
+    state.record_hook_invocation(event, elapsed_ms);
 
     // Save state AFTER all processing (so phase reads and tool calls are persisted)
-    let _ = sentinel_infrastructure::state_store::save(&state);
+    if let Err(e) = sentinel_infrastructure::state_store::save(&state) {
+        tracing::warn!(error = %e, "Failed to persist hook state");
+    }
 
     // Claude Code only supports hookSpecificOutput for UserPromptSubmit and PostToolUse.
     // For Stop/SessionStart/PreCompact, strip it to avoid JSON validation errors.
-    if matches!(hook_event, HookEvent::Stop | HookEvent::SessionStart | HookEvent::PreCompact) {
+    // Claude Code only supports hookSpecificOutput for UserPromptSubmit and PostToolUse.
+    // Strip it for all other events to avoid JSON validation errors.
+    if !matches!(hook_event, HookEvent::UserPromptSubmit | HookEvent::PostToolUse) {
         output.hook_specific_output = None;
     }
 

@@ -21,7 +21,7 @@ pub async fn run(port: u16) -> Result<()> {
             .allow_headers(tower_http::cors::Any),
     );
 
-    let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}")).await?;
+    let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{port}")).await?;
     info!("Dashboard API listening on http://localhost:{port}");
 
     axum::serve(listener, app).await?;

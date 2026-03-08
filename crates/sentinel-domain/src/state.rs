@@ -43,6 +43,20 @@ pub struct SessionState {
     /// Total tool calls in this session (for phase-skip detection)
     #[serde(default)]
     pub tool_calls: u32,
+
+    /// Failed submission attempts per phase key ("skill:phase_id")
+    /// Used for resubmission rate limiting
+    #[serde(default)]
+    pub failed_submissions: HashMap<String, SubmissionAttempts>,
+}
+
+/// Tracks failed submission attempts for rate limiting
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SubmissionAttempts {
+    /// Number of consecutive failures
+    pub count: u32,
+    /// Timestamp of last failure
+    pub last_failure: Option<DateTime<Utc>>,
 }
 
 /// Aggregated hook execution statistics
@@ -75,6 +89,7 @@ impl SessionState {
             active: true,
             phases_read: Vec::new(),
             tool_calls: 0,
+            failed_submissions: HashMap::new(),
         }
     }
 

@@ -1,15 +1,16 @@
 //! Anthropic API Client
 //!
 //! Shared client for Sonnet 4.6, Opus 4.6, and Haiku 4.5.
-//! Used by AI judges, skill classifier, and relevance checker.
+//! Used by the skill classifier (skill router).
+//!
+//! Note: AI judge functionality has moved to `rig_judge.rs` (multi-model via Rig).
 
 use anyhow::{Context, Result};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use tracing::{debug, warn};
+use tracing::warn;
 
-use sentinel_domain::evidence::Evidence;
-use sentinel_domain::judge::{JudgeModel, JudgeVerdict};
+use sentinel_domain::judge::JudgeModel;
 
 const API_URL: &str = "https://api.anthropic.com/v1/messages";
 const API_VERSION: &str = "2023-06-01";
@@ -117,57 +118,6 @@ impl AnthropicClient {
             .context("No text content in API response")
     }
 
-    /// Judge evidence for a phase
-    pub async fn judge(
-        &self,
-        skill: &str,
-        phase_id: &str,
-        phase_objectives: &str,
-        evidence: &Evidence,
-        model: JudgeModel,
-    ) -> Result<JudgeVerdict> {
-        let system = format!(
-            "You are an AI judge evaluating whether evidence proves a skill phase was completed.\n\
-             Respond with ONLY valid JSON in this exact format:\n\
-             {{\"sufficient\": true/false, \"confidence\": 0.0-1.0, \"reasoning\": \"...\", \"requested_evidence\": null or [\"...\", ...]}}\n\n\
-             Skill: {skill}\n\
-             Phase: {phase_id}\n\
-             Phase objectives: {phase_objectives}"
-        );
-
-        let evidence_json = serde_json::to_string_pretty(evidence)?;
-        let user_msg = format!(
-            "Evaluate this evidence for the '{phase_id}' phase:\n\n{evidence_json}"
-        );
-
-        let response = self.message(model, &system, &user_msg, 512).await;
-
-        match response {
-            Ok(text) => {
-                debug!(phase = phase_id, "Judge response received");
-                match serde_json::from_str::<JudgeVerdict>(&text) {
-                    Ok(verdict) => Ok(verdict),
-                    Err(e) => {
-                        warn!(
-                            phase = phase_id,
-                            error = %e,
-                            "Failed to parse judge verdict, using default pass"
-                        );
-                        Ok(JudgeVerdict::default_pass())
-                    }
-                }
-            }
-            Err(e) => {
-                warn!(
-                    phase = phase_id,
-                    error = %e,
-                    "Judge API call failed, using default pass"
-                );
-                Ok(JudgeVerdict::default_pass())
-            }
-        }
-    }
-
     /// Classify a message into a skill
     pub async fn classify_skill(
         &self,
@@ -198,22 +148,6 @@ impl AnthropicClient {
         } else {
             Ok(Some(skill))
         }
-    }
-}
-
-/// Implement the application layer's JudgeService trait
-#[async_trait::async_trait]
-impl sentinel_application::judge_service::JudgeService for AnthropicClient {
-    async fn evaluate(
-        &self,
-        skill: &str,
-        phase_id: &str,
-        phase_objectives: &str,
-        evidence: &Evidence,
-        model: JudgeModel,
-    ) -> Result<JudgeVerdict> {
-        self.judge(skill, phase_id, phase_objectives, evidence, model)
-            .await
     }
 }
 

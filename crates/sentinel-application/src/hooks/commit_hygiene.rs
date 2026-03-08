@@ -201,6 +201,11 @@ mod tests {
 
     #[test]
     fn test_stop_with_changes_writes_state() {
+        // Clean any stale state before running
+        if let Some(path) = state_file() {
+            let _ = fs::remove_file(&path);
+        }
+
         let git = StubGit {
             has_changes: true,
             files: vec!["src/main.rs".into(), "README.md".into(), "lib.rs".into()],
@@ -212,13 +217,12 @@ mod tests {
         let output = process_stop(&input, &git);
         assert!(output.blocked.is_none());
 
-        // State file should exist
+        // State file should exist with our 3 files
         if let Some(path) = state_file() {
-            if path.exists() {
-                let state: CommitState =
-                    serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-                assert_eq!(state.file_count, 3);
-            }
+            assert!(path.exists(), "State file should have been written");
+            let state: CommitState =
+                serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+            assert_eq!(state.file_count, 3);
         }
     }
 

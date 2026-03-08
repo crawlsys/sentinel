@@ -6,6 +6,7 @@
 pub mod activity_log;
 pub mod anthropic;
 pub mod config;
+pub mod rig_judge;
 pub mod error_log;
 pub mod git;
 pub mod ipc;

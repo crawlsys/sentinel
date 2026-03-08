@@ -5,47 +5,31 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::evidence::Evidence;
-
-/// Which AI model to use for judging
+/// Judge criticality tier — determines which AI provider handles the evaluation.
+///
+/// Names are historical (from Anthropic model family). Actual routing:
+/// - `Haiku` → Cerebras GLM-4.7 (fast, simple phases)
+/// - `Sonnet` → OpenAI GPT-5.3 Codex (standard phases)
+/// - `Opus` → Anthropic Opus 4.6 (critical phases — no fallback to weaker tiers)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum JudgeModel {
-    /// Sonnet 4.6 — fast judge (~200-500ms), used for most phases
+    /// Standard tier — routes to OpenAI, falls back to Anthropic
     Sonnet,
-    /// Opus 4.6 — deep judge (~1-3s), used for critical phases (review, qa-handoff)
+    /// Critical tier — routes to Anthropic only, no fallback
     Opus,
-    /// Haiku 4.5 — lightweight check (~100ms), used for simple validation
+    /// Fast tier — routes to Cerebras, falls back to OpenAI or Anthropic
     Haiku,
 }
 
 impl std::fmt::Display for JudgeModel {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Sonnet => write!(f, "sonnet-4.6"),
-            Self::Opus => write!(f, "opus-4.6"),
-            Self::Haiku => write!(f, "haiku-4.5"),
+            Self::Sonnet => write!(f, "openai/gpt-5.3"),
+            Self::Opus => write!(f, "anthropic/opus-4.6"),
+            Self::Haiku => write!(f, "cerebras/glm-4.7"),
         }
     }
-}
-
-/// Request to an AI judge to evaluate phase evidence
-#[derive(Debug, Clone, Serialize)]
-pub struct JudgeRequest {
-    /// The phase being judged
-    pub phase_id: String,
-
-    /// The skill this phase belongs to
-    pub skill: String,
-
-    /// What the phase is supposed to accomplish (from workflow config)
-    pub phase_objectives: String,
-
-    /// The collected evidence
-    pub evidence: Evidence,
-
-    /// Which model to use
-    pub model: JudgeModel,
 }
 
 /// The AI judge's verdict on phase evidence
@@ -88,11 +72,6 @@ impl JudgeVerdict {
         }
     }
 
-    /// Create a default pass verdict (used when AI judge is unavailable)
-    #[must_use]
-    pub fn default_pass() -> Self {
-        Self::pass(0.5, "AI judge unavailable — default pass (graceful degradation)")
-    }
 }
 
 #[cfg(test)]
@@ -120,8 +99,8 @@ mod tests {
 
     #[test]
     fn test_judge_model_display() {
-        assert_eq!(JudgeModel::Sonnet.to_string(), "sonnet-4.6");
-        assert_eq!(JudgeModel::Opus.to_string(), "opus-4.6");
-        assert_eq!(JudgeModel::Haiku.to_string(), "haiku-4.5");
+        assert_eq!(JudgeModel::Sonnet.to_string(), "openai/gpt-5.3");
+        assert_eq!(JudgeModel::Opus.to_string(), "anthropic/opus-4.6");
+        assert_eq!(JudgeModel::Haiku.to_string(), "cerebras/glm-4.7");
     }
 }

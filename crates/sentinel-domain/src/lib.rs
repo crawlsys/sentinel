@@ -17,7 +17,7 @@ pub mod workflow;
 pub use events::HookEvent;
 pub use evidence::{Evidence, EvidenceEntry};
 pub use hooks::{HookId, HookResult, HookSpec};
-pub use judge::{JudgeRequest, JudgeVerdict};
+pub use judge::JudgeVerdict;
 pub use proof::{PhaseProof, ProofChain};
 pub use routing::RegexRouter;
 pub use state::SessionState;

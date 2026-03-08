@@ -99,20 +99,22 @@ pub fn load_hooks(config_path: &Path) -> Result<Vec<HookSpec>> {
     let config: HooksConfig =
         toml::from_str(&content).context("Failed to parse hooks.toml")?;
 
-    let specs: Vec<HookSpec> = config
-        .hooks
-        .into_iter()
-        .map(|h| HookSpec {
+    let mut specs: Vec<HookSpec> = Vec::new();
+    for h in config.hooks {
+        let event = HookEvent::from_arg(&h.event).ok_or_else(|| {
+            anyhow::anyhow!("Unknown hook event type '{}' for hook '{}'", h.event, h.id)
+        })?;
+        specs.push(HookSpec {
             id: HookId::new(&h.id),
-            event: HookEvent::from_arg(&h.event).unwrap_or(HookEvent::Stop),
+            event,
             matcher: h.matcher,
             depends_on: h.depends_on
                 .into_iter()
                 .map(|d| HookId::new(&d))
                 .collect(),
             has_api_call: h.has_api_call,
-        })
-        .collect();
+        });
+    }
 
     Ok(specs)
 }

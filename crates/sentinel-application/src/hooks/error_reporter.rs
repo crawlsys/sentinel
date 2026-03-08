@@ -13,26 +13,47 @@ use sentinel_domain::events::{HookEvent, HookInput, HookOutput};
 /// Cooldown between error reports (10 minutes)
 const COOLDOWN_MS: u64 = 10 * 60 * 1000;
 
-/// Linear workspace config for auto-filing
+/// Linear workspace config for auto-filing — loaded from config file at runtime
+#[derive(Debug, serde::Deserialize)]
 struct LinearConfig {
-    account: &'static str,
-    team_id: &'static str,
-    state_id: &'static str,
-    assignee_id: &'static str,
-    label_bug: &'static str,
-    label_infrastructure: &'static str,
-    label_auto_filed: &'static str,
+    account: String,
+    team_id: String,
+    state_id: String,
+    assignee_id: String,
+    label_bug: String,
+    label_infrastructure: String,
+    label_auto_filed: String,
 }
 
-const LINEAR_CONFIG: LinearConfig = LinearConfig {
-    account: "personal",
-    team_id: "2bd6c241-d8bf-4754-8b49-896525114644",
-    state_id: "7a93cb67-9135-4e43-9fd8-db1ef5c4179c",
-    assignee_id: "fc29de7e-51b4-494d-a117-0040d123f0a9",
-    label_bug: "9b3f1e12-d2ed-46fb-8d1d-bd01be785bdb",
-    label_infrastructure: "90e4b3b2-4877-436e-ad4b-9c8e1e5bb426",
-    label_auto_filed: "88aee459-b906-46ca-a5c0-fda2f21df9fe",
-};
+impl Default for LinearConfig {
+    fn default() -> Self {
+        Self {
+            account: "personal".to_string(),
+            team_id: String::new(),
+            state_id: String::new(),
+            assignee_id: String::new(),
+            label_bug: String::new(),
+            label_infrastructure: String::new(),
+            label_auto_filed: String::new(),
+        }
+    }
+}
+
+/// Load Linear config from ~/.claude/sentinel/config/error-reporter.toml
+fn load_linear_config() -> LinearConfig {
+    let path = dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".claude")
+        .join("sentinel")
+        .join("config")
+        .join("error-reporter.toml");
+
+    if let Ok(content) = fs::read_to_string(&path) {
+        toml::from_str(&content).unwrap_or_default()
+    } else {
+        LinearConfig::default()
+    }
+}
 
 /// A single error entry from errors.jsonl
 #[derive(Debug, serde::Deserialize)]
@@ -124,6 +145,12 @@ pub fn process(input: &HookInput) -> HookOutput {
         return HookOutput::allow();
     }
 
+    let linear_config = load_linear_config();
+    if linear_config.team_id.is_empty() {
+        // No Linear config — can't file issues
+        return HookOutput::allow();
+    }
+
     // Build error lines
     let error_lines: Vec<String> = errors
         .iter()
@@ -167,13 +194,13 @@ pub fn process(input: &HookInput) -> HookOutput {
          Errors to file:\n\
          {}",
         errors.len(),
-        LINEAR_CONFIG.account,
-        LINEAR_CONFIG.team_id,
-        LINEAR_CONFIG.state_id,
-        LINEAR_CONFIG.assignee_id,
-        LINEAR_CONFIG.label_bug,
-        LINEAR_CONFIG.label_infrastructure,
-        LINEAR_CONFIG.label_auto_filed,
+        linear_config.account,
+        linear_config.team_id,
+        linear_config.state_id,
+        linear_config.assignee_id,
+        linear_config.label_bug,
+        linear_config.label_infrastructure,
+        linear_config.label_auto_filed,
         resolutions_path,
         error_lines.join("\n"),
     );

@@ -54,9 +54,14 @@ pub struct PhaseProof {
 }
 
 impl PhaseProof {
-    /// Compute the evidence hash from evidence data
+    /// Compute the evidence hash from evidence data.
+    ///
+    /// Note: Evidence hash determinism depends on serde_json using BTreeMap
+    /// (the default) for JSON object ordering. If the `preserve_order` feature
+    /// is enabled, ordering may change.
     pub fn compute_evidence_hash(evidence: &Evidence) -> String {
-        let json = serde_json::to_string(evidence).unwrap_or_default();
+        let json = serde_json::to_string(evidence)
+            .expect("Evidence serialization should never fail — all fields are simple types");
         let mut hasher = Sha256::new();
         hasher.update(json.as_bytes());
         format!("{:x}", hasher.finalize())

@@ -11,9 +11,9 @@ use tokio::sync::RwLock;
 use tracing::{debug, info};
 
 use sentinel_domain::evidence::Evidence;
-use sentinel_domain::judge::{JudgeModel, JudgeVerdict};
+use sentinel_domain::judge::JudgeModel;
 use sentinel_domain::proof::{PhaseProof, ProofChain};
-use sentinel_domain::state::SessionState;
+use sentinel_domain::state::{SessionState, SubmissionAttempts};
 
 use crate::judge_service::JudgeService;
 
@@ -31,6 +31,12 @@ impl ProofEngine {
         Self { state, judge }
     }
 
+    /// Minimum seconds between resubmissions after a failure
+    const RESUBMIT_COOLDOWN_SECS: i64 = 30;
+
+    /// Maximum consecutive failures before requiring longer cooldown
+    const MAX_RAPID_FAILURES: u32 = 3;
+
     /// Submit evidence for a phase and build its proof
     pub async fn submit_evidence(
         &self,
@@ -41,6 +47,30 @@ impl ProofEngine {
         judge_model: JudgeModel,
         started_at: chrono::DateTime<Utc>,
     ) -> Result<PhaseProof> {
+        // Check resubmission rate limit
+        let phase_key = format!("{skill}:{phase_id}");
+        {
+            let state = self.state.read().await;
+            if let Some(attempts) = state.failed_submissions.get(&phase_key) {
+                if let Some(last) = attempts.last_failure {
+                    let elapsed = (Utc::now() - last).num_seconds();
+                    let cooldown = if attempts.count >= Self::MAX_RAPID_FAILURES {
+                        Self::RESUBMIT_COOLDOWN_SECS * attempts.count as i64
+                    } else {
+                        Self::RESUBMIT_COOLDOWN_SECS
+                    };
+                    if elapsed < cooldown {
+                        bail!(
+                            "Phase '{}' resubmission blocked — wait {}s (failed {} time(s))",
+                            phase_id,
+                            cooldown - elapsed,
+                            attempts.count
+                        );
+                    }
+                }
+            }
+        }
+
         // Ask AI judge to evaluate the evidence
         let verdict = self
             .judge
@@ -56,6 +86,16 @@ impl ProofEngine {
         );
 
         if !verdict.sufficient {
+            // Track the failure for rate limiting
+            {
+                let mut state = self.state.write().await;
+                let attempts = state
+                    .failed_submissions
+                    .entry(phase_key)
+                    .or_insert_with(SubmissionAttempts::default);
+                attempts.count += 1;
+                attempts.last_failure = Some(Utc::now());
+            }
             bail!(
                 "Phase '{}' evidence insufficient: {}",
                 phase_id,
@@ -63,39 +103,45 @@ impl ProofEngine {
             );
         }
 
-        // Compute hashes
-        let evidence_hash = PhaseProof::compute_evidence_hash(&evidence);
-        let previous_hash = {
-            let state = self.state.read().await;
-            state
+        // Clear failure tracking on success
+        {
+            let mut state = self.state.write().await;
+            state.failed_submissions.remove(&phase_key);
+        }
+
+        // Compute hashes, build proof, and add to chain under a single write lock
+        // to prevent TOCTOU races on concurrent submissions
+        let (proof, combined_hash) = {
+            let mut state = self.state.write().await;
+            let completed_at = Utc::now();
+
+            let evidence_hash = PhaseProof::compute_evidence_hash(&evidence);
+            let previous_hash = state
                 .proof_chains
                 .get(skill)
                 .map_or_else(
                     || sentinel_domain::proof::GENESIS_HASH.to_string(),
                     |chain| chain.head_hash().to_string(),
-                )
-        };
-        let combined_hash =
-            PhaseProof::compute_combined_hash(phase_id, &evidence_hash, &previous_hash);
+                );
+            let combined_hash =
+                PhaseProof::compute_combined_hash(phase_id, &evidence_hash, &previous_hash);
 
-        let proof = PhaseProof {
-            phase_id: phase_id.to_string(),
-            skill: skill.to_string(),
-            session_id: self.state.read().await.session_id.clone(),
-            evidence,
-            evidence_hash,
-            previous_hash,
-            combined_hash: combined_hash.clone(),
-            judge_model: judge_model.to_string(),
-            judge_verdict: verdict,
-            started_at,
-            completed_at: Utc::now(),
-            duration_ms: (Utc::now() - started_at).num_milliseconds().unsigned_abs(),
-        };
+            let proof = PhaseProof {
+                phase_id: phase_id.to_string(),
+                skill: skill.to_string(),
+                session_id: state.session_id.clone(),
+                evidence,
+                evidence_hash,
+                previous_hash,
+                combined_hash: combined_hash.clone(),
+                judge_model: judge_model.to_string(),
+                judge_verdict: verdict,
+                started_at,
+                completed_at,
+                duration_ms: (completed_at - started_at).num_milliseconds().unsigned_abs(),
+            };
 
-        // Add to chain
-        {
-            let mut state = self.state.write().await;
+            // Add to chain
             let session_id = state.session_id.clone();
             let chain = state
                 .proof_chains
@@ -107,7 +153,9 @@ impl ProofEngine {
             if let Some(wf) = state.workflows.get_mut(skill) {
                 wf.advance(phase_id);
             }
-        }
+
+            (proof, combined_hash)
+        };
 
         debug!(
             phase = phase_id,

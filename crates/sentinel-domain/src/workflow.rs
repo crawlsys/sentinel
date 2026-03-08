@@ -41,7 +41,9 @@ pub struct PhaseSteps {
 /// All step definitions for a skill
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SkillSteps {
-    /// Skill name
+    /// Skill name — skipped during serde because it is set by
+    /// `config::load_skill_steps()` from the filename, not from TOML content.
+    /// This struct is never round-tripped through JSON.
     #[serde(skip)]
     pub skill: String,
 
@@ -185,10 +187,12 @@ impl WorkflowState {
         }
     }
 
-    /// Advance to the next phase
+    /// Advance to the next phase (idempotent — no-op if already completed)
     pub fn advance(&mut self, completed_phase_id: &str) {
-        self.completed_phases
-            .push(completed_phase_id.to_string());
+        if !self.is_phase_complete(completed_phase_id) {
+            self.completed_phases
+                .push(completed_phase_id.to_string());
+        }
         self.current_phase = Some(self.completed_phases.len());
     }
 

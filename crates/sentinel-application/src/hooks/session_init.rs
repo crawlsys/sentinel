@@ -219,10 +219,17 @@ fn copy_dir_recursive(src: &Path, dest: &Path) -> std::io::Result<u32> {
 
     for entry in fs::read_dir(src)? {
         let entry = entry?;
+        let ft = entry.file_type()?;
+
+        // Skip symlinks to avoid circular references and unexpected behavior
+        if ft.is_symlink() {
+            continue;
+        }
+
         let src_path = entry.path();
         let dest_path = dest.join(entry.file_name());
 
-        if src_path.is_dir() {
+        if ft.is_dir() {
             count += copy_dir_recursive(&src_path, &dest_path)?;
         } else {
             // Only copy if source is newer or dest doesn't exist
@@ -288,7 +295,13 @@ fn validate_sync(claude_dir: &Path) -> ValidationResult {
     let cargo_bin = dirs::home_dir()
         .map(|h| h.join(".cargo").join("bin"));
     let sentinel_available = cargo_bin
-        .map(|d| d.join("sentinel.exe").exists() || d.join("sentinel-engine.exe").exists())
+        .map(|d| {
+            if cfg!(windows) {
+                d.join("sentinel.exe").exists() || d.join("sentinel-engine.exe").exists()
+            } else {
+                d.join("sentinel").exists() || d.join("sentinel-engine").exists()
+            }
+        })
         .unwrap_or(false);
     if !sentinel_available {
         reasons.push("sentinel binary not found in ~/.cargo/bin/".to_string());

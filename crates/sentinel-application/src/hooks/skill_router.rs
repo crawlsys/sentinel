@@ -215,37 +215,9 @@ pub fn default_router() -> RegexRouter {
         router.add_rule(rule);
     }
 
-    // Windows — desktop/UI automation, PowerShell, virtual desktops
+    // Internet — network/router management (ATT/Netgear)
     if let Ok(rule) = sentinel_domain::routing::RoutingRule::new(
-        "windows",
-        vec![
-            r"(?i)\bwindows\s+automation\b",
-            r"(?i)\bdesktop\s+automation\b",
-            r"(?i)\bui\s+automation\b",
-            r"(?i)\bpowershell\s+script\b",
-            r"(?i)\bscreenshot\s+window\b",
-            r"(?i)\bvirtual\s+desktop\b",
-        ],
-        65,
-    ) {
-        router.add_rule(rule);
-    }
-
-    // Centurion — Chrome extension browser automation
-    if let Ok(rule) = sentinel_domain::routing::RoutingRule::new(
-        "centurion",
-        vec![
-            r"(?i)\bcenturion\b",
-            r"(?i)\bchrome\s+extension\s+automation\b",
-        ],
-        65,
-    ) {
-        router.add_rule(rule);
-    }
-
-    // Router Guardian — network/router management
-    if let Ok(rule) = sentinel_domain::routing::RoutingRule::new(
-        "router-guardian",
+        "internet",
         vec![
             r"(?i)\b(my\s+)?router\b",
             r"(?i)\bnetgear\b",
@@ -257,21 +229,6 @@ pub fn default_router() -> RegexRouter {
             r"(?i)\bdhcp\b",
         ],
         60,
-    ) {
-        router.add_rule(rule);
-    }
-
-    // Claude in Chrome — in-browser assistant, tab control, GIF recording
-    if let Ok(rule) = sentinel_domain::routing::RoutingRule::new(
-        "claude-in-chrome",
-        vec![
-            r"(?i)\bclaude\s+in\s+chrome\b",
-            r"(?i)\bchrome\s+tab\b",
-            r"(?i)\bgif\s+recording\b",
-            r"(?i)\bread\s+page\b",
-            r"(?i)\bform\s+fill\s+chrome\b",
-        ],
-        65,
     ) {
         router.add_rule(rule);
     }
@@ -342,8 +299,8 @@ pub fn process(input: &HookInput, router: &RegexRouter) -> HookOutput {
         Some(m) => {
             // Generate a unique run ID
             let now_ms = chrono::Utc::now().timestamp_millis();
-            let rand: u32 = (now_ms as u32) ^ 0xDEAD_BEEF;
-            let run_id = format!("{}-{}", now_ms, rand % 100000);
+            let pid = std::process::id();
+            let run_id = format!("{}-{}", now_ms, pid % 100000);
 
             // Write temp state files for skill_telemetry to read on Stop
             write_telemetry_state(&m.skill, &run_id);
@@ -510,43 +467,7 @@ mod tests {
     }
 
     #[test]
-    fn test_windows_automation_routing() {
-        let router = default_router();
-        let input = HookInput {
-            prompt: Some("use windows automation to click the button".to_string()),
-            ..Default::default()
-        };
-        let output = process(&input, &router);
-        let ctx = output.hook_specific_output.unwrap();
-        assert!(ctx.additional_context.contains("windows"));
-    }
-
-    #[test]
-    fn test_windows_powershell_routing() {
-        let router = default_router();
-        let input = HookInput {
-            prompt: Some("run this powershell script on the machine".to_string()),
-            ..Default::default()
-        };
-        let output = process(&input, &router);
-        let ctx = output.hook_specific_output.unwrap();
-        assert!(ctx.additional_context.contains("windows"));
-    }
-
-    #[test]
-    fn test_centurion_routing() {
-        let router = default_router();
-        let input = HookInput {
-            prompt: Some("use centurion to navigate to the page".to_string()),
-            ..Default::default()
-        };
-        let output = process(&input, &router);
-        let ctx = output.hook_specific_output.unwrap();
-        assert!(ctx.additional_context.contains("centurion"));
-    }
-
-    #[test]
-    fn test_router_guardian_netgear_routing() {
+    fn test_internet_netgear_routing() {
         let router = default_router();
         let input = HookInput {
             prompt: Some("check my netgear wifi clients".to_string()),
@@ -554,11 +475,11 @@ mod tests {
         };
         let output = process(&input, &router);
         let ctx = output.hook_specific_output.unwrap();
-        assert!(ctx.additional_context.contains("router-guardian"));
+        assert!(ctx.additional_context.contains("internet"));
     }
 
     #[test]
-    fn test_router_guardian_port_forwarding_routing() {
+    fn test_internet_port_forwarding_routing() {
         let router = default_router();
         let input = HookInput {
             prompt: Some("set up port forwarding on my router".to_string()),
@@ -566,11 +487,11 @@ mod tests {
         };
         let output = process(&input, &router);
         let ctx = output.hook_specific_output.unwrap();
-        assert!(ctx.additional_context.contains("router-guardian"));
+        assert!(ctx.additional_context.contains("internet"));
     }
 
     #[test]
-    fn test_router_guardian_dhcp_routing() {
+    fn test_internet_dhcp_routing() {
         let router = default_router();
         let input = HookInput {
             prompt: Some("show me the DHCP leases".to_string()),
@@ -578,30 +499,6 @@ mod tests {
         };
         let output = process(&input, &router);
         let ctx = output.hook_specific_output.unwrap();
-        assert!(ctx.additional_context.contains("router-guardian"));
-    }
-
-    #[test]
-    fn test_claude_in_chrome_routing() {
-        let router = default_router();
-        let input = HookInput {
-            prompt: Some("use claude in chrome to read the page".to_string()),
-            ..Default::default()
-        };
-        let output = process(&input, &router);
-        let ctx = output.hook_specific_output.unwrap();
-        assert!(ctx.additional_context.contains("claude-in-chrome"));
-    }
-
-    #[test]
-    fn test_claude_in_chrome_gif_routing() {
-        let router = default_router();
-        let input = HookInput {
-            prompt: Some("start gif recording of this workflow".to_string()),
-            ..Default::default()
-        };
-        let output = process(&input, &router);
-        let ctx = output.hook_specific_output.unwrap();
-        assert!(ctx.additional_context.contains("claude-in-chrome"));
+        assert!(ctx.additional_context.contains("internet"));
     }
 }

@@ -1,0 +1,30 @@
+[package]
+name = "sentinel-mcp"
+description = "Standalone MCP server for Sentinel — built with Vulcan SDK"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "sentinel-mcp"
+path = "src/main.rs"
+
+[dependencies]
+sentinel-domain = { workspace = true }
+sentinel-application = { workspace = true }
+sentinel-infrastructure = { workspace = true }
+vulcan = { path = "../../../vulcan-mcp-sdk-rust/crates/vulcan", features = ["macros", "transport-io"] }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+chrono = { workspace = true }
+schemars = { version = "1.0", features = ["chrono04"] }
+
+[lints]
+workspace = true

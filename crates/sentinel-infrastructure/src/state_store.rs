@@ -3,7 +3,7 @@
 //! Persists session state to disk. Uses a single JSON file per session
 //! instead of the 13+ temp files the Node.js hooks use.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 
@@ -18,14 +18,16 @@ fn state_dir() -> PathBuf {
         .join("state")
 }
 
-/// Save session state to disk
+/// Save session state to disk (atomic write — temp file + rename)
 pub fn save(state: &SessionState) -> Result<()> {
     let dir = state_dir();
     std::fs::create_dir_all(&dir).context("Failed to create state directory")?;
 
     let path = dir.join(format!("{}.json", state.session_id));
+    let tmp_path = dir.join(format!("{}.json.tmp", state.session_id));
     let json = serde_json::to_string_pretty(state)?;
-    std::fs::write(&path, json).context("Failed to write state file")?;
+    std::fs::write(&tmp_path, &json).context("Failed to write temp state file")?;
+    std::fs::rename(&tmp_path, &path).context("Failed to rename temp state file")?;
 
     Ok(())
 }
