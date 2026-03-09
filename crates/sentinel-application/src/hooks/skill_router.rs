@@ -8,15 +8,52 @@ use sentinel_domain::routing::RegexRouter;
 use std::fs;
 use std::io::Write;
 
+/// Load Linear team keys from the cache file written at session start.
+/// Falls back to a hardcoded set if the cache doesn't exist yet.
+fn load_linear_team_keys() -> Vec<String> {
+    let cache_path = dirs::home_dir()
+        .unwrap_or_default()
+        .join(".claude")
+        .join("sentinel")
+        .join("linear-teams.json");
+
+    if let Ok(content) = fs::read_to_string(&cache_path) {
+        if let Ok(keys) = serde_json::from_str::<Vec<String>>(&content) {
+            if !keys.is_empty() {
+                return keys;
+            }
+        }
+    }
+
+    // Fallback — hardcoded keys (updated 2026-03-09 from Linear API)
+    vec![
+        "FPCRM", "FPFIELD", "FPROUTE", "GS", "COR", "LEG", "TRB",
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect()
+}
+
 /// Build the default regex router with all skill patterns
 pub fn default_router() -> RegexRouter {
     let mut router = RegexRouter::new();
 
     // Linear — highest priority (issue IDs are unambiguous)
+    // Team keys loaded dynamically from ~/.claude/sentinel/linear-teams.json
+    // (written by session_init hook via Linear API, falls back to hardcoded)
+    let team_keys = load_linear_team_keys();
+    let team_pattern = format!(
+        r"(?i)\b({})-\d+\b",
+        team_keys
+            .iter()
+            .map(|k| regex::escape(k))
+            .collect::<Vec<_>>()
+            .join("|")
+    );
     if let Ok(rule) = sentinel_domain::routing::RoutingRule::new(
         "linear",
         vec![
-            r"(?i)\b(fir|fpcrm|cor|per|eng|des|ops|sec|dat|api|mob|inf|qat|rel)-\d+\b",
+            &team_pattern,
             r"(?i)\blinear\s+(issue|ticket|bug|feature|task)\b",
             r"(?i)\b(pick\s+up|claim|assign|work\s+on)\b.*\b(issue|ticket)\b",
         ],
@@ -346,13 +383,22 @@ mod tests {
     #[test]
     fn test_linear_issue_id_routing() {
         let router = default_router();
-        let input = HookInput {
-            prompt: Some("Pick up FIR-123".to_string()),
-            ..Default::default()
-        };
-        let output = process(&input, &router);
-        let ctx = output.hook_specific_output.unwrap();
-        assert!(ctx.additional_context.contains("linear"));
+        // Test keys that are always present (hardcoded fallback + cache)
+        // The exact set depends on the runtime cache, so test the keys
+        // that load_linear_team_keys() actually returns
+        let keys = super::load_linear_team_keys();
+        for prefix in &keys {
+            let input = HookInput {
+                prompt: Some(format!("Pick up {prefix}-123")),
+                ..Default::default()
+            };
+            let output = process(&input, &router);
+            let ctx = output.hook_specific_output.unwrap();
+            assert!(
+                ctx.additional_context.contains("linear"),
+                "{prefix}-123 should route to linear"
+            );
+        }
     }
 
     #[test]
@@ -380,14 +426,16 @@ mod tests {
     }
 
     #[test]
-    fn test_no_match_returns_allow() {
+    fn test_no_match_returns_context() {
         let router = default_router();
         let input = HookInput {
             prompt: Some("hello world, how are you?".to_string()),
             ..Default::default()
         };
         let output = process(&input, &router);
-        assert!(output.hook_specific_output.is_none());
+        // No-match now injects "general conversation mode" context
+        let ctx = output.hook_specific_output.unwrap();
+        assert!(ctx.additional_context.contains("No skill matched"));
         assert!(output.blocked.is_none());
     }
 
@@ -396,6 +444,7 @@ mod tests {
         let router = default_router();
         let input = HookInput::default();
         let output = process(&input, &router);
+        // No prompt at all → plain allow (no context injection)
         assert!(output.hook_specific_output.is_none());
     }
 

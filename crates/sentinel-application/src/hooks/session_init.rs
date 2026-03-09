@@ -54,7 +54,10 @@ pub fn process(input: &HookInput) -> HookOutput {
         tracing::warn!("Post-sync validation failed: {}", reasons);
     }
 
-    // 4. Generate CLAUDE.md with dynamic counts
+    // 4. Cache Linear team keys for skill router
+    cache_linear_team_keys(&claude_dir);
+
+    // 5. Generate CLAUDE.md with dynamic counts
     let counts = count_components(&claude_dir);
     generate_claude_md(&claude_dir, &counts);
 
@@ -699,6 +702,96 @@ fn build_startup_context(
     parts.join("\n")
 }
 
+// ---------------------------------------------------------------------------
+// Linear team key caching (marketplace → sentinel)
+// ---------------------------------------------------------------------------
+
+/// Read all ~/.claude/projects/*.md files, extract linear_teams keys from
+/// YAML frontmatter, and write them to ~/.claude/sentinel/linear-teams.json
+/// so the skill router can consume them without hardcoding.
+fn cache_linear_team_keys(claude_dir: &Path) {
+    let projects_dir = claude_dir.join("projects");
+    if !projects_dir.exists() {
+        return;
+    }
+
+    let mut keys: Vec<String> = Vec::new();
+
+    // Scan all .md files in projects/
+    let entries = match fs::read_dir(&projects_dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+
+    for entry in entries.filter_map(|e| e.ok()) {
+        let path = entry.path();
+        let file_name = entry.file_name().to_string_lossy().to_string();
+        if !file_name.ends_with(".md") || file_name.starts_with('_') {
+            continue;
+        }
+
+        let content = match fs::read_to_string(&path) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+
+        // Extract YAML frontmatter between --- delimiters
+        if !content.starts_with("---") {
+            continue;
+        }
+        let rest = &content[3..];
+        let end = match rest.find("\n---") {
+            Some(i) => i,
+            None => continue,
+        };
+        let frontmatter = &rest[..end];
+
+        // Extract team keys from linear_teams entries: { key: "XXX" }
+        for line in frontmatter.lines() {
+            let trimmed = line.trim();
+            // Match lines like: - { name: "...", key: "FPCRM", id: "..." }
+            if let Some(key_start) = trimmed.find("key:") {
+                let after_key = &trimmed[key_start + 4..];
+                let after_key = after_key.trim().trim_start_matches('"');
+                if let Some(end) = after_key.find('"') {
+                    let key = &after_key[..end];
+                    if !key.is_empty() && !keys.contains(&key.to_string()) {
+                        keys.push(key.to_string());
+                    }
+                }
+            }
+
+            // Also extract issue_prefix: FPCRM
+            if trimmed.starts_with("issue_prefix:") {
+                let prefix = trimmed["issue_prefix:".len()..].trim();
+                if !prefix.is_empty() && !keys.contains(&prefix.to_string()) {
+                    keys.push(prefix.to_string());
+                }
+            }
+        }
+    }
+
+    if keys.is_empty() {
+        tracing::debug!("No Linear team keys found in project configs");
+        return;
+    }
+
+    // Write to sentinel cache
+    let sentinel_dir = claude_dir.join("sentinel");
+    let _ = fs::create_dir_all(&sentinel_dir);
+    let cache_path = sentinel_dir.join("linear-teams.json");
+
+    match serde_json::to_string_pretty(&keys) {
+        Ok(json) => {
+            let _ = fs::write(&cache_path, json);
+            tracing::info!(count = keys.len(), "Cached Linear team keys: {:?}", keys);
+        }
+        Err(e) => {
+            tracing::warn!("Failed to serialize Linear team keys: {e}");
+        }
+    }
+}
+
 /// Result of marketplace sync attempt
 enum SyncResult {
     /// No marketplace repo found
@@ -936,6 +1029,49 @@ mod tests {
         assert_eq!(count, 2);
         assert!(dest.join("file1.txt").exists());
         assert!(dest.join("sub").join("file2.txt").exists());
+    }
+
+    #[test]
+    fn test_cache_linear_team_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let projects = dir.path().join("projects");
+        fs::create_dir(&projects).unwrap();
+
+        // Write a project config with YAML frontmatter
+        fs::write(
+            projects.join("test-project.md"),
+            r#"---
+name: test-project
+linear_teams:
+  - { name: "Team A", key: "TEAMA", id: "abc" }
+  - { name: "Team B", key: "TEAMB", id: "def" }
+issue_prefix: TEAMA
+---
+
+# Project
+"#,
+        )
+        .unwrap();
+
+        cache_linear_team_keys(dir.path());
+
+        let cache = dir.path().join("sentinel").join("linear-teams.json");
+        assert!(cache.exists());
+        let content = fs::read_to_string(&cache).unwrap();
+        let keys: Vec<String> = serde_json::from_str(&content).unwrap();
+        assert!(keys.contains(&"TEAMA".to_string()));
+        assert!(keys.contains(&"TEAMB".to_string()));
+        // issue_prefix TEAMA should not be duplicated
+        assert_eq!(keys.iter().filter(|k| *k == "TEAMA").count(), 1);
+    }
+
+    #[test]
+    fn test_cache_linear_team_keys_no_projects() {
+        let dir = tempfile::tempdir().unwrap();
+        // No projects/ dir — should not panic
+        cache_linear_team_keys(dir.path());
+        let cache = dir.path().join("sentinel").join("linear-teams.json");
+        assert!(!cache.exists());
     }
 
     #[test]
