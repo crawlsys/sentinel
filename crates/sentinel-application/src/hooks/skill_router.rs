@@ -323,7 +323,12 @@ pub fn process(input: &HookInput, router: &RegexRouter) -> HookOutput {
             let _ = fs::remove_file(tmp.join("claude-current-skill"));
             let _ = fs::remove_file(tmp.join("claude-skill-run-id"));
             let _ = fs::remove_file(tmp.join("claude-skill-start-time"));
-            HookOutput::allow()
+
+            // Always report router status so user knows it fired
+            HookOutput::inject_context(
+                HookEvent::UserPromptSubmit,
+                "[Skill Router] No skill matched — general conversation mode.".to_string(),
+            )
         }
     }
 }

@@ -434,6 +434,9 @@ mod tests {
     #[test]
     fn test_prompt_injects_and_clears() {
         let _ = fs::remove_file(cooldown_file());
+        // Write a stale cooldown to guarantee cooldown_expired() returns true
+        // (protects against parallel tests that write the cooldown file)
+        let _ = fs::write(cooldown_file(), "0");
 
         if let Some(path) = state_file() {
             let state = ClaimState {

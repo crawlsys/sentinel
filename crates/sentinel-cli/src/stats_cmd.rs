@@ -17,8 +17,21 @@ pub async fn run() -> Result<()> {
 
     println!("Sessions: {}", sessions.len());
 
+    let mut corrupt_count = 0u32;
     for session_id in &sessions {
-        if let Some(state) = sentinel_infrastructure::state_store::load(session_id)? {
+        let state_result = sentinel_infrastructure::state_store::load(session_id);
+        let state_opt = match state_result {
+            Ok(s) => s,
+            Err(e) => {
+                corrupt_count += 1;
+                eprintln!(
+                    "  {} skipping {session_id}: {e:#}",
+                    "warning:".yellow()
+                );
+                continue;
+            }
+        };
+        if let Some(state) = state_opt {
             println!("\n{}", format!("Session: {session_id}").cyan());
             println!(
                 "  Hooks invoked: {}",
@@ -45,6 +58,13 @@ pub async fn run() -> Result<()> {
                 }
             }
         }
+    }
+
+    if corrupt_count > 0 {
+        println!(
+            "\n{} {corrupt_count} corrupt state file(s) skipped",
+            "warning:".yellow()
+        );
     }
 
     // List proof chains

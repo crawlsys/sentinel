@@ -2,10 +2,13 @@
 //!
 //! Persists session state to disk. Uses a single JSON file per session
 //! instead of the 13+ temp files the Node.js hooks use.
+//!
+//! Uses file locking to prevent race conditions from concurrent writes.
 
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
+use fs2::FileExt;
 
 use sentinel_domain::state::SessionState;
 
@@ -18,16 +21,32 @@ fn state_dir() -> PathBuf {
         .join("state")
 }
 
-/// Save session state to disk (atomic write — temp file + rename)
+/// Save session state to disk (atomic write with file lock)
+///
+/// Uses an exclusive lock file to serialize concurrent writes,
+/// preventing corruption from parallel hook invocations.
 pub fn save(state: &SessionState) -> Result<()> {
     let dir = state_dir();
     std::fs::create_dir_all(&dir).context("Failed to create state directory")?;
 
     let path = dir.join(format!("{}.json", state.session_id));
+    let lock_path = dir.join(format!("{}.json.lock", state.session_id));
     let tmp_path = dir.join(format!("{}.json.tmp", state.session_id));
+
+    // Acquire exclusive lock
+    let lock_file =
+        std::fs::File::create(&lock_path).context("Failed to create lock file")?;
+    lock_file
+        .lock_exclusive()
+        .context("Failed to acquire state lock")?;
+
     let json = serde_json::to_string_pretty(state)?;
     std::fs::write(&tmp_path, &json).context("Failed to write temp state file")?;
     std::fs::rename(&tmp_path, &path).context("Failed to rename temp state file")?;
+
+    // Lock released on drop
+    drop(lock_file);
+    let _ = std::fs::remove_file(&lock_path);
 
     Ok(())
 }
