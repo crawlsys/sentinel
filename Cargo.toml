@@ -43,7 +43,7 @@ sha2 = "0.10"
 reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
 
 # LLM framework (multi-model AI judge — Cerebras, OpenAI, Anthropic)
-rig-core = { git = "https://github.com/garysomerhalder/rig-extended-rust.git", rev = "e282b60acf08f259de529f0714c069b839278ecf", package = "rig-core" }
+rig-core = { version = "0.30", package = "rig-core" }
 
 # HTTP server (dashboard API)
 axum = { version = "0.8", features = ["ws"] }

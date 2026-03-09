@@ -433,10 +433,10 @@ Today is {date_str}.
 The Claude Code Marketplace is a modular ecosystem of components that extend Claude Code:
 
 ```
+~/.claude.json             <- MCP server registrations (user-scope)
 ~/.claude/
 ├── CLAUDE.md              <- Auto-generated on every session (live version)
 ├── settings.json          <- Hook registrations (sentinel commands) + env vars
-├── .claude.json           <- MCP server registrations
 ├── sentinel/config/       <- Sentinel hook engine configuration
 ├── skills/                <- {skills} skill directories (SKILL.md each)
 ├── commands/              <- {commands} slash commands (.md files)
@@ -446,6 +446,28 @@ The Claude Code Marketplace is a modular ecosystem of components that extend Cla
 ├── docs/                  <- Reference docs (auto-generated)
 └── metrics/               <- Usage analytics (JSONL)
 ```
+
+### MCP Server Configuration
+
+MCP servers are configured in `~/.claude.json` (NOT inside `~/.claude/`).
+
+| Scope | File | Description |
+|-------|------|-------------|
+| **User** (all projects) | `~/.claude.json` | Your personal MCP servers |
+| **Project** (shared) | `.mcp.json` in project root | Team-shared, checked into git |
+| **Managed** (enterprise) | See platform paths below | IT-controlled, read-only |
+
+**Cross-platform paths for `~/.claude.json`:**
+- **Windows:** `C:\\Users\\<user>\\.claude.json`
+- **macOS:** `/Users/<user>/.claude.json`
+- **Linux:** `/home/<user>/.claude.json`
+
+**Managed MCP (enterprise):**
+- **Windows:** `C:\\Program Files\\ClaudeCode\\managed-mcp.json`
+- **macOS:** `/Library/Application Support/ClaudeCode/managed-mcp.json`
+- **Linux:** `/etc/claude-code/managed-mcp.json`
+
+**Runtime architecture:** All MCP servers are custom Rust binaries built with [Vulcan SDK](https://github.com/garysomerhalder/vulcan-mcp-sdk-rust), wrapped by `mcp-router --single <binary>` for hot-reload. The router watches the binary for changes and auto-restarts on rebuild — no need to restart Claude Code when updating an MCP server. The only exception is `sequential-thinking`, which runs as a direct binary without the router.
 
 **How components connect:**
 - **User types a message** -> `UserPromptSubmit` hooks fire (skill-router, error-reporter, todo-loader)
