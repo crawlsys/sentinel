@@ -14,30 +14,148 @@ use sentinel_domain::state::SessionState;
 use sentinel_domain::workflow::SkillWorkflow;
 use std::collections::HashMap;
 
-/// Extract the phase file name from a Read() tool_input path.
+/// Extracted phase file info from a Read() tool_input path.
+#[derive(Debug, Clone)]
+struct PhaseFileInfo {
+    /// The phase filename (e.g., "claim.md")
+    file: String,
+    /// The skill name derived from the path (e.g., "linear")
+    skill: String,
+    /// Whether the file passed canonical path validation (exists on disk
+    /// and resolves to within ~/.claude/skills/). Untrusted files are
+    /// recorded for tracking but do NOT advance workflow state.
+    trusted: bool,
+}
+
+/// Extract the phase file name AND skill name from a Read() tool_input path.
 /// Matches paths like `~/.claude/skills/linear/phases/claim.md`
 /// or `C:\Users\...\.claude\skills\linear\phases\claim.md`.
-/// Returns `Some("claim.md")` if it matches a phase file pattern.
-fn extract_phase_file(tool_input: &serde_json::Value) -> Option<String> {
+///
+/// Returns `Some(PhaseFileInfo)` if the path is a valid phase file.
+/// Validates:
+/// - Path components match `skills/{name}/phases/{file}.md` pattern
+/// - No `ParentDir` (`..`) components (checked via Path::components())
+/// - Skill name and file name contain only safe ASCII characters
+/// - Symlinks resolve to a path still under `~/.claude/skills/` (PathBuf API)
+/// - `trusted` flag indicates whether canonical validation passed
+fn extract_phase_file(tool_input: &serde_json::Value) -> Option<PhaseFileInfo> {
+    use std::path::{Component, Path};
+
     // tool_input for Read is { "file_path": "..." }
     let path = tool_input
         .get("file_path")
         .and_then(|v| v.as_str())?;
 
-    // Normalize separators for cross-platform matching
-    let normalized = path.replace('\\', "/");
+    // Parse into path components — this handles both `/` and `\` separators
+    // and gives us semantic components (Normal, ParentDir, RootDir, etc.)
+    let file_path = Path::new(path);
+    let components: Vec<Component> = file_path.components().collect();
 
-    // Check if it matches skills/*/phases/*.md
-    if let Some(idx) = normalized.find("skills/") {
-        let after_skills = &normalized[idx..];
-        // Pattern: skills/{name}/phases/{file}.md
-        let parts: Vec<&str> = after_skills.split('/').collect();
-        if parts.len() >= 4 && parts[2] == "phases" && parts[3].ends_with(".md") {
-            return Some(parts[3].to_string());
-        }
+    // Reject any ParentDir (..) components — checked structurally, not as substring.
+    // This avoids both false positives (filenames containing "..") and false negatives
+    // (edge cases where string matching diverges from OS path resolution).
+    if components.iter().any(|c| matches!(c, Component::ParentDir)) {
+        return None;
     }
 
-    None
+    // Find the `skills` component and extract the pattern:
+    //   skills / {skill_name} / phases / {phase_file}.md
+    // Match as full path components, not substring — prevents matching
+    // paths like `/foo/myskills/linear/phases/claim.md` or `skills_evil/...`.
+    let skills_pos = components.iter().position(|c| {
+        matches!(c, Component::Normal(s) if *s == std::ffi::OsStr::new("skills"))
+    })?;
+
+    // Need exactly 3 more components after "skills": {name}, "phases", {file}.md
+    // And nothing after the .md file.
+    if skills_pos + 4 != components.len() {
+        return None;
+    }
+
+    let skill_name = components[skills_pos + 1]
+        .as_os_str()
+        .to_str()?;
+    let phases_component = components[skills_pos + 2]
+        .as_os_str()
+        .to_str()?;
+    let phase_file = components[skills_pos + 3]
+        .as_os_str()
+        .to_str()?;
+
+    // Verify the "phases" directory component
+    if phases_component != "phases" {
+        return None;
+    }
+
+    // Must be a .md file
+    if !phase_file.ends_with(".md") {
+        return None;
+    }
+
+    // Validate names: ASCII alphanumeric + hyphens + underscores + dots only
+    if !is_safe_name(skill_name) || !is_safe_name(phase_file) {
+        return None;
+    }
+
+    // Symlink/canonical path resolution — eliminates TOCTOU by calling
+    // canonicalize() directly without a prior exists() check.
+    // canonicalize() returns Err if the file doesn't exist, which we handle.
+    let canonical_result = file_path.canonicalize();
+
+    // Track whether the file passed canonical validation.
+    // Files that don't exist on disk are still extracted (for phase tracking)
+    // but marked untrusted — the caller should not advance workflow state.
+    let trusted = match &canonical_result {
+        Ok(canonical) => {
+            // Use PathBuf::starts_with() — component-aware, not string prefix.
+            // This prevents sibling-directory tricks like `skills_evil/` matching
+            // a string prefix of `skills`.
+            let skills_dir = dirs::home_dir()
+                .unwrap_or_default()
+                .join(".claude")
+                .join("skills");
+            let skills_canonical = skills_dir
+                .canonicalize()
+                .unwrap_or(skills_dir);
+
+            if !canonical.starts_with(&skills_canonical) {
+                eprintln!(
+                    "[sentinel] SECURITY: Phase file '{}' resolves to '{}' \
+                     which is outside ~/.claude/skills/. Rejecting symlink escape.",
+                    path,
+                    canonical.display()
+                );
+                return None;
+            }
+            true
+        }
+        Err(_) => {
+            // File doesn't exist on disk — textual validation passed above.
+            // Mark as untrusted so workflow state is NOT advanced.
+            false
+        }
+    };
+
+    Some(PhaseFileInfo {
+        file: phase_file.to_string(),
+        skill: skill_name.to_string(),
+        trusted,
+    })
+}
+
+/// Validate a path segment contains only safe ASCII characters.
+/// Allows: a-z, A-Z, 0-9, hyphens, underscores, dots (for .md extension).
+///
+/// Explicitly rejects ALL non-ASCII characters, including Unicode confusables
+/// (e.g., Cyrillic 'а' U+0430 vs Latin 'a' U+0061) that could bypass
+/// skill name matching via homoglyph attacks.
+fn is_safe_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && name.is_ascii()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
 }
 
 /// Process a phase-gate hook event (PreToolUse)
@@ -61,15 +179,74 @@ pub fn process(
     // If this is a Read() call, check if it's reading a phase file
     if tool_name == "Read" {
         if let Some(ref tool_input) = input.tool_input {
-            if let Some(phase_file) = extract_phase_file(tool_input) {
-                state.record_phase_read(&phase_file);
+            if let Some(info) = extract_phase_file(tool_input) {
+                state.record_phase_read(&info.file);
+
+                // Only advance workflow if the phase file is trusted (exists on
+                // disk and canonicalizes to within ~/.claude/skills/).
+                // Non-existent files are still recorded for tracking (phases_read)
+                // but cannot advance state — prevents phantom phase completion
+                // via crafted paths to files that don't exist.
+                if !info.trusted {
+                    return HookOutput::allow();
+                }
 
                 // Auto-advance workflow when phase file is read.
                 // Reading the phase file = proof of engagement under hard gate.
-                if let Some(skill) = state.active_skill.clone() {
-                    let phase_id = phase_file.trim_end_matches(".md");
-                    if let Some(wf) = state.workflows.get_mut(&skill) {
-                        wf.advance(phase_id);
+                //
+                // FIX: Derive skill from the path (info.skill), not active_skill.
+                // This prevents misattribution when multiple skills are in play.
+                // Fall back to active_skill only if the path-derived skill has
+                // no workflow definition in the config.
+                let skill_to_advance = if workflows.contains_key(&info.skill) {
+                    Some(info.skill.clone())
+                } else if let Some(ref active) = state.active_skill {
+                    if workflows.contains_key(active.as_str()) {
+                        // Fallback: path-derived skill not in workflows, using active_skill.
+                        // This is a potential misconfiguration — the phase file path
+                        // references a skill that has no workflow definition.
+                        eprintln!(
+                            "[sentinel] WARNING: Phase file path references skill '{}' \
+                             which has no workflow definition. Falling back to active_skill '{}'. \
+                             This may indicate a misconfigured skill or stale phase file.",
+                            info.skill, active
+                        );
+                        Some(active.clone())
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+
+                if let Some(skill_name) = skill_to_advance {
+                    // FIX: Use strip_suffix instead of trim_end_matches.
+                    // trim_end_matches removes repeated char patterns, not the suffix.
+                    // e.g., "add.md" with trim_end_matches(".md") would strip "d" too.
+                    let phase_id = info.file.strip_suffix(".md").unwrap_or(&info.file);
+
+                    // Validate phase_id against known workflow phases before advancing.
+                    // Only advance if this is a recognized phase, preventing
+                    // arbitrary state manipulation via crafted filenames.
+                    let is_known_phase = workflows
+                        .get(&skill_name)
+                        .map(|w| w.phases.iter().any(|p| p.id == phase_id))
+                        .unwrap_or(false);
+
+                    if is_known_phase {
+                        // Ensure workflow state exists for this skill
+                        if !state.workflows.contains_key(&skill_name) {
+                            state.workflows.insert(
+                                skill_name.clone(),
+                                sentinel_domain::workflow::WorkflowState::new(
+                                    &skill_name,
+                                    &state.session_id,
+                                ),
+                            );
+                        }
+                        if let Some(wf) = state.workflows.get_mut(&skill_name) {
+                            wf.advance(phase_id);
+                        }
                     }
                 }
             }
@@ -337,10 +514,15 @@ mod tests {
         let mut workflows = HashMap::new();
         workflows.insert("linear".to_string(), test_workflow());
 
+        // Use a real absolute path so canonicalize() succeeds (trusted = true)
+        let claim_path = dirs::home_dir()
+            .unwrap()
+            .join(".claude/skills/linear/phases/claim.md");
+
         let input = HookInput {
             tool_name: Some("Read".to_string()),
             tool_input: Some(serde_json::json!({
-                "file_path": "~/.claude/skills/linear/phases/claim.md"
+                "file_path": claim_path.to_string_lossy()
             })),
             ..Default::default()
         };
@@ -349,15 +531,109 @@ mod tests {
         assert!(output.blocked.is_none());
         // Should record the phase read
         assert!(state.phases_read.contains(&"claim.md".to_string()));
-        // Should auto-advance the workflow (reading phase file = proof of engagement)
-        let wf_state = state.workflows.get("linear").unwrap();
-        assert!(wf_state.is_phase_complete("claim"));
+
+        if claim_path.exists() {
+            // File exists on disk → trusted → workflow advances
+            let wf_state = state.workflows.get("linear").unwrap();
+            assert!(wf_state.is_phase_complete("claim"));
+        } else {
+            // File doesn't exist (CI/other machines) → untrusted → no advance
+            assert!(state.workflows.get("linear").is_none()
+                || !state.workflows.get("linear").unwrap().is_phase_complete("claim"));
+        }
+    }
+
+    #[test]
+    fn test_read_derives_skill_from_path() {
+        // Even if active_skill is different, the phase advance should use
+        // the skill derived from the path, not active_skill.
+        let mut state = SessionState::new("sess-1");
+        state.set_active_skill("some-other-skill");
+        let mut workflows = HashMap::new();
+        workflows.insert("linear".to_string(), test_workflow());
+
+        let claim_path = dirs::home_dir()
+            .unwrap()
+            .join(".claude/skills/linear/phases/claim.md");
+
+        let input = HookInput {
+            tool_name: Some("Read".to_string()),
+            tool_input: Some(serde_json::json!({
+                "file_path": claim_path.to_string_lossy()
+            })),
+            ..Default::default()
+        };
+        let output = process(&input, &mut state, &workflows);
+        assert!(output.blocked.is_none());
+        assert!(state.phases_read.contains(&"claim.md".to_string()));
+
+        if claim_path.exists() {
+            // File exists → trusted → should advance "linear" (from path), not "some-other-skill"
+            let wf_state = state.workflows.get("linear").unwrap();
+            assert!(wf_state.is_phase_complete("claim"));
+        }
+        // If file doesn't exist → untrusted → no advance (still OK, phases_read recorded)
+    }
+
+    #[test]
+    fn test_read_rejects_unknown_phase_id() {
+        // Reading a .md file that isn't a known phase should NOT advance workflow
+        let mut state = SessionState::new("sess-1");
+        state.set_active_skill("linear");
+        let mut workflows = HashMap::new();
+        workflows.insert("linear".to_string(), test_workflow());
+
+        let evil_path = dirs::home_dir()
+            .unwrap()
+            .join(".claude/skills/linear/phases/evil-phase.md");
+
+        let input = HookInput {
+            tool_name: Some("Read".to_string()),
+            tool_input: Some(serde_json::json!({
+                "file_path": evil_path.to_string_lossy()
+            })),
+            ..Default::default()
+        };
+        let output = process(&input, &mut state, &workflows);
+        assert!(output.blocked.is_none());
+        // File is recorded as read (for tracking), but workflow should NOT advance
+        // (evil-phase.md doesn't exist on disk → untrusted, AND not a known phase ID)
+        assert!(state.phases_read.contains(&"evil-phase.md".to_string()));
+        // No workflow state should be created for unknown phases
+        assert!(
+            state.workflows.get("linear").is_none()
+                || !state.workflows.get("linear").unwrap().is_phase_complete("evil-phase")
+        );
+    }
+
+    #[test]
+    fn test_read_rejects_path_traversal() {
+        let mut state = SessionState::new("sess-1");
+        let workflows = HashMap::new();
+
+        let traversal_path = dirs::home_dir()
+            .unwrap()
+            .join(".claude/skills/linear/phases/../../secrets/claim.md");
+
+        let input = HookInput {
+            tool_name: Some("Read".to_string()),
+            tool_input: Some(serde_json::json!({
+                "file_path": traversal_path.to_string_lossy()
+            })),
+            ..Default::default()
+        };
+        let output = process(&input, &mut state, &workflows);
+        assert!(output.blocked.is_none());
+        // Path traversal should be rejected (ParentDir component detected) — no phase recorded
+        assert!(state.phases_read.is_empty());
     }
 
     #[test]
     fn test_read_on_windows_path_records_phase() {
         let mut state = SessionState::new("sess-1");
-        let workflows = HashMap::new();
+        state.set_active_skill("linear");
+        let mut workflows = HashMap::new();
+        workflows.insert("linear".to_string(), test_workflow());
 
         let input = HookInput {
             tool_name: Some("Read".to_string()),
@@ -376,10 +652,14 @@ mod tests {
         let mut state = SessionState::new("sess-1");
         let workflows = HashMap::new();
 
+        let skill_path = dirs::home_dir()
+            .unwrap()
+            .join(".claude/skills/linear/SKILL.md");
+
         let input = HookInput {
             tool_name: Some("Read".to_string()),
             tool_input: Some(serde_json::json!({
-                "file_path": "~/.claude/skills/linear/SKILL.md"
+                "file_path": skill_path.to_string_lossy()
             })),
             ..Default::default()
         };
@@ -444,6 +724,42 @@ mod tests {
         let output = process(&input, &mut state, &workflows);
         // Should be allowed — all phases read
         assert!(output.blocked.is_none());
+    }
+
+    #[test]
+    fn test_untrusted_file_does_not_advance_workflow() {
+        // A phase file path that doesn't exist on disk should be recorded
+        // in phases_read but should NOT advance workflow state (untrusted).
+        let mut state = SessionState::new("sess-1");
+        state.set_active_skill("linear");
+        let mut workflows = HashMap::new();
+        workflows.insert("linear".to_string(), test_workflow());
+
+        // Use a path with a nonexistent parent dir so the file definitely doesn't exist
+        let fake_path = dirs::home_dir()
+            .unwrap()
+            .join(".claude/skills/linear/phases/claim.md");
+
+        // Only run this test if the file does NOT exist (CI environments)
+        // On dev machines where the file exists, skip this variant
+        if !fake_path.exists() {
+            let input = HookInput {
+                tool_name: Some("Read".to_string()),
+                tool_input: Some(serde_json::json!({
+                    "file_path": fake_path.to_string_lossy()
+                })),
+                ..Default::default()
+            };
+            let output = process(&input, &mut state, &workflows);
+            assert!(output.blocked.is_none());
+            // File recorded for tracking
+            assert!(state.phases_read.contains(&"claim.md".to_string()));
+            // But workflow NOT advanced (untrusted — file doesn't exist)
+            assert!(
+                state.workflows.get("linear").is_none()
+                    || !state.workflows.get("linear").unwrap().is_phase_complete("claim")
+            );
+        }
     }
 
     #[test]

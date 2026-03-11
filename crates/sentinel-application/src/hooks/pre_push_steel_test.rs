@@ -13,11 +13,12 @@
 //!
 //! Logic:
 //! 1. Only fires on `git push` commands
-//! 2. Checks if diff includes frontend files (.tsx, .jsx, .css, .scss, .styled)
-//! 3. If no frontend files → allow (backend-only push)
-//! 4. If frontend files + recent Steel test → allow
-//! 5. If frontend files + no Steel test → block with instructions
-//! 6. If no project has Steel config → allow (Steel not configured)
+//! 2. Matches cwd repo name against project configs with Steel settings
+//! 3. If current repo has no matching Steel-configured project → allow
+//! 4. Checks if diff includes frontend files (.tsx, .jsx, .css, .scss, .styled)
+//! 5. If no frontend files → allow (backend-only push)
+//! 6. If frontend files + recent Steel test → allow
+//! 7. If frontend files + no Steel test → block with instructions
 
 use chrono::Utc;
 use regex::Regex;
@@ -76,9 +77,31 @@ fn has_recent_steel_test(session_id: &str) -> bool {
     }
 }
 
-/// Check if any project config has Steel test settings.
+/// Extract the repo directory name from a cwd path.
+/// e.g. "C:\Users\garys\Documents\GitHub\firefly-pro-crm" → "firefly-pro-crm"
+/// Also handles worktree paths like "repo--branch-name" by stripping the "--" suffix.
+fn repo_name_from_cwd(cwd: &str) -> Option<String> {
+    let path = std::path::Path::new(cwd);
+    let name = path.file_name()?.to_string_lossy().to_string();
+    // Strip worktree suffix (e.g. "firefly-pro-crm--fir-123-desc" → "firefly-pro-crm")
+    let base = name.split("--").next().unwrap_or(&name);
+    Some(base.to_lowercase())
+}
+
+/// Check if the current repo matches a project config that has Steel test settings.
+/// Scoped check: only returns true if the repo name matches the project's name or aliases
+/// AND that project has steel_test_email configured.
+///
 /// Accepts an optional override path for testing; uses ~/.claude/skills/linear/projects/ by default.
-fn any_project_has_steel_config_in(projects_dir: Option<&std::path::Path>) -> bool {
+fn repo_has_steel_config_in(
+    cwd: Option<&str>,
+    projects_dir: Option<&std::path::Path>,
+) -> bool {
+    let repo = match cwd.and_then(repo_name_from_cwd) {
+        Some(r) => r,
+        None => return false, // No cwd → can't determine repo → allow
+    };
+
     let default_dir = dirs::home_dir()
         .map(|h| h.join(".claude").join("skills").join("linear").join("projects"));
 
@@ -112,7 +135,14 @@ fn any_project_has_steel_config_in(projects_dir: Option<&std::path::Path>) -> bo
         }
 
         if let Ok(content) = std::fs::read_to_string(&path) {
-            if content.contains("steel_test_email") || content.contains("staging_url") {
+            // Must have steel_test_email to be a Steel-configured project
+            if !content.contains("steel_test_email") {
+                continue;
+            }
+
+            // Check if repo name matches project name or aliases
+            let content_lower = content.to_lowercase();
+            if repo_matches_project(&repo, &content_lower) {
                 return true;
             }
         }
@@ -121,9 +151,51 @@ fn any_project_has_steel_config_in(projects_dir: Option<&std::path::Path>) -> bo
     false
 }
 
-/// Check if any project config has Steel test settings (default path)
-fn any_project_has_steel_config() -> bool {
-    any_project_has_steel_config_in(None)
+/// Check if a repo name matches a project config's name or aliases.
+/// Matches against:
+/// - `name:` frontmatter field (e.g. "name: firefly-pro")
+/// - `aliases:` frontmatter array (e.g. aliases: ["firefly", "crm", "fpcrm"])
+/// - The filename stem of the project file
+///
+/// Repo names are matched with normalization: "firefly-pro-crm" matches alias "fpcrm",
+/// name "firefly-pro", and common variants like "firefly" by checking if the repo
+/// name contains or is contained by any alias.
+fn repo_matches_project(repo: &str, content_lower: &str) -> bool {
+    // Extract name field: `name: firefly-pro`
+    for line in content_lower.lines() {
+        let trimmed = line.trim();
+        if let Some(name_val) = trimmed.strip_prefix("name:") {
+            let name = name_val.trim().trim_matches('"');
+            if repo.contains(name) || name.contains(repo) {
+                return true;
+            }
+        }
+
+        // Extract aliases array: `aliases: ["firefly", "crm", "fpcrm"]`
+        if let Some(aliases_val) = trimmed.strip_prefix("aliases:") {
+            let aliases_str = aliases_val.trim();
+            // Parse simple array format: ["a", "b", "c"]
+            let cleaned = aliases_str
+                .trim_start_matches('[')
+                .trim_end_matches(']');
+            for alias in cleaned.split(',') {
+                let alias = alias.trim().trim_matches('"').trim_matches('\'');
+                if alias.is_empty() {
+                    continue;
+                }
+                if repo.contains(alias) || alias.contains(repo) {
+                    return true;
+                }
+            }
+        }
+    }
+
+    false
+}
+
+/// Check if the current repo has Steel test config (default projects path)
+fn repo_has_steel_config(cwd: Option<&str>) -> bool {
+    repo_has_steel_config_in(cwd, None)
 }
 
 /// Check if the git diff (staged or branch) includes frontend file changes.
@@ -183,13 +255,13 @@ pub fn process(input: &HookInput) -> HookOutput {
         return HookOutput::allow();
     }
 
-    // Check if any project has Steel test config
-    if !any_project_has_steel_config() {
+    // Check if THIS repo's project has Steel test config (not all projects globally)
+    let cwd = input.cwd.as_deref();
+    if !repo_has_steel_config(cwd) {
         return HookOutput::allow();
     }
 
     // Check if the diff includes frontend files
-    let cwd = input.cwd.as_deref();
     if !diff_has_frontend_files(cwd) {
         // Backend-only change — no Steel test needed
         return HookOutput::allow();
@@ -217,9 +289,8 @@ pub fn process(input: &HookInput) -> HookOutput {
 |  3. Create Steel session → login → screenshot → verify     |
 |  4. Check console errors                                   |
 |                                                            |
-|  Or mark test as passed:                                   |
-|  -> Say \"steel test passed\" to bypass                      |
-|  -> Say \"override push\" to push anyway                     |
+|  Or push manually from your terminal:                      |
+|  -> git push origin <branch>                               |
 +============================================================+"
         .to_string();
 
@@ -256,17 +327,71 @@ mod tests {
     fn test_allows_push_when_no_steel_config() {
         // Use an empty temp dir — no project config files with steel settings
         let tmpdir = tempfile::tempdir().unwrap();
-        let result = any_project_has_steel_config_in(Some(tmpdir.path()));
+        let result = repo_has_steel_config_in(Some("/fake/path/some-repo"), Some(tmpdir.path()));
         assert!(!result, "Empty directory should have no steel config");
     }
 
     #[test]
-    fn test_detects_steel_config_in_project_files() {
+    fn test_detects_steel_config_for_matching_repo() {
         let tmpdir = tempfile::tempdir().unwrap();
         let project_file = tmpdir.path().join("firefly.md");
-        std::fs::write(&project_file, "staging_url: https://staging.example.com").unwrap();
-        let result = any_project_has_steel_config_in(Some(tmpdir.path()));
-        assert!(result, "Should detect staging_url in project file");
+        std::fs::write(
+            &project_file,
+            "name: firefly-pro\naliases: [\"firefly\", \"crm\", \"fpcrm\"]\nsteel_test_email: test@example.com",
+        )
+        .unwrap();
+        // Repo name "firefly-pro-crm" contains alias "crm" → match
+        let result = repo_has_steel_config_in(
+            Some("/fake/path/firefly-pro-crm"),
+            Some(tmpdir.path()),
+        );
+        assert!(result, "Should match repo 'firefly-pro-crm' against alias 'crm'");
+    }
+
+    #[test]
+    fn test_ignores_steel_config_for_unrelated_repo() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let project_file = tmpdir.path().join("firefly.md");
+        std::fs::write(
+            &project_file,
+            "name: firefly-pro\naliases: [\"firefly\", \"crm\", \"fpcrm\"]\nsteel_test_email: test@example.com",
+        )
+        .unwrap();
+        // Repo name "sentinel" doesn't match any alias → no block
+        let result = repo_has_steel_config_in(
+            Some("/fake/path/sentinel"),
+            Some(tmpdir.path()),
+        );
+        assert!(!result, "Should NOT match repo 'sentinel' against firefly aliases");
+    }
+
+    #[test]
+    fn test_ignores_project_without_steel_email() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let project_file = tmpdir.path().join("myproject.md");
+        // Has staging_url but NOT steel_test_email → should not trigger Steel gate
+        std::fs::write(
+            &project_file,
+            "name: myproject\naliases: [\"myapp\"]\nstaging_url: https://staging.example.com",
+        )
+        .unwrap();
+        let result = repo_has_steel_config_in(
+            Some("/fake/path/myproject"),
+            Some(tmpdir.path()),
+        );
+        assert!(!result, "Should NOT match project without steel_test_email");
+    }
+
+    #[test]
+    fn test_worktree_path_strips_branch_suffix() {
+        assert_eq!(
+            repo_name_from_cwd("/path/to/firefly-pro-crm--fir-123-desc"),
+            Some("firefly-pro-crm".to_string())
+        );
+        assert_eq!(
+            repo_name_from_cwd("/path/to/sentinel"),
+            Some("sentinel".to_string())
+        );
     }
 
     #[test]

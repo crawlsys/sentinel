@@ -50,19 +50,37 @@ pub fn evaluate(
 
     // Check if workflow blocks this tool
     if let Some(block) = workflow_state.should_block(workflow, tool_name) {
-        // Only enforce the gate when the required phase file exists on disk.
-        // If phase files aren't authored yet, the workflow definition in
-        // workflows.toml is documentation — not enforceable. This prevents
-        // hard-gate deadlocks for the 42+ skills without phase files.
-        let phase_file_path = dirs::home_dir()
+        let phases_dir = dirs::home_dir()
             .unwrap_or_default()
             .join(".claude/skills")
             .join(skill_name)
-            .join("phases")
-            .join(&block.next_phase_file);
+            .join("phases");
+
+        let phase_file_path = phases_dir.join(&block.next_phase_file);
+
+        // Distinguish two cases:
+        // 1. "No phase system" — phases/ directory doesn't exist at all.
+        //    The workflow definition in workflows.toml is documentation only.
+        //    This prevents hard-gate deadlocks for 42+ skills without phase files.
+        // 2. "Phase file missing" — phases/ dir exists but the specific file is gone.
+        //    This is likely a configuration error. Log a loud warning but still block,
+        //    because the skill HAS a phase system — it's just broken.
+        if !phases_dir.exists() {
+            // Case 1: No phase system authored yet — allow
+            return GateDecision::Allow;
+        }
 
         if !phase_file_path.exists() {
-            return GateDecision::Allow;
+            // Case 2: Phase system exists but specific file is missing.
+            // Log warning for debugging, but still block — fail closed.
+            eprintln!(
+                "[sentinel] WARNING: Phase file missing but phases/ dir exists: {}. \
+                 Skill '{}' has a broken phase configuration. Blocking to fail closed.",
+                phase_file_path.display(),
+                skill_name,
+            );
+            // Still block — the skill has a phase system, the file is just missing.
+            // The user needs to either create the file or remove the phases/ dir.
         }
 
         return GateDecision::Block {
