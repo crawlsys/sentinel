@@ -5,7 +5,7 @@
 
 use anyhow::Result;
 
-use sentinel_domain::routing::{RegexRouter, RoutingMatch};
+use sentinel_domain::routing::RegexRouter;
 
 /// Port for AI classification — infrastructure implements this
 #[async_trait::async_trait]

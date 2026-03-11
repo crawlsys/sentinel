@@ -30,6 +30,7 @@ pub mod teammate_idle;
 pub mod todo_interceptor;
 pub mod todo_loader;
 pub mod verification_gate;
+pub mod wrangler_guard;
 
 /// All hook module names — used for dynamic counting.
 /// Keep in sync with the `pub mod` declarations above.
@@ -60,6 +61,7 @@ pub const HOOK_NAMES: &[&str] = &[
     "todo_interceptor",
     "todo_loader",
     "verification_gate",
+    "wrangler_guard",
 ];
 
 /// Port for git status queries — implemented by the infrastructure layer.

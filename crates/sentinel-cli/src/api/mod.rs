@@ -4,7 +4,11 @@
 //! Provides endpoints for proof chains, workflows, and hook stats.
 
 pub mod hooks;
+pub mod logs;
 pub mod proofs;
+pub mod scan;
+pub mod sessions;
+pub mod store;
 pub mod workflows;
 
 use std::sync::Arc;
@@ -26,6 +30,10 @@ pub fn router(state: AppState) -> Router {
         .nest("/api/proofs", proofs::router())
         .nest("/api/workflows", workflows::router())
         .nest("/api/hooks", hooks::router())
+        .nest("/api/sentinel", sessions::router())
+        .nest("/api", scan::router())
+        .nest("/api", logs::router())
+        .nest("/api", store::router())
         .with_state(state)
 }
 

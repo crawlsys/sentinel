@@ -93,6 +93,7 @@ mod tests {
         let output = process(&input);
         assert!(output.hook_specific_output.is_some());
         let ctx = output.hook_specific_output.unwrap().additional_context;
+        let ctx = ctx.as_deref().unwrap();
         assert!(ctx.contains("[Plan Organizer]"));
         assert!(ctx.contains("firefly-pro"));
         assert!(ctx.contains("MANDATORY"));
@@ -142,6 +143,7 @@ mod tests {
         };
         let output = process(&input);
         let ctx = output.hook_specific_output.unwrap().additional_context;
+        let ctx = ctx.as_deref().unwrap();
         assert!(ctx.contains("plans/legatus"));
     }
 

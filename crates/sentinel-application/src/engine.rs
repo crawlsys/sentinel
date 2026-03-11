@@ -3,7 +3,6 @@
 //! Core orchestrator: resolves dependencies, executes hooks in parallel batches,
 //! merges outputs. Single entry point for all hook events.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::Result;

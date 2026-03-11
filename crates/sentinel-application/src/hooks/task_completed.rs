@@ -73,6 +73,7 @@ mod tests {
         let output = process(&input);
         assert!(output.hook_specific_output.is_some());
         let ctx = output.hook_specific_output.unwrap().additional_context;
+        let ctx = ctx.as_deref().unwrap();
         assert!(ctx.contains("backend-dev"));
         assert!(ctx.contains("auth-team"));
         assert!(ctx.contains("Implement auth"));
@@ -85,6 +86,7 @@ mod tests {
         let output = process(&input);
         assert!(output.hook_specific_output.is_some());
         let ctx = output.hook_specific_output.unwrap().additional_context;
+        let ctx = ctx.as_deref().unwrap();
         assert!(ctx.contains("unknown task"));
     }
 }

@@ -37,7 +37,20 @@ fn state_file() -> Option<PathBuf> {
     Some(dir.join("unverified-claims.json"))
 }
 
+/// Test-only override for the cooldown file path.
+/// The STATE_LOCK mutex serializes all access, so a simple Mutex<Option> is safe.
+#[cfg(test)]
+static COOLDOWN_PATH_OVERRIDE: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
+
 fn cooldown_file() -> PathBuf {
+    #[cfg(test)]
+    {
+        if let Ok(guard) = COOLDOWN_PATH_OVERRIDE.lock() {
+            if let Some(ref path) = *guard {
+                return path.clone();
+            }
+        }
+    }
     std::env::temp_dir().join("claude-verification-gate-last")
 }
 
@@ -329,6 +342,10 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::io::Write as _;
+    use std::sync::Mutex;
+
+    /// Mutex to serialize tests that share the cooldown file.
+    static STATE_LOCK: Mutex<()> = Mutex::new(());
 
     fn make_transcript(entries: &[serde_json::Value]) -> tempfile::NamedTempFile {
         let mut file = tempfile::NamedTempFile::new().unwrap();
@@ -396,6 +413,7 @@ mod tests {
 
     #[test]
     fn test_claim_without_evidence_writes_state() {
+        let _lock = STATE_LOCK.lock().unwrap();
         let session_id = format!("test-vg-warn-{}", std::process::id());
 
         let _ = fs::remove_file(offset_path(&session_id));
@@ -433,10 +451,15 @@ mod tests {
 
     #[test]
     fn test_prompt_injects_and_clears() {
+        let _lock = STATE_LOCK.lock().unwrap();
+
+        // Use a unique cooldown file to avoid interference from live sentinel
+        let unique_path = std::env::temp_dir().join(format!(
+            "claude-vg-test-inject-{}",
+            std::process::id()
+        ));
+        *COOLDOWN_PATH_OVERRIDE.lock().unwrap() = Some(unique_path);
         let _ = fs::remove_file(cooldown_file());
-        // Write a stale cooldown to guarantee cooldown_expired() returns true
-        // (protects against parallel tests that write the cooldown file)
-        let _ = fs::write(cooldown_file(), "0");
 
         if let Some(path) = state_file() {
             let state = ClaimState {
@@ -455,6 +478,7 @@ mod tests {
         assert!(output.hook_specific_output.is_some());
 
         let ctx = output.hook_specific_output.unwrap().additional_context;
+        let ctx = ctx.as_deref().unwrap();
         assert!(ctx.contains("Verification Gate"));
         assert!(ctx.contains("all tests pass"));
 
@@ -464,10 +488,12 @@ mod tests {
         }
 
         let _ = fs::remove_file(cooldown_file());
+        *COOLDOWN_PATH_OVERRIDE.lock().unwrap() = None;
     }
 
     #[test]
     fn test_prompt_wrong_session_no_inject() {
+        let _lock = STATE_LOCK.lock().unwrap();
         if let Some(path) = state_file() {
             let state = ClaimState {
                 claims: vec!["all tests pass".into()],
@@ -492,11 +518,20 @@ mod tests {
 
     #[test]
     fn test_cooldown_prevents_repeated_warnings() {
+        let _lock = STATE_LOCK.lock().unwrap();
+
+        let unique_path = std::env::temp_dir().join(format!(
+            "claude-vg-test-cooldown-{}",
+            std::process::id()
+        ));
+        *COOLDOWN_PATH_OVERRIDE.lock().unwrap() = Some(unique_path);
+
         let _ = fs::remove_file(cooldown_file());
         assert!(cooldown_expired());
         write_cooldown();
         assert!(!cooldown_expired());
         let _ = fs::remove_file(cooldown_file());
+        *COOLDOWN_PATH_OVERRIDE.lock().unwrap() = None;
     }
 
     #[test]

@@ -397,7 +397,7 @@ mod tests {
             let output = process(&input, &router);
             let ctx = output.hook_specific_output.unwrap();
             assert!(
-                ctx.additional_context.contains("linear"),
+                ctx.additional_context.as_deref().unwrap().contains("linear"),
                 "{prefix}-123 should route to linear"
             );
         }
@@ -412,7 +412,7 @@ mod tests {
         };
         let output = process(&input, &router);
         let ctx = output.hook_specific_output.unwrap();
-        assert!(ctx.additional_context.contains("linear"));
+        assert!(ctx.additional_context.as_deref().unwrap().contains("linear"));
     }
 
     #[test]
@@ -424,7 +424,7 @@ mod tests {
         };
         let output = process(&input, &router);
         let ctx = output.hook_specific_output.unwrap();
-        assert!(ctx.additional_context.contains("git"));
+        assert!(ctx.additional_context.as_deref().unwrap().contains("git"));
     }
 
     #[test]
@@ -437,7 +437,7 @@ mod tests {
         let output = process(&input, &router);
         // No-match now injects "general conversation mode" context
         let ctx = output.hook_specific_output.unwrap();
-        assert!(ctx.additional_context.contains("No skill matched"));
+        assert!(ctx.additional_context.as_deref().unwrap().contains("No skill matched"));
         assert!(output.blocked.is_none());
     }
 
@@ -459,7 +459,7 @@ mod tests {
         };
         let output = process(&input, &router);
         let ctx = output.hook_specific_output.unwrap();
-        assert!(ctx.additional_context.contains("test"));
+        assert!(ctx.additional_context.as_deref().unwrap().contains("test"));
     }
 
     #[test]
@@ -471,7 +471,7 @@ mod tests {
         };
         let output = process(&input, &router);
         let ctx = output.hook_specific_output.unwrap();
-        assert!(ctx.additional_context.contains("ddd-hexagonal"));
+        assert!(ctx.additional_context.as_deref().unwrap().contains("ddd-hexagonal"));
     }
 
     #[test]
@@ -483,7 +483,7 @@ mod tests {
         };
         let output = process(&input, &router);
         let ctx = output.hook_specific_output.unwrap();
-        assert!(ctx.additional_context.contains("deploy"));
+        assert!(ctx.additional_context.as_deref().unwrap().contains("deploy"));
     }
 
     #[test]
@@ -495,7 +495,7 @@ mod tests {
         };
         let output = process(&input, &router);
         let ctx = output.hook_specific_output.unwrap();
-        assert!(ctx.additional_context.contains("security"));
+        assert!(ctx.additional_context.as_deref().unwrap().contains("security"));
     }
 
     #[test]
@@ -507,7 +507,7 @@ mod tests {
         };
         let output = process(&input, &router);
         let ctx = output.hook_specific_output.unwrap();
-        assert!(ctx.additional_context.contains("cerebras"));
+        assert!(ctx.additional_context.as_deref().unwrap().contains("cerebras"));
     }
 
     #[test]
@@ -519,7 +519,7 @@ mod tests {
         };
         let output = process(&input, &router);
         let ctx = output.hook_specific_output.unwrap();
-        assert!(ctx.additional_context.contains("cerebras"));
+        assert!(ctx.additional_context.as_deref().unwrap().contains("cerebras"));
     }
 
     #[test]
@@ -531,7 +531,7 @@ mod tests {
         };
         let output = process(&input, &router);
         let ctx = output.hook_specific_output.unwrap();
-        assert!(ctx.additional_context.contains("internet"));
+        assert!(ctx.additional_context.as_deref().unwrap().contains("internet"));
     }
 
     #[test]
@@ -543,7 +543,7 @@ mod tests {
         };
         let output = process(&input, &router);
         let ctx = output.hook_specific_output.unwrap();
-        assert!(ctx.additional_context.contains("internet"));
+        assert!(ctx.additional_context.as_deref().unwrap().contains("internet"));
     }
 
     #[test]
@@ -555,6 +555,6 @@ mod tests {
         };
         let output = process(&input, &router);
         let ctx = output.hook_specific_output.unwrap();
-        assert!(ctx.additional_context.contains("internet"));
+        assert!(ctx.additional_context.as_deref().unwrap().contains("internet"));
     }
 }

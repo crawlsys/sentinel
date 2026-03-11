@@ -5,7 +5,7 @@
 
 use sentinel_domain::events::HookInput;
 use sentinel_domain::state::SessionState;
-use sentinel_domain::workflow::{SkillWorkflow, WorkflowBlock};
+use sentinel_domain::workflow::SkillWorkflow;
 
 /// Result of evaluating a gate
 #[derive(Debug)]
@@ -50,6 +50,21 @@ pub fn evaluate(
 
     // Check if workflow blocks this tool
     if let Some(block) = workflow_state.should_block(workflow, tool_name) {
+        // Only enforce the gate when the required phase file exists on disk.
+        // If phase files aren't authored yet, the workflow definition in
+        // workflows.toml is documentation — not enforceable. This prevents
+        // hard-gate deadlocks for the 42+ skills without phase files.
+        let phase_file_path = dirs::home_dir()
+            .unwrap_or_default()
+            .join(".claude/skills")
+            .join(skill_name)
+            .join("phases")
+            .join(&block.next_phase_file);
+
+        if !phase_file_path.exists() {
+            return GateDecision::Allow;
+        }
+
         return GateDecision::Block {
             reason: block.reason,
             next_phase: block.next_phase,

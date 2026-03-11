@@ -5,7 +5,6 @@
 
 use std::sync::Arc;
 
-use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 

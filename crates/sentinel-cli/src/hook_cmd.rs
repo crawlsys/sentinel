@@ -78,8 +78,10 @@ pub async fn run(event: &str, matcher: Option<&str>, standalone: bool) -> Result
 
             // Extract detected skill from router output and update state
             if let Some(ref ctx) = router_output.hook_specific_output {
-                if let Some(skill) = extract_skill_name(&ctx.additional_context) {
-                    state.set_active_skill(&skill);
+                if let Some(ref ac) = ctx.additional_context {
+                    if let Some(skill) = extract_skill_name(ac) {
+                        state.set_active_skill(&skill);
+                    }
                 }
             }
 
@@ -153,6 +155,10 @@ pub async fn run(event: &str, matcher: Option<&str>, standalone: bool) -> Result
                 // Pre-push Steel test — block git push without Steel test (Bash only)
                 let steel_output = hooks::pre_push_steel_test::process(&input);
                 output.merge(&steel_output);
+
+                // Wrangler guard — block Node wrangler deploy, gate deletes (Bash only)
+                let wrangler_output = hooks::wrangler_guard::process(&input);
+                output.merge(&wrangler_output);
             }
         }
 
@@ -254,12 +260,19 @@ pub async fn run(event: &str, matcher: Option<&str>, standalone: bool) -> Result
         tracing::warn!(error = %e, "Failed to persist hook state");
     }
 
-    // Claude Code only supports hookSpecificOutput for UserPromptSubmit and PostToolUse.
-    // For Stop/SessionStart/PreCompact, strip it to avoid JSON validation errors.
-    // Claude Code only supports hookSpecificOutput for UserPromptSubmit and PostToolUse.
-    // Strip it for all other events to avoid JSON validation errors.
-    if !matches!(hook_event, HookEvent::UserPromptSubmit | HookEvent::PostToolUse) {
-        output.hook_specific_output = None;
+    // Transform output for Claude Code's JSON schema
+    match hook_event {
+        HookEvent::PreToolUse => {
+            // Transform legacy blocked/reason → proper hookSpecificOutput with permissionDecision
+            output = output.into_pretool_output();
+        }
+        HookEvent::UserPromptSubmit | HookEvent::PostToolUse => {
+            // These events support hookSpecificOutput natively — no transform needed
+        }
+        _ => {
+            // Strip hookSpecificOutput for events Claude Code doesn't support
+            output.hook_specific_output = None;
+        }
     }
 
     // Write output to stdout

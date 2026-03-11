@@ -37,7 +37,7 @@ pub fn resolve(specs: &[HookSpec]) -> Result<ExecutionPlan, DependencyError> {
     }
 
     // Build index: HookId → spec
-    let id_map: HashMap<&HookId, &HookSpec> = specs.iter().map(|s| (&s.id, s)).collect();
+    let _id_map: HashMap<&HookId, &HookSpec> = specs.iter().map(|s| (&s.id, s)).collect();
 
     // Build petgraph DAG
     let mut graph = DiGraph::<&HookId, ()>::new();

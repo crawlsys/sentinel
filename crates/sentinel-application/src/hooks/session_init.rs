@@ -317,77 +317,25 @@ fn validate_sync(claude_dir: &Path) -> ValidationResult {
 }
 
 // ---------------------------------------------------------------------------
-// Component counting
+// Component counting — delegated to shared scanner module
 // ---------------------------------------------------------------------------
 
-/// Dynamic component counts for CLAUDE.md generation
-struct ComponentCounts {
-    skills: usize,
-    hooks: usize,
-    commands: usize,
-    agents: usize,
-    mcp_servers: usize,
+use crate::scanner::{self, ComponentCounts};
+
+/// Count subdirectories in a path (delegates to shared scanner module)
+fn count_subdirs(dir: &Path) -> usize {
+    scanner::count_subdirs(dir)
+}
+
+/// Count files with a given extension (delegates to shared scanner module)
+#[cfg(test)]
+fn count_files_with_ext(dir: &Path, ext: &str) -> usize {
+    scanner::count_files_with_ext(dir, ext)
 }
 
 /// Count all marketplace components in ~/.claude/
 fn count_components(claude_dir: &Path) -> ComponentCounts {
-    let skills = count_subdirs(&claude_dir.join("skills"));
-    let hooks = super::HOOK_NAMES.len();
-    let commands = count_files_with_ext(&claude_dir.join("commands"), ".md");
-    let agents = count_files_with_ext(&claude_dir.join("agents"), ".md");
-    let mcp_servers = count_mcp_servers();
-
-    ComponentCounts {
-        skills,
-        hooks,
-        commands,
-        agents,
-        mcp_servers,
-    }
-}
-
-/// Count subdirectories in a path
-fn count_subdirs(dir: &Path) -> usize {
-    fs::read_dir(dir)
-        .map(|entries| {
-            entries
-                .filter_map(|e| e.ok())
-                .filter(|e| e.file_type().map(|ft| ft.is_dir()).unwrap_or(false))
-                .count()
-        })
-        .unwrap_or(0)
-}
-
-/// Count files with a given extension in a directory (non-recursive)
-fn count_files_with_ext(dir: &Path, ext: &str) -> usize {
-    fs::read_dir(dir)
-        .map(|entries| {
-            entries
-                .filter_map(|e| e.ok())
-                .filter(|e| {
-                    e.file_type().map(|ft| ft.is_file()).unwrap_or(false)
-                        && e.file_name().to_string_lossy().ends_with(ext)
-                })
-                .count()
-        })
-        .unwrap_or(0)
-}
-
-/// Count MCP servers from ~/.claude.json
-fn count_mcp_servers() -> usize {
-    let path = dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".claude.json");
-
-    fs::read_to_string(path)
-        .ok()
-        .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
-        .and_then(|json| {
-            json.get("mcpServers")
-                .and_then(|v| v.as_object())
-                .map(|obj| obj.len())
-        })
-        .unwrap_or(0)
+    scanner::count_components(claude_dir)
 }
 
 // ---------------------------------------------------------------------------
@@ -480,6 +428,26 @@ MCP servers are configured in `~/.claude.json` (NOT inside `~/.claude/`).
 - **Context compacts** -> `PreCompact` hooks fire (preserves critical context)
 
 All {hooks} hooks run through the sentinel Rust engine (`sentinel hook --event <Event>`).
+
+### Rust Tooling Ecosystem
+
+All MCP servers and CLIs are custom Rust binaries in `~/Documents/GitHub/`:
+
+| Type | Count | Repo pattern | Package pattern | Binary pattern |
+|------|-------|-------------|-----------------|----------------|
+| **MCP servers** | {mcp_repos} | `{{product}}-mcp-rust` | `{{product}}-mcp` | `{{product}}-mcp` |
+| **CLIs** | {cli_repos} | `{{product}}-cli-rust` | `{{product}}-cli-rs` | `{{product}}` |
+
+**Key infrastructure:**
+- **Vulcan SDK** (`vulcan-mcp-sdk-rust`): Proc-macro SDK (`#[tool]`, `#[tool_router]`, `#[tool_handler]`) for building MCP servers
+- **mcp-router**: Hot-reload wrapper — `mcp-router --single <binary> --watch <binary>` watches for recompilation and auto-restarts
+- **Sentinel** (`sentinel`): Hook engine powering all {hooks} lifecycle hooks
+
+**Conventions:**
+- Each MCP server is a standalone repo with its own `Cargo.toml` (not a workspace member of the CLI)
+- CLIs and MCPs for the same product are separate repos (e.g. `blacksmith-cli-rust` + `blacksmith-mcp-rust`)
+- MCP servers depend on Vulcan via path: `../vulcan-mcp-sdk-rust/crates/vulcan`
+- All MCP binaries are registered in `~/.claude.json` and wrapped by `mcp-router`
 
 ---
 
@@ -624,7 +592,8 @@ The conversation transcripts are at:
 ## Marketplace Stats
 
 - **Skills:** {skills}
-- **MCP Servers:** {mcp}
+- **MCP Servers:** {mcp} registered ({mcp_repos} repos)
+- **CLIs:** {cli_repos} repos
 - **Slash Commands:** {commands}
 - **Hooks:** {hooks} (sentinel engine)
 - **Agents:** {agents}
@@ -639,6 +608,8 @@ The conversation transcripts are at:
         commands = counts.commands,
         agents = counts.agents,
         mcp = counts.mcp_servers,
+        mcp_repos = counts.mcp_repos,
+        cli_repos = counts.cli_repos,
     );
 
     let claude_md_path = claude_dir.join("CLAUDE.md");
@@ -816,8 +787,9 @@ mod tests {
         let output = process(&input);
         assert!(output.hook_specific_output.is_some());
         let ctx = output.hook_specific_output.unwrap();
-        assert!(ctx.additional_context.contains("[SessionStart]"));
-        assert!(ctx.additional_context.contains("test-123"));
+        let additional = ctx.additional_context.as_deref().unwrap();
+        assert!(additional.contains("[SessionStart]"));
+        assert!(additional.contains("test-123"));
     }
 
     #[test]
@@ -844,6 +816,8 @@ mod tests {
             commands: 9,
             agents: 8,
             mcp_servers: 6,
+            mcp_repos: 0,
+            cli_repos: 0,
         };
         let context = build_startup_context(&sync, &validation, &counts, "test-sess");
         assert!(context.contains("No local repo found"));
@@ -867,6 +841,8 @@ mod tests {
             commands: 0,
             agents: 0,
             mcp_servers: 0,
+            mcp_repos: 0,
+            cli_repos: 0,
         };
         let context = build_startup_context(&sync, &validation, &counts, "s1");
         assert!(context.contains("42 files synced"));
@@ -886,6 +862,8 @@ mod tests {
             commands: 0,
             agents: 0,
             mcp_servers: 0,
+            mcp_repos: 0,
+            cli_repos: 0,
         };
         let context = build_startup_context(&sync, &validation, &counts, "s1");
         assert!(context.contains("Up to date"));
@@ -904,6 +882,8 @@ mod tests {
             commands: 0,
             agents: 0,
             mcp_servers: 0,
+            mcp_repos: 0,
+            cli_repos: 0,
         };
         let context = build_startup_context(&sync, &validation, &counts, "s1");
         assert!(context.contains("[Validation] FAILED"));
@@ -999,6 +979,8 @@ mod tests {
             commands: 10,
             agents: 8,
             mcp_servers: 9,
+            mcp_repos: 0,
+            cli_repos: 0,
         };
         generate_claude_md(dir.path(), &counts);
 

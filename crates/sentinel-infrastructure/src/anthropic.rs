@@ -8,7 +8,6 @@
 use anyhow::{Context, Result};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use tracing::warn;
 
 use sentinel_domain::judge::JudgeModel;
 

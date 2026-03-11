@@ -5,6 +5,7 @@
 //!   sentinel hook       — Thin client, forwards to daemon (or standalone)
 //!   sentinel verify     — Verify a session's proof chain
 //!   sentinel mcp        — MCP server over stdio (Claude Code connects here)
+//!   sentinel scan       — Scan marketplace, output JSON snapshot
 //!   sentinel stats      — Hook execution statistics
 
 use clap::{Parser, Subcommand};
@@ -14,6 +15,7 @@ mod api;
 mod daemon_cmd;
 mod hook_cmd;
 mod mcp_cmd;
+mod scan_cmd;
 mod stats_cmd;
 mod verify_cmd;
 
@@ -59,6 +61,21 @@ enum Commands {
     /// Start the MCP server over stdio (Claude Code connects here)
     Mcp,
 
+    /// Scan marketplace and output snapshot as JSON
+    Scan {
+        /// Output only component counts
+        #[arg(long)]
+        counts_only: bool,
+
+        /// Output only validation results
+        #[arg(long)]
+        validate: bool,
+
+        /// Override marketplace root directory (default: ~/.claude/)
+        #[arg(long)]
+        dir: Option<String>,
+    },
+
     /// Show hook execution statistics
     Stats,
 }
@@ -84,6 +101,11 @@ async fn main() -> anyhow::Result<()> {
         } => hook_cmd::run(&event, matcher.as_deref(), standalone).await,
         Commands::Verify { session } => verify_cmd::run(&session).await,
         Commands::Mcp => mcp_cmd::run().await,
+        Commands::Scan {
+            counts_only,
+            validate,
+            dir,
+        } => scan_cmd::run(counts_only, validate, dir).await,
         Commands::Stats => stats_cmd::run().await,
     }
 }

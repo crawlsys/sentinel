@@ -346,7 +346,7 @@ mod tests {
 
     #[test]
     fn test_different_evidence_different_hash() {
-        let mut e1 = Evidence::default();
+        let e1 = Evidence::default();
         let mut e2 = Evidence::default();
         e2.phase_file_read = true;
 

@@ -1897,6 +1897,7 @@ dependencies = [
  "chrono",
  "clap",
  "colored",
+ "dirs",
  "sentinel-application",
  "sentinel-domain",
  "sentinel-infrastructure",
@@ -2684,7 +2685,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "vulcan"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "base64",
@@ -2714,7 +2715,7 @@ dependencies = [
 
 [[package]]
 name = "vulcan-macros"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "darling",
  "proc-macro2",

@@ -11,4 +11,5 @@ pub mod hooks;
 pub mod judge_service;
 pub mod mcp_handler;
 pub mod proof_engine;
+pub mod scanner;
 pub mod verifier;

@@ -63,6 +63,15 @@ pub fn process(
         if let Some(ref tool_input) = input.tool_input {
             if let Some(phase_file) = extract_phase_file(tool_input) {
                 state.record_phase_read(&phase_file);
+
+                // Auto-advance workflow when phase file is read.
+                // Reading the phase file = proof of engagement under hard gate.
+                if let Some(skill) = state.active_skill.clone() {
+                    let phase_id = phase_file.trim_end_matches(".md");
+                    if let Some(wf) = state.workflows.get_mut(&skill) {
+                        wf.advance(phase_id);
+                    }
+                }
             }
         }
         // Read calls always pass through (they're safe tools)
@@ -264,7 +273,37 @@ mod tests {
     }
 
     #[test]
-    fn test_blocks_when_no_phases_completed() {
+    fn test_allows_when_no_phase_files_on_disk() {
+        // Phase gate skips enforcement when phase files don't exist on disk.
+        // Use a fake skill name that definitely has no phase files.
+        let fake_workflow = SkillWorkflow {
+            skill: "nonexistent-test-skill".to_string(),
+            phases: vec![WorkflowPhase {
+                id: "setup".to_string(),
+                file: "setup.md".to_string(),
+                required: true,
+                judge: JudgeModel::Sonnet,
+                description: "Setup".to_string(),
+            }],
+        };
+        let mut state = SessionState::new("sess-1");
+        state.set_active_skill("nonexistent-test-skill");
+        let mut workflows = HashMap::new();
+        workflows.insert("nonexistent-test-skill".to_string(), fake_workflow);
+
+        let input = HookInput {
+            tool_name: Some("Bash".to_string()),
+            ..Default::default()
+        };
+        let output = process(&input, &mut state, &workflows);
+        // No phase files on disk → gate allows
+        assert!(output.blocked.is_none());
+    }
+
+    #[test]
+    fn test_blocks_when_phase_files_exist() {
+        // Phase gate enforces when phase files exist on disk.
+        // Uses "linear" which has real phase files at ~/.claude/skills/linear/phases/
         let mut state = SessionState::new("sess-1");
         state.set_active_skill("linear");
         let mut workflows = HashMap::new();
@@ -275,13 +314,24 @@ mod tests {
             ..Default::default()
         };
         let output = process(&input, &mut state, &workflows);
-        assert_eq!(output.blocked, Some(true));
-        assert!(output.reason.as_ref().unwrap().contains("BLOCKED"));
-        assert!(output.reason.as_ref().unwrap().contains("claim"));
+
+        // Check if linear phase files exist on this machine
+        let claim_path = dirs::home_dir()
+            .unwrap_or_default()
+            .join(".claude/skills/linear/phases/claim.md");
+        if claim_path.exists() {
+            // Phase files exist → gate blocks
+            assert_eq!(output.blocked, Some(true));
+            assert!(output.reason.as_ref().unwrap().contains("BLOCKED"));
+            assert!(output.reason.as_ref().unwrap().contains("claim"));
+        } else {
+            // No phase files → gate allows (CI/other machines)
+            assert!(output.blocked.is_none());
+        }
     }
 
     #[test]
-    fn test_read_on_phase_file_records_it() {
+    fn test_read_on_phase_file_records_and_advances() {
         let mut state = SessionState::new("sess-1");
         state.set_active_skill("linear");
         let mut workflows = HashMap::new();
@@ -297,8 +347,11 @@ mod tests {
         let output = process(&input, &mut state, &workflows);
         // Read should always be allowed
         assert!(output.blocked.is_none());
-        // But it should record the phase read
+        // Should record the phase read
         assert!(state.phases_read.contains(&"claim.md".to_string()));
+        // Should auto-advance the workflow (reading phase file = proof of engagement)
+        let wf_state = state.workflows.get("linear").unwrap();
+        assert!(wf_state.is_phase_complete("claim"));
     }
 
     #[test]

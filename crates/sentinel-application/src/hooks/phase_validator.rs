@@ -287,6 +287,7 @@ mod tests {
 
         let output = process(&input, &state, &workflows, &step_configs);
         let ctx = output.hook_specific_output.unwrap().additional_context;
+        let ctx = ctx.as_deref().unwrap();
         assert!(ctx.contains("Phases loaded: 0/4"));
         assert!(ctx.contains("claim.md"));
     }
@@ -305,6 +306,7 @@ mod tests {
 
         let output = process(&input, &state, &workflows, &step_configs);
         let ctx = output.hook_specific_output.unwrap().additional_context;
+        let ctx = ctx.as_deref().unwrap();
         assert!(ctx.contains("Phases loaded: 2/4"));
         assert!(ctx.contains("intelligence.md"));
     }
@@ -323,6 +325,7 @@ mod tests {
 
         let output = process(&input, &state, &workflows, &step_configs);
         let ctx = output.hook_specific_output.unwrap().additional_context;
+        let ctx = ctx.as_deref().unwrap();
         assert!(ctx.contains("WARNING"));
         assert!(ctx.contains("Phase Execution Required"));
     }
@@ -342,6 +345,7 @@ mod tests {
 
         let output = process(&input, &state, &workflows, &step_configs);
         let ctx = output.hook_specific_output.unwrap().additional_context;
+        let ctx = ctx.as_deref().unwrap();
         assert!(ctx.contains("All 3/4 required phases loaded"));
     }
 
@@ -365,6 +369,7 @@ mod tests {
 
         let output = process(&input, &state, &workflows, &step_configs);
         let ctx = output.hook_specific_output.unwrap().additional_context;
+        let ctx = ctx.as_deref().unwrap();
 
         // Should contain step progress line
         assert!(ctx.contains("[Step Progress]"));
@@ -391,6 +396,7 @@ mod tests {
 
         let output = process(&input, &state, &workflows, &step_configs);
         let ctx = output.hook_specific_output.unwrap().additional_context;
+        let ctx = ctx.as_deref().unwrap();
 
         // Should NOT contain step progress
         assert!(!ctx.contains("[Step Progress]"));

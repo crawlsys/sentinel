@@ -1,6 +1,8 @@
 //! Hook lifecycle events
 //!
 //! Maps to Claude Code's 8 hook lifecycle events.
+//! Outputs conform to Claude Code's actual Zod-validated JSON schema
+//! (discovered via source deobfuscation of CLI v2.1.50).
 
 use serde::{Deserialize, Serialize};
 
@@ -16,6 +18,16 @@ pub enum HookEvent {
     PreCompact,
     TeammateIdle,
     TaskCompleted,
+}
+
+/// PreToolUse permission decision — maps to Claude Code's permissionDecision field.
+/// Priority: Deny > Ask > Allow (when merging multiple hook outputs).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PermissionDecision {
+    Allow,
+    Deny,
+    Ask,
 }
 
 impl HookEvent {
@@ -102,25 +114,42 @@ pub struct HookInput {
 /// JSON output a hook returns to Claude Code
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct HookOutput {
-    /// If true, the tool call is blocked (PreToolUse only)
+    /// If true, the tool call is blocked (internal merge flag, cleared on output)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub blocked: Option<bool>,
 
-    /// Reason for blocking
+    /// Reason for blocking (internal, cleared on output for PreToolUse)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
 
-    /// Hook-specific output (UserPromptSubmit context injection)
+    /// Hook-specific output — the primary output mechanism for Claude Code
     #[serde(skip_serializing_if = "Option::is_none", rename = "hookSpecificOutput")]
     pub hook_specific_output: Option<HookSpecificOutput>,
 }
 
+/// Claude Code's hookSpecificOutput schema.
+/// For PreToolUse: permissionDecision, permissionDecisionReason, updatedInput, additionalContext
+/// For UserPromptSubmit/PostToolUse: additionalContext only
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HookSpecificOutput {
     #[serde(rename = "hookEventName")]
     pub hook_event_name: String,
-    #[serde(rename = "additionalContext")]
-    pub additional_context: String,
+
+    /// Permission decision for PreToolUse (deny > ask > allow)
+    #[serde(skip_serializing_if = "Option::is_none", rename = "permissionDecision")]
+    pub permission_decision: Option<PermissionDecision>,
+
+    /// Reason for the permission decision
+    #[serde(skip_serializing_if = "Option::is_none", rename = "permissionDecisionReason")]
+    pub permission_decision_reason: Option<String>,
+
+    /// Modified tool input (PreToolUse only — replaces the original input)
+    #[serde(skip_serializing_if = "Option::is_none", rename = "updatedInput")]
+    pub updated_input: Option<serde_json::Value>,
+
+    /// Additional context injected into the conversation
+    #[serde(skip_serializing_if = "Option::is_none", rename = "additionalContext")]
+    pub additional_context: Option<String>,
 }
 
 impl HookOutput {
@@ -130,13 +159,63 @@ impl HookOutput {
         Self::default()
     }
 
-    /// Block a tool call with a reason
+    /// Block a tool call with a reason (legacy — sets internal blocked flag).
+    /// For PreToolUse, this is transformed to permissionDecision: deny on output.
     #[must_use]
     pub fn block(reason: impl Into<String>) -> Self {
         Self {
             blocked: Some(true),
             reason: Some(reason.into()),
             hook_specific_output: None,
+        }
+    }
+
+    /// Hard-deny a PreToolUse tool call (platform-enforced block).
+    /// Uses Claude Code's hookSpecificOutput.permissionDecision directly.
+    #[must_use]
+    pub fn deny(reason: impl Into<String>) -> Self {
+        Self {
+            blocked: Some(true), // keep for internal merge logic
+            reason: None,
+            hook_specific_output: Some(HookSpecificOutput {
+                hook_event_name: "PreToolUse".to_string(),
+                permission_decision: Some(PermissionDecision::Deny),
+                permission_decision_reason: Some(reason.into()),
+                updated_input: None,
+                additional_context: None,
+            }),
+        }
+    }
+
+    /// Prompt user for approval before allowing tool call (PreToolUse only)
+    #[must_use]
+    pub fn ask(reason: impl Into<String>) -> Self {
+        Self {
+            blocked: None,
+            reason: None,
+            hook_specific_output: Some(HookSpecificOutput {
+                hook_event_name: "PreToolUse".to_string(),
+                permission_decision: Some(PermissionDecision::Ask),
+                permission_decision_reason: Some(reason.into()),
+                updated_input: None,
+                additional_context: None,
+            }),
+        }
+    }
+
+    /// Modify tool input before execution (PreToolUse only)
+    #[must_use]
+    pub fn rewrite_input(updated: serde_json::Value) -> Self {
+        Self {
+            blocked: None,
+            reason: None,
+            hook_specific_output: Some(HookSpecificOutput {
+                hook_event_name: "PreToolUse".to_string(),
+                permission_decision: Some(PermissionDecision::Allow),
+                permission_decision_reason: None,
+                updated_input: Some(updated),
+                additional_context: None,
+            }),
         }
     }
 
@@ -148,14 +227,54 @@ impl HookOutput {
             reason: None,
             hook_specific_output: Some(HookSpecificOutput {
                 hook_event_name: event.to_string(),
-                additional_context: context.into(),
+                permission_decision: None,
+                permission_decision_reason: None,
+                updated_input: None,
+                additional_context: Some(context.into()),
             }),
         }
     }
 
+    /// Transform legacy blocked/reason into proper Claude Code PreToolUse JSON.
+    /// Called at the output boundary in hook_cmd.rs before serialization.
+    #[must_use]
+    pub fn into_pretool_output(mut self) -> Self {
+        // If already has hookSpecificOutput with permissionDecision, clear legacy fields
+        if self
+            .hook_specific_output
+            .as_ref()
+            .and_then(|h| h.permission_decision)
+            .is_some()
+        {
+            self.blocked = None;
+            self.reason = None;
+            return self;
+        }
+
+        // Transform legacy blocked/reason → hookSpecificOutput deny
+        if self.blocked == Some(true) {
+            let reason = self.reason.take();
+            let existing_context = self
+                .hook_specific_output
+                .as_ref()
+                .and_then(|h| h.additional_context.clone());
+            self.blocked = None;
+            self.hook_specific_output = Some(HookSpecificOutput {
+                hook_event_name: "PreToolUse".to_string(),
+                permission_decision: Some(PermissionDecision::Deny),
+                permission_decision_reason: reason,
+                updated_input: None,
+                additional_context: existing_context,
+            });
+        }
+
+        self
+    }
+
     /// Merge another output into this one. Blocked wins over allowed.
+    /// Permission decision priority: deny > ask > allow.
     pub fn merge(&mut self, other: &Self) {
-        // If either blocks, the merged result blocks
+        // Legacy blocked field merge (internal — transformed on output)
         if other.blocked == Some(true) {
             self.blocked = Some(true);
             if let Some(ref reason) = other.reason {
@@ -168,15 +287,45 @@ impl HookOutput {
             }
         }
 
-        // Merge context injections
-        if let Some(ref other_ctx) = other.hook_specific_output {
-            if let Some(ref mut self_ctx) = self.hook_specific_output {
-                self_ctx.additional_context = format!(
-                    "{}\n\n{}",
-                    self_ctx.additional_context, other_ctx.additional_context
-                );
-            } else {
-                self.hook_specific_output = Some(other_ctx.clone());
+        // Merge hookSpecificOutput
+        if let Some(ref other_hso) = other.hook_specific_output {
+            match &mut self.hook_specific_output {
+                Some(ref mut self_hso) => {
+                    // Permission decision priority: deny > ask > allow
+                    if let Some(other_pd) = other_hso.permission_decision {
+                        let dominated = match (self_hso.permission_decision, other_pd) {
+                            (_, PermissionDecision::Deny) => true,
+                            (Some(PermissionDecision::Deny), _) => false,
+                            (_, PermissionDecision::Ask) => true,
+                            (Some(PermissionDecision::Ask), _) => false,
+                            _ => true,
+                        };
+                        if dominated {
+                            self_hso.permission_decision = Some(other_pd);
+                            self_hso.permission_decision_reason =
+                                other_hso.permission_decision_reason.clone();
+                        }
+                    }
+
+                    // updatedInput: last writer wins
+                    if other_hso.updated_input.is_some() {
+                        self_hso.updated_input = other_hso.updated_input.clone();
+                    }
+
+                    // additionalContext: concatenate
+                    match (&self_hso.additional_context, &other_hso.additional_context) {
+                        (Some(a), Some(b)) => {
+                            self_hso.additional_context = Some(format!("{a}\n\n{b}"));
+                        }
+                        (None, Some(b)) => {
+                            self_hso.additional_context = Some(b.clone());
+                        }
+                        _ => {}
+                    }
+                }
+                None => {
+                    self.hook_specific_output = Some(other_hso.clone());
+                }
             }
         }
     }
@@ -188,7 +337,10 @@ mod tests {
 
     #[test]
     fn test_hook_event_from_arg() {
-        assert_eq!(HookEvent::from_arg("PreToolUse"), Some(HookEvent::PreToolUse));
+        assert_eq!(
+            HookEvent::from_arg("PreToolUse"),
+            Some(HookEvent::PreToolUse)
+        );
         assert_eq!(HookEvent::from_arg("Stop"), Some(HookEvent::Stop));
         assert_eq!(HookEvent::from_arg("invalid"), None);
     }
@@ -208,6 +360,26 @@ mod tests {
     }
 
     #[test]
+    fn test_hook_output_deny() {
+        let output = HookOutput::deny("not allowed");
+        assert_eq!(output.blocked, Some(true));
+        let hso = output.hook_specific_output.unwrap();
+        assert_eq!(hso.permission_decision, Some(PermissionDecision::Deny));
+        assert_eq!(
+            hso.permission_decision_reason.as_deref(),
+            Some("not allowed")
+        );
+    }
+
+    #[test]
+    fn test_hook_output_ask() {
+        let output = HookOutput::ask("confirm deletion");
+        assert!(output.blocked.is_none());
+        let hso = output.hook_specific_output.unwrap();
+        assert_eq!(hso.permission_decision, Some(PermissionDecision::Ask));
+    }
+
+    #[test]
     fn test_hook_output_merge_block_wins() {
         let mut a = HookOutput::allow();
         let b = HookOutput::block("blocked by gate");
@@ -216,12 +388,79 @@ mod tests {
     }
 
     #[test]
+    fn test_hook_output_merge_deny_over_ask() {
+        let mut a = HookOutput::ask("maybe?");
+        let b = HookOutput::deny("no way");
+        a.merge(&b);
+        let hso = a.hook_specific_output.unwrap();
+        assert_eq!(hso.permission_decision, Some(PermissionDecision::Deny));
+        assert_eq!(
+            hso.permission_decision_reason.as_deref(),
+            Some("no way")
+        );
+    }
+
+    #[test]
+    fn test_hook_output_merge_ask_over_allow() {
+        let mut a = HookOutput::allow();
+        let b = HookOutput::ask("check this");
+        a.merge(&b);
+        let hso = a.hook_specific_output.unwrap();
+        assert_eq!(hso.permission_decision, Some(PermissionDecision::Ask));
+    }
+
+    #[test]
+    fn test_hook_output_merge_deny_not_overridden_by_allow() {
+        let mut a = HookOutput::deny("blocked");
+        let b = HookOutput::allow();
+        a.merge(&b);
+        let hso = a.hook_specific_output.unwrap();
+        assert_eq!(hso.permission_decision, Some(PermissionDecision::Deny));
+    }
+
+    #[test]
     fn test_hook_output_merge_contexts() {
         let mut a = HookOutput::inject_context(HookEvent::UserPromptSubmit, "context A");
         let b = HookOutput::inject_context(HookEvent::UserPromptSubmit, "context B");
         a.merge(&b);
-        let ctx = a.hook_specific_output.unwrap().additional_context;
+        let ctx = a
+            .hook_specific_output
+            .unwrap()
+            .additional_context
+            .unwrap();
         assert!(ctx.contains("context A"));
         assert!(ctx.contains("context B"));
+    }
+
+    #[test]
+    fn test_into_pretool_output_transforms_legacy_block() {
+        let output = HookOutput::block("phase gate violation");
+        let transformed = output.into_pretool_output();
+        assert!(transformed.blocked.is_none());
+        assert!(transformed.reason.is_none());
+        let hso = transformed.hook_specific_output.unwrap();
+        assert_eq!(hso.hook_event_name, "PreToolUse");
+        assert_eq!(hso.permission_decision, Some(PermissionDecision::Deny));
+        assert_eq!(
+            hso.permission_decision_reason.as_deref(),
+            Some("phase gate violation")
+        );
+    }
+
+    #[test]
+    fn test_into_pretool_output_preserves_deny() {
+        let output = HookOutput::deny("already proper");
+        let transformed = output.into_pretool_output();
+        assert!(transformed.blocked.is_none());
+        let hso = transformed.hook_specific_output.unwrap();
+        assert_eq!(hso.permission_decision, Some(PermissionDecision::Deny));
+    }
+
+    #[test]
+    fn test_into_pretool_output_noop_for_allow() {
+        let output = HookOutput::allow();
+        let transformed = output.into_pretool_output();
+        assert!(transformed.blocked.is_none());
+        assert!(transformed.hook_specific_output.is_none());
     }
 }
