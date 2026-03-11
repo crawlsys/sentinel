@@ -71,6 +71,18 @@ enum Commands {
         #[arg(long)]
         validate: bool,
 
+        /// Synchronize component counts across all marketplace text files
+        #[arg(long)]
+        sync_counts: bool,
+
+        /// Generate manifest.json with SHA-256 hashes for all syncable files
+        #[arg(long)]
+        manifest: bool,
+
+        /// Dry-run mode (preview changes without writing). Used with --sync-counts
+        #[arg(long)]
+        dry_run: bool,
+
         /// Override marketplace root directory (default: ~/.claude/)
         #[arg(long)]
         dir: Option<String>,
@@ -104,8 +116,11 @@ async fn main() -> anyhow::Result<()> {
         Commands::Scan {
             counts_only,
             validate,
+            sync_counts,
+            manifest,
+            dry_run,
             dir,
-        } => scan_cmd::run(counts_only, validate, dir).await,
+        } => scan_cmd::run(counts_only, validate, sync_counts, manifest, dry_run, dir).await,
         Commands::Stats => stats_cmd::run().await,
     }
 }

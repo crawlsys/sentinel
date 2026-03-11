@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -1192,6 +1193,400 @@ fn run_validation(
         failed,
         warned,
         results,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Extended counts (includes non-sentinel local counts for sync-counts)
+// ---------------------------------------------------------------------------
+
+/// Extended counts including local-only filesystem counts not tracked by sentinel.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExtendedCounts {
+    #[serde(flatten)]
+    pub core: ComponentCounts,
+    pub scripts: usize,
+    pub docs: usize,
+    pub templates: usize,
+    pub steel_tools: usize,
+}
+
+/// Count extended marketplace components (core + local extras).
+pub fn count_extended(root_dir: &Path) -> ExtendedCounts {
+    let core = count_components(root_dir);
+    let scripts = count_files_with_ext(&root_dir.join("scripts"), ".js");
+    let docs = count_files_with_ext(&root_dir.join("docs"), ".md");
+    let templates = count_all_non_hidden(&root_dir.join("templates"));
+    let steel_tools = parse_steel_tools(root_dir);
+
+    ExtendedCounts {
+        core,
+        scripts,
+        docs,
+        templates,
+        steel_tools,
+    }
+}
+
+/// Count all non-hidden entries in a directory.
+fn count_all_non_hidden(dir: &Path) -> usize {
+    fs::read_dir(dir)
+        .map(|entries| {
+            entries
+                .filter_map(|e| e.ok())
+                .filter(|e| !e.file_name().to_string_lossy().starts_with('.'))
+                .count()
+        })
+        .unwrap_or(0)
+}
+
+/// Parse steel tool count from marketplace.json MCP description.
+fn parse_steel_tools(root_dir: &Path) -> usize {
+    let mp_path = root_dir.join("marketplace.json");
+    let Ok(content) = fs::read_to_string(&mp_path) else {
+        return 48; // default
+    };
+    let Ok(data) = serde_json::from_str::<serde_json::Value>(&content) else {
+        return 48;
+    };
+
+    data.get("mcp")
+        .and_then(|v| v.as_array())
+        .and_then(|arr| arr.iter().find(|m| m.get("name").and_then(|n| n.as_str()) == Some("steel")))
+        .and_then(|steel| steel.get("description").and_then(|d| d.as_str()))
+        .and_then(|desc| {
+            let re = regex::Regex::new(r"(\d+)\s*tools").ok()?;
+            re.captures(desc).and_then(|cap| cap[1].parse().ok())
+        })
+        .unwrap_or(48)
+}
+
+// ---------------------------------------------------------------------------
+// Sync counts — port of sync-counts.js
+// ---------------------------------------------------------------------------
+
+/// Report from a sync-counts operation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SyncCountsReport {
+    pub files_changed: Vec<String>,
+    pub dry_run: bool,
+}
+
+/// Synchronize component counts across all marketplace text files.
+///
+/// Walks all `.md`, `.json`, `.js`, `.cjs`, `.ts`, `.toml` files under `root_dir`,
+/// applies universal regex replacements for count patterns, plus targeted
+/// replacements for specific files (marketplace.json, README.md, CLAUDE.md, etc.).
+pub fn sync_counts(root_dir: &Path, dry_run: bool) -> SyncCountsReport {
+    let ext = count_extended(root_dir);
+    let c = &ext.core;
+
+    // Universal patterns (applied to ALL text files)
+    // Note: regex crate doesn't support lookahead, so MCP server pattern
+    // uses a simple match. The targeted updates handle specific files.
+    let universal: Vec<(regex::Regex, String)> = vec![
+        (regex::Regex::new(r"All \d+ hooks").unwrap(), format!("All {} hooks", c.hooks)),
+        (regex::Regex::new(r"\d+ hooks \(sentinel").unwrap(), format!("{} hooks (sentinel", c.hooks)),
+        (regex::Regex::new(r"\d+ MCP servers\b").unwrap(), format!("{} MCP servers", c.mcp_servers)),
+        (regex::Regex::new(r"Steel MCP \(\d+ tools\)").unwrap(), format!("Steel MCP ({} tools)", ext.steel_tools)),
+        (regex::Regex::new(r"browser automation \(\d+ MCP tools\)").unwrap(), format!("browser automation ({} MCP tools)", ext.steel_tools)),
+    ];
+
+    // Skills pattern needs special handling (preserve prefix)
+    let skills_re = regex::Regex::new(r"((?:All |all |ALL |\(|marketplace \())\d+( skills)").unwrap();
+
+    let skip_dirs: HashSet<&str> = ["node_modules", ".git", "target", "dist", ".next"].iter().copied().collect();
+    let text_exts: HashSet<&str> = ["md", "json", "js", "cjs", "ts", "toml"].iter().copied().collect();
+
+    let mut changed_files: Vec<String> = Vec::new();
+
+    // Walk and apply universal patterns
+    walk_text_files(root_dir, &skip_dirs, &text_exts, &mut |path| {
+        let rel = path.strip_prefix(root_dir).unwrap_or(path);
+        let rel_str = rel.to_string_lossy().replace('\\', "/");
+
+        // Skip this script equivalent and changelogs
+        if rel_str.starts_with("CHANGELOG") {
+            return;
+        }
+
+        let Ok(content) = fs::read_to_string(path) else {
+            return;
+        };
+        let original = content.clone();
+        let mut result = content;
+
+        // Apply universal patterns
+        for (re, replacement) in &universal {
+            if replacement.is_empty() {
+                continue; // Skip the skills placeholder
+            }
+            result = re.replace_all(&result, replacement.as_str()).to_string();
+        }
+
+        // Apply skills pattern with prefix preservation
+        result = skills_re.replace_all(&result, |caps: &regex::Captures| {
+            format!("{}{}{}", &caps[1], c.skills, &caps[2])
+        }).to_string();
+
+        if result != original {
+            if !dry_run {
+                let _ = fs::write(path, &result);
+            }
+            changed_files.push(rel_str);
+        }
+    });
+
+    // Targeted updates for specific files
+    let desc_line = format!(
+        "{} skills + {} agents + 1 sentinel engine ({} hooks) + {} MCP servers ({} repos) + {} CLIs + hot-reload via Vulcan mcp-router for the full software development lifecycle",
+        c.skills, c.agents, c.hooks, c.mcp_servers, c.mcp_repos, c.cli_repos
+    );
+
+    // marketplace.json description
+    targeted_update(root_dir, "marketplace.json", dry_run, &mut changed_files, &[
+        (r#""description":\s*"[^"]*""#, &format!(r#""description": "{}""#, desc_line)),
+    ]);
+
+    // .claude-plugin/plugin.json
+    targeted_update(root_dir, ".claude-plugin/plugin.json", dry_run, &mut changed_files, &[
+        (r#""description":\s*"[^"]*""#, &format!(r#""description": "{}""#, desc_line)),
+    ]);
+
+    // .claude-plugin/marketplace.json
+    targeted_update(root_dir, ".claude-plugin/marketplace.json", dry_run, &mut changed_files, &[
+        (r#""summary":\s*"[^"]*""#, &format!(
+            r#""summary": "Complete dev lifecycle: {} skills, {} agents, {} hooks (sentinel engine), {} MCP servers ({} repos), and {} CLIs""#,
+            c.skills, c.agents, c.hooks, c.mcp_servers, c.mcp_repos, c.cli_repos
+        )),
+    ]);
+
+    // README.md
+    targeted_update(root_dir, "README.md", dry_run, &mut changed_files, &[
+        (r#"> \*\*\d+ skills \+ \d+ agents \+ 1 sentinel engine \(\d+ hooks\) \+ \d+ MCP servers\*\*"#,
+         &format!("> **{} skills + {} agents + 1 sentinel engine ({} hooks) + {} MCP servers**", c.skills, c.agents, c.hooks, c.mcp_servers)),
+        (r"## Available Skills \(\d+ Total\)", &format!("## Available Skills ({} Total)", c.skills)),
+        (r"## Custom Agents \(\d+ Total\)", &format!("## Custom Agents ({} Total)", c.agents)),
+        (r"## Hooks \(\d+ Total", &format!("## Hooks ({} Total", c.hooks)),
+        (r"## MCP Integrations \(\d+ Total\)", &format!("## MCP Integrations ({} Total)", c.mcp_servers)),
+        (r"## Scripts \(\d+ Total\)", &format!("## Scripts ({} Total)", ext.scripts)),
+        (r"skills/\s+# \d+ skill directories.*", &format!("skills/                   # {} skill directories", c.skills)),
+        (r"agents/\s+# \d+ agent definitions.*", &format!("agents/                   # {} agent definitions (.md)", c.agents)),
+        (r"commands/\s+# \d+ slash commands.*", &format!("commands/                 # {} slash commands (.md)", c.commands)),
+        (r"scripts/\s+# \d+ utility scripts?.*", &format!("scripts/                  # {} utility scripts (.js)", ext.scripts)),
+        (r"templates/\s+# \d+ skill scaffolding.*", &format!("templates/                # {} skill scaffolding templates", ext.templates)),
+        (r"docs/\s+# \d+ documentation pages.*", &format!("docs/                     # {} documentation pages", ext.docs)),
+    ]);
+
+    // CLAUDE.md (repo-level)
+    targeted_update(root_dir, "CLAUDE.md", dry_run, &mut changed_files, &[
+        (r#"> \*\*\d+ skills \+ \d+ agents \+ 1 sentinel engine \(\d+ hooks\) \+ \d+ MCP servers\*\*"#,
+         &format!("> **{} skills + {} agents + 1 sentinel engine ({} hooks) + {} MCP servers**", c.skills, c.agents, c.hooks, c.mcp_servers)),
+        (r"skills/\s+<- \d+ skill directories.*", &format!("skills/                <- {} skill directories (SKILL.md each)", c.skills)),
+        (r"commands/\s+<- \d+ slash commands.*", &format!("commands/              <- {} slash commands (.md files)", c.commands)),
+        (r"agents/\s+<- \d+ agent definitions.*", &format!("agents/                <- {} agent definitions (.md files)", c.agents)),
+        (r"\| Skills \| \d+", &format!("| Skills | {}", c.skills)),
+        (r"\| Hooks \| \d+", &format!("| Hooks | {}", c.hooks)),
+        (r"\| Agents \| \d+", &format!("| Agents | {}", c.agents)),
+        (r"\| MCP Servers \| \d+", &format!("| MCP Servers | {}", c.mcp_servers)),
+        (r"\| Commands \| \d+", &format!("| Commands | {}", c.commands)),
+        (r"\| Scripts \| \d+", &format!("| Scripts | {}", ext.scripts)),
+        (r"\| Docs \| \d+", &format!("| Docs | {}", ext.docs)),
+        (r"\| Templates \| \d+", &format!("| Templates | {}", ext.templates)),
+    ]);
+
+    // docs/marketplace-architecture.md
+    targeted_update(root_dir, "docs/marketplace-architecture.md", dry_run, &mut changed_files, &[
+        (r"ecosystem of \d+ skills, \d+ agents, \d+ hooks, \d+ commands, and \d+ MCP servers",
+         &format!("ecosystem of {} skills, {} agents, {} hooks, {} commands, and {} MCP servers",
+                  c.skills, c.agents, c.hooks, c.commands, c.mcp_servers)),
+    ]);
+
+    // Deduplicate
+    changed_files.sort();
+    changed_files.dedup();
+
+    SyncCountsReport {
+        files_changed: changed_files,
+        dry_run,
+    }
+}
+
+/// Apply targeted regex replacements to a specific file.
+fn targeted_update(
+    root_dir: &Path,
+    rel_path: &str,
+    dry_run: bool,
+    changed_files: &mut Vec<String>,
+    patterns: &[(&str, &str)],
+) {
+    let file_path = root_dir.join(rel_path);
+    let Ok(content) = fs::read_to_string(&file_path) else {
+        return;
+    };
+    let original = content.clone();
+    let mut result = content;
+
+    for &(pattern, replacement) in patterns {
+        if let Ok(re) = regex::Regex::new(pattern) {
+            result = re.replace_all(&result, replacement).to_string();
+        }
+    }
+
+    if result != original {
+        if !dry_run {
+            let _ = fs::write(&file_path, &result);
+        }
+        let rel = rel_path.replace('\\', "/");
+        if !changed_files.contains(&rel) {
+            changed_files.push(rel);
+        }
+    }
+}
+
+/// Walk text files recursively, skipping specified directories.
+fn walk_text_files(
+    dir: &Path,
+    skip_dirs: &HashSet<&str>,
+    text_exts: &HashSet<&str>,
+    callback: &mut dyn FnMut(&Path),
+) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+
+    for entry in entries.filter_map(|e| e.ok()) {
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+
+        if entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
+            if !skip_dirs.contains(name_str.as_ref()) {
+                walk_text_files(&entry.path(), skip_dirs, text_exts, callback);
+            }
+        } else if entry.file_type().map(|ft| ft.is_file()).unwrap_or(false) {
+            if let Some(ext) = entry.path().extension().and_then(|e| e.to_str()) {
+                if text_exts.contains(ext) {
+                    callback(&entry.path());
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Manifest generation — port of generate-manifest.js
+// ---------------------------------------------------------------------------
+
+/// A single file entry in the manifest.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManifestEntry {
+    pub path: String,
+    pub hash: String,
+    pub size: u64,
+}
+
+/// The generated manifest.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Manifest {
+    pub version: u32,
+    pub generated: String,
+    pub repo: String,
+    pub branch: String,
+    pub file_count: usize,
+    pub files: Vec<ManifestEntry>,
+}
+
+/// Generate a manifest.json with SHA-256 hashes for all syncable files.
+pub fn generate_manifest(root_dir: &Path) -> Manifest {
+    let sync_dirs: &[(&str, Option<&[&str]>)] = &[
+        ("commands", Some(&[".md"])),
+        ("skills", None),       // all files
+        ("agents", Some(&[".md"])),
+        ("scripts", Some(&[".js"])),
+        ("templates", Some(&[".md", ".template"])),
+        ("docs", Some(&[".md"])),
+    ];
+
+    let exclude_patterns = [".git/", "node_modules/", ".DS_Store", "Thumbs.db"];
+
+    let mut files: Vec<ManifestEntry> = Vec::new();
+
+    for &(dir_name, extensions) in sync_dirs {
+        let dir_path = root_dir.join(dir_name);
+        if !dir_path.exists() {
+            continue;
+        }
+        walk_manifest_files(&dir_path, dir_name, extensions, &exclude_patterns, &mut files);
+    }
+
+    files.sort_by(|a, b| a.path.cmp(&b.path));
+
+    let file_count = files.len();
+
+    let manifest = Manifest {
+        version: 1,
+        generated: chrono::Utc::now().to_rfc3339(),
+        repo: "garysomerhalder/claude-code-marketplace".to_string(),
+        branch: "main".to_string(),
+        file_count,
+        files,
+    };
+
+    // Write manifest.json
+    let out_path = root_dir.join("manifest.json");
+    if let Ok(json) = serde_json::to_string_pretty(&manifest) {
+        let _ = fs::write(&out_path, json + "\n");
+    }
+
+    manifest
+}
+
+/// Recursively walk a directory and collect manifest entries.
+fn walk_manifest_files(
+    dir: &Path,
+    base_path: &str,
+    extensions: Option<&[&str]>,
+    exclude_patterns: &[&str],
+    files: &mut Vec<ManifestEntry>,
+) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+
+    for entry in entries.filter_map(|e| e.ok()) {
+        let full_path = entry.path();
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        let rel_path = format!("{}/{}", base_path, name_str);
+
+        // Check exclusions
+        if exclude_patterns.iter().any(|p| rel_path.contains(p) || name_str.ends_with(p)) {
+            continue;
+        }
+
+        if entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
+            walk_manifest_files(&full_path, &rel_path, extensions, exclude_patterns, files);
+        } else if entry.file_type().map(|ft| ft.is_file()).unwrap_or(false) {
+            // Check extension filter
+            if let Some(exts) = extensions {
+                let has_ext = exts.iter().any(|ext| name_str.ends_with(ext));
+                if !has_ext {
+                    continue;
+                }
+            }
+
+            if let Ok(content) = fs::read(&full_path) {
+                let mut hasher = Sha256::new();
+                hasher.update(&content);
+                let hash = format!("{:x}", hasher.finalize());
+
+                files.push(ManifestEntry {
+                    path: rel_path.replace('\\', "/"),
+                    hash,
+                    size: content.len() as u64,
+                });
+            }
+        }
     }
 }
 

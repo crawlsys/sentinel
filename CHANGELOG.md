@@ -7,6 +7,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 ## [Unreleased]
 
 ### Added
+- `sentinel scan --sync-counts`: synchronize component counts across all marketplace text files (2026-03-10)
+  - Replaces `scripts/sync-counts.js` — universal regex sweep + targeted file-specific replacements
+  - `--dry-run` flag for preview mode
+  - Extended counts: scripts, docs, templates, steel_tools in addition to core sentinel counts
+- `sentinel scan --manifest`: generate manifest.json with SHA-256 hashes for all syncable files (2026-03-10)
+  - Replaces `scripts/generate-manifest.js` — walks skills, agents, commands, scripts, templates, docs
+  - Uses sha2 crate for deterministic content hashing
 - `sentinel scan` CLI command: full marketplace scanner ported from Node.js `scanner.cjs` to Rust (2026-03-10)
   - `--counts-only`: output just component counts as JSON
   - `--validate`: output validation report with colored terminal output

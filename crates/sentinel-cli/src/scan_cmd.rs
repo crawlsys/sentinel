@@ -13,8 +13,18 @@ use sentinel_application::scanner;
 /// - Default: full marketplace snapshot as JSON
 /// - `--counts-only`: just component counts
 /// - `--validate`: just validation results
+/// - `--sync-counts`: synchronize counts across all marketplace text files
+/// - `--manifest`: generate manifest.json with SHA-256 hashes
+/// - `--dry-run`: preview changes without writing (for --sync-counts)
 /// - `--dir <path>`: override marketplace root (default: `~/.claude/`)
-pub async fn run(counts_only: bool, validate_only: bool, dir: Option<String>) -> anyhow::Result<()> {
+pub async fn run(
+    counts_only: bool,
+    validate_only: bool,
+    sync_counts: bool,
+    manifest: bool,
+    dry_run: bool,
+    dir: Option<String>,
+) -> anyhow::Result<()> {
     let root_dir = match dir {
         Some(d) => PathBuf::from(d),
         None => dirs::home_dir()
@@ -26,6 +36,69 @@ pub async fn run(counts_only: bool, validate_only: bool, dir: Option<String>) ->
         anyhow::bail!("Marketplace directory not found: {}", root_dir.display());
     }
 
+    // --sync-counts mode
+    if sync_counts {
+        let ext = scanner::count_extended(&root_dir);
+        eprintln!("{} Filesystem counts:", "▶".blue());
+        eprintln!(
+            "  skills={}, hooks={}, commands={}, agents={}, mcp_servers={}, mcp_repos={}, cli_repos={}",
+            ext.core.skills, ext.core.hooks, ext.core.commands, ext.core.agents,
+            ext.core.mcp_servers, ext.core.mcp_repos, ext.core.cli_repos,
+        );
+        eprintln!(
+            "  scripts={}, docs={}, templates={}, steel_tools={}",
+            ext.scripts, ext.docs, ext.templates, ext.steel_tools,
+        );
+
+        let report = scanner::sync_counts(&root_dir, dry_run);
+
+        if report.files_changed.is_empty() {
+            eprintln!("\n{} All counts up to date.", "✓".green());
+        } else {
+            let verb = if dry_run { "Would update" } else { "Updated" };
+            eprintln!(
+                "\n{} {} {} file(s):",
+                if dry_run { "▶".blue() } else { "✓".green() },
+                verb,
+                report.files_changed.len(),
+            );
+            for f in &report.files_changed {
+                eprintln!("  - {f}");
+            }
+        }
+
+        // Also output JSON to stdout
+        let json = serde_json::to_string_pretty(&report)?;
+        println!("{json}");
+        return Ok(());
+    }
+
+    // --manifest mode
+    if manifest {
+        let result = scanner::generate_manifest(&root_dir);
+        eprintln!(
+            "{} Generated manifest.json: {} files",
+            "✓".green(),
+            result.file_count,
+        );
+
+        // Summary by directory
+        let mut by_dir: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+        for f in &result.files {
+            let top = f.path.split('/').next().unwrap_or("?").to_string();
+            *by_dir.entry(top).or_insert(0) += 1;
+        }
+        for (dir, count) in &by_dir {
+            eprintln!("  {dir}: {count}");
+        }
+
+        // Output JSON to stdout
+        let json = serde_json::to_string_pretty(&result)?;
+        println!("{json}");
+        return Ok(());
+    }
+
+    // --counts-only mode
     if counts_only {
         let counts = scanner::count_components(&root_dir);
         let json = serde_json::to_string_pretty(&counts)?;
@@ -35,8 +108,8 @@ pub async fn run(counts_only: bool, validate_only: bool, dir: Option<String>) ->
 
     let snapshot = scanner::scan_marketplace(&root_dir);
 
+    // --validate mode
     if validate_only {
-        // Print validation report with colored output
         let v = &snapshot.validation;
         eprintln!(
             "{} Validation: {} passed, {} failed, {} warned ({}ms)",
@@ -65,17 +138,15 @@ pub async fn run(counts_only: bool, validate_only: bool, dir: Option<String>) ->
             eprintln!("  {icon} [{}] {} — {}", r.category, r.rule, r.message);
         }
 
-        // Also output JSON to stdout for machine consumption
         let json = serde_json::to_string_pretty(&snapshot.validation)?;
         println!("{json}");
         return Ok(());
     }
 
-    // Full snapshot
+    // Full snapshot (default)
     let json = serde_json::to_string_pretty(&snapshot)?;
     println!("{json}");
 
-    // Summary to stderr
     eprintln!(
         "{} Marketplace: {} skills, {} hooks, {} agents, {} commands, {} MCP servers ({} repos), {} CLIs",
         "▶".blue(),
