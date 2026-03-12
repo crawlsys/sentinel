@@ -59,9 +59,11 @@ pub fn process(input: &HookInput) -> HookOutput {
     // 4. Cache Linear team keys for skill router
     cache_linear_team_keys(&claude_dir);
 
-    // 5. Generate CLAUDE.md with dynamic counts
+    // 5. Generate CLAUDE.md with dynamic counts + project data
     let counts = count_components(&claude_dir);
-    generate_claude_md(&claude_dir, &counts);
+    let project_names = list_project_configs(&claude_dir);
+    let linear_accounts = list_linear_accounts(&claude_dir);
+    generate_claude_md(&claude_dir, &counts, &project_names, &linear_accounts);
 
     // 6. Auto-init standard project files in cwd (creates missing, never overwrites)
     let init_result = auto_init_project(cwd);
@@ -347,12 +349,129 @@ fn count_components(claude_dir: &Path) -> ComponentCounts {
 // CLAUDE.md generation
 // ---------------------------------------------------------------------------
 
+/// List project config names from ~/.claude/projects/*.md (excluding _template)
+fn list_project_configs(claude_dir: &Path) -> Vec<String> {
+    let projects_dir = claude_dir.join("projects");
+    if !projects_dir.exists() {
+        return Vec::new();
+    }
+    let mut names = Vec::new();
+    if let Ok(entries) = fs::read_dir(&projects_dir) {
+        for entry in entries.filter_map(|e| e.ok()) {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.ends_with(".md") && !name.starts_with('_') {
+                names.push(name.trim_end_matches(".md").to_string());
+            }
+        }
+    }
+    names.sort();
+    names
+}
+
+/// List Linear account names from ~/.claude.json mcpServers.linear env
+fn list_linear_accounts(claude_dir: &Path) -> Vec<String> {
+    // Read ~/.claude.json (one level up from ~/.claude/)
+    let claude_json = claude_dir
+        .parent()
+        .map(|p| p.join(".claude.json"))
+        .unwrap_or_default();
+
+    if !claude_json.exists() {
+        return Vec::new();
+    }
+
+    let content = match fs::read_to_string(&claude_json) {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+
+    let json: serde_json::Value = match serde_json::from_str(&content) {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+
+    // Look for mcpServers.linear.env.LINEAR_ACCOUNTS or similar
+    // Fallback: scan project configs for linear_account fields
+    let mut accounts = Vec::new();
+
+    // Scan project configs for linear_account fields
+    let projects_dir = claude_dir.join("projects");
+    if projects_dir.exists() {
+        if let Ok(entries) = fs::read_dir(&projects_dir) {
+            for entry in entries.filter_map(|e| e.ok()) {
+                let path = entry.path();
+                let name = entry.file_name().to_string_lossy().to_string();
+                if !name.ends_with(".md") || name.starts_with('_') {
+                    continue;
+                }
+                if let Ok(content) = fs::read_to_string(&path) {
+                    for line in content.lines() {
+                        let trimmed = line.trim();
+                        if trimmed.starts_with("linear_account:") {
+                            let acct = trimmed["linear_account:".len()..].trim().trim_matches('"');
+                            if !acct.is_empty() && !accounts.contains(&acct.to_string()) {
+                                accounts.push(acct.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Also check if mcpServers has linear configured
+    if let Some(servers) = json.get("mcpServers") {
+        if servers.get("linear").is_some() && !accounts.contains(&"default".to_string()) {
+            accounts.insert(0, "default".to_string());
+        }
+    }
+
+    accounts.sort();
+    accounts.dedup();
+    accounts
+}
+
 /// Generate ~/.claude/CLAUDE.md with dynamic counts and current date
-fn generate_claude_md(claude_dir: &Path, counts: &ComponentCounts) {
+fn generate_claude_md(
+    claude_dir: &Path,
+    counts: &ComponentCounts,
+    project_names: &[String],
+    linear_accounts: &[String],
+) {
     let now = chrono::Utc::now();
     let date_str = now.format("%A, %B %-d, %Y").to_string();
     let year = now.format("%Y").to_string();
     let month = now.format("%B").to_string();
+
+    // Build dynamic sections
+    let projects_section = if project_names.is_empty() {
+        String::new()
+    } else {
+        let list = project_names
+            .iter()
+            .map(|n| format!("  - `{}`", n))
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!(
+            "\n**Active projects** ({} configured):\n{}\n",
+            project_names.len(),
+            list
+        )
+    };
+
+    let linear_section = if linear_accounts.is_empty() {
+        String::new()
+    } else {
+        let list = linear_accounts
+            .iter()
+            .map(|a| format!("  - `{}`", a))
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!(
+            "\n### Linear Multi-Account\n\nSwitch between Linear workspaces using `mcp__linear__switch_account(account_name: \"<name>\")`.\n\n**Available accounts:**\n{}\n\nEach project config specifies its `linear_account` — the skill router auto-switches when detecting issue prefixes.\n",
+            list
+        )
+    };
 
     let content = format!(
         r#"# Claude Code Marketplace - Global Configuration
@@ -542,7 +661,7 @@ Per-project settings live in `~/.claude/projects/{{name}}.md` with YAML frontmat
 - **Auth**: Auth0 domains, callback URLs
 
 The skill router auto-detects the active project from issue prefixes (e.g. `FIR-123`), project aliases, or cwd path matching, and injects project context into every skill.
-
+{projects_section}{linear_section}
 ### Hook Event Reference
 
 | Event | When | Key Hooks |
@@ -719,6 +838,8 @@ The conversation transcripts are at:
         mcp = counts.mcp_servers,
         mcp_repos = counts.mcp_repos,
         cli_repos = counts.cli_repos,
+        projects_section = projects_section,
+        linear_section = linear_section,
     );
 
     let claude_md_path = claude_dir.join("CLAUDE.md");
@@ -1151,7 +1272,7 @@ mod tests {
             mcp_repos: 0,
             cli_repos: 0,
         };
-        generate_claude_md(dir.path(), &counts);
+        generate_claude_md(dir.path(), &counts, &[], &[]);
 
         let md_path = dir.path().join("CLAUDE.md");
         assert!(md_path.exists());
@@ -1162,6 +1283,45 @@ mod tests {
         assert!(content.contains("**Hooks:** 20"));
         assert!(content.contains("**Agents:** 8"));
         assert!(content.contains("Auto-generated on session start"));
+    }
+
+    #[test]
+    fn test_generate_claude_md_with_projects_and_linear() {
+        let dir = tempfile::tempdir().unwrap();
+        let counts = ComponentCounts {
+            skills: 72,
+            hooks: 27,
+            commands: 9,
+            agents: 8,
+            mcp_servers: 18,
+            mcp_repos: 19,
+            cli_repos: 30,
+        };
+        let projects = vec!["firefly-pro".to_string(), "legatus".to_string()];
+        let accounts = vec!["default".to_string(), "personal".to_string(), "firefly".to_string()];
+        generate_claude_md(dir.path(), &counts, &projects, &accounts);
+
+        let content = fs::read_to_string(dir.path().join("CLAUDE.md")).unwrap();
+        assert!(content.contains("Active projects** (2 configured)"));
+        assert!(content.contains("`firefly-pro`"));
+        assert!(content.contains("`legatus`"));
+        assert!(content.contains("Linear Multi-Account"));
+        assert!(content.contains("`default`"));
+        assert!(content.contains("`personal`"));
+        assert!(content.contains("`firefly`"));
+        assert!(content.contains("mcp__linear__switch_account"));
+    }
+
+    #[test]
+    fn test_list_project_configs() {
+        let dir = tempfile::tempdir().unwrap();
+        let projects = dir.path().join("projects");
+        fs::create_dir(&projects).unwrap();
+        fs::write(projects.join("alpha.md"), "# Alpha").unwrap();
+        fs::write(projects.join("beta.md"), "# Beta").unwrap();
+        fs::write(projects.join("_template.md"), "# Template").unwrap();
+        let names = list_project_configs(dir.path());
+        assert_eq!(names, vec!["alpha", "beta"]);
     }
 
     #[test]

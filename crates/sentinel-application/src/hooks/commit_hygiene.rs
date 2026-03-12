@@ -35,6 +35,11 @@ fn now_ms() -> u64 {
 }
 
 fn state_file() -> Option<PathBuf> {
+    // Allow tests to override the state file path to avoid race conditions
+    // when multiple tests write/read the same file in parallel.
+    if let Ok(path) = std::env::var("SENTINEL_COMMIT_HYGIENE_STATE") {
+        return Some(PathBuf::from(path));
+    }
     let home = dirs::home_dir()?;
     let dir = home.join(".claude").join("metrics");
     fs::create_dir_all(&dir).ok()?;
@@ -201,10 +206,14 @@ mod tests {
 
     #[test]
     fn test_stop_with_changes_writes_state() {
-        // Clean any stale state before running
-        if let Some(path) = state_file() {
-            let _ = fs::remove_file(&path);
-        }
+        // Use a process-unique temp file to avoid race conditions with parallel tests
+        let tmp = std::env::temp_dir().join(format!(
+            "commit-hygiene-test-{}-{:?}.json",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::env::set_var("SENTINEL_COMMIT_HYGIENE_STATE", tmp.to_str().unwrap());
+        let _ = fs::remove_file(&tmp);
 
         let git = StubGit {
             has_changes: true,
@@ -218,12 +227,14 @@ mod tests {
         assert!(output.blocked.is_none());
 
         // State file should exist with our 3 files
-        if let Some(path) = state_file() {
-            assert!(path.exists(), "State file should have been written");
-            let state: CommitState =
-                serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-            assert_eq!(state.file_count, 3);
-        }
+        assert!(tmp.exists(), "State file should have been written");
+        let state: CommitState =
+            serde_json::from_str(&fs::read_to_string(&tmp).unwrap()).unwrap();
+        assert_eq!(state.file_count, 3);
+
+        // Cleanup
+        let _ = fs::remove_file(&tmp);
+        std::env::remove_var("SENTINEL_COMMIT_HYGIENE_STATE");
     }
 
     #[test]

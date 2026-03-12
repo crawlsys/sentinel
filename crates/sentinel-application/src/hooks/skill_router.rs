@@ -380,7 +380,7 @@ fn write_routing_entry(skill: &str, run_id: &str, input: &HookInput, prompt: &st
     }
 }
 
-/// Process a skill-router hook event
+/// Process a skill-router hook event (regex-only, synchronous)
 pub fn process(input: &HookInput, router: &RegexRouter) -> HookOutput {
     let prompt = match &input.prompt {
         Some(p) => p,
@@ -388,49 +388,117 @@ pub fn process(input: &HookInput, router: &RegexRouter) -> HookOutput {
     };
 
     match router.route(prompt) {
-        Some(m) => {
-            // Generate a unique run ID
-            let now_ms = chrono::Utc::now().timestamp_millis();
-            let pid = std::process::id();
-            let run_id = format!("{}-{}", now_ms, pid % 100000);
+        Some(m) if m.strong => build_match_output(&m.skill, input, prompt, "regex"),
+        _ => build_no_match_output(),
+    }
+}
 
-            // Write temp state files for skill_telemetry to read on Stop
-            write_telemetry_state(&m.skill, &run_id);
+/// Process a skill-router hook event with AI classification fallback.
+///
+/// Flow:
+/// 1. Slash commands (^/...) — regex only, always strong → no AI needed
+/// 2. Strong regex match (priority >= 80) — use directly
+/// 3. Weak regex match or no match — ask AI classifier with candidates
+/// 4. AI unavailable or returns "none" — report no match
+pub async fn process_with_ai(
+    input: &HookInput,
+    router: &RegexRouter,
+    classifier: Option<&dyn crate::classifier::AiClassifier>,
+) -> HookOutput {
+    let prompt = match &input.prompt {
+        Some(p) => p,
+        None => return HookOutput::allow(),
+    };
 
-            // Append routing entry to metrics
-            write_routing_entry(&m.skill, &run_id, input, prompt);
+    // 1. Slash commands are always exact — regex handles them definitively
+    if prompt.starts_with('/') {
+        return match router.route(prompt) {
+            Some(m) => build_match_output(&m.skill, input, prompt, "regex"),
+            None => build_no_match_output(),
+        };
+    }
 
-            let skill_path = format!("~/.claude/skills/{}/SKILL.md", m.skill);
-            let context = format!(
-                "[Skill Router] Detected skill: {}. \
-                 MANDATORY: You MUST Read(\"{}\") BEFORE responding. \
-                 This is a non-negotiable requirement.",
-                m.skill, skill_path
-            );
-            let mut output = HookOutput::inject_context(HookEvent::UserPromptSubmit, context);
+    // 2. Try regex pre-match
+    let regex_match = router.route(prompt);
 
-            // Extract and attach the activation banner as a systemMessage
-            // so it's visible to the user in the terminal transcript
-            if let Some(banner) = extract_banner(&m.skill) {
-                output.system_message = Some(banner);
-            }
-
-            output
-        }
-        None => {
-            // Clear temp state so telemetry records "none" accurately
-            let tmp = std::env::temp_dir();
-            let _ = fs::remove_file(tmp.join("claude-current-skill"));
-            let _ = fs::remove_file(tmp.join("claude-skill-run-id"));
-            let _ = fs::remove_file(tmp.join("claude-skill-start-time"));
-
-            // Always report router status so user knows it fired
-            HookOutput::inject_context(
-                HookEvent::UserPromptSubmit,
-                "[Skill Router] No skill matched — general conversation mode.".to_string(),
-            )
+    if let Some(ref m) = regex_match {
+        if m.strong {
+            // Strong regex match — but verify with AI if available to catch false positives
+            // For now, trust strong matches (priority >= 80) without AI verification
+            // TODO: optionally verify strong matches too, behind a flag
+            return build_match_output(&m.skill, input, prompt, "regex");
         }
     }
+
+    // 3. Weak match or no match — use AI classifier
+    if let Some(ai) = classifier {
+        let candidates: Vec<String> = router
+            .route_all(prompt)
+            .into_iter()
+            .map(|m| m.skill)
+            .collect();
+
+        match ai.classify(prompt, &candidates).await {
+            Ok(Some(skill)) => {
+                return build_match_output(&skill, input, prompt, "ai");
+            }
+            Ok(None) => {
+                // AI says no skill matches
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "AI classifier failed");
+                // Fall through to weak regex match or no match
+            }
+        }
+    }
+
+    // 4. Fall back to weak regex match if AI is unavailable or said "none"
+    if let Some(m) = regex_match {
+        return build_match_output(&m.skill, input, prompt, "regex-weak");
+    }
+
+    build_no_match_output()
+}
+
+/// Build output for a matched skill
+fn build_match_output(skill: &str, input: &HookInput, prompt: &str, source: &str) -> HookOutput {
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let pid = std::process::id();
+    let run_id = format!("{}-{}", now_ms, pid % 100000);
+
+    write_telemetry_state(skill, &run_id);
+    write_routing_entry(skill, &run_id, input, prompt);
+
+    // Log the routing source for diagnostics
+    tracing::info!(skill = skill, source = source, "Skill routed");
+
+    let skill_path = format!("~/.claude/skills/{}/SKILL.md", skill);
+    let context = format!(
+        "[Skill Router] Detected skill: {}. \
+         MANDATORY: You MUST Read(\"{}\") BEFORE responding. \
+         This is a non-negotiable requirement.",
+        skill, skill_path
+    );
+    let mut output = HookOutput::inject_context(HookEvent::UserPromptSubmit, context);
+
+    if let Some(banner) = extract_banner(skill) {
+        output.system_message = Some(banner);
+    }
+
+    output
+}
+
+/// Build output for no match
+fn build_no_match_output() -> HookOutput {
+    let tmp = std::env::temp_dir();
+    let _ = fs::remove_file(tmp.join("claude-current-skill"));
+    let _ = fs::remove_file(tmp.join("claude-skill-run-id"));
+    let _ = fs::remove_file(tmp.join("claude-skill-start-time"));
+
+    HookOutput::inject_context(
+        HookEvent::UserPromptSubmit,
+        "[Skill Router] No skill matched — general conversation mode.".to_string(),
+    )
 }
 
 #[cfg(test)]
@@ -512,7 +580,8 @@ mod tests {
     }
 
     #[test]
-    fn test_test_skill_routing() {
+    fn test_strong_match_test_routing() {
+        // "test" has priority 85 (strong) — should match via regex-only process()
         let router = default_router();
         let input = HookInput {
             prompt: Some("run the tests".to_string()),
@@ -524,7 +593,8 @@ mod tests {
     }
 
     #[test]
-    fn test_ddd_routing() {
+    fn test_strong_match_ddd_routing() {
+        // "ddd-hexagonal" has priority 85 (strong)
         let router = default_router();
         let input = HookInput {
             prompt: Some("use hexagonal architecture for this".to_string()),
@@ -536,7 +606,8 @@ mod tests {
     }
 
     #[test]
-    fn test_deploy_routing() {
+    fn test_strong_match_deploy_routing() {
+        // "deploy" has priority 80 (strong)
         let router = default_router();
         let input = HookInput {
             prompt: Some("deploy to production".to_string()),
@@ -548,7 +619,8 @@ mod tests {
     }
 
     #[test]
-    fn test_security_routing() {
+    fn test_strong_match_security_routing() {
+        // "security" has priority 80 (strong)
         let router = default_router();
         let input = HookInput {
             prompt: Some("check for CVE vulnerabilities".to_string()),
@@ -560,7 +632,9 @@ mod tests {
     }
 
     #[test]
-    fn test_cerebras_routing() {
+    fn test_weak_match_falls_to_no_match() {
+        // "cerebras" has priority 60 (weak) — process() should NOT match it
+        // These are deferred to AI classification via process_with_ai()
         let router = default_router();
         let input = HookInput {
             prompt: Some("run this with cerebras fast inference".to_string()),
@@ -568,23 +642,12 @@ mod tests {
         };
         let output = process(&input, &router);
         let ctx = output.hook_specific_output.unwrap();
-        assert!(ctx.additional_context.as_deref().unwrap().contains("cerebras"));
+        assert!(ctx.additional_context.as_deref().unwrap().contains("No skill matched"));
     }
 
     #[test]
-    fn test_cerebras_qwen_routing() {
-        let router = default_router();
-        let input = HookInput {
-            prompt: Some("use qwen-3 for this task".to_string()),
-            ..Default::default()
-        };
-        let output = process(&input, &router);
-        let ctx = output.hook_specific_output.unwrap();
-        assert!(ctx.additional_context.as_deref().unwrap().contains("cerebras"));
-    }
-
-    #[test]
-    fn test_internet_netgear_routing() {
+    fn test_weak_internet_falls_to_no_match() {
+        // "internet" has priority 60 (weak) — requires AI confirmation
         let router = default_router();
         let input = HookInput {
             prompt: Some("check my netgear wifi clients".to_string()),
@@ -592,30 +655,17 @@ mod tests {
         };
         let output = process(&input, &router);
         let ctx = output.hook_specific_output.unwrap();
-        assert!(ctx.additional_context.as_deref().unwrap().contains("internet"));
+        assert!(ctx.additional_context.as_deref().unwrap().contains("No skill matched"));
     }
 
     #[test]
-    fn test_internet_port_forwarding_routing() {
+    fn test_regex_still_finds_weak_matches() {
+        // Verify the regex router itself still matches weak rules
+        // (process_with_ai will use these as candidates for the AI)
         let router = default_router();
-        let input = HookInput {
-            prompt: Some("set up port forwarding on my router".to_string()),
-            ..Default::default()
-        };
-        let output = process(&input, &router);
-        let ctx = output.hook_specific_output.unwrap();
-        assert!(ctx.additional_context.as_deref().unwrap().contains("internet"));
-    }
-
-    #[test]
-    fn test_internet_dhcp_routing() {
-        let router = default_router();
-        let input = HookInput {
-            prompt: Some("show me the DHCP leases".to_string()),
-            ..Default::default()
-        };
-        let output = process(&input, &router);
-        let ctx = output.hook_specific_output.unwrap();
-        assert!(ctx.additional_context.as_deref().unwrap().contains("internet"));
+        let m = router.route("check my netgear wifi clients");
+        assert!(m.is_some());
+        assert_eq!(m.as_ref().unwrap().skill, "internet");
+        assert!(!m.unwrap().strong);
     }
 }

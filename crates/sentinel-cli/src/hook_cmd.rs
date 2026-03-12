@@ -72,8 +72,14 @@ pub async fn run(event: &str, matcher: Option<&str>, standalone: bool) -> Result
     match hook_event {
         HookEvent::UserPromptSubmit => {
             // Skill router — classify and route to matching skill
+            // Uses AI classification (Cerebras/OpenAI) with regex fallback
             let router = hooks::skill_router::default_router();
-            let router_output = hooks::skill_router::process(&input, &router);
+            let classifier = sentinel_infrastructure::rig_classifier::RigClassifier::from_env();
+            let router_output = hooks::skill_router::process_with_ai(
+                &input,
+                &router,
+                classifier.as_ref().map(|c| c as &dyn sentinel_application::classifier::AiClassifier),
+            ).await;
             output.merge(&router_output);
 
             // Extract detected skill from router output and update state.
