@@ -228,6 +228,46 @@ body.light-mode tbody tr:hover { background: rgba(37, 99, 235, 0.03); }
 body.light-mode #search-modal { box-shadow: 0 24px 64px rgba(0,0,0,0.15); }
 body.light-mode #font-panel { box-shadow: 0 16px 48px rgba(0,0,0,0.12); }
 
+/* ===== CALLOUT BOXES ===== */
+.callout-critical {
+  margin: 20px 0;
+  padding: 16px 20px 16px 24px;
+  border-left: 4px solid var(--red);
+  background: rgba(248, 81, 73, 0.06);
+  border-radius: 0 8px 8px 0;
+  font-size: 0.95em;
+  color: var(--text);
+}
+.callout-critical::before {
+  content: '\26A0\FE0F';
+  margin-right: 8px;
+  font-size: 1.1em;
+}
+.callout-critical strong { color: var(--red); }
+body.light-mode .callout-critical {
+  background: rgba(220, 38, 38, 0.05);
+  border-left-color: var(--red);
+}
+.callout-info {
+  margin: 20px 0;
+  padding: 16px 20px 16px 24px;
+  border-left: 4px solid var(--amber);
+  background: rgba(210, 153, 34, 0.06);
+  border-radius: 0 8px 8px 0;
+  font-size: 0.95em;
+  color: var(--text);
+}
+.callout-info::before {
+  content: '\2139\FE0F';
+  margin-right: 8px;
+  font-size: 1.1em;
+}
+.callout-info strong { color: var(--amber); }
+body.light-mode .callout-info {
+  background: rgba(217, 119, 6, 0.05);
+  border-left-color: var(--amber);
+}
+
 /* ===== EXPAND/COLLAPSE ALL ===== */
 #section-controls {
   display: flex; gap: 8px; margin-bottom: 8px; justify-content: flex-end;
@@ -445,11 +485,11 @@ body.sidebar-collapsed #sidebar-toggle {
   min-height: calc(100vh - var(--progress-height));
 }
 
-.container { max-width: 900px; margin: 0 auto; padding: 32px 48px 80px; }
+.container { max-width: 900px; margin: 0 auto; padding: 48px 48px 80px; }
 
 /* Compact hero — left-aligned document header */
 .hero-compact {
-  border-bottom: 1px solid var(--border); padding: 32px 0 24px;
+  border-bottom: 1px solid var(--border); padding: 48px 0 32px;
   margin-bottom: 0; background: var(--bg-secondary);
 }
 
@@ -1056,26 +1096,69 @@ hr { border: none; border-top: 1px solid var(--border); margin: 48px 0; }
 }
 
 @media (max-width: 768px) {
+  /* Sidebar: hide by default, full-width overlay when open */
+  #sidebar { transform: translateX(-100%); width: 80vw; max-width: 320px; }
+  #sidebar.open { transform: translateX(0); }
+  #content-wrapper { margin-left: 0 !important; }
+  body:not(.sidebar-collapsed) #content-wrapper { margin-left: 0; }
+  #hamburger { display: block; }
+  #sidebar-toggle { display: none !important; }
+  #sidebar-overlay.open { display: block; }
+  body.sidebar-open #hamburger { opacity: 0; pointer-events: none; }
+
+  /* Hero and content full-width */
   .hero-compact { padding: 54px 0 20px; text-align: left; }
   .hero-compact h1 { font-size: 28px; }
-  .hero-compact-inner { flex-direction: column; align-items: flex-start; gap: 16px; }
+  .hero-compact-inner { flex-direction: column; align-items: flex-start; gap: 16px; padding: 0 20px; }
   .hero-compact-right { align-items: flex-start; flex-direction: row; }
   .hero-compact-meta { flex-direction: column; gap: 4px; align-items: flex-start; }
   .meta-sep { display: none; }
-  section h2 { font-size: 20px; flex-wrap: wrap; }
+  .container { padding: 0 16px 60px; }
+
+  /* Typography adjustments */
+  body { font-size: 15px; }
+  section h2 { font-size: 20px; flex-wrap: wrap; padding-left: 12px; }
   section h3 { font-size: 16px; }
-  .section-wordcount { display: block; margin-top: 4px; }
-  .table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; margin: 16px -20px; padding: 0 20px; }
+  section h4 { font-size: 15px; }
+  .section-wordcount { display: block; margin-top: 4px; margin-left: 0; }
+
+  /* Tables: horizontally scrollable */
+  .table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; margin: 16px -16px; padding: 0 16px; }
   table { font-size: 12px; min-width: 500px; }
   th, td { padding: 8px 10px; }
-  pre, .styled-pre { font-size: 11px; padding: 12px 16px; margin-left: -20px; margin-right: -20px; border-radius: 0; border-left: none; border-right: none; }
+
+  /* Code blocks: full bleed */
+  pre, .styled-pre { font-size: 11px; padding: 12px 16px; margin-left: -16px; margin-right: -16px; border-radius: 0; border-left: none; border-right: none; }
+
+  /* Stack side-by-side layouts */
+  .wire-body { flex-direction: column; }
+  .wire-sidebar-col { width: 100%; border-right: none; border-bottom: 1px solid var(--border); }
+  .wire-inner-layout { flex-direction: column; }
+  .wire-inner-sidebar { width: 100%; }
+  .preview-row { flex-wrap: wrap; }
+
+  /* FABs */
   .fab-row { bottom: 16px; right: 16px; gap: 8px; }
   .fab-btn { width: 38px; height: 38px; font-size: 14px; }
+
+  /* Controls */
   #section-controls { gap: 8px; margin-top: 12px; }
   #section-controls button { font-size: 11px; padding: 4px 10px; }
+
+  /* File trees, diagrams, blockquotes, callouts */
   .file-tree { overflow-x: auto; font-size: 11px; }
   .mermaid-container { overflow-x: auto; -webkit-overflow-scrolling: touch; }
   blockquote { padding: 12px 16px; margin: 12px 0; font-size: 14px; }
+  .callout-critical, .callout-info { padding: 12px 16px 12px 20px; font-size: 13px; margin: 12px 0; }
+
+  /* Sticky header full-width */
+  #sticky-section-header { left: 0 !important; padding: 8px 16px; font-size: 12px; }
+
+  /* Minimap hidden on mobile */
+  #minimap { display: none; }
+
+  /* Progress label compact */
+  #progress-label { font-size: 10px; padding: 3px 8px; gap: 8px; right: 12px; top: 8px; }
 }
 
 @media (max-width: 480px) {
@@ -1124,18 +1207,20 @@ hr { border: none; border-top: 1px solid var(--border); margin: 48px 0; }
   .mermaid-container { border-color: #ddd; background: #fafafa; }
   .footer .shortcuts { display: none; }
   .styled-pre { background: #f4f4f4; border-color: #ddd; color: #1a1a1a; }
+  .callout-critical { border-left-color: #dc2626; background: #fef2f2; }
+  .callout-info { border-left-color: #d97706; background: #fffbeb; }
 }
 </style>
 </head>
 <body>
 <!-- PROGRESS BAR -->
-<div id="progress-bar-container">
-  <div id="progress-bar-fill"></div>
-  <div id="reading-progress-fill"></div>
+<div id="progress-bar-container" role="group" aria-label="Progress indicators">
+  <div id="progress-bar-fill" role="progressbar" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100" aria-label="Deliverables progress"></div>
+  <div id="reading-progress-fill" role="progressbar" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100" aria-label="Reading progress"></div>
 </div>
-<div id="progress-label">
-  <span class="dot-green"></span><span id="deliverable-count">0 / 57</span>
-  <span class="dot-blue"></span><span id="reading-pct">0% read</span>
+<div id="progress-label" aria-live="polite">
+  <span class="dot-green" aria-hidden="true"></span><span id="deliverable-count">0 / 57</span>
+  <span class="dot-blue" aria-hidden="true"></span><span id="reading-pct">0% read</span>
 </div>
 <!-- FLOATING ACTION BUTTONS -->
 <div class="fab-row">
@@ -1152,35 +1237,35 @@ hr { border: none; border-top: 1px solid var(--border); margin: 48px 0; }
   <button class="fab-btn" id="btn-shortcuts" aria-label="Keyboard shortcuts" title="Shortcuts (?)">?</button>
   <!-- Font switcher -->
   <div id="font-switcher" style="position:relative">
-    <div id="font-panel">
+    <div id="font-panel" role="listbox" aria-label="Select typeface">
       <div class="font-panel-header">Typeface</div>
-      <button class="font-option active" data-font="'Inter'" data-label="Inter">
+      <button class="font-option active" data-font="'Inter'" data-label="Inter" role="option" aria-selected="true" aria-label="Select Inter font">
         <span><span class="font-name" style="font-family:'Inter'">Inter</span><br><span class="font-preview" style="font-family:'Inter'">The quick brown fox</span></span>
-        <span class="font-check">&#10003;</span>
+        <span class="font-check" aria-hidden="true">&#10003;</span>
       </button>
-      <button class="font-option" data-font="'Plus Jakarta Sans'" data-label="Plus Jakarta Sans">
+      <button class="font-option" data-font="'Plus Jakarta Sans'" data-label="Plus Jakarta Sans" role="option" aria-selected="false" aria-label="Select Plus Jakarta Sans font">
         <span><span class="font-name" style="font-family:'Plus Jakarta Sans'">Plus Jakarta Sans</span><br><span class="font-preview" style="font-family:'Plus Jakarta Sans'">The quick brown fox</span></span>
-        <span class="font-check">&#10003;</span>
+        <span class="font-check" aria-hidden="true">&#10003;</span>
       </button>
-      <button class="font-option" data-font="'DM Sans'" data-label="DM Sans">
+      <button class="font-option" data-font="'DM Sans'" data-label="DM Sans" role="option" aria-selected="false" aria-label="Select DM Sans font">
         <span><span class="font-name" style="font-family:'DM Sans'">DM Sans</span><br><span class="font-preview" style="font-family:'DM Sans'">The quick brown fox</span></span>
-        <span class="font-check">&#10003;</span>
+        <span class="font-check" aria-hidden="true">&#10003;</span>
       </button>
-      <button class="font-option" data-font="'Instrument Sans'" data-label="Instrument Sans">
+      <button class="font-option" data-font="'Instrument Sans'" data-label="Instrument Sans" role="option" aria-selected="false" aria-label="Select Instrument Sans font">
         <span><span class="font-name" style="font-family:'Instrument Sans'">Instrument Sans</span><br><span class="font-preview" style="font-family:'Instrument Sans'">The quick brown fox</span></span>
-        <span class="font-check">&#10003;</span>
+        <span class="font-check" aria-hidden="true">&#10003;</span>
       </button>
-      <button class="font-option" data-font="'Outfit'" data-label="Outfit">
+      <button class="font-option" data-font="'Outfit'" data-label="Outfit" role="option" aria-selected="false" aria-label="Select Outfit font">
         <span><span class="font-name" style="font-family:'Outfit'">Outfit</span><br><span class="font-preview" style="font-family:'Outfit'">The quick brown fox</span></span>
-        <span class="font-check">&#10003;</span>
+        <span class="font-check" aria-hidden="true">&#10003;</span>
       </button>
-      <button class="font-option" data-font="'Space Grotesk'" data-label="Space Grotesk">
+      <button class="font-option" data-font="'Space Grotesk'" data-label="Space Grotesk" role="option" aria-selected="false" aria-label="Select Space Grotesk font">
         <span><span class="font-name" style="font-family:'Space Grotesk'">Space Grotesk</span><br><span class="font-preview" style="font-family:'Space Grotesk'">The quick brown fox</span></span>
-        <span class="font-check">&#10003;</span>
+        <span class="font-check" aria-hidden="true">&#10003;</span>
       </button>
-      <button class="font-option" data-font="'Sora'" data-label="Sora">
+      <button class="font-option" data-font="'Sora'" data-label="Sora" role="option" aria-selected="false" aria-label="Select Sora font">
         <span><span class="font-name" style="font-family:'Sora'">Sora</span><br><span class="font-preview" style="font-family:'Sora'">The quick brown fox</span></span>
-        <span class="font-check">&#10003;</span>
+        <span class="font-check" aria-hidden="true">&#10003;</span>
       </button>
     </div>
     <button class="fab-btn" id="font-switcher-btn" aria-label="Switch font" title="Font (Aa)" style="font-weight:700">Aa</button>
@@ -1190,8 +1275,8 @@ hr { border: none; border-top: 1px solid var(--border); margin: 48px 0; }
 </div>
 
 <!-- KEYBOARD SHORTCUTS MODAL -->
-<div id="shortcuts-overlay"></div>
-<div id="shortcuts-modal">
+<div id="shortcuts-overlay" role="presentation" aria-hidden="true"></div>
+<div id="shortcuts-modal" role="dialog" aria-label="Keyboard shortcuts" aria-modal="true">
   <h3>Keyboard Shortcuts</h3>
   <div class="shortcut-row"><span class="shortcut-label">Search</span><span class="shortcut-keys"><kbd>Ctrl</kbd><kbd>K</kbd></span></div>
   <div class="shortcut-row"><span class="shortcut-label">Next section</span><span class="shortcut-keys"><kbd>J</kbd></span></div>
@@ -1213,14 +1298,14 @@ hr { border: none; border-top: 1px solid var(--border); margin: 48px 0; }
 <div id="sidebar-overlay"></div>
 
 <!-- SIDEBAR -->
-<div id="sidebar">
+<div id="sidebar" role="complementary" aria-label="Document navigation">
   <div class="sidebar-header">
     <div class="logo">Sentinel</div>
     <div class="logo-sub">WORKER HARDENING</div>
     <button id="sidebar-collapse" aria-label="Collapse sidebar" title="Collapse sidebar">&#10094;</button>
   </div>
-  <nav>
-    <ul>
+  <nav aria-label="Table of contents">
+    <ul role="list">
       <li class="section"><a href="#section-1">1. Problem Statement</a></li>
       <li class="section"><a href="#section-2">2. Solution: 4-Layer Defense</a></li>
       <li class="sub"><a href="#three-unforgeable-chokepoints">Three Unforgeable Chokepoints</a></li>
@@ -1267,26 +1352,26 @@ hr { border: none; border-top: 1px solid var(--border); margin: 48px 0; }
 </div>
 
 <!-- SEARCH -->
-<div id="search-overlay"></div>
-<div id="search-modal">
+<div id="search-overlay" role="presentation" aria-hidden="true"></div>
+<div id="search-modal" role="dialog" aria-label="Search plan" aria-modal="true">
   <div id="search-input-wrap">
-    <span id="search-icon">&#128269;</span>
-    <input type="text" id="search-input" placeholder="Search this plan..." autocomplete="off" />
-    <span id="search-hint"><kbd>ESC</kbd></span>
+    <span id="search-icon" aria-hidden="true">&#128269;</span>
+    <input type="text" id="search-input" placeholder="Search this plan..." autocomplete="off" aria-label="Search this plan" role="searchbox" />
+    <span id="search-hint" aria-hidden="true"><kbd>ESC</kbd></span>
   </div>
-  <div id="search-results"></div>
+  <div id="search-results" role="listbox" aria-label="Search results"></div>
 </div>
 
 <!-- Sticky section header -->
-<div id="sticky-section-header"><span class="sticky-number"></span><span class="sticky-title"></span></div>
+<div id="sticky-section-header" role="status" aria-live="polite" aria-label="Current section"><span class="sticky-number"></span><span class="sticky-title"></span></div>
 
 <!-- Mini-map -->
-<div id="minimap"></div>
+<div id="minimap" role="navigation" aria-label="Document minimap"></div>
 
 <!-- Deep link toast -->
 <div id="link-toast">Link copied to clipboard</div>
 <!-- MAIN CONTENT -->
-<div id="content-wrapper">
+<div id="content-wrapper" role="main">
 
   <!-- HERO (compact) -->
   <div class="hero-compact">
@@ -1315,9 +1400,9 @@ hr { border: none; border-top: 1px solid var(--border); margin: 48px 0; }
 
   <div class="container">
 
-    <div id="section-controls">
-      <button id="btn-expand-all">Expand all</button>
-      <button id="btn-collapse-all">Collapse all</button>
+    <div id="section-controls" role="toolbar" aria-label="Section controls">
+      <button id="btn-expand-all" aria-label="Expand all sections">Expand all</button>
+      <button id="btn-collapse-all" aria-label="Collapse all sections">Collapse all</button>
     </div>
 
     <!-- ================= SECTION 1: PROBLEM STATEMENT ================= -->
@@ -1338,7 +1423,7 @@ hr { border: none; border-top: 1px solid var(--border); margin: 48px 0; }
         <li>Kill or impersonate local processes</li>
       </ul>
 
-      <p><strong>Kerckhoffs&rsquo;s principle</strong>: Security must come from design, not obscurity. Even if Claude knows the full protocol, it should not be able to bypass it.</p>
+      <div class="callout-info"><strong>Kerckhoffs&rsquo;s principle</strong>: Security must come from design, not obscurity. Even if Claude knows the full protocol, it should not be able to bypass it.</div>
     </section>
 
     <hr />
@@ -1377,7 +1462,7 @@ hr { border: none; border-top: 1px solid var(--border); margin: 48px 0; }
 
       <h3 id="trust-anchor">The Trust Anchor</h3>
 
-      <p>Claude Code&rsquo;s runtime <strong>guarantees</strong> that hooks fire &mdash; Claude the AI model cannot suppress PreToolUse/PostToolUse invocations. The hooks call the Worker. The Worker verifies against external APIs. The external APIs are the ultimate source of truth.</p>
+      <div class="callout-critical"><strong>Security invariant</strong>: Claude Code&rsquo;s runtime <strong>guarantees</strong> that hooks fire &mdash; Claude the AI model cannot suppress PreToolUse/PostToolUse invocations. The hooks call the Worker. The Worker verifies against external APIs. The external APIs are the ultimate source of truth.</div>
     </section>
 
     <hr />
@@ -1424,7 +1509,7 @@ hr { border: none; border-top: 1px solid var(--border); margin: 48px 0; }
         </table>
       </div>
 
-      <p><strong>Key insight</strong>: PostToolUse hooks get <code>tool_result: None</code> for MCP tools &mdash; Claude Code doesn&rsquo;t populate it. But the mcp-router and proxy both see the actual responses.</p>
+      <div class="callout-info"><strong>Key insight</strong>: PostToolUse hooks get <code>tool_result: None</code> for MCP tools &mdash; Claude Code doesn&rsquo;t populate it. But the mcp-router and proxy both see the actual responses.</div>
     </section>
 
     <hr />
@@ -1796,7 +1881,7 @@ outbox.<span class="fn">notify</span>();        <span class="cmt">// Wakes backg
         </table>
       </div>
 
-      <p><strong>All API keys live in the Worker&rsquo;s environment &mdash; never on the local machine.</strong></p>
+      <div class="callout-critical"><strong>Off-machine authority</strong>: All API keys live in the Worker&rsquo;s environment &mdash; never on the local machine. Claude cannot access these credentials.</div>
     </section>
 
     <hr />
@@ -1843,13 +1928,7 @@ outbox.<span class="fn">notify</span>();        <span class="cmt">// Wakes backg
         <li>The capability token format (HMAC-SHA256)</li>
       </ul>
 
-      <p><strong>Knowing all of this doesn&rsquo;t help.</strong> The security comes from:</p>
-      <ol>
-        <li>Keys are off-machine</li>
-        <li>External APIs are the source of truth</li>
-        <li>Durable Objects are append-only</li>
-        <li>GitHub check runs require the Worker&rsquo;s posting</li>
-      </ol>
+      <div class="callout-info"><strong>Knowing all of this doesn&rsquo;t help.</strong> The security comes from: (1) Keys are off-machine, (2) External APIs are the source of truth, (3) Durable Objects are append-only, (4) GitHub check runs require the Worker&rsquo;s posting.</div>
     </section>
 
     <hr />
@@ -1977,7 +2056,7 @@ outbox.<span class="fn">notify</span>();        <span class="cmt">// Wakes backg
     <span class="ty">HookOutput</span>::<span class="fn">block</span>(<span class="str">"Sentinel Worker unreachable. All operations blocked until connectivity is restored."</span>)
 }</pre>
 
-      <p><strong>Migration implication</strong>: Skip the &ldquo;enforce + fallback&rdquo; phase entirely. Go from shadow mode (observe only) straight to enforce mode (fail-closed). If the Worker has reliability issues, fix them before cutover &mdash; don&rsquo;t add fallback paths that become attack surfaces.</p>
+      <div class="callout-critical"><strong>Migration implication</strong>: Skip the &ldquo;enforce + fallback&rdquo; phase entirely. Go from shadow mode (observe only) straight to enforce mode (fail-closed). If the Worker has reliability issues, fix them before cutover &mdash; don&rsquo;t add fallback paths that become attack surfaces.</div>
 
       <p><strong>Chaos testing</strong>: Periodically simulate Worker outages in dev to verify fail-closed behavior. Add a <code>sentinel chaos --kill-worker</code> command for this.</p>
 
@@ -2097,9 +2176,7 @@ outbox.<span class="fn">notify</span>();        <span class="cmt">// Wakes backg
     <section id="section-9">
       <h2>9. Migration Strategy (Updated)</h2>
 
-      <blockquote>
-        <p><strong>Codex finding &sect;8.5</strong>: Removed the &ldquo;Enforce + Fallback&rdquo; phase. Fail-open fallback is itself an attack surface &mdash; an adversary who can induce network issues gets a bypass for free.</p>
-      </blockquote>
+      <div class="callout-critical"><strong>Codex finding &sect;8.5</strong>: Removed the &ldquo;Enforce + Fallback&rdquo; phase. Fail-open fallback is itself an attack surface &mdash; an adversary who can induce network issues gets a bypass for free.</div>
 
       <h3 id="shadow-mode">Shadow Mode (Phase 2.1)</h3>
       <ul>
@@ -2347,13 +2424,19 @@ hmac = <span class="str">"0.12"</span>       <span class="cmt"># &sect;8.4 &mdas
 sha2 = <span class="str">"0.10"</span>       <span class="cmt"># &sect;8.1 &mdash; Body hash</span></pre>
 
       <h3>Tooling Versions (as of 2026-03-11)</h3>
-      <table>
-        <tr><th>Component</th><th>Version</th><th>Repo</th><th>Notes</th></tr>
-        <tr><td>sentinel</td><td><code>0.3.0</code></td><td><code>sentinel</code></td><td>Hook engine + scanner CLI</td></tr>
-        <tr><td>codex-mcp</td><td><code>0.2.0</code></td><td><code>codex-mcp-rust</code></td><td>GPT-5.4, 8 tools (codex, codex_reply, shell, read_file, list_dir, grep_files, write_file, apply_patch)</td></tr>
-        <tr><td>vulcan SDK</td><td><code>0.2.1</code></td><td><code>vulcan-mcp-sdk-rust</code></td><td>Router timeout fix (30s &rarr; 300s configurable)</td></tr>
-        <tr><td>mcp-router</td><td><code>0.2.1</code></td><td><code>vulcan-mcp-sdk-rust/crates/vulcan-router</code></td><td>Hot-reload wrapper, <code>MCP_ROUTER_TIMEOUT_SECS</code> env var</td></tr>
-      </table>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>Component</th><th>Version</th><th>Repo</th><th>Notes</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><strong>sentinel</strong></td><td><code>0.3.0</code></td><td><code>sentinel</code></td><td>Hook engine + scanner CLI</td></tr>
+            <tr><td><strong>codex-mcp</strong></td><td><code>0.2.0</code></td><td><code>codex-mcp-rust</code></td><td>GPT-5.4, 8 tools (codex, codex_reply, shell, read_file, list_dir, grep_files, write_file, apply_patch)</td></tr>
+            <tr><td><strong>vulcan SDK</strong></td><td><code>0.2.1</code></td><td><code>vulcan-mcp-sdk-rust</code></td><td>Router timeout fix (30s &rarr; 300s configurable)</td></tr>
+            <tr><td><strong>mcp-router</strong></td><td><code>0.2.1</code></td><td><code>vulcan-mcp-sdk-rust/crates/vulcan-router</code></td><td>Hot-reload wrapper, <code>MCP_ROUTER_TIMEOUT_SECS</code> env var</td></tr>
+          </tbody>
+        </table>
+      </div>
     </section>
 
     <hr />
@@ -2499,6 +2582,7 @@ mermaid.initialize({
     var checked = document.querySelectorAll('.checklist input[type="checkbox"]:checked').length;
     var pct = total > 0 ? (checked / total) * 100 : 0;
     fillEl.style.width = pct + '%';
+    fillEl.setAttribute('aria-valuenow', Math.round(pct));
     countEl.textContent = checked + ' / ' + total + ' done';
     checkboxes.forEach(function(cb) {
       if (cb.checked) { cb.parentElement.classList.add('checked'); }
@@ -2521,6 +2605,7 @@ mermaid.initialize({
     var docHeight = document.documentElement.scrollHeight - window.innerHeight;
     var pct = docHeight > 0 ? Math.min(100, Math.round((scrollTop / docHeight) * 100)) : 0;
     readingFill.style.width = pct + '%';
+    readingFill.setAttribute('aria-valuenow', pct);
     readingPct.textContent = pct + '% read';
 
     if (scrollTop > 400) { backToTop.classList.add('visible'); }
@@ -2810,8 +2895,9 @@ mermaid.initialize({
       var fontFamily = opt.getAttribute('data-font') + fallback;
       document.documentElement.style.setProperty('--font-sans', fontFamily);
 
-      options.forEach(function(o) { o.classList.remove('active'); });
+      options.forEach(function(o) { o.classList.remove('active'); o.setAttribute('aria-selected', 'false'); });
       opt.classList.add('active');
+      opt.setAttribute('aria-selected', 'true');
 
       // Save preference
       try { localStorage.setItem('structura-font', opt.getAttribute('data-font')); } catch(e) {}
@@ -2906,9 +2992,15 @@ mermaid.initialize({
     children.forEach(function(child) { wrapper.appendChild(child); });
     section.appendChild(wrapper);
 
+    // Set initial aria state
+    h2.setAttribute('role', 'button');
+    h2.setAttribute('aria-expanded', 'true');
+    h2.setAttribute('tabindex', '0');
+
     // Click handler on h2
     h2.addEventListener('click', function() {
       section.classList.toggle('collapsed');
+      h2.setAttribute('aria-expanded', section.classList.contains('collapsed') ? 'false' : 'true');
       console.log('[Structura] Toggled', section.id, section.classList.contains('collapsed') ? 'collapsed' : 'expanded');
 
       try {
@@ -2925,7 +3017,11 @@ mermaid.initialize({
     Object.keys(saved).forEach(function(id) {
       if (saved[id]) {
         var el = document.getElementById(id);
-        if (el) el.classList.add('collapsed');
+        if (el) {
+          el.classList.add('collapsed');
+          var h2 = el.querySelector(':scope > h2');
+          if (h2) h2.setAttribute('aria-expanded', 'false');
+        }
       }
     });
   } catch(err) {}
