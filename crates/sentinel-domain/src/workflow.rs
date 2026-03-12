@@ -228,6 +228,7 @@ impl WorkflowState {
             "Read", "Glob", "Grep", "WebSearch", "WebFetch", "Task",
             "AskUserQuestion", "EnterPlanMode", "ExitPlanMode", "TaskCreate",
             "TaskUpdate", "TaskList", "TaskGet", "Skill", "ToolSearch",
+            "Agent",
         ];
         if safe_tools.contains(&tool_name) {
             return None;

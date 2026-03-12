@@ -68,18 +68,41 @@ pub fn process(input: &HookInput) -> HookOutput {
         return HookOutput::allow();
     }
 
-    // ── Node wrangler deploy — BLOCK ────────────────────────────────────
+    // ── Node wrangler deploy — ALLOW if CWD matches a known service dir ──
     if WRANGLER_DEPLOY.is_match(cmd) {
+        let cwd = input.cwd.as_deref().unwrap_or("");
+        let normalized = cwd.replace('\\', "/");
+        // Known service directories (with and without /c/ prefix, and \\?\ UNC prefix)
+        let clean = normalized
+            .trim_start_matches("//?/")
+            .trim_start_matches("\\\\?\\");
+        let suffixes: &[&str] = &[
+            "firefly-pro-routing/rust/langgraph-service",
+            "firefly-pro-routing/osm-service",
+            "firefly-pro-routing/rust/engine-service",
+            "firefly-pro-routing",
+        ];
+
+        // Match if CWD ends with a known suffix (but not a partial match)
+        let is_known = suffixes.iter().any(|suffix| {
+            clean.ends_with(suffix)
+                && (clean.len() == suffix.len()
+                    || clean.as_bytes()[clean.len() - suffix.len() - 1] == b'/')
+        });
+
+        if is_known {
+            return HookOutput::allow();
+        }
+
         return HookOutput::deny(
-            "BLOCKED: Node wrangler deploy detected.\n\n\
-             USE wrangler-rs INSTEAD: wrangler-rs workers deploy --env <env>\n\
-             Node wrangler uses CWD to find wrangler.toml — wrong CWD = wrong service.\n\n\
-             Service directories (CWD for wrangler.toml):\n  \
-               API:        /c/Users/garys/Documents/GitHub/firefly-pro-routing\n  \
-               OSM:        /c/Users/garys/Documents/GitHub/firefly-pro-routing/osm-service\n  \
-               AI:         /c/Users/garys/Documents/GitHub/firefly-pro-routing/rust/langgraph-service\n  \
-               Engine:     /c/Users/garys/Documents/GitHub/firefly-pro-routing/rust/engine-service\n  \
-               Engine AI:  /c/Users/garys/Documents/GitHub/firefly-pro-routing/rust/engine-service",
+            "BLOCKED: Node wrangler deploy from unknown directory.\n\n\
+             Node wrangler deploy is only allowed from known service directories.\n\
+             Either cd to the correct directory or use wrangler-rs.\n\n\
+             Allowed directories:\n  \
+               API:        firefly-pro-routing/\n  \
+               OSM:        firefly-pro-routing/osm-service/\n  \
+               AI:         firefly-pro-routing/rust/langgraph-service/\n  \
+               Engine:     firefly-pro-routing/rust/engine-service/",
         );
     }
 
@@ -131,6 +154,15 @@ mod tests {
         }
     }
 
+    fn bash_input_with_cwd(command: &str, cwd: &str) -> HookInput {
+        HookInput {
+            tool_name: Some("Bash".to_string()),
+            tool_input: Some(json!({ "command": command })),
+            cwd: Some(cwd.to_string()),
+            ..Default::default()
+        }
+    }
+
     #[test]
     fn test_non_wrangler_allowed() {
         let output = process(&bash_input("ls -la"));
@@ -144,9 +176,64 @@ mod tests {
     }
 
     #[test]
-    fn test_node_wrangler_deploy_blocked() {
+    fn test_node_wrangler_deploy_blocked_unknown_dir() {
+        // No CWD or unknown CWD → blocked
         let output = process(&bash_input("npx wrangler deploy --env staging"));
         assert_eq!(output.blocked, Some(true));
+    }
+
+    #[test]
+    fn test_node_wrangler_deploy_allowed_ai_dir() {
+        let output = process(&bash_input_with_cwd(
+            "npx wrangler deploy --env staging",
+            "/c/Users/garys/Documents/GitHub/firefly-pro-routing/rust/langgraph-service",
+        ));
+        assert!(output.blocked.is_none());
+    }
+
+    #[test]
+    fn test_node_wrangler_deploy_allowed_osm_dir() {
+        let output = process(&bash_input_with_cwd(
+            "npx wrangler deploy --env staging",
+            "C:/Users/garys/Documents/GitHub/firefly-pro-routing/osm-service",
+        ));
+        assert!(output.blocked.is_none());
+    }
+
+    #[test]
+    fn test_node_wrangler_deploy_allowed_api_root() {
+        let output = process(&bash_input_with_cwd(
+            "npx wrangler deploy --env production",
+            "/c/Users/garys/Documents/GitHub/firefly-pro-routing",
+        ));
+        assert!(output.blocked.is_none());
+    }
+
+    #[test]
+    fn test_node_wrangler_deploy_allowed_engine_dir() {
+        let output = process(&bash_input_with_cwd(
+            "npx wrangler deploy --env staging",
+            "C:/Users/garys/Documents/GitHub/firefly-pro-routing/rust/engine-service",
+        ));
+        assert!(output.blocked.is_none());
+    }
+
+    #[test]
+    fn test_node_wrangler_deploy_blocked_wrong_dir() {
+        let output = process(&bash_input_with_cwd(
+            "npx wrangler deploy --env staging",
+            "/c/Users/garys/Documents/GitHub/some-other-project",
+        ));
+        assert_eq!(output.blocked, Some(true));
+    }
+
+    #[test]
+    fn test_node_wrangler_deploy_allowed_unc_prefix() {
+        let output = process(&bash_input_with_cwd(
+            "npx wrangler deploy --env staging",
+            "\\\\?\\C:\\Users\\garys\\Documents\\GitHub\\firefly-pro-routing\\rust\\langgraph-service",
+        ));
+        assert!(output.blocked.is_none());
     }
 
     #[test]
@@ -187,7 +274,7 @@ mod tests {
     }
 
     #[test]
-    fn test_plain_wrangler_deploy_blocked() {
+    fn test_plain_wrangler_deploy_blocked_no_cwd() {
         let output = process(&bash_input("wrangler deploy --env production"));
         assert_eq!(output.blocked, Some(true));
     }

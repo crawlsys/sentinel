@@ -38,6 +38,12 @@ fn state_file_path(session_id: &str) -> PathBuf {
 }
 
 /// Check if a passing Steel test exists for this session within the validity window
+/// (Public wrapper for CLI access)
+pub fn has_recent_steel_test_pub(session_id: &str) -> bool {
+    has_recent_steel_test(session_id)
+}
+
+/// Check if a passing Steel test exists for this session within the validity window
 fn has_recent_steel_test(session_id: &str) -> bool {
     let path = state_file_path(session_id);
     let content = match std::fs::read_to_string(&path) {
@@ -226,6 +232,59 @@ fn diff_has_frontend_files(cwd: Option<&str>) -> bool {
     file_list
         .lines()
         .any(|line| FRONTEND_EXTENSIONS.iter().any(|ext| line.ends_with(ext)))
+}
+
+/// Write the Steel test state file after a successful Steel session.
+/// Called from the PostToolUse handler when `mcp__steel__release_session` succeeds.
+pub fn record_steel_test_passed(session_id: &str) {
+    let path = state_file_path(session_id);
+    let state = serde_json::json!({
+        "passed": true,
+        "sessionId": session_id,
+        "timestamp": Utc::now().to_rfc3339()
+    });
+    if let Err(e) = std::fs::write(&path, serde_json::to_string(&state).unwrap_or_default()) {
+        tracing::warn!("Failed to write Steel test state file: {e}");
+    } else {
+        tracing::debug!("Steel test state recorded at {}", path.display());
+    }
+}
+
+/// PostToolUse handler — detect successful browser tests and record test state.
+/// Triggers on:
+/// 1. `mcp__steel__release_session` — Steel MCP test completed
+/// 2. Bash tool result containing `STEEL_TEST_PASS` — CDP/Puppeteer test completed
+///
+/// Should be called from the PostToolUse event dispatch in hook_cmd.rs.
+pub fn process_post_tool(input: &HookInput) -> HookOutput {
+    let tool = match &input.tool_name {
+        Some(name) => name.as_str(),
+        None => return HookOutput::allow(),
+    };
+
+    let session_id = input.session_id.as_deref().unwrap_or("unknown");
+
+    // Path 1: Steel MCP release_session
+    if tool == "mcp__steel__release_session" {
+        record_steel_test_passed(session_id);
+        return HookOutput::allow();
+    }
+
+    // Path 2: Bash tool with STEEL_TEST_PASS marker in output
+    // This supports CDP, Puppeteer, Playwright, or any browser test that
+    // prints "STEEL_TEST_PASS" on success.
+    if tool == "Bash" {
+        let has_marker = input
+            .tool_result
+            .as_ref()
+            .and_then(|r| r.as_str())
+            .map_or(false, |s| s.contains("STEEL_TEST_PASS"));
+        if has_marker {
+            record_steel_test_passed(session_id);
+        }
+    }
+
+    HookOutput::allow()
 }
 
 /// Process a pre-push Steel test hook event (PreToolUse)
@@ -469,5 +528,103 @@ mod tests {
         let tmpdir = tempfile::tempdir().unwrap();
         let result = diff_has_frontend_files(Some(tmpdir.path().to_str().unwrap()));
         assert!(!result, "Non-git dir should return false (allow push)");
+    }
+
+    #[test]
+    fn test_record_steel_test_passed_writes_state_file() {
+        let session_id = "test-record-steel";
+        let state_path = state_file_path(session_id);
+
+        // Ensure clean state
+        let _ = std::fs::remove_file(&state_path);
+
+        record_steel_test_passed(session_id);
+
+        assert!(state_path.exists(), "State file should be created");
+        let content = std::fs::read_to_string(&state_path).unwrap();
+        let state: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(state["passed"], true);
+        assert_eq!(state["sessionId"], session_id);
+        assert!(state["timestamp"].is_string());
+
+        // Verify it's recognized as a recent test
+        assert!(has_recent_steel_test(session_id));
+
+        // Cleanup
+        let _ = std::fs::remove_file(&state_path);
+    }
+
+    #[test]
+    fn test_process_post_tool_records_on_release() {
+        let session_id = "test-post-tool-release";
+        let state_path = state_file_path(session_id);
+        let _ = std::fs::remove_file(&state_path);
+
+        // Claude Code does NOT populate tool_result for MCP tools —
+        // PostToolUse firing is sufficient proof the call succeeded
+        let input = HookInput {
+            tool_name: Some("mcp__steel__release_session".to_string()),
+            tool_result: None,
+            session_id: Some(session_id.to_string()),
+            ..Default::default()
+        };
+        let output = process_post_tool(&input);
+        assert!(output.blocked.is_none());
+        assert!(has_recent_steel_test(session_id), "State file should be written after release");
+
+        let _ = std::fs::remove_file(&state_path);
+    }
+
+    #[test]
+    fn test_process_post_tool_ignores_bash_without_marker() {
+        let session_id = "test-post-tool-no-marker";
+        let state_path = state_file_path(session_id);
+        let _ = std::fs::remove_file(&state_path);
+
+        let input = HookInput {
+            tool_name: Some("Bash".to_string()),
+            tool_result: Some(serde_json::json!("ok")),
+            session_id: Some(session_id.to_string()),
+            ..Default::default()
+        };
+        let output = process_post_tool(&input);
+        assert!(output.blocked.is_none());
+        assert!(!state_path.exists(), "State file should NOT be created for Bash without STEEL_TEST_PASS");
+    }
+
+    #[test]
+    fn test_process_post_tool_records_on_cdp_marker() {
+        let session_id = "test-post-tool-cdp";
+        let state_path = state_file_path(session_id);
+        let _ = std::fs::remove_file(&state_path);
+
+        let input = HookInput {
+            tool_name: Some("Bash".to_string()),
+            tool_result: Some(serde_json::json!("Screenshot saved: C:\\tmp\\screenshot.png\nConsole errors: 0\n  No console errors detected\nSTEEL_TEST_PASS")),
+            session_id: Some(session_id.to_string()),
+            ..Default::default()
+        };
+        let output = process_post_tool(&input);
+        assert!(output.blocked.is_none());
+        assert!(has_recent_steel_test(session_id), "State file should be written after CDP test with STEEL_TEST_PASS marker");
+
+        let _ = std::fs::remove_file(&state_path);
+    }
+
+    #[test]
+    fn test_process_post_tool_ignores_non_bash_non_steel() {
+        let session_id = "test-post-tool-read";
+        let state_path = state_file_path(session_id);
+        let _ = std::fs::remove_file(&state_path);
+
+        let input = HookInput {
+            tool_name: Some("Read".to_string()),
+            tool_result: Some(serde_json::json!("STEEL_TEST_PASS")),
+            session_id: Some(session_id.to_string()),
+            ..Default::default()
+        };
+        let output = process_post_tool(&input);
+        assert!(output.blocked.is_none());
+        assert!(!state_path.exists(), "State file should NOT be created for Read tool even with marker");
     }
 }

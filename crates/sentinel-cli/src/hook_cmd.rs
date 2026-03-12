@@ -180,6 +180,10 @@ pub async fn run(event: &str, matcher: Option<&str>, standalone: bool) -> Result
             let activity_output = hooks::activity_tracker::process_post_tool(&input);
             output.merge(&activity_output);
 
+            // Steel test recorder — write state file on successful session release
+            let steel_output = hooks::pre_push_steel_test::process_post_tool(&input);
+            output.merge(&steel_output);
+
             // Plan organizer — inject plan file organization instructions (ExitPlanMode only)
             if matches!(input.tool_name.as_deref(), Some("ExitPlanMode")) {
                 let plan_output = hooks::plan_organizer::process(&input);

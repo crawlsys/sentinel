@@ -54,7 +54,7 @@ pub fn default_router() -> RegexRouter {
         "linear",
         vec![
             &team_pattern,
-            r"(?i)\blinear\b",
+            r"(?i)(?:^|[\s,.])\b(?:in|on|check|open|view|create|update|close|use|from|with|to)\s+linear\b",
             r"(?i)\b(pick\s+up|claim|assign|work\s+on)\b.*\b(issue|ticket)\b",
             r"(?i)\b(in\s+review|assign\s+to\s+qa|qa\s+handoff|mark\s+complete)\b",
             r"(?i)\b(sprint|cycle|milestone|backlog|triage|initiative|roadmap)\b",

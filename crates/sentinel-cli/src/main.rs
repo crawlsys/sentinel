@@ -17,6 +17,7 @@ mod hook_cmd;
 mod mcp_cmd;
 mod scan_cmd;
 mod stats_cmd;
+mod steel_test_cmd;
 mod verify_cmd;
 
 /// Sentinel — Proof-of-Work for AI Skill Execution
@@ -90,6 +91,28 @@ enum Commands {
 
     /// Show hook execution statistics
     Stats,
+
+    /// Manage Steel browser test state
+    SteelTest {
+        #[command(subcommand)]
+        action: SteelTestAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum SteelTestAction {
+    /// Record a passing browser test for the current session
+    Record {
+        /// Session ID (reads from stdin if not provided)
+        #[arg(long)]
+        session: Option<String>,
+    },
+    /// Check if a valid browser test exists for the current session
+    Check {
+        /// Session ID
+        #[arg(long)]
+        session: Option<String>,
+    },
 }
 
 #[tokio::main]
@@ -122,5 +145,9 @@ async fn main() -> anyhow::Result<()> {
             dir,
         } => scan_cmd::run(counts_only, validate, sync_counts, manifest, dry_run, dir).await,
         Commands::Stats => stats_cmd::run().await,
+        Commands::SteelTest { action } => match action {
+            SteelTestAction::Record { session } => steel_test_cmd::record(session).await,
+            SteelTestAction::Check { session } => steel_test_cmd::check(session).await,
+        },
     }
 }
