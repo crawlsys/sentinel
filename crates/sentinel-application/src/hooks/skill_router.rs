@@ -275,6 +275,44 @@ pub fn default_router() -> RegexRouter {
     router
 }
 
+/// Extract the activation banner from a skill's SKILL.md file.
+/// Returns the content between `## Activation Banner` and the next `##` heading,
+/// including the code-fenced banner block.
+fn extract_banner(skill: &str) -> Option<String> {
+    let skill_path = dirs::home_dir()?
+        .join(".claude")
+        .join("skills")
+        .join(skill)
+        .join("SKILL.md");
+
+    let content = fs::read_to_string(skill_path).ok()?;
+
+    // Find the Activation Banner section
+    let banner_start = content.find("## Activation Banner")?;
+    let after_header = &content[banner_start..];
+
+    // Find the code block within the banner section
+    let code_start = after_header.find("```")?;
+    let code_body = &after_header[code_start + 3..];
+    let code_end = code_body.find("```")?;
+
+    // Extract just the content inside the code fence (skip the opening line like "```\n")
+    let inner = &code_body[..code_end];
+    // Strip the optional language identifier on the first line of the code fence
+    let inner = if let Some(nl) = inner.find('\n') {
+        &inner[nl + 1..]
+    } else {
+        inner
+    };
+
+    let trimmed = inner.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
 /// Write temp state files so skill_telemetry can track the execution.
 /// This mirrors the behavior of the legacy JS skill-router.js.
 fn write_telemetry_state(skill: &str, run_id: &str) {
@@ -354,7 +392,15 @@ pub fn process(input: &HookInput, router: &RegexRouter) -> HookOutput {
                  This is a non-negotiable requirement.",
                 m.skill, skill_path
             );
-            HookOutput::inject_context(HookEvent::UserPromptSubmit, context)
+            let mut output = HookOutput::inject_context(HookEvent::UserPromptSubmit, context);
+
+            // Extract and attach the activation banner as a systemMessage
+            // so it's visible to the user in the terminal transcript
+            if let Some(banner) = extract_banner(&m.skill) {
+                output.system_message = Some(banner);
+            }
+
+            output
         }
         None => {
             // Clear temp state so telemetry records "none" accurately

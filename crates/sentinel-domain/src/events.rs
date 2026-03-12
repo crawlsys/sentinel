@@ -125,6 +125,11 @@ pub struct HookOutput {
     /// Hook-specific output — the primary output mechanism for Claude Code
     #[serde(skip_serializing_if = "Option::is_none", rename = "hookSpecificOutput")]
     pub hook_specific_output: Option<HookSpecificOutput>,
+
+    /// Warning message shown to the user in the terminal (visible in transcript).
+    /// Used for banners and notifications that the user should see directly.
+    #[serde(skip_serializing_if = "Option::is_none", rename = "systemMessage")]
+    pub system_message: Option<String>,
 }
 
 /// Claude Code's hookSpecificOutput schema.
@@ -167,6 +172,7 @@ impl HookOutput {
             blocked: Some(true),
             reason: Some(reason.into()),
             hook_specific_output: None,
+            system_message: None,
         }
     }
 
@@ -184,6 +190,7 @@ impl HookOutput {
                 updated_input: None,
                 additional_context: None,
             }),
+            system_message: None,
         }
     }
 
@@ -200,6 +207,7 @@ impl HookOutput {
                 updated_input: None,
                 additional_context: None,
             }),
+            system_message: None,
         }
     }
 
@@ -216,6 +224,7 @@ impl HookOutput {
                 updated_input: Some(updated),
                 additional_context: None,
             }),
+            system_message: None,
         }
     }
 
@@ -232,6 +241,7 @@ impl HookOutput {
                 updated_input: None,
                 additional_context: Some(context.into()),
             }),
+            system_message: None,
         }
     }
 
@@ -327,6 +337,17 @@ impl HookOutput {
                     self.hook_specific_output = Some(other_hso.clone());
                 }
             }
+        }
+
+        // Merge systemMessage: concatenate with newline
+        match (&self.system_message, &other.system_message) {
+            (Some(a), Some(b)) => {
+                self.system_message = Some(format!("{a}\n{b}"));
+            }
+            (None, Some(b)) => {
+                self.system_message = Some(b.clone());
+            }
+            _ => {}
         }
     }
 }
