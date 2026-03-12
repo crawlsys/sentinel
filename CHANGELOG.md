@@ -15,12 +15,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - `HookOutput.system_message` field in sentinel-domain (2026-03-12)
   - Serializes as `"systemMessage"` per Claude Code's JSON output schema
   - Merged via concatenation when multiple hooks produce system messages
+- `sentinel init` CLI subcommand for standard project file generation (2026-03-12)
+  - Generates 11 standard files: README.md, CLAUDE.md, CHANGELOG.md, LICENSE, BUILDING.md, SECURITY.md, .editorconfig, .gitattributes, .gitignore, rustfmt.toml, docs/
+  - Parses `Cargo.toml` for project name, description, version, license, dependencies
+  - Detects project type: MCP server (vulcan dep), CLI (clap dep), workspace, library
+  - Tailored content: MCP servers get mcp-router registration docs, CLIs get install instructions
+  - `--dry-run` for preview, `--force` to overwrite, `--all` for batch across `~/Documents/GitHub/`
+  - `--dir <path>` to override target directory
+  - Skips existing files by default; creates `docs/` subdirectory structure with `.gitkeep` files
+  - 18 unit tests in `sentinel-application::project_init`
 - `sentinel steel-test` CLI subcommand for standalone Steel browser test management (2026-03-11)
   - `sentinel steel-test record` — record a passing browser test for current session
   - `sentinel steel-test check` — check if valid browser test exists for current session
 - Worker hardening plan HTML (`plans/worker-hardening-plan-v1-styled.html`) with tooling versions table (2026-03-11)
 
 ### Changed
+- `doc_drift`: expanded from 3 monitored files (README, CLAUDE.md, CHANGELOG) to 6 (+ BUILDING.md, LICENSE, SECURITY.md); adds "run sentinel init" batch advice when 3+ standard files are missing (2026-03-12)
+- `skill_router`: added project-init routing rule with 5 patterns (init project, standardize files, sentinel init, create missing files, project.init) at priority 60 (2026-03-12)
 - `phase_gate`: fail-closed when `phases/` dir exists but file is missing; canonical path validation rejects `..` components, validates skill/file names are safe ASCII, resolves symlinks (2026-03-11)
 - `pre_push_steel_test`: scoped Steel test requirement to repos matching project configs (not all repos with any Steel config); added Worker verification support (2026-03-11)
 - `wrangler_guard`: expanded with per-repo scoping and Cloudflare API verification (2026-03-11)

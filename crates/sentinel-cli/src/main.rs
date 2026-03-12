@@ -14,6 +14,7 @@ use tracing_subscriber::EnvFilter;
 mod api;
 mod daemon_cmd;
 mod hook_cmd;
+mod init_cmd;
 mod mcp_cmd;
 mod scan_cmd;
 mod stats_cmd;
@@ -97,6 +98,25 @@ enum Commands {
         #[command(subcommand)]
         action: SteelTestAction,
     },
+
+    /// Generate standard project files (README, CLAUDE.md, LICENSE, etc.)
+    Init {
+        /// Preview only — show what would be created without writing
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Overwrite existing files
+        #[arg(long)]
+        force: bool,
+
+        /// Batch mode — run across all repos under ~/Documents/GitHub/
+        #[arg(long)]
+        all: bool,
+
+        /// Override target directory (default: current directory)
+        #[arg(long)]
+        dir: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -149,5 +169,11 @@ async fn main() -> anyhow::Result<()> {
             SteelTestAction::Record { session } => steel_test_cmd::record(session).await,
             SteelTestAction::Check { session } => steel_test_cmd::check(session).await,
         },
+        Commands::Init {
+            dry_run,
+            force,
+            all,
+            dir,
+        } => init_cmd::run(dry_run, force, all, dir).await,
     }
 }

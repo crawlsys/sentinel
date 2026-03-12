@@ -20,7 +20,14 @@ use std::time::{SystemTime, UNIX_EPOCH};
 const COOLDOWN_MS: u64 = 30 * 60 * 1000;
 
 /// Docs we monitor for staleness
-const MONITORED_DOCS: &[&str] = &["README.md", "CLAUDE.md", "CHANGELOG.md"];
+const MONITORED_DOCS: &[&str] = &[
+    "README.md",
+    "CLAUDE.md",
+    "CHANGELOG.md",
+    "BUILDING.md",
+    "LICENSE",
+    "SECURITY.md",
+];
 
 /// A single drift finding
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -169,6 +176,9 @@ fn check_doc_drift(cwd: &Path, doc_name: &str, recent_changes: &[String]) -> Opt
         "README.md" => check_readme_drift(&doc_path, recent_changes, &cwd_str, &timestamp),
         "CLAUDE.md" => check_claude_md_drift(&doc_path, cwd, &cwd_str, &timestamp),
         "CHANGELOG.md" => check_changelog_drift(&doc_path, recent_changes, &cwd_str, &timestamp),
+        "BUILDING.md" | "LICENSE" | "SECURITY.md" => {
+            check_standard_file_drift(&doc_path, doc_name, cwd, &cwd_str, &timestamp)
+        }
         _ => None,
     }
 }
@@ -323,6 +333,39 @@ fn check_changelog_drift(
     None
 }
 
+fn check_standard_file_drift(
+    path: &Path,
+    doc_name: &str,
+    cwd: &Path,
+    cwd_str: &str,
+    ts: &str,
+) -> Option<DriftEntry> {
+    if path.exists() {
+        return None;
+    }
+
+    // Only flag if this is a real project (has Cargo.toml or package.json)
+    let has_sources = cwd.join("Cargo.toml").exists() || cwd.join("package.json").exists();
+    if !has_sources {
+        return None;
+    }
+
+    let reason = match doc_name {
+        "BUILDING.md" => "Missing BUILDING.md — project has no build documentation",
+        "LICENSE" => "Missing LICENSE — project has no license file",
+        "SECURITY.md" => "Missing SECURITY.md — project has no security policy",
+        _ => return None,
+    };
+
+    Some(DriftEntry {
+        doc: doc_name.into(),
+        reason: reason.into(),
+        cwd: cwd_str.into(),
+        ts: ts.into(),
+        resolved: false,
+    })
+}
+
 /// Write drift findings to doc-drift.jsonl (append mode).
 fn write_drift_entries(entries: &[DriftEntry]) {
     let path = match drift_file() {
@@ -400,8 +443,17 @@ fn build_drift_context(entries: &[DriftEntry]) -> String {
                 lines.push("   - If missing: create with Keep a Changelog format and [Unreleased] section".into());
                 lines.push("   - If no [Unreleased]: add one and log recent changes under appropriate categories (Added/Changed/Fixed/Removed)".into());
             }
+            "BUILDING.md" | "LICENSE" | "SECURITY.md" => {
+                lines.push("   - Run `sentinel init` to generate this file from templates".into());
+            }
             _ => {}
         }
+    }
+
+    // Batch advice when many files are missing
+    if entries.len() >= 3 {
+        lines.push(String::new());
+        lines.push("**TIP:** Multiple standard files are missing. Run `sentinel init --dry-run` to preview, then `sentinel init` to create them all at once.".into());
     }
 
     lines.push(String::new());
@@ -502,7 +554,7 @@ pub fn process_prompt(input: &HookInput) -> HookOutput {
                             .unwrap_or(true)
                 }
                 "CLAUDE.md" => !doc_path.exists() || fs::metadata(&doc_path).map(|m| m.len() < 200).unwrap_or(true),
-                "CHANGELOG.md" => !doc_path.exists(),
+                "CHANGELOG.md" | "BUILDING.md" | "LICENSE" | "SECURITY.md" => !doc_path.exists(),
                 _ => false,
             }
         })

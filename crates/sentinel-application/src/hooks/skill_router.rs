@@ -272,6 +272,21 @@ pub fn default_router() -> RegexRouter {
         router.add_rule(rule);
     }
 
+    // Project init — standardize project files
+    if let Ok(rule) = sentinel_domain::routing::RoutingRule::new(
+        "project-init",
+        vec![
+            r"(?i)\b(init|initialize|setup)\s+(this\s+)?(project|repo)\b",
+            r"(?i)\bstandard(ize)?\s+(project\s+)?(files|docs|structure)\b",
+            r"(?i)\bsentinel\s+init\b",
+            r"(?i)\b(create|add|generate)\s+(standard|missing)\s+(files|docs)\b",
+            r"(?i)\bproject.init\b",
+        ],
+        60,
+    ) {
+        router.add_rule(rule);
+    }
+
     router
 }
 

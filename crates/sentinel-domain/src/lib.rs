@@ -8,6 +8,7 @@ pub mod events;
 pub mod evidence;
 pub mod hooks;
 pub mod judge;
+pub mod project;
 pub mod proof;
 pub mod routing;
 pub mod state;

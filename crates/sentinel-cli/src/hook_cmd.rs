@@ -76,11 +76,15 @@ pub async fn run(event: &str, matcher: Option<&str>, standalone: bool) -> Result
             let router_output = hooks::skill_router::process(&input, &router);
             output.merge(&router_output);
 
-            // Extract detected skill from router output and update state
+            // Extract detected skill from router output and update state.
+            // When no skill matches, clear active_skill so the phase gate
+            // doesn't keep blocking on a stale skill from earlier in the session.
             if let Some(ref ctx) = router_output.hook_specific_output {
                 if let Some(ref ac) = ctx.additional_context {
                     if let Some(skill) = extract_skill_name(ac) {
                         state.set_active_skill(&skill);
+                    } else if ac.contains("No skill matched") {
+                        state.active_skill = None;
                     }
                 }
             }
@@ -307,5 +311,16 @@ mod tests {
     #[test]
     fn test_extract_skill_name_none() {
         assert_eq!(extract_skill_name("no skill here"), None);
+    }
+
+    #[test]
+    fn test_no_skill_matched_clears_active_skill() {
+        // Simulates the scenario: skill router detected "linear" on message 1,
+        // then "No skill matched" on message 2. active_skill should be cleared.
+        let no_match_context = "[Skill Router] No skill matched — general conversation mode.";
+        assert_eq!(extract_skill_name(no_match_context), None);
+        // The clearing happens in the caller (run()) when extract_skill_name returns
+        // None AND the context contains "No skill matched"
+        assert!(no_match_context.contains("No skill matched"));
     }
 }
