@@ -423,13 +423,11 @@ MCP servers are configured in `~/.claude.json` (NOT inside `~/.claude/`).
 - **macOS:** `/Library/Application Support/ClaudeCode/managed-mcp.json`
 - **Linux:** `/etc/claude-code/managed-mcp.json`
 
-**Runtime architecture:** All MCP servers are custom Rust binaries built with [Vulcan SDK](https://github.com/garysomerhalder/vulcan-mcp-sdk-rust), wrapped by `mcp-router --single <binary>` for hot-reload. The router watches the binary for changes and auto-restarts on rebuild — no need to restart Claude Code when updating an MCP server. The only exception is `sequential-thinking`, which runs as a direct binary without the router.
-
 **How components connect:**
 - **User types a message** -> `UserPromptSubmit` hooks fire (skill-router, error-reporter, todo-loader)
 - **Claude uses a tool** -> `PreToolUse` hooks fire (phase-gate, git-hygiene), then `PostToolUse` hooks fire (mcp-health)
 - **Claude finishes responding** -> `Stop` hooks fire (context-monitor, skill-telemetry, commit-hygiene)
-- **Session starts** -> `SessionStart` hooks fire (generates this CLAUDE.md, syncs marketplace)
+- **Session starts** -> `SessionStart` hooks fire (generates this CLAUDE.md, syncs marketplace, auto-inits standard project files)
 - **Context compacts** -> `PreCompact` hooks fire (preserves critical context)
 
 All {hooks} hooks run through the sentinel Rust engine (`sentinel hook --event <Event>`).
@@ -444,15 +442,56 @@ All MCP servers and CLIs are custom Rust binaries in `~/Documents/GitHub/`:
 | **CLIs** | {cli_repos} | `{{product}}-cli-rust` | `{{product}}-cli-rs` | `{{product}}` |
 
 **Key infrastructure:**
-- **Vulcan SDK** (`vulcan-mcp-sdk-rust`): Proc-macro SDK (`#[tool]`, `#[tool_router]`, `#[tool_handler]`) for building MCP servers
-- **mcp-router**: Hot-reload wrapper — `mcp-router --single <binary> --watch <binary>` watches for recompilation and auto-restarts
-- **Sentinel** (`sentinel`): Hook engine powering all {hooks} lifecycle hooks
+- **[Vulcan SDK](https://github.com/garysomerhalder/vulcan-mcp-sdk-rust)** (`vulcan-mcp-sdk-rust`): Proc-macro SDK for building MCP servers. Annotate handlers with `#[tool]`, `#[tool_router]`, `#[tool_handler]` — Vulcan generates JSON schema, stdio transport, and tool dispatch at compile time. Zero boilerplate.
+- **mcp-router** (`mcp-router`): Hot-reload wrapper binary. Wraps any MCP server binary: `mcp-router --single <binary>`. Watches the binary file for changes, auto-restarts on recompilation, and sends `notifications/tools/list_changed` to Claude Code so tool lists refresh without restarting the session. All {mcp_repos} MCP servers are wrapped by mcp-router.
+- **Sentinel** (`sentinel`): Hook engine powering all {hooks} lifecycle hooks via a single Rust binary.
 
-**Conventions:**
+### MCP Server Hot-Reload (Vulcan + mcp-router)
+
+All MCP servers use zero-restart hot module replacement:
+
+1. **Build**: `cargo build --release` in the MCP server repo (e.g. `linear-mcp-rust/`)
+2. **mcp-router detects change**: Watches the binary file, sees new mtime
+3. **Auto-restart**: Kills old process, starts new binary, sends `notifications/tools/list_changed`
+4. **Claude Code refreshes**: Tool list updated in-session — no manual restart needed
+
+```
+~/.claude.json entry:
+  "linear": {{ "command": "mcp-router --single linear-mcp", "type": "stdio" }}
+
+Dev workflow:
+  cd ~/Documents/GitHub/linear-mcp-rust
+  cargo build --release          # mcp-router auto-detects new binary
+                                  # Claude Code sees updated tools immediately
+```
+
+**When NOT to use mcp-router**: `sequential-thinking-mcp` runs as a direct binary (no wrapper) because it has no binary changes during development.
+
+### Sentinel Shadow Binary System (Windows)
+
+On Windows, `sentinel.exe` cannot be overwritten while Claude Code is running (file lock). The shadow binary system solves this:
+
+- `~/.cargo/bin/sentinel.exe` — Tiny launcher (207KB, never changes)
+- `~/.cargo/bin/sentinel-engine.exe` — Actual engine (hot-swappable)
+- `~/.cargo/bin/sentinel-engine.exe.staged` — Pending build (auto-consumed)
+
+**Dev workflow:**
+```bash
+cd ~/Documents/GitHub/sentinel
+cargo build --release -p sentinel       # Builds sentinel-engine.exe
+cp target/release/sentinel-engine.exe ~/.cargo/bin/sentinel-engine.exe.staged
+# Next hook invocation: launcher detects .staged file, swaps it in
+```
+
+The launcher checks for `.staged` on every invocation. If found, it replaces `sentinel-engine.exe` and runs the new version. Zero downtime, no session restart.
+
+### Conventions
+
 - Each MCP server is a standalone repo with its own `Cargo.toml` (not a workspace member of the CLI)
 - CLIs and MCPs for the same product are separate repos (e.g. `blacksmith-cli-rust` + `blacksmith-mcp-rust`)
 - MCP servers depend on Vulcan via path: `../vulcan-mcp-sdk-rust/crates/vulcan`
 - All MCP binaries are registered in `~/.claude.json` and wrapped by `mcp-router`
+- MCP server configuration is in `~/.claude.json` (NOT inside `~/.claude/`)
 
 ---
 
