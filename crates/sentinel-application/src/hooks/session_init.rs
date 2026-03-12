@@ -14,6 +14,8 @@ use std::process::Command;
 
 use sentinel_domain::events::{HookEvent, HookInput, HookOutput};
 
+use crate::project_init;
+
 /// Well-known marketplace repo locations to check
 const REPO_CANDIDATES: &[&str] = &[
     "Documents/GitHub/claude-code-marketplace",
@@ -61,8 +63,11 @@ pub fn process(input: &HookInput) -> HookOutput {
     let counts = count_components(&claude_dir);
     generate_claude_md(&claude_dir, &counts);
 
-    // 5. Build startup context
-    let context = build_startup_context(&sync_result, &validation, &counts, session_id);
+    // 6. Auto-init standard project files in cwd (creates missing, never overwrites)
+    let init_result = auto_init_project(cwd);
+
+    // 7. Build startup context
+    let context = build_startup_context(&sync_result, &validation, &counts, session_id, &init_result);
 
     HookOutput::inject_context(HookEvent::SessionStart, context)
 }
@@ -626,6 +631,7 @@ fn build_startup_context(
     validation: &ValidationResult,
     counts: &ComponentCounts,
     session_id: &str,
+    init_result: &Option<sentinel_domain::project::InitResult>,
 ) -> String {
     let mut parts = Vec::new();
 
@@ -669,6 +675,29 @@ fn build_startup_context(
         "[Components] {} skills | {} hooks | {} commands | {} agents | {} MCP servers",
         counts.skills, counts.hooks, counts.commands, counts.agents, counts.mcp_servers
     ));
+
+    // Auto-init results
+    if let Some(result) = init_result {
+        if !result.created.is_empty() {
+            let file_names: Vec<&str> = result.created.iter().map(|f| f.path()).collect();
+            parts.push(format!(
+                "[Project Init] Auto-generated {} standard file(s): {}",
+                result.created.len(),
+                file_names.join(", ")
+            ));
+        }
+        if !result.errors.is_empty() {
+            let err_names: Vec<String> = result
+                .errors
+                .iter()
+                .map(|(f, e)| format!("{}: {}", f.path(), e))
+                .collect();
+            parts.push(format!(
+                "[Project Init] Errors: {}",
+                err_names.join("; ")
+            ));
+        }
+    }
 
     parts.join("\n")
 }
@@ -763,6 +792,42 @@ fn cache_linear_team_keys(claude_dir: &Path) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Auto-init standard project files
+// ---------------------------------------------------------------------------
+
+/// Auto-generate missing standard project files in the cwd.
+/// Only runs if the directory looks like a git repo.
+/// Never overwrites existing files (force=false).
+fn auto_init_project(cwd: &str) -> Option<sentinel_domain::project::InitResult> {
+    let cwd_path = Path::new(cwd);
+
+    // Only run on git repos
+    if !cwd_path.join(".git").exists() {
+        return None;
+    }
+
+    // Quick audit — skip if nothing is missing
+    let audit = project_init::audit(cwd_path);
+    if audit.missing.is_empty() {
+        return None;
+    }
+
+    // Generate missing files (never overwrite)
+    let result = project_init::init_repo(cwd_path, false);
+
+    if !result.created.is_empty() {
+        tracing::info!(
+            repo = cwd,
+            created = result.created.len(),
+            "Auto-init: generated {} standard file(s)",
+            result.created.len()
+        );
+    }
+
+    Some(result)
+}
+
 /// Result of marketplace sync attempt
 enum SyncResult {
     /// No marketplace repo found
@@ -819,7 +884,7 @@ mod tests {
             mcp_repos: 0,
             cli_repos: 0,
         };
-        let context = build_startup_context(&sync, &validation, &counts, "test-sess");
+        let context = build_startup_context(&sync, &validation, &counts, "test-sess", &None);
         assert!(context.contains("No local repo found"));
         assert!(context.contains("50 skills"));
         assert!(context.contains("test-sess"));
@@ -844,7 +909,7 @@ mod tests {
             mcp_repos: 0,
             cli_repos: 0,
         };
-        let context = build_startup_context(&sync, &validation, &counts, "s1");
+        let context = build_startup_context(&sync, &validation, &counts, "s1", &None);
         assert!(context.contains("42 files synced"));
         assert!(context.contains("(pulled)"));
     }
@@ -865,7 +930,7 @@ mod tests {
             mcp_repos: 0,
             cli_repos: 0,
         };
-        let context = build_startup_context(&sync, &validation, &counts, "s1");
+        let context = build_startup_context(&sync, &validation, &counts, "s1", &None);
         assert!(context.contains("Up to date"));
     }
 
@@ -885,7 +950,7 @@ mod tests {
             mcp_repos: 0,
             cli_repos: 0,
         };
-        let context = build_startup_context(&sync, &validation, &counts, "s1");
+        let context = build_startup_context(&sync, &validation, &counts, "s1", &None);
         assert!(context.contains("[Validation] FAILED"));
         assert!(context.contains("settings.json missing"));
     }
@@ -1074,5 +1139,64 @@ issue_prefix: TEAMA
         // The important thing is it doesn't error.
         let count2 = copy_dir_recursive(src_dir.path(), &dest).unwrap();
         assert!(count2 <= 1);
+    }
+
+    #[test]
+    fn test_auto_init_context_with_created_files() {
+        use sentinel_domain::project::{InitResult, StandardFile};
+
+        let init_result = Some(InitResult {
+            repo_path: PathBuf::from("/tmp/test"),
+            created: vec![StandardFile::License, StandardFile::SecurityMd, StandardFile::BuildingMd],
+            skipped: vec![StandardFile::Readme],
+            errors: vec![],
+        });
+        let sync = SyncResult::UpToDate;
+        let validation = ValidationResult {
+            valid: true,
+            reasons: vec![],
+        };
+        let counts = ComponentCounts {
+            skills: 72,
+            hooks: 27,
+            commands: 9,
+            agents: 8,
+            mcp_servers: 18,
+            mcp_repos: 0,
+            cli_repos: 0,
+        };
+        let context = build_startup_context(&sync, &validation, &counts, "s1", &init_result);
+        assert!(context.contains("[Project Init] Auto-generated 3 standard file(s)"));
+        assert!(context.contains("LICENSE"));
+        assert!(context.contains("SECURITY.md"));
+        assert!(context.contains("BUILDING.md"));
+    }
+
+    #[test]
+    fn test_auto_init_context_none_when_all_present() {
+        let sync = SyncResult::UpToDate;
+        let validation = ValidationResult {
+            valid: true,
+            reasons: vec![],
+        };
+        let counts = ComponentCounts {
+            skills: 72,
+            hooks: 27,
+            commands: 9,
+            agents: 8,
+            mcp_servers: 18,
+            mcp_repos: 0,
+            cli_repos: 0,
+        };
+        let context = build_startup_context(&sync, &validation, &counts, "s1", &None);
+        assert!(!context.contains("[Project Init]"));
+    }
+
+    #[test]
+    fn test_auto_init_skips_non_git_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        // No .git — should return None
+        let result = auto_init_project(dir.path().to_str().unwrap());
+        assert!(result.is_none());
     }
 }
