@@ -493,6 +493,71 @@ The launcher checks for `.staged` on every invocation. If found, it replaces `se
 - All MCP binaries are registered in `~/.claude.json` and wrapped by `mcp-router`
 - MCP server configuration is in `~/.claude.json` (NOT inside `~/.claude/`)
 
+### Standard Project Files (Auto-Init)
+
+On every SessionStart, sentinel audits the current working directory and auto-generates any missing standard files (never overwrites existing). These files are also generated in batch via `sentinel init --all`.
+
+| File | Purpose |
+|------|---------|
+| README.md | Project overview, quick start, architecture |
+| CLAUDE.md | Claude Code context for future sessions |
+| CHANGELOG.md | Keep a Changelog format |
+| LICENSE | MIT license |
+| BUILDING.md | Build/test prerequisites, path dependencies |
+| SECURITY.md | Vulnerability reporting policy |
+| .editorconfig | UTF-8, LF, indent rules |
+| .gitattributes | LF normalization, binary markers |
+| .gitignore | Standard ignores for the stack |
+| rustfmt.toml | Rust formatter config (Rust projects only) |
+| docs/ | ADRs, architecture, guides, runbooks |
+
+Templates are tailored: MCP servers get mcp-router registration docs, CLIs get install instructions, workspaces get member lists.
+
+### Sentinel CLI
+
+```bash
+sentinel hook --event <Event>         # Run hooks for an event (called by settings.json)
+sentinel init                         # Audit cwd, generate missing standard files
+sentinel init --dry-run               # Preview only
+sentinel init --all                   # Batch: all repos under ~/Documents/GitHub/
+sentinel init --force                 # Overwrite existing files
+sentinel scan --validate              # Validate skill structure + cross-references
+sentinel scan --sync-counts           # Update counts across all marketplace files
+sentinel scan --sync-counts --dry-run # Preview count changes
+sentinel scan --manifest              # Regenerate manifest.json with SHA-256 hashes
+sentinel scan --counts-only           # Output component counts as JSON
+sentinel daemon                       # Start dashboard API server (port 3001)
+sentinel steel-test record            # Record a passing browser test
+sentinel steel-test check             # Check if valid browser test exists
+```
+
+### Project Configs
+
+Per-project settings live in `~/.claude/projects/{{name}}.md` with YAML frontmatter:
+
+- **Doppler**: project name, config names (dev/stg/prd)
+- **Linear**: team ID, team key, issue prefix, project IDs, labels
+- **Deploy**: staging/production URLs, hosting provider
+- **QA**: Steel test user, Doppler secret path for test password
+- **Auth**: Auth0 domains, callback URLs
+
+The skill router auto-detects the active project from issue prefixes (e.g. `FIR-123`), project aliases, or cwd path matching, and injects project context into every skill.
+
+### Hook Event Reference
+
+| Event | When | Key Hooks |
+|-------|------|-----------|
+| **SessionStart** | New session opens | Marketplace sync, CLAUDE.md gen, project auto-init, Linear key cache |
+| **UserPromptSubmit** | Every user message | Skill router, phase validator, error reporter, todo loader, doc drift*, commit hygiene*, context monitor*, verification gate* |
+| **PreToolUse** | Before Claude uses a tool | Phase gate (blocks tools until phase loaded), git hygiene (Edit/Write), commit validator (Bash), pre-push Steel test (Bash), wrangler guard (Bash) |
+| **PostToolUse** | After Claude uses a tool | MCP health check, todo interceptor, evidence collector, plan organizer (ExitPlanMode) |
+| **Stop** | Claude finishes responding | Execution log, skill telemetry, context monitor*, commit hygiene*, doc drift*, verification gate* |
+| **PreCompact** | Before context compression | Session snapshot (preserves critical context) |
+| **TeammateIdle** | Agent about to go idle | Quality gate — reminds to check TaskList before stopping |
+| **TaskCompleted** | Agent marks task done | Verification gate — ensures work is verified before marking complete |
+
+\\* Two-phase hooks: Stop detects state and writes to disk, UserPromptSubmit reads state and injects instructions.
+
 ---
 
 ## Using Slash Commands
