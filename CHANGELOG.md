@@ -24,6 +24,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   - `--dir <path>` to override target directory
   - Skips existing files by default; creates `docs/` subdirectory structure with `.gitkeep` files
   - 18 unit tests in `sentinel-application::project_init`
+- `session_init`: auto-runs `project_init` on every SessionStart (2026-03-12)
+  - Audits current working directory for missing standard files
+  - Auto-generates missing files (never overwrites existing)
+  - Only runs on git repos (skips non-repo directories)
+  - Reports created files in startup context: `[Project Init] Auto-generated N standard file(s): ...`
+  - Silent when all standard files are present
+  - 3 new tests in `session_init::tests`
 - `sentinel steel-test` CLI subcommand for standalone Steel browser test management (2026-03-11)
   - `sentinel steel-test record` — record a passing browser test for current session
   - `sentinel steel-test check` — check if valid browser test exists for current session
