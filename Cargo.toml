@@ -67,6 +67,7 @@ uuid = { version = "1", features = ["v4", "serde"] }
 colored = "3"
 glob = "0.3"
 fs2 = "0.4"
+getrandom = "0.2"
 
 # Dev
 tempfile = "3"

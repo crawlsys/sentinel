@@ -58,9 +58,13 @@ fn extract_context(line: &str) -> Option<String> {
     re.captures(line).map(|c| c[1].to_string())
 }
 
-/// Read the current skill from the temp state file written by skill-router.
+/// Read the current skill from the telemetry state file written by skill-router.
+/// Uses sentinel's protected telemetry dir instead of world-writable temp_dir(). (Attack #51)
 fn current_skill() -> String {
-    let path = std::env::temp_dir().join("claude-current-skill");
+    let dir = dirs::home_dir()
+        .map(|h| h.join(".claude").join("sentinel").join("telemetry"))
+        .unwrap_or_else(|| std::env::temp_dir());
+    let path = dir.join("claude-current-skill");
     fs::read_to_string(path)
         .map(|s| s.trim().to_string())
         .unwrap_or_else(|_| "none".to_string())

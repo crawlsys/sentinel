@@ -37,7 +37,8 @@ impl ProofEngine {
     /// Maximum consecutive failures before requiring longer cooldown
     const MAX_RAPID_FAILURES: u32 = 3;
 
-    /// Submit evidence for a phase and build its proof
+    /// Submit evidence for a phase and build its proof.
+    /// `workflow` is optional — if provided, enables sequential phase enforcement.
     pub async fn submit_evidence(
         &self,
         skill: &str,
@@ -46,6 +47,7 @@ impl ProofEngine {
         evidence: Evidence,
         judge_model: JudgeModel,
         started_at: chrono::DateTime<Utc>,
+        workflow: Option<&sentinel_domain::workflow::SkillWorkflow>,
     ) -> Result<PhaseProof> {
         // Check resubmission rate limit
         let phase_key = format!("{skill}:{phase_id}");
@@ -149,9 +151,38 @@ impl ProofEngine {
                 .or_insert_with(|| ProofChain::new(skill, &session_id));
             chain.add_proof(proof.clone())?;
 
-            // Advance workflow
+            // **Attack #62 fix**: Use advance_sequential() when workflow definition
+            // is available. This prevents out-of-order phase completion even if the
+            // AI judge approves evidence for a later phase.
             if let Some(wf) = state.workflows.get_mut(skill) {
-                wf.advance(phase_id);
+                if wf.is_phase_complete(phase_id) {
+                    // Already complete — idempotent, no-op
+                } else if let Some(wf_def) = workflow {
+                    // Sequential enforcement: phase must be the next required one
+                    if wf.advance_sequential(phase_id, wf_def) {
+                        eprintln!(
+                            "[sentinel] ProofEngine: Sequentially advanced phase '{}' for skill '{}' \
+                             (now {} completed phases)",
+                            phase_id, skill, wf.completed_phases.len()
+                        );
+                    } else {
+                        bail!(
+                            "Phase '{}' cannot be advanced — prior required phases are incomplete. \
+                             Phases must be completed in order.",
+                            phase_id
+                        );
+                    }
+                } else {
+                    // **Attack #79 fix**: No workflow definition available — fail closed.
+                    // Previously fell back to advance_unchecked() which bypasses sequential
+                    // enforcement. Now refuse to advance without a workflow definition.
+                    // ProofEngine callers MUST provide a workflow parameter.
+                    bail!(
+                        "Phase '{}' for skill '{}' cannot be advanced — no workflow definition provided. \
+                         ProofEngine requires workflow context for sequential enforcement.",
+                        phase_id, skill
+                    );
+                }
             }
 
             (proof, combined_hash)

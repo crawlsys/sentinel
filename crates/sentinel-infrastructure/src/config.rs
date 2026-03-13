@@ -44,6 +44,17 @@ struct WorkflowsConfig {
 struct WorkflowToml {
     skill: String,
     phases: Vec<PhaseToml>,
+    /// Tool name prefixes to block when this workflow is active.
+    /// E.g., ["mcp__cdp__", "mcp__edge_cdp__"] blocks CDP tools when steel is active.
+    #[serde(default)]
+    blocked_tool_prefixes: Vec<String>,
+    /// Bash command patterns (regex) to block when this workflow is active.
+    /// E.g., ["steel-mcp", "chrome.*--remote-debugging"] blocks CLI escape attempts.
+    #[serde(default)]
+    blocked_bash_patterns: Vec<String>,
+    /// Bash command allowlist (regex). When non-empty, ONLY matching commands pass.
+    #[serde(default)]
+    bash_allowlist: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -68,23 +79,18 @@ fn default_judge_str() -> String {
 
 /// Default config directory.
 ///
-/// Searches relative to the executable first, then falls back to
-/// `~/.claude/sentinel/config`.
+/// **Attack #73 fix**: Always use `~/.claude/sentinel/config`. The previous
+/// exe-relative lookup (`~/.cargo/bin/config/`) let any user-writable process
+/// plant a malicious `workflows.toml` that disables all enforcement.
+///
+/// **Attack #84 fix**: Panic instead of falling back to `"."` when HOME is unset.
+/// The `"."` fallback means CWD (attacker-controlled project dir) becomes the
+/// config source — an attacker plants `workflows.toml` in the project with empty
+/// enforcement, and sentinel loads it as the real config.
 #[must_use]
 pub fn config_dir() -> PathBuf {
-    let exe_dir = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|p| p.to_path_buf()));
-
-    if let Some(dir) = exe_dir {
-        let config = dir.join("config");
-        if config.exists() {
-            return config;
-        }
-    }
-
     dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
+        .expect("[sentinel] FATAL: Cannot determine home directory. HOME/USERPROFILE must be set.")
         .join(".claude")
         .join("sentinel")
         .join("config")
@@ -148,6 +154,9 @@ pub fn load_workflows(config_path: &Path) -> Result<Vec<SkillWorkflow>> {
                     description: p.description,
                 })
                 .collect(),
+            blocked_tool_prefixes: w.blocked_tool_prefixes,
+            blocked_bash_patterns: w.blocked_bash_patterns,
+            bash_allowlist: w.bash_allowlist,
         })
         .collect();
 
@@ -179,6 +188,11 @@ struct StepToml {
 ///
 /// Returns `None` if the file doesn't exist (steps are optional).
 pub fn load_skill_steps(config_path: &Path, skill: &str) -> Result<Option<SkillSteps>> {
+    // **Attack #95 fix**: Sanitize skill name before using as path component.
+    // Without this, skill="../../etc" reads `config/steps/../../etc.toml` (path traversal).
+    if skill.contains('.') || skill.contains('/') || skill.contains('\\') || skill.is_empty() || skill.len() > 64 {
+        anyhow::bail!("Invalid skill name for step loading: '{}'", skill);
+    }
     let toml_path = config_path.join("steps").join(format!("{skill}.toml"));
     if !toml_path.exists() {
         return Ok(None);

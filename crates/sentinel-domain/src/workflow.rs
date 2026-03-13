@@ -107,6 +107,25 @@ pub struct SkillWorkflow {
 
     /// Ordered list of phases
     pub phases: Vec<WorkflowPhase>,
+
+    /// Tool name prefixes to block when this workflow is active.
+    /// E.g., `["mcp__cdp__"]` blocks all CDP tools when steel workflow is active.
+    /// This prevents using equivalent MCP servers to bypass phase enforcement.
+    #[serde(default)]
+    pub blocked_tool_prefixes: Vec<String>,
+
+    /// Bash command patterns (regex strings) to block when this workflow is active.
+    /// E.g., `["steel-mcp", "chrome.*--remote-debugging"]` blocks CLI escape attempts.
+    #[serde(default)]
+    pub blocked_bash_patterns: Vec<String>,
+
+    /// Bash command allowlist (regex strings). When non-empty, ONLY commands matching
+    /// at least one pattern are permitted. All other Bash commands are blocked.
+    /// This is the nuclear option — defeats all obfuscation (eval, base64, $'\x',
+    /// variable concatenation) because anything not explicitly allowed is denied.
+    /// E.g., `["^git ", "^npm ", "^node ", "^cargo "]` allows only those prefixes.
+    #[serde(default)]
+    pub bash_allowlist: Vec<String>,
 }
 
 /// Runtime state of a workflow execution
@@ -187,8 +206,60 @@ impl WorkflowState {
         }
     }
 
-    /// Advance to the next phase (idempotent — no-op if already completed)
-    pub fn advance(&mut self, completed_phase_id: &str) {
+    /// Advance to the next phase (idempotent — no-op if already completed).
+    ///
+    /// **Sequential enforcement**: Only advances if all prior required phases
+    /// in the workflow are already complete. This prevents out-of-order phase
+    /// reads from unlocking tools (Attack #21). Returns true if advanced.
+    pub fn advance_sequential(
+        &mut self,
+        completed_phase_id: &str,
+        workflow: &SkillWorkflow,
+    ) -> bool {
+        if self.is_phase_complete(completed_phase_id) {
+            return false; // Already done — idempotent
+        }
+
+        // Find this phase's position in the workflow
+        let target_idx = match workflow.phases.iter().position(|p| p.id == completed_phase_id) {
+            Some(idx) => idx,
+            None => return false, // Unknown phase
+        };
+
+        // Check that ALL prior required phases are completed
+        for phase in &workflow.phases[..target_idx] {
+            if phase.required && !self.is_phase_complete(&phase.id) {
+                // Prior required phase not complete — refuse to advance
+                eprintln!(
+                    "[sentinel] Sequential enforcement: refusing to advance '{}' because \
+                     prior required phase '{}' is not yet complete.",
+                    completed_phase_id, phase.id
+                );
+                return false;
+            }
+        }
+
+        self.completed_phases
+            .push(completed_phase_id.to_string());
+        self.current_phase = Some(self.completed_phases.len());
+        true
+    }
+
+    /// Advance a phase WITHOUT sequential ordering checks.
+    ///
+    /// **SECURITY WARNING**: This skips the sequential enforcement that prevents
+    /// out-of-order phase completion (Attack #21). Only use this when the caller
+    /// has its own authorization gate (e.g., `ProofEngine` — AI judge approved
+    /// the evidence). All other callers MUST use `advance_sequential()`.
+    ///
+    /// This is intentionally named `advance_unchecked` to make the danger obvious
+    /// at every call site.
+    ///
+    /// **Attack #79 fix**: Production code MUST use `advance_sequential()` instead.
+    /// This method exists only for test setup convenience. The ProofEngine fallback
+    /// path that previously called this was changed to fail closed (bail!).
+    #[cfg_attr(not(test), deprecated(note = "Use advance_sequential() in production code"))]
+    pub fn advance_unchecked(&mut self, completed_phase_id: &str) {
         if !self.is_phase_complete(completed_phase_id) {
             self.completed_phases
                 .push(completed_phase_id.to_string());
@@ -224,14 +295,42 @@ impl WorkflowState {
         tool_name: &str,
     ) -> Option<WorkflowBlock> {
         // Never block read-only or meta tools
+        // **Attack #69 fix**: Removed "Task" and "Agent" from safe tools.
+        // These spawn sub-agents that can execute ANY tool (Bash, Write, MCP)
+        // in a separate context that may not inherit the same sentinel hooks.
+        // Claude should use Task/Agent only after completing required phases.
         let safe_tools = [
-            "Read", "Glob", "Grep", "WebSearch", "WebFetch", "Task",
+            "Read", "Glob", "Grep", "WebSearch", "WebFetch",
             "AskUserQuestion", "EnterPlanMode", "ExitPlanMode", "TaskCreate",
-            "TaskUpdate", "TaskList", "TaskGet", "Skill", "ToolSearch",
-            "Agent",
+            "TaskUpdate", "TaskList", "TaskGet", "TaskOutput", "Skill",
+            "ToolSearch", "SendMessage",
         ];
         if safe_tools.contains(&tool_name) {
             return None;
+        }
+
+        // ── Blocked tool prefix check ─────────────────────────────────
+        // Block equivalent MCP tools regardless of phase progress.
+        // E.g., mcp__cdp__* is always blocked when steel workflow is active.
+        if !workflow.blocked_tool_prefixes.is_empty() {
+            for prefix in &workflow.blocked_tool_prefixes {
+                if tool_name.starts_with(prefix.as_str()) {
+                    let next = self.next_required_phase(workflow);
+                    let next_phase = next.map(|n| n.id.clone()).unwrap_or_default();
+                    let next_file = next.map(|n| n.file.clone()).unwrap_or_default();
+                    return Some(WorkflowBlock {
+                        reason: format!(
+                            "Workflow '{}': tool '{}' is blocked (matches blocked prefix '{}').\n\
+                             Use the workflow's native tools instead of equivalent alternatives.",
+                            workflow.skill, tool_name, prefix
+                        ),
+                        next_phase,
+                        next_phase_file: next_file,
+                        completed: self.completed_phases.len(),
+                        total: workflow.phases.iter().filter(|p| p.required).count(),
+                    });
+                }
+            }
         }
 
         // Find next required phase
@@ -420,6 +519,9 @@ mod tests {
                     description: "Code review".to_string(),
                 },
             ],
+            blocked_tool_prefixes: Vec::new(),
+            blocked_bash_patterns: Vec::new(),
+            bash_allowlist: Vec::new(),
         }
     }
 
@@ -434,7 +536,7 @@ mod tests {
     #[test]
     fn test_advance_phase() {
         let mut state = WorkflowState::new("linear", "sess-1");
-        state.advance("claim");
+        state.advance_unchecked("claim");
         assert_eq!(state.completed_phases, vec!["claim"]);
         assert!(state.is_phase_complete("claim"));
         assert!(!state.is_phase_complete("fetch"));
@@ -447,13 +549,13 @@ mod tests {
 
         assert_eq!(state.next_required_phase(&wf).unwrap().id, "claim");
 
-        state.advance("claim");
+        state.advance_unchecked("claim");
         assert_eq!(state.next_required_phase(&wf).unwrap().id, "fetch");
 
-        state.advance("fetch");
+        state.advance_unchecked("fetch");
         assert_eq!(state.next_required_phase(&wf).unwrap().id, "review");
 
-        state.advance("review");
+        state.advance_unchecked("review");
         assert!(state.next_required_phase(&wf).is_none());
     }
 
@@ -474,14 +576,16 @@ mod tests {
 
         assert!(state.should_block(&wf, "Read").is_none());
         assert!(state.should_block(&wf, "Glob").is_none());
-        assert!(state.should_block(&wf, "Task").is_none());
+        // Task and Agent removed from safe tools (Attack #69)
+        assert!(state.should_block(&wf, "Task").is_some());
+        assert!(state.should_block(&wf, "Agent").is_some());
     }
 
     #[test]
     fn test_block_on_skip() {
         let wf = linear_workflow();
         let mut state = WorkflowState::new("linear", "sess-1");
-        state.advance("claim");
+        state.advance_unchecked("claim");
         // Trying to use tools without completing "fetch" (skipping to review territory)
         // Gap is 0 here (fetch is the very next one), so it should NOT block
         assert!(state.should_block(&wf, "Bash").is_none());

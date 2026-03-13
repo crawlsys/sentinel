@@ -31,7 +31,7 @@ pub fn process(input: &HookInput, git: &dyn GitStatusPort) -> HookOutput {
         Ok(true) => {
             // Count changed files
             match git.changed_files(cwd) {
-                Ok(files) if files.len() > MAX_UNCOMMITTED_FILES => HookOutput::block(format!(
+                Ok(files) if files.len() > MAX_UNCOMMITTED_FILES => HookOutput::deny(format!(
                     "Git hygiene: {} uncommitted files (threshold: {}). \
                      Commit your changes before making more edits.\n\
                      Changed files: {}",
@@ -126,7 +126,14 @@ mod tests {
         };
         let output = process(&input, &git);
         assert_eq!(output.blocked, Some(true));
-        assert!(output.reason.as_ref().unwrap().contains("15 uncommitted files"));
+        // deny() puts reason in hook_specific_output.permission_decision_reason
+        let reason = output
+            .hook_specific_output
+            .as_ref()
+            .and_then(|h| h.permission_decision_reason.as_deref())
+            .or(output.reason.as_deref())
+            .unwrap();
+        assert!(reason.contains("15 uncommitted files"));
     }
 
     #[test]

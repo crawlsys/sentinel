@@ -7,15 +7,11 @@
 //!   Layer 1 (regex): Did any tests/builds run? (fast, ~0ms)
 //!   Layer 2 (AI):    Skipped for now — regex-only detection
 //!
-//! Override: temp file at {tmpdir}/claude-verification-override (5 min TTL)
+//! Override: session-scoped temp file (60s TTL, via hygiene_override module)
 
 use regex::Regex;
 use sentinel_domain::events::{HookInput, HookOutput};
 use std::path::PathBuf;
-use std::time::{Duration, SystemTime};
-
-/// Override file validity window (5 minutes)
-const OVERRIDE_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Test command patterns that count as verification evidence
 const TEST_COMMAND_PATTERNS: &[&str] = &[
@@ -46,28 +42,9 @@ const TEST_OUTPUT_PATTERNS: &[&str] = &[
     r"All \d+ tests? passed",
 ];
 
-/// Check if the override temp file exists and is still valid
-fn is_override_active_at(path: &std::path::Path) -> bool {
-    match std::fs::metadata(path) {
-        Ok(meta) => {
-            if let Ok(modified) = meta.modified() {
-                if let Ok(elapsed) = SystemTime::now().duration_since(modified) {
-                    if elapsed < OVERRIDE_TIMEOUT {
-                        return true;
-                    }
-                    // Expired — try to clean up
-                    let _ = std::fs::remove_file(path);
-                }
-            }
-            false
-        }
-        Err(_) => false,
-    }
-}
-
-/// Path to the default override temp file
-fn default_override_path() -> PathBuf {
-    std::env::temp_dir().join("claude-verification-override")
+/// Path to the default override file (session-scoped via hygiene_override).
+fn default_override_path(session_id: &str) -> PathBuf {
+    super::hygiene_override::verification_override_path(session_id)
 }
 
 /// Check the transcript for test evidence (Layer 1: regex)
@@ -148,30 +125,25 @@ fn transcript_has_test_evidence(transcript_path: &str) -> bool {
             }
         }
 
-        // Also do a raw line check for common patterns (handles non-JSON transcript lines)
-        for pattern in &cmd_patterns {
-            if pattern.is_match(line) {
-                return true;
-            }
-        }
-        for pattern in &output_patterns {
-            if pattern.is_match(line) {
-                return true;
-            }
-        }
+        // **Attack #59 fix**: Removed raw line fallback. Only structured JSON entries
+        // are trusted for test evidence. Raw text lines could be injected by an
+        // attacker (e.g., `echo "Tests: 5 passed" >> transcript.jsonl`) to fake
+        // passing test evidence without actually running tests.
     }
 
     false
 }
 
 /// Process a pre-commit verification hook event (PreToolUse).
-/// Uses the default override path at `{tmpdir}/claude-verification-override`.
+/// Uses session-scoped signed override check.
 pub fn process(input: &HookInput) -> HookOutput {
-    process_with_override(input, &default_override_path())
+    let session_id = input.session_id.as_deref().unwrap_or("unknown");
+    let override_path = default_override_path(session_id);
+    process_with_override(input, &override_path, session_id)
 }
 
 /// Internal: process with an explicit override file path (for testability).
-fn process_with_override(input: &HookInput, override_path: &std::path::Path) -> HookOutput {
+fn process_with_override(input: &HookInput, override_path: &std::path::Path, session_id: &str) -> HookOutput {
     // Only act on Bash tool calls
     let tool = match &input.tool_name {
         Some(name) if name == "Bash" => name.as_str(),
@@ -205,8 +177,8 @@ fn process_with_override(input: &HookInput, override_path: &std::path::Path) -> 
         "Pushing"
     };
 
-    // Check override temp file
-    if is_override_active_at(override_path) {
+    // Check signed override file (Attack #47: replaces mtime-only check)
+    if super::hygiene_override::is_signed_override_active(override_path, "verification", session_id) {
         return HookOutput::allow();
     }
 
@@ -243,6 +215,7 @@ fn process_with_override(input: &HookInput, override_path: &std::path::Path) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hooks::hygiene_override;
     use std::io::Write;
 
     #[test]
@@ -269,7 +242,6 @@ mod tests {
 
     #[test]
     fn test_blocks_git_commit_without_evidence() {
-        // Use a non-existent override path to isolate from parallel tests
         let tmpdir = tempfile::tempdir().unwrap();
         let override_path = tmpdir.path().join("no-override");
 
@@ -278,7 +250,7 @@ mod tests {
             tool_input: Some(serde_json::json!({"command": "git commit -m 'test'"})),
             ..Default::default()
         };
-        let output = process_with_override(&input, &override_path);
+        let output = process_with_override(&input, &override_path, "test-sess");
         assert_eq!(output.blocked, Some(true));
         assert!(output.reason.as_ref().unwrap().contains("BLOCKED"));
         assert!(output.reason.as_ref().unwrap().contains("Committing"));
@@ -286,7 +258,6 @@ mod tests {
 
     #[test]
     fn test_blocks_git_push_without_evidence() {
-        // Use a non-existent override path to isolate from parallel tests
         let tmpdir = tempfile::tempdir().unwrap();
         let override_path = tmpdir.path().join("no-override");
 
@@ -295,7 +266,7 @@ mod tests {
             tool_input: Some(serde_json::json!({"command": "git push origin main"})),
             ..Default::default()
         };
-        let output = process_with_override(&input, &override_path);
+        let output = process_with_override(&input, &override_path, "test-sess");
         assert_eq!(output.blocked, Some(true));
         assert!(output.reason.as_ref().unwrap().contains("Pushing"));
     }
@@ -321,17 +292,23 @@ mod tests {
     }
 
     #[test]
-    fn test_allows_when_override_active() {
-        // Use an isolated override file to avoid race conditions
+    fn test_allows_when_signed_override_active() {
         let tmpdir = tempfile::tempdir().unwrap();
         let override_path = tmpdir.path().join("test-override");
+        let session_id = "test-sess-override";
 
         // No override file — should not be active
-        assert!(!is_override_active_at(&override_path));
+        assert!(!hygiene_override::is_signed_override_active(
+            &override_path, "verification", session_id
+        ));
 
-        // Write the override file
-        std::fs::write(&override_path, "override").unwrap();
-        assert!(is_override_active_at(&override_path));
+        // Write a properly signed override file
+        hygiene_override::write_signed_override_for_test(
+            &override_path, "verification", session_id
+        );
+        assert!(hygiene_override::is_signed_override_active(
+            &override_path, "verification", session_id
+        ));
 
         // Verify process respects it
         let input = HookInput {
@@ -339,8 +316,15 @@ mod tests {
             tool_input: Some(serde_json::json!({"command": "git commit -m 'override'"})),
             ..Default::default()
         };
-        let output = process_with_override(&input, &override_path);
+        let output = process_with_override(&input, &override_path, session_id);
         assert!(output.blocked.is_none());
+
+        // Verify that a plain `touch` doesn't work
+        let touch_path = tmpdir.path().join("touch-override");
+        std::fs::write(&touch_path, "").unwrap();
+        assert!(!hygiene_override::is_signed_override_active(
+            &touch_path, "verification", session_id
+        ));
     }
 
     #[test]
@@ -380,7 +364,7 @@ mod tests {
             tool_input: Some(serde_json::json!({"command": "git commit --amend"})),
             ..Default::default()
         };
-        let output = process_with_override(&input, &override_path);
+        let output = process_with_override(&input, &override_path, "test-sess");
         assert_eq!(output.blocked, Some(true));
     }
 }

@@ -32,7 +32,12 @@ pub fn process(
 
     let total_required = workflow.phases.iter().filter(|p| p.required).count();
     let total = workflow.phases.len();
-    let loaded = state.phases_read_count();
+    // **Attack #76 fix**: Use per-skill count, not global. Cross-skill reads
+    // inflated the counter, misleading Claude into thinking more phases were done.
+    let loaded = state.phases_read
+        .get(skill_name)
+        .map(|v| v.len())
+        .unwrap_or(0);
 
     // Find next required phase file
     let next_file = state.next_required_phase_file(workflow);
@@ -239,6 +244,9 @@ mod tests {
                     description: "Cleanup".to_string(),
                 },
             ],
+            blocked_tool_prefixes: Vec::new(),
+            blocked_bash_patterns: Vec::new(),
+            bash_allowlist: Vec::new(),
         }
     }
 
@@ -296,8 +304,8 @@ mod tests {
     fn test_progress_injection_with_some_phases_read() {
         let mut state = SessionState::new("sess-1");
         state.set_active_skill("linear");
-        state.record_phase_read("claim.md");
-        state.record_phase_read("fetch.md");
+        state.record_phase_read("linear", "claim.md");
+        state.record_phase_read("linear", "fetch.md");
 
         let mut workflows = HashMap::new();
         workflows.insert("linear".to_string(), test_workflow());
@@ -334,9 +342,9 @@ mod tests {
     fn test_all_required_phases_read() {
         let mut state = SessionState::new("sess-1");
         state.set_active_skill("linear");
-        state.record_phase_read("claim.md");
-        state.record_phase_read("fetch.md");
-        state.record_phase_read("intelligence.md");
+        state.record_phase_read("linear", "claim.md");
+        state.record_phase_read("linear", "fetch.md");
+        state.record_phase_read("linear", "intelligence.md");
 
         let mut workflows = HashMap::new();
         workflows.insert("linear".to_string(), test_workflow());
@@ -353,7 +361,7 @@ mod tests {
     fn test_step_progress_injection() {
         let mut state = SessionState::new("sess-1");
         state.set_active_skill("linear");
-        state.record_phase_read("claim.md");
+        state.record_phase_read("linear", "claim.md");
 
         // Update some steps in the workflow state
         if let Some(wf) = state.active_workflow_mut() {
@@ -386,7 +394,7 @@ mod tests {
     fn test_step_progress_without_config() {
         let mut state = SessionState::new("sess-1");
         state.set_active_skill("linear");
-        state.record_phase_read("claim.md");
+        state.record_phase_read("linear", "claim.md");
 
         let mut workflows = HashMap::new();
         workflows.insert("linear".to_string(), test_workflow());

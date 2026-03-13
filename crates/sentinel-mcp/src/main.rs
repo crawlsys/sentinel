@@ -18,6 +18,7 @@ use vulcan::{
     transport::stdio,
 };
 
+use sentinel_application::hooks::session_init;
 use sentinel_application::judge_service::{FallbackJudge, JudgeService};
 use sentinel_application::proof_engine::ProofEngine;
 use sentinel_domain::evidence::Evidence;
@@ -134,7 +135,7 @@ impl SentinelMcp {
         {
             let mut s = self.state.write().await;
             s.set_active_skill(&skill);
-            s.record_phase_read(&phase_file);
+            s.record_phase_read(&skill, &phase_file);
         }
 
         // Look up phase config for judge model + objectives
@@ -184,13 +185,13 @@ impl SentinelMcp {
         let started_at = Utc::now() - chrono::Duration::seconds(1);
         let proof_result = self
             .proof_engine
-            .submit_evidence(&skill, &phase_id, &phase_objectives, evidence, judge_model, started_at)
+            .submit_evidence(&skill, &phase_id, &phase_objectives, evidence, judge_model, started_at, workflow_configs.get(&skill))
             .await;
 
         // Persist state to disk regardless of outcome
         {
-            let s = self.state.read().await;
-            if let Err(e) = sentinel_infrastructure::state_store::save(&s) {
+            let mut s = self.state.write().await;
+            if let Err(e) = sentinel_infrastructure::state_store::save(&mut s) {
                 tracing::error!(error = %e, "Failed to persist session state — proof chain may be lost on crash");
             }
         }
@@ -313,7 +314,7 @@ impl SentinelMcp {
             format!("{completed}/{total} steps")
         });
 
-        let _ = sentinel_infrastructure::state_store::save(&s);
+        let _ = sentinel_infrastructure::state_store::save(&mut s);
 
         let mut result = serde_json::json!({
             "step_id": step_id,
@@ -407,6 +408,72 @@ impl SentinelMcp {
             "total": total,
         });
 
+        serde_json::to_string_pretty(&result)
+            .map_err(|e| ErrorData::internal_error(format!("Serialization error: {e}"), None))
+    }
+
+    /// Regenerate the global ~/.claude/CLAUDE.md from the session_init template.
+    /// Re-counts all marketplace components (skills, MCP servers, CLIs, hooks, agents, commands),
+    /// refreshes project configs and Linear accounts, updates the date, and writes a fresh file.
+    /// Call this after changing marketplace components, or to fix a stale/broken CLAUDE.md.
+    #[tool(description = "Regenerate ~/.claude/CLAUDE.md from the template. Re-counts all marketplace components, refreshes project configs and Linear accounts, updates date, and writes a fresh file. Call after changing marketplace components or to fix stale CLAUDE.md.")]
+    async fn regenerate_claude_md(&self) -> Result<String, ErrorData> {
+        let path = session_init::regenerate_global_claude_md();
+        let metadata = std::fs::metadata(&path)
+            .map_err(|e| ErrorData::internal_error(format!("Failed to stat {}: {e}", path.display()), None))?;
+        let size = metadata.len();
+        let result = serde_json::json!({
+            "status": "regenerated",
+            "path": path.display().to_string(),
+            "size_bytes": size,
+        });
+        serde_json::to_string_pretty(&result)
+            .map_err(|e| ErrorData::internal_error(format!("Serialization error: {e}"), None))
+    }
+
+    /// Edit the CLAUDE.md generator template (session_init.rs) with find-and-replace,
+    /// then regenerate ~/.claude/CLAUDE.md from the updated template.
+    /// Use this to fix wrong or stale text in the generated CLAUDE.md.
+    /// The change persists — every future session will use the updated template.
+    #[tool(description = "Edit the CLAUDE.md generator template with find-and-replace, then regenerate. Use to fix wrong/stale text. Provide old_text (exact match in template) and new_text (replacement). Change persists across sessions.")]
+    async fn edit_claude_md_template(
+        &self,
+        old_text: String,
+        new_text: String,
+    ) -> Result<String, ErrorData> {
+        let template_path = session_init::template_source_path();
+        let content = std::fs::read_to_string(&template_path)
+            .map_err(|e| ErrorData::internal_error(
+                format!("Failed to read template at {}: {e}", template_path.display()),
+                None,
+            ))?;
+
+        if !content.contains(&old_text) {
+            return Err(ErrorData::invalid_params(
+                format!("old_text not found in template. Make sure it matches exactly (including whitespace)."),
+                None,
+            ));
+        }
+
+        let updated = content.replacen(&old_text, &new_text, 1);
+        std::fs::write(&template_path, &updated)
+            .map_err(|e| ErrorData::internal_error(
+                format!("Failed to write template: {e}"),
+                None,
+            ))?;
+
+        // Regenerate from the updated template
+        let claude_md_path = session_init::regenerate_global_claude_md();
+        let size = std::fs::metadata(&claude_md_path)
+            .map(|m| m.len())
+            .unwrap_or(0);
+
+        let result = serde_json::json!({
+            "status": "template_edited_and_regenerated",
+            "template_path": template_path.display().to_string(),
+            "claude_md_path": claude_md_path.display().to_string(),
+            "claude_md_size_bytes": size,
+        });
         serde_json::to_string_pretty(&result)
             .map_err(|e| ErrorData::internal_error(format!("Serialization error: {e}"), None))
     }

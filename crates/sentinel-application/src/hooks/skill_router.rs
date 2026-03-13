@@ -328,20 +328,30 @@ fn extract_banner(skill: &str) -> Option<String> {
     }
 }
 
-/// Write temp state files so skill_telemetry can track the execution.
-/// This mirrors the behavior of the legacy JS skill-router.js.
+/// Directory for telemetry state files — inside sentinel's protected config dir
+/// instead of world-writable temp_dir(). Prevents other processes/users from
+/// injecting fake skill names or run IDs. (Attack #51)
+fn telemetry_dir() -> Option<std::path::PathBuf> {
+    dirs::home_dir().map(|h| h.join(".claude").join("sentinel").join("telemetry"))
+}
+
+/// Write telemetry state files so skill_telemetry can track the execution.
 fn write_telemetry_state(skill: &str, run_id: &str) {
-    let tmp = std::env::temp_dir();
+    let dir = match telemetry_dir() {
+        Some(d) => d,
+        None => return,
+    };
+    let _ = fs::create_dir_all(&dir);
 
     // Current skill name
-    let _ = fs::write(tmp.join("claude-current-skill"), skill);
+    let _ = fs::write(dir.join("claude-current-skill"), skill);
 
     // Run ID for correlation
-    let _ = fs::write(tmp.join("claude-skill-run-id"), run_id);
+    let _ = fs::write(dir.join("claude-skill-run-id"), run_id);
 
     // Start timestamp (epoch ms) for duration calculation
     let now_ms = chrono::Utc::now().timestamp_millis();
-    let _ = fs::write(tmp.join("claude-skill-start-time"), now_ms.to_string());
+    let _ = fs::write(dir.join("claude-skill-start-time"), now_ms.to_string());
 }
 
 /// Append a routing entry to metrics/routing.jsonl
@@ -440,7 +450,16 @@ pub async fn process_with_ai(
 
         match ai.classify(prompt, &candidates).await {
             Ok(Some(skill)) => {
-                return build_match_output(&skill, input, prompt, "ai");
+                // **Attack #60 fix**: Validate AI classifier return against the
+                // candidate list. A compromised or prompt-injected classifier could
+                // return arbitrary skill names to bypass routing.
+                if candidates.contains(&skill) || router.route_all(prompt).iter().any(|m| m.skill == skill) {
+                    return build_match_output(&skill, input, prompt, "ai");
+                }
+                tracing::warn!(
+                    returned_skill = %skill,
+                    "AI classifier returned unknown skill — ignoring"
+                );
             }
             Ok(None) => {
                 // AI says no skill matches
@@ -490,10 +509,11 @@ fn build_match_output(skill: &str, input: &HookInput, prompt: &str, source: &str
 
 /// Build output for no match
 fn build_no_match_output() -> HookOutput {
-    let tmp = std::env::temp_dir();
-    let _ = fs::remove_file(tmp.join("claude-current-skill"));
-    let _ = fs::remove_file(tmp.join("claude-skill-run-id"));
-    let _ = fs::remove_file(tmp.join("claude-skill-start-time"));
+    if let Some(dir) = telemetry_dir() {
+        let _ = fs::remove_file(dir.join("claude-current-skill"));
+        let _ = fs::remove_file(dir.join("claude-skill-run-id"));
+        let _ = fs::remove_file(dir.join("claude-skill-start-time"));
+    }
 
     HookOutput::inject_context(
         HookEvent::UserPromptSubmit,

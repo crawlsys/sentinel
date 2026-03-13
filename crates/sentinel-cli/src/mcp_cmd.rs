@@ -378,7 +378,7 @@ async fn handle_submit_phase(
     {
         let mut s = state.write().await;
         s.set_active_skill(&skill);
-        s.record_phase_read(&phase_file);
+        s.record_phase_read(&skill, &phase_file);
     }
 
     // Look up phase config for judge model + objectives from workflows.toml
@@ -431,7 +431,7 @@ async fn handle_submit_phase(
     // Generate cryptographic proof via the proof engine
     let started_at = Utc::now() - chrono::Duration::seconds(1); // Approximate phase start
     let proof_result = proof_engine
-        .submit_evidence(&skill, &phase_id, &phase_objectives, evidence, judge_model, started_at)
+        .submit_evidence(&skill, &phase_id, &phase_objectives, evidence, judge_model, started_at, workflow_configs.get(&skill))
         .await;
 
     // Get completed phases and tessera (hash only — verdict details stay sealed)
@@ -452,8 +452,8 @@ async fn handle_submit_phase(
 
     // Persist state to disk (so hooks can see the proof chain)
     {
-        let s = state.read().await;
-        if let Err(e) = sentinel_infrastructure::state_store::save(&s) {
+        let mut s = state.write().await;
+        if let Err(e) = sentinel_infrastructure::state_store::save(&mut s) {
             warn!(error = %e, "Failed to persist session state — proof chain may be lost on crash");
         }
     }
@@ -609,7 +609,7 @@ async fn handle_update_step(
     });
 
     // Save state to disk
-    if let Err(e) = sentinel_infrastructure::state_store::save(&s) {
+    if let Err(e) = sentinel_infrastructure::state_store::save(&mut s) {
         tracing::warn!(error = %e, "Failed to persist state after step update");
     }
 

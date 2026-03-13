@@ -38,9 +38,17 @@ fn detect_language(dir: &Path) -> &'static str {
     "unknown"
 }
 
-/// Read the current skill from the temp state file written by skill-router.
+/// Directory for telemetry state files — must match skill_router::telemetry_dir().
+/// Falls back to temp_dir() if home dir unavailable (shouldn't happen in practice).
+fn telemetry_state_dir() -> std::path::PathBuf {
+    dirs::home_dir()
+        .map(|h| h.join(".claude").join("sentinel").join("telemetry"))
+        .unwrap_or_else(|| std::env::temp_dir())
+}
+
+/// Read the current skill from the telemetry state file written by skill-router.
 fn read_current_skill() -> String {
-    let path = std::env::temp_dir().join("claude-current-skill");
+    let path = telemetry_state_dir().join("claude-current-skill");
     fs::read_to_string(path)
         .ok()
         .map(|s| s.trim().to_string())
@@ -48,18 +56,18 @@ fn read_current_skill() -> String {
         .unwrap_or_else(|| "none".to_string())
 }
 
-/// Read the run ID from the temp state file written by skill-router.
+/// Read the run ID from the telemetry state file written by skill-router.
 fn read_run_id() -> Option<String> {
-    let path = std::env::temp_dir().join("claude-skill-run-id");
+    let path = telemetry_state_dir().join("claude-skill-run-id");
     fs::read_to_string(path)
         .map(|s| s.trim().to_string())
         .ok()
         .filter(|s| !s.is_empty())
 }
 
-/// Read the start time from the temp state file written by skill-router.
+/// Read the start time from the telemetry state file written by skill-router.
 fn read_start_time() -> Option<i64> {
-    let path = std::env::temp_dir().join("claude-skill-start-time");
+    let path = telemetry_state_dir().join("claude-skill-start-time");
     fs::read_to_string(path)
         .ok()
         .and_then(|s| s.trim().parse().ok())
@@ -230,7 +238,7 @@ pub fn process(input: &HookInput) -> HookOutput {
         }
 
         // Clean up one-time run ID file
-        let _ = fs::remove_file(std::env::temp_dir().join("claude-skill-run-id"));
+        let _ = fs::remove_file(telemetry_state_dir().join("claude-skill-run-id"));
     }
 
     // Regenerate summary every 10 executions

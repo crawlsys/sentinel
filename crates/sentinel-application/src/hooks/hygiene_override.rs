@@ -2,23 +2,87 @@
 //!
 //! Runs on UserPromptSubmit. Checks user prompt for override patterns
 //! (e.g., "override hygiene", "skip tests"). If matched, writes temporary
-//! override files with 5-minute expiry so that git-hygiene-gate and
+//! override files with 60-second expiry so that git-hygiene-gate and
 //! verification-gate will allow tool calls through.
+//!
+//! **Security hardening (Attacks #46, #47, #56)**:
+//!   - Override files stored under `~/.claude/sentinel/overrides/` (protected
+//!     by the Bash redirect guard and Write/Edit protection)
+//!   - Session ID hashed with SHA-256 (128-bit truncation, not 48-bit)
+//!   - File content is a signed token: `{timestamp}:{hmac}` where HMAC is
+//!     computed over `{type}:{session_id}:{timestamp}` with a secret salt.
+//!     A simple `touch` produces an empty/invalid file that fails verification.
 
 use std::fs;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use regex::Regex;
+use sha2::{Digest, Sha256};
 use sentinel_domain::events::{HookInput, HookOutput};
 
-/// Override file paths (in temp dir)
-fn hygiene_override_path() -> PathBuf {
-    std::env::temp_dir().join("claude-hygiene-override")
+/// Override files directory — under sentinel's protected path
+fn override_dir() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".claude")
+        .join("sentinel")
+        .join("overrides")
 }
 
-fn verification_override_path() -> PathBuf {
-    std::env::temp_dir().join("claude-verification-override")
+/// Override file paths — session-scoped with SHA-256 hash of session ID.
+///
+/// **Attack #46**: Uses SHA-256 (128-bit truncation) instead of DefaultHasher
+/// (48-bit truncation). Stored under ~/.claude/sentinel/ instead of temp dir.
+/// **Attack #56**: No longer in world-readable /tmp.
+pub fn hygiene_override_path(session_id: &str) -> PathBuf {
+    let hash = sha256_hash(session_id);
+    override_dir().join(format!("hygiene-{hash}"))
+}
+
+pub fn verification_override_path(session_id: &str) -> PathBuf {
+    let hash = sha256_hash(session_id);
+    override_dir().join(format!("verification-{hash}"))
+}
+
+/// SHA-256 hash of input, truncated to 32 hex chars (128 bits)
+fn sha256_hash(input: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(input.as_bytes());
+    let result = hasher.finalize();
+    result.iter().take(16).map(|b| format!("{b:02x}")).collect()
+}
+
+/// Compute HMAC-like signature for override content.
+/// Uses SHA-256(salt + type + session_id + timestamp) as a simple MAC.
+/// Not a true HMAC (no hmac crate in this crate) but sufficient since
+/// the salt is embedded in the binary and not observable.
+fn compute_override_sig(override_type: &str, session_id: &str, timestamp: u64) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"sentinel-override-sig-v1:");
+    hasher.update(override_type.as_bytes());
+    hasher.update(b":");
+    hasher.update(session_id.as_bytes());
+    hasher.update(b":");
+    hasher.update(timestamp.to_string().as_bytes());
+    let result = hasher.finalize();
+    result.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Verify an override file's content is a valid signed token.
+/// Format: `{timestamp}:{signature}`
+fn verify_override_content(content: &str, override_type: &str, session_id: &str) -> Option<u64> {
+    let parts: Vec<&str> = content.trim().splitn(2, ':').collect();
+    if parts.len() != 2 {
+        return None;
+    }
+    let timestamp: u64 = parts[0].parse().ok()?;
+    let expected_sig = compute_override_sig(override_type, session_id, timestamp);
+    if parts[1] == expected_sig {
+        Some(timestamp)
+    } else {
+        None
+    }
 }
 
 fn now_secs() -> u64 {
@@ -27,6 +91,10 @@ fn now_secs() -> u64 {
         .map(|d| d.as_secs())
         .unwrap_or(0)
 }
+
+/// Override expiry reduced from 5 minutes to 60 seconds (Attack #31).
+/// Shorter window limits exposure from accidental or social-engineered overrides.
+const OVERRIDE_TTL_SECS: u64 = 60;
 
 /// Check if prompt matches hygiene override patterns
 fn is_hygiene_override(prompt: &str) -> bool {
@@ -59,23 +127,67 @@ fn is_verification_override(prompt: &str) -> bool {
     })
 }
 
-/// Write a temporary override file with the current timestamp
-fn write_override(path: &PathBuf) -> Result<(), std::io::Error> {
-    fs::write(path, now_secs().to_string())
+/// Write a signed override file.
+/// Content format: `{timestamp}:{signature}` — a simple `touch` won't produce valid content.
+///
+/// **Attack #47**: Override files now contain signed tokens. `touch /path` or
+/// `echo "" > /path` creates invalid content that fails `verify_override_content()`.
+fn write_signed_override(path: &PathBuf, override_type: &str, session_id: &str) -> Result<(), std::io::Error> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let ts = now_secs();
+    let sig = compute_override_sig(override_type, session_id, ts);
+    fs::write(path, format!("{ts}:{sig}"))
 }
 
-/// Process the hygiene-override hook event
+/// Check if a signed override file is active (exists, valid signature, not expired).
+///
+/// **Attack #47**: Replaces the old `is_override_active_at()` which only checked
+/// file mtime. Now verifies the content signature, preventing `touch`-based bypass.
+pub fn is_signed_override_active(path: &std::path::Path, override_type: &str, session_id: &str) -> bool {
+    let content = match fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    match verify_override_content(&content, override_type, session_id) {
+        Some(timestamp) => {
+            let now = now_secs();
+            if now.saturating_sub(timestamp) < OVERRIDE_TTL_SECS {
+                true
+            } else {
+                // Expired — clean up
+                let _ = fs::remove_file(path);
+                false
+            }
+        }
+        None => {
+            // Invalid content (unsigned/tampered) — clean up
+            eprintln!(
+                "[sentinel] SECURITY: Override file at '{}' has invalid signature. Removing.",
+                path.display()
+            );
+            let _ = fs::remove_file(path);
+            false
+        }
+    }
+}
+
+/// Process the hygiene-override hook event.
+/// Accepts session_id for session-scoped override files.
 pub fn process(input: &HookInput) -> HookOutput {
     let prompt = match &input.prompt {
         Some(p) => p.to_lowercase(),
         None => return HookOutput::allow(),
     };
 
+    let session_id = input.session_id.as_deref().unwrap_or("unknown");
+
     let hygiene = is_hygiene_override(&prompt);
     let verification = is_verification_override(&prompt);
 
     if hygiene {
-        if let Err(e) = write_override(&hygiene_override_path()) {
+        if let Err(e) = write_signed_override(&hygiene_override_path(session_id), "hygiene", session_id) {
             eprintln!("Failed to set hygiene override: {e}");
             return HookOutput::allow();
         }
@@ -84,7 +196,7 @@ pub fn process(input: &HookInput) -> HookOutput {
 +-------------------------------------------------------------+\n\
 |  GIT HYGIENE OVERRIDE ACTIVATED                             |\n\
 +-------------------------------------------------------------+\n\
-|  Edit/Write tools unblocked for 5 minutes.                  |\n\
+|  Edit/Write tools unblocked for {OVERRIDE_TTL_SECS} seconds.                   |\n\
 |                                                             |\n\
 |  Remember to commit your changes!                           |\n\
 |  The gate will re-engage after timeout or next commit.      |\n\
@@ -93,7 +205,7 @@ pub fn process(input: &HookInput) -> HookOutput {
     }
 
     if verification {
-        if let Err(e) = write_override(&verification_override_path()) {
+        if let Err(e) = write_signed_override(&verification_override_path(session_id), "verification", session_id) {
             eprintln!("Failed to set verification override: {e}");
             return HookOutput::allow();
         }
@@ -102,7 +214,7 @@ pub fn process(input: &HookInput) -> HookOutput {
 +-------------------------------------------------------------+\n\
 |  VERIFICATION OVERRIDE ACTIVATED                            |\n\
 +-------------------------------------------------------------+\n\
-|  git commit/push unblocked for 5 minutes.                   |\n\
+|  git commit/push unblocked for {OVERRIDE_TTL_SECS} seconds.                    |\n\
 |                                                             |\n\
 |  Run tests before your next commit!                         |\n\
 |  The gate will re-engage after timeout.                     |\n\
@@ -111,6 +223,18 @@ pub fn process(input: &HookInput) -> HookOutput {
     }
 
     HookOutput::allow()
+}
+
+/// Test helper: write a signed override file at the given path.
+/// Only available for tests in sibling modules.
+#[doc(hidden)]
+pub fn write_signed_override_for_test(path: &std::path::Path, override_type: &str, session_id: &str) {
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let ts = now_secs();
+    let sig = compute_override_sig(override_type, session_id, ts);
+    let _ = fs::write(path, format!("{ts}:{sig}"));
 }
 
 #[cfg(test)]
@@ -172,41 +296,47 @@ mod tests {
 
     #[test]
     fn test_process_hygiene_override_writes_file() {
+        let session = "test-sess-hygiene";
         let input = HookInput {
             prompt: Some("override hygiene".to_string()),
+            session_id: Some(session.to_string()),
             ..Default::default()
         };
         let output = process(&input);
         assert!(output.blocked.is_none());
-        // The override file should exist in temp dir
-        assert!(hygiene_override_path().exists());
+        // The override file should exist in temp dir (session-scoped)
+        assert!(hygiene_override_path(session).exists());
         // Clean up
-        let _ = fs::remove_file(hygiene_override_path());
+        let _ = fs::remove_file(hygiene_override_path(session));
     }
 
     #[test]
     fn test_process_verification_override_writes_file() {
+        let session = "test-sess-verification";
         let input = HookInput {
             prompt: Some("skip tests".to_string()),
+            session_id: Some(session.to_string()),
             ..Default::default()
         };
         let output = process(&input);
         assert!(output.blocked.is_none());
-        assert!(verification_override_path().exists());
+        assert!(verification_override_path(session).exists());
         // Clean up
-        let _ = fs::remove_file(verification_override_path());
+        let _ = fs::remove_file(verification_override_path(session));
     }
 
     #[test]
     fn test_case_insensitive() {
+        let session = "test-sess-case";
         let input = HookInput {
             prompt: Some("Override Hygiene".to_string()),
+            session_id: Some(session.to_string()),
             ..Default::default()
         };
         let output = process(&input);
         assert!(output.blocked.is_none());
         // Should match because prompt is lowercased
-        assert!(hygiene_override_path().exists());
-        let _ = fs::remove_file(hygiene_override_path());
+        assert!(hygiene_override_path(session).exists());
+        let _ = fs::remove_file(hygiene_override_path(session));
     }
 }

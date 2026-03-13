@@ -584,7 +584,11 @@ Dev workflow:
                                   # Claude Code sees updated tools immediately
 ```
 
-**When NOT to use mcp-router**: `sequential-thinking-mcp` runs as a direct binary (no wrapper) because it has no binary changes during development.
+**Self-healing MCP servers**: Every mcp-router instance exposes `mcp_restart_server` as a tool. Call `mcp__<name>__mcp_restart_server` to kill and respawn any MCP server binary without disconnecting from Claude Code. Use after rebuilding a binary, or to fix a broken server.
+
+**Self-maintaining CLAUDE.md**: Sentinel MCP exposes two tools for managing this file:
+- `mcp__sentinel__regenerate_claude_md` — Re-counts all components, refreshes dates/projects, writes a fresh CLAUDE.md from the template
+- `mcp__sentinel__edit_claude_md_template` — Find-and-replace on the generator template source, then auto-regenerates. Changes persist across all future sessions
 
 ### Sentinel Shadow Binary System (Windows)
 
@@ -844,6 +848,41 @@ The conversation transcripts are at:
 
     let claude_md_path = claude_dir.join("CLAUDE.md");
     let _ = fs::write(&claude_md_path, content);
+}
+
+/// Regenerate `~/.claude/CLAUDE.md` on demand.
+///
+/// This is the public entry point for the sentinel MCP tool. It re-runs the
+/// same logic as the SessionStart hook: counts components, lists projects
+/// and Linear accounts, then writes a fresh CLAUDE.md.
+///
+/// Returns the path that was written.
+pub fn regenerate_global_claude_md() -> PathBuf {
+    let claude_dir = claude_dir();
+    let counts = count_components(&claude_dir);
+    let project_names = list_project_configs(&claude_dir);
+    let linear_accounts = list_linear_accounts(&claude_dir);
+    generate_claude_md(&claude_dir, &counts, &project_names, &linear_accounts);
+    claude_dir.join("CLAUDE.md")
+}
+
+/// Return the path to this source file (the CLAUDE.md template).
+///
+/// Used by the MCP `edit_claude_md_template` tool to do find-and-replace
+/// on the generator template itself.
+pub fn template_source_path() -> PathBuf {
+    // The sentinel repo lives at ~/Documents/GitHub/sentinel
+    // **Attack #96 fix**: Panic instead of CWD fallback
+    let home = dirs::home_dir()
+        .expect("[sentinel] FATAL: Cannot determine home directory");
+    home.join("Documents")
+        .join("GitHub")
+        .join("sentinel")
+        .join("crates")
+        .join("sentinel-application")
+        .join("src")
+        .join("hooks")
+        .join("session_init.rs")
 }
 
 // ---------------------------------------------------------------------------

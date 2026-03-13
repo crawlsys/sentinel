@@ -59,8 +59,11 @@ pub async fn run(event: &str, matcher: Option<&str>, standalone: bool) -> Result
         })
         .collect();
 
-    // Load or create session state
+    // **Attack #67 fix**: Acquire session lock BEFORE loading state.
+    // Hold through processing + save to prevent concurrent hook invocations
+    // from overwriting each other's state changes (lost updates).
     let session_id = input.session_id.as_deref().unwrap_or("unknown");
+    let _session_lock = sentinel_infrastructure::state_store::acquire_session_lock(session_id)?;
     let mut state = sentinel_infrastructure::state_store::load(session_id)?
         .unwrap_or_else(|| SessionState::new(session_id));
 
@@ -88,7 +91,25 @@ pub async fn run(event: &str, matcher: Option<&str>, standalone: bool) -> Result
             if let Some(ref ctx) = router_output.hook_specific_output {
                 if let Some(ref ac) = ctx.additional_context {
                     if let Some(skill) = extract_skill_name(ac) {
-                        state.set_active_skill(&skill);
+                        // **Attack #58 fix**: Only accept skill names that exist in the
+                        // loaded workflows map. Accepting arbitrary names lets an attacker
+                        // inject a fake skill with no phases, creating a workflow entry
+                        // that has zero enforcement gates.
+                        if workflows.contains_key(&skill) {
+                            state.set_active_skill(&skill);
+                        } else {
+                            // **Attack #80 fix**: Do NOT set active_skill for non-workflow skills.
+                            // Setting active_skill to a skill with no workflow definition creates
+                            // a state where gate.rs sees an active skill, checks for its workflow
+                            // (finds None), and falls through to Allow — bypassing any incomplete
+                            // workflow that should still be enforced. Instead, leave active_skill
+                            // unchanged so find_incomplete_workflow() continues enforcing.
+                            eprintln!(
+                                "[sentinel] Skill '{}' has no workflow definition — not setting as active_skill \
+                                 to preserve existing gate enforcement.",
+                                skill
+                            );
+                        }
                     } else if ac.contains("No skill matched") {
                         state.active_skill = None;
                     }
@@ -238,8 +259,20 @@ pub async fn run(event: &str, matcher: Option<&str>, standalone: bool) -> Result
         }
 
         HookEvent::SessionStart => {
-            // Initialize fresh state
-            state = SessionState::new(session_id);
+            // **Attack #57 fix**: Only create fresh state if no existing state was loaded.
+            // Unconditional reset lets an attacker trigger SessionStart mid-session
+            // (via crafted event) to wipe all workflow progress and phase gates.
+            // If state already exists (loaded from disk at line 64), preserve it.
+            if state.tool_calls == 0 && state.workflows.is_empty() && state.phases_read.is_empty() {
+                // Genuinely new session — use fresh state (already created above)
+                state = SessionState::new(session_id);
+            } else {
+                eprintln!(
+                    "[sentinel] SessionStart received for active session '{}' — preserving existing state \
+                     ({} tool calls, {} workflows). This may indicate a mid-session reset attempt.",
+                    session_id, state.tool_calls, state.workflows.len()
+                );
+            }
 
             // Session init — log session, sync marketplace repo, inject startup context
             let init_output = hooks::session_init::process(&input);
@@ -270,7 +303,7 @@ pub async fn run(event: &str, matcher: Option<&str>, standalone: bool) -> Result
     state.record_hook_invocation(event, elapsed_ms);
 
     // Save state AFTER all processing (so phase reads and tool calls are persisted)
-    if let Err(e) = sentinel_infrastructure::state_store::save(&state) {
+    if let Err(e) = sentinel_infrastructure::state_store::save(&mut state) {
         tracing::warn!(error = %e, "Failed to persist hook state");
     }
 

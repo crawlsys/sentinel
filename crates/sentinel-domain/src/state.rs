@@ -36,9 +36,13 @@ pub struct SessionState {
     /// Whether the session is still active
     pub active: bool,
 
-    /// Phase files that have been Read() by Claude (e.g., "claim.md", "fetch.md")
+    /// Phase files that have been Read() by Claude, keyed by skill name.
+    /// E.g., `{"linear": ["claim.md", "fetch.md"], "steel": ["claim.md"]}`.
+    ///
+    /// **Attack #50**: Was a global `Vec<String>` — reading skill A's `review.md`
+    /// would satisfy checks for skill B's `review.md`. Now per-skill.
     #[serde(default)]
-    pub phases_read: Vec<String>,
+    pub phases_read: HashMap<String, Vec<String>>,
 
     /// Total tool calls in this session (for phase-skip detection)
     #[serde(default)]
@@ -48,6 +52,19 @@ pub struct SessionState {
     /// Used for resubmission rate limiting
     #[serde(default)]
     pub failed_submissions: HashMap<String, SubmissionAttempts>,
+
+    /// SHA-256 hashes of phase file content, keyed by canonical path.
+    /// Set on first trusted Read() of a phase file. Subsequent reads with
+    /// different content indicate mid-session file tampering.
+    #[serde(default)]
+    pub phase_file_hashes: HashMap<String, String>,
+
+    /// Monotonic state generation counter. Incremented on every save().
+    /// **Attack #81 fix**: Detects state regression from file deletion/replacement.
+    /// If loaded state has a lower generation than the in-memory counter,
+    /// someone deleted and recreated the state file mid-session.
+    #[serde(default)]
+    pub state_generation: u64,
 }
 
 /// Tracks failed submission attempts for rate limiting
@@ -87,9 +104,11 @@ impl SessionState {
             proof_chains: HashMap::new(),
             hook_stats: HookStats::default(),
             active: true,
-            phases_read: Vec::new(),
+            phases_read: HashMap::new(),
             tool_calls: 0,
             failed_submissions: HashMap::new(),
+            phase_file_hashes: HashMap::new(),
+            state_generation: 0,
         }
     }
 
@@ -159,28 +178,44 @@ impl SessionState {
         self.hook_stats.total_blocked += 1;
     }
 
-    /// Record that a phase file has been Read() by Claude.
+    /// Record that a phase file has been Read() by Claude for a specific skill.
     /// Only adds if not already present (idempotent).
-    pub fn record_phase_read(&mut self, phase_file: &str) {
+    pub fn record_phase_read(&mut self, skill: &str, phase_file: &str) {
+        let files = self.phases_read.entry(skill.to_string()).or_default();
         let file = phase_file.to_string();
-        if !self.phases_read.contains(&file) {
-            self.phases_read.push(file);
+        if !files.contains(&file) {
+            files.push(file);
         }
     }
 
-    /// Number of phase files that have been read
+    /// Number of phase files that have been read across all skills
     #[must_use]
     pub fn phases_read_count(&self) -> usize {
-        self.phases_read.len()
+        self.phases_read.values().map(|v| v.len()).sum()
+    }
+
+    /// Check if a specific phase file has been read for a given skill
+    #[must_use]
+    pub fn has_phase_been_read(&self, skill: &str, phase_file: &str) -> bool {
+        self.phases_read
+            .get(skill)
+            .map(|files| files.contains(&phase_file.to_string()))
+            .unwrap_or(false)
     }
 
     /// Returns the file name of the next required phase that hasn't been read yet.
     /// Uses the workflow definition to determine phase ordering.
     #[must_use]
     pub fn next_required_phase_file(&self, workflow: &SkillWorkflow) -> Option<String> {
+        let skill_files = self.phases_read.get(&workflow.skill);
         for phase in &workflow.phases {
-            if phase.required && !self.phases_read.contains(&phase.file) {
-                return Some(phase.file.clone());
+            if phase.required {
+                let read = skill_files
+                    .map(|files| files.contains(&phase.file))
+                    .unwrap_or(false);
+                if !read {
+                    return Some(phase.file.clone());
+                }
             }
         }
         None
@@ -189,6 +224,32 @@ impl SessionState {
     /// Record a tool call (increments counter)
     pub fn record_tool_call(&mut self) {
         self.tool_calls += 1;
+    }
+
+    /// Record the SHA-256 hash of a phase file's content on first Read().
+    /// Returns `Ok(())` if this is the first read or the hash matches.
+    /// Returns `Err(reason)` if the content has changed (tampering detected).
+    pub fn record_phase_file_hash(
+        &mut self,
+        canonical_path: &str,
+        content_hash: &str,
+    ) -> Result<(), String> {
+        match self.phase_file_hashes.get(canonical_path) {
+            Some(existing) if existing != content_hash => {
+                Err(format!(
+                    "Phase file content changed mid-session: '{}'. \
+                     Original hash: {}, new hash: {}. \
+                     This indicates file tampering.",
+                    canonical_path, existing, content_hash
+                ))
+            }
+            Some(_) => Ok(()), // Same hash — no change
+            None => {
+                self.phase_file_hashes
+                    .insert(canonical_path.to_string(), content_hash.to_string());
+                Ok(())
+            }
+        }
     }
 }
 
@@ -273,7 +334,7 @@ mod tests {
         state.set_active_skill("linear");
 
         // Advance workflow
-        state.active_workflow_mut().unwrap().advance("claim");
+        state.active_workflow_mut().unwrap().advance_unchecked("claim");
 
         // Setting same skill again should NOT reset the workflow
         state.set_active_skill("linear");
@@ -285,15 +346,16 @@ mod tests {
         let mut state = SessionState::new("sess-1");
         assert_eq!(state.phases_read_count(), 0);
 
-        state.record_phase_read("claim.md");
+        state.record_phase_read("linear", "claim.md");
         assert_eq!(state.phases_read_count(), 1);
-        assert!(state.phases_read.contains(&"claim.md".to_string()));
+        assert!(state.has_phase_been_read("linear", "claim.md"));
+        assert!(!state.has_phase_been_read("steel", "claim.md")); // per-skill isolation
 
         // Idempotent — recording same file twice doesn't duplicate
-        state.record_phase_read("claim.md");
+        state.record_phase_read("linear", "claim.md");
         assert_eq!(state.phases_read_count(), 1);
 
-        state.record_phase_read("fetch.md");
+        state.record_phase_read("linear", "fetch.md");
         assert_eq!(state.phases_read_count(), 2);
     }
 
@@ -327,6 +389,9 @@ mod tests {
                     description: String::new(),
                 },
             ],
+            blocked_tool_prefixes: Vec::new(),
+            blocked_bash_patterns: Vec::new(),
+            bash_allowlist: Vec::new(),
         };
 
         let mut state = SessionState::new("sess-1");
@@ -338,14 +403,14 @@ mod tests {
         );
 
         // After reading claim.md, next is fetch.md
-        state.record_phase_read("claim.md");
+        state.record_phase_read("linear", "claim.md");
         assert_eq!(
             state.next_required_phase_file(&workflow),
             Some("fetch.md".to_string())
         );
 
         // After reading fetch.md, no more required phases
-        state.record_phase_read("fetch.md");
+        state.record_phase_read("linear", "fetch.md");
         assert_eq!(state.next_required_phase_file(&workflow), None);
     }
 

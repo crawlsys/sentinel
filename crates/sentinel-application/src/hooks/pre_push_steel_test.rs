@@ -32,9 +32,24 @@ const TEST_VALIDITY: Duration = Duration::from_secs(2 * 60 * 60);
 /// Frontend file extensions that trigger Steel test requirement
 const FRONTEND_EXTENSIONS: &[&str] = &[".tsx", ".jsx", ".css", ".scss", ".styled"];
 
-/// Path to the Steel test state file for a given session
+/// Path to the Steel test state file for a given session.
+/// **Attack #61 fix**: Moved from world-writable temp_dir() to sentinel's
+/// protected directory. Also sanitizes session_id to prevent path traversal.
 fn state_file_path(session_id: &str) -> PathBuf {
-    std::env::temp_dir().join(format!("claude-steel-test-{session_id}.json"))
+    // Sanitize session_id — only allow alphanumeric, hyphen, underscore
+    let safe_id: String = session_id
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .take(128)
+        .collect();
+    let id = if safe_id.is_empty() { "unknown".to_string() } else { safe_id };
+
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".claude")
+        .join("sentinel")
+        .join("steel-test")
+        .join(format!("{id}.json"))
 }
 
 /// Check if a passing Steel test exists for this session within the validity window
@@ -238,6 +253,10 @@ fn diff_has_frontend_files(cwd: Option<&str>) -> bool {
 /// Called from the PostToolUse handler when `mcp__steel__release_session` succeeds.
 pub fn record_steel_test_passed(session_id: &str) {
     let path = state_file_path(session_id);
+    // Ensure parent directory exists (Attack #61: now in ~/.claude/sentinel/steel-test/)
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
     let state = serde_json::json!({
         "passed": true,
         "sessionId": session_id,
@@ -459,6 +478,9 @@ mod tests {
         let state_path = state_file_path(session_id);
 
         // Write a valid recent state file
+        if let Some(parent) = state_path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
         let state = serde_json::json!({
             "passed": true,
             "sessionId": session_id,
@@ -491,6 +513,9 @@ mod tests {
     fn test_mismatched_session_not_valid() {
         let session_id = "test-steel-mismatch";
         let state_path = state_file_path(session_id);
+        if let Some(parent) = state_path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
 
         let state = serde_json::json!({
             "passed": true,

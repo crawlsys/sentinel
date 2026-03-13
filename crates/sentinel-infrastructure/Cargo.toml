@@ -25,10 +25,12 @@ futures = { workspace = true }
 chrono = { workspace = true }
 dirs = { workspace = true }
 sha2 = { workspace = true }
+hmac = { workspace = true }
 uuid = { workspace = true }
 glob = { workspace = true }
 regex = { workspace = true }
 fs2 = { workspace = true }
+getrandom = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
