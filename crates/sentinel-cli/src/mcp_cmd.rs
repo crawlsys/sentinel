@@ -273,11 +273,7 @@ async fn handle_request(
                 .get("name")
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
-            let arguments = request
-                .params
-                .get("arguments")
-                .cloned()
-                .unwrap_or_default();
+            let arguments = request.params.get("arguments").cloned().unwrap_or_default();
 
             // Handle submit_phase_complete specially (needs state mutation + proof generation)
             if tool_name == "sentinel__submit_phase_complete" {
@@ -307,10 +303,7 @@ async fn handle_request(
                     "workflows": s.workflows.keys().collect::<Vec<_>>(),
                     "proof_chains": s.proof_chains.keys().collect::<Vec<_>>(),
                 });
-                return JsonRpcResponse::success(
-                    request.id.clone(),
-                    mcp_tool_result(true, stats),
-                );
+                return JsonRpcResponse::success(request.id.clone(), mcp_tool_result(true, stats));
             }
 
             let call = McpToolCall {
@@ -447,7 +440,15 @@ async fn handle_submit_phase(
     // Generate cryptographic proof via the proof engine
     let started_at = Utc::now() - chrono::Duration::seconds(1); // Approximate phase start
     let proof_result = proof_engine
-        .submit_evidence(&skill, &phase_id, &phase_objectives, evidence, judge_model, started_at, workflow_configs.get(&skill))
+        .submit_evidence(
+            &skill,
+            &phase_id,
+            &phase_objectives,
+            evidence,
+            judge_model,
+            started_at,
+            workflow_configs.get(&skill),
+        )
         .await;
 
     // Get completed phases and tessera (hash only — verdict details stay sealed)
@@ -681,14 +682,11 @@ async fn handle_get_phase_steps(
         if let Some(phase_steps) = sc.phase_steps(&phase_id) {
             for step_def in &phase_steps.steps {
                 // Find runtime state for this step
-                let step_state = s
-                    .workflows
-                    .get(&skill)
-                    .and_then(|wf| {
-                        wf.step_states
-                            .iter()
-                            .find(|ss| ss.step_id == step_def.id && ss.phase_id == phase_id)
-                    });
+                let step_state = s.workflows.get(&skill).and_then(|wf| {
+                    wf.step_states
+                        .iter()
+                        .find(|ss| ss.step_id == step_def.id && ss.phase_id == phase_id)
+                });
 
                 let status = step_state
                     .map(|ss| &ss.status)
@@ -868,10 +866,7 @@ async fn handle_get_workflow_progress(
             let mut phase_map: HashMap<String, Vec<&sentinel_domain::workflow::StepState>> =
                 HashMap::new();
             for ss in &wf.step_states {
-                phase_map
-                    .entry(ss.phase_id.clone())
-                    .or_default()
-                    .push(ss);
+                phase_map.entry(ss.phase_id.clone()).or_default().push(ss);
             }
 
             for (pid, states) in &phase_map {

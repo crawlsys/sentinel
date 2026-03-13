@@ -98,8 +98,8 @@ fn scan_docs(dir: &Path, cwd: &Path, depth: usize, max_depth: usize, results: &m
         Err(_) => return,
     };
 
-    let todo_re = Regex::new(r"(?i)^#.*\n+\s*(TODO|TBD|Coming soon|Add content)")
-        .expect("valid regex");
+    let todo_re =
+        Regex::new(r"(?i)^#.*\n+\s*(TODO|TBD|Coming soon|Add content)").expect("valid regex");
 
     for entry in entries.flatten() {
         let file_type = match entry.file_type() {
@@ -159,10 +159,7 @@ fn scan_docs(dir: &Path, cwd: &Path, depth: usize, max_depth: usize, results: &m
         }
 
         // Orphaned: non-allowed .md in the root directory, small content
-        if depth == 0
-            && !ALLOWED_ROOT_MD.contains(&name_str.as_ref())
-            && stripped.len() < 200
-        {
+        if depth == 0 && !ALLOWED_ROOT_MD.contains(&name_str.as_ref()) && stripped.len() < 200 {
             results.push(JunkDoc {
                 path: relative,
                 reason: "orphaned in root (should be in docs/ or deleted)".into(),
@@ -204,10 +201,7 @@ pub fn process_stop(input: &HookInput) -> HookOutput {
         let _ = fs::write(&path, serde_json::to_string(&state).unwrap_or_default());
     }
 
-    tracing::info!(
-        count = state.junk_docs.len(),
-        "Junk docs detected"
-    );
+    tracing::info!(count = state.junk_docs.len(), "Junk docs detected");
 
     HookOutput::allow()
 }

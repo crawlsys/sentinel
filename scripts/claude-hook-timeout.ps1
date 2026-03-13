@@ -12,13 +12,11 @@ $timeoutMs = switch ($Event) {
     default { 5000 }
 }
 
-$payload = [Console]::In.ReadToEnd()
-
 $psi = [System.Diagnostics.ProcessStartInfo]::new()
 $psi.FileName = 'C:\Users\garys\.cargo\bin\sentinel.exe'
 $psi.Arguments = "hook --event $Event"
 $psi.UseShellExecute = $false
-$psi.RedirectStandardInput = $true
+$psi.RedirectStandardInput = $false
 $psi.RedirectStandardOutput = $true
 $psi.RedirectStandardError = $true
 $psi.CreateNoWindow = $true
@@ -49,11 +47,6 @@ if (-not $proc.Start()) {
 
 $proc.BeginOutputReadLine()
 $proc.BeginErrorReadLine()
-
-if ($payload.Length -gt 0) {
-    $proc.StandardInput.Write($payload)
-}
-$proc.StandardInput.Close()
 
 if ($proc.WaitForExit($timeoutMs)) {
     $proc.WaitForExit()

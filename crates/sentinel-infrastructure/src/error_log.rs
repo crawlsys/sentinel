@@ -40,7 +40,10 @@ pub fn log_error(session_id: &str, hook: &str, error: &str) -> Result<()> {
     // Auto-rotate
     if let Ok(meta) = std::fs::metadata(&path) {
         if meta.len() > MAX_LOG_SIZE {
-            let archive = dir.join(format!("errors-{}.jsonl", Utc::now().format("%Y%m%d-%H%M%S")));
+            let archive = dir.join(format!(
+                "errors-{}.jsonl",
+                Utc::now().format("%Y%m%d-%H%M%S")
+            ));
             std::fs::rename(&path, archive)?;
         }
     }

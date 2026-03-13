@@ -43,9 +43,10 @@ mod tests {
     #[test]
     fn test_teammate_idle_injects_context() {
         let mut input = HookInput::default();
-        input
-            .extra
-            .insert("teammate_name".to_string(), serde_json::json!("backend-dev"));
+        input.extra.insert(
+            "teammate_name".to_string(),
+            serde_json::json!("backend-dev"),
+        );
         input
             .extra
             .insert("team_name".to_string(), serde_json::json!("my-project"));

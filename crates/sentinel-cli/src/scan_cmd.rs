@@ -83,7 +83,8 @@ pub async fn run(
         );
 
         // Summary by directory
-        let mut by_dir: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+        let mut by_dir: std::collections::BTreeMap<String, usize> =
+            std::collections::BTreeMap::new();
         for f in &result.files {
             let top = f.path.split('/').next().unwrap_or("?").to_string();
             *by_dir.entry(top).or_insert(0) += 1;
@@ -167,11 +168,7 @@ pub async fn run(
             v.failed.to_string().red(),
         );
     } else {
-        eprintln!(
-            "{} Validation: all {} checks passed",
-            "✓".green(),
-            v.passed,
-        );
+        eprintln!("{} Validation: all {} checks passed", "✓".green(), v.passed,);
     }
 
     Ok(())

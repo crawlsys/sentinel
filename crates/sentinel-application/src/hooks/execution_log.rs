@@ -134,8 +134,7 @@ pub fn process(input: &HookInput) -> HookOutput {
             .expect("valid regex"),
     ];
 
-    let prefix_re =
-        Regex::new(r"^(?:#\s*|<!--\s*)?(?:LOG:\s*)?").expect("valid regex");
+    let prefix_re = Regex::new(r"^(?:#\s*|<!--\s*)?(?:LOG:\s*)?").expect("valid regex");
     let suffix_re = Regex::new(r"\s*-->$").expect("valid regex");
 
     let mut log_lines: Vec<String> = Vec::new();

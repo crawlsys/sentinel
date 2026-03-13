@@ -42,7 +42,11 @@ fn state_file_path(session_id: &str) -> PathBuf {
         .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
         .take(128)
         .collect();
-    let id = if safe_id.is_empty() { "unknown".to_string() } else { safe_id };
+    let id = if safe_id.is_empty() {
+        "unknown".to_string()
+    } else {
+        safe_id
+    };
 
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
@@ -72,7 +76,10 @@ fn has_recent_steel_test(session_id: &str) -> bool {
     };
 
     // Verify passed flag and session match
-    let passed = state.get("passed").and_then(|v| v.as_bool()).unwrap_or(false);
+    let passed = state
+        .get("passed")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     let state_session = state
         .get("sessionId")
         .and_then(|v| v.as_str())
@@ -91,8 +98,7 @@ fn has_recent_steel_test(session_id: &str) -> bool {
     match chrono::DateTime::parse_from_rfc3339(timestamp) {
         Ok(test_time) => {
             let elapsed = Utc::now().signed_duration_since(test_time);
-            elapsed.num_seconds() >= 0
-                && elapsed.to_std().map_or(false, |d| d < TEST_VALIDITY)
+            elapsed.num_seconds() >= 0 && elapsed.to_std().map_or(false, |d| d < TEST_VALIDITY)
         }
         Err(_) => false,
     }
@@ -114,17 +120,18 @@ fn repo_name_from_cwd(cwd: &str) -> Option<String> {
 /// AND that project has steel_test_email configured.
 ///
 /// Accepts an optional override path for testing; uses ~/.claude/skills/linear/projects/ by default.
-fn repo_has_steel_config_in(
-    cwd: Option<&str>,
-    projects_dir: Option<&std::path::Path>,
-) -> bool {
+fn repo_has_steel_config_in(cwd: Option<&str>, projects_dir: Option<&std::path::Path>) -> bool {
     let repo = match cwd.and_then(repo_name_from_cwd) {
         Some(r) => r,
         None => return false, // No cwd → can't determine repo → allow
     };
 
-    let default_dir = dirs::home_dir()
-        .map(|h| h.join(".claude").join("skills").join("linear").join("projects"));
+    let default_dir = dirs::home_dir().map(|h| {
+        h.join(".claude")
+            .join("skills")
+            .join("linear")
+            .join("projects")
+    });
 
     let projects_dir = match projects_dir {
         Some(d) => d.to_path_buf(),
@@ -196,9 +203,7 @@ fn repo_matches_project(repo: &str, content_lower: &str) -> bool {
         if let Some(aliases_val) = trimmed.strip_prefix("aliases:") {
             let aliases_str = aliases_val.trim();
             // Parse simple array format: ["a", "b", "c"]
-            let cleaned = aliases_str
-                .trim_start_matches('[')
-                .trim_end_matches(']');
+            let cleaned = aliases_str.trim_start_matches('[').trim_end_matches(']');
             for alias in cleaned.split(',') {
                 let alias = alias.trim().trim_matches('"').trim_matches('\'');
                 if alias.is_empty() {
@@ -419,11 +424,12 @@ mod tests {
         )
         .unwrap();
         // Repo name "firefly-pro-crm" contains alias "crm" → match
-        let result = repo_has_steel_config_in(
-            Some("/fake/path/firefly-pro-crm"),
-            Some(tmpdir.path()),
+        let result =
+            repo_has_steel_config_in(Some("/fake/path/firefly-pro-crm"), Some(tmpdir.path()));
+        assert!(
+            result,
+            "Should match repo 'firefly-pro-crm' against alias 'crm'"
         );
-        assert!(result, "Should match repo 'firefly-pro-crm' against alias 'crm'");
     }
 
     #[test]
@@ -436,11 +442,11 @@ mod tests {
         )
         .unwrap();
         // Repo name "sentinel" doesn't match any alias → no block
-        let result = repo_has_steel_config_in(
-            Some("/fake/path/sentinel"),
-            Some(tmpdir.path()),
+        let result = repo_has_steel_config_in(Some("/fake/path/sentinel"), Some(tmpdir.path()));
+        assert!(
+            !result,
+            "Should NOT match repo 'sentinel' against firefly aliases"
         );
-        assert!(!result, "Should NOT match repo 'sentinel' against firefly aliases");
     }
 
     #[test]
@@ -453,10 +459,7 @@ mod tests {
             "name: myproject\naliases: [\"myapp\"]\nstaging_url: https://staging.example.com",
         )
         .unwrap();
-        let result = repo_has_steel_config_in(
-            Some("/fake/path/myproject"),
-            Some(tmpdir.path()),
-        );
+        let result = repo_has_steel_config_in(Some("/fake/path/myproject"), Some(tmpdir.path()));
         assert!(!result, "Should NOT match project without steel_test_email");
     }
 
@@ -595,7 +598,10 @@ mod tests {
         };
         let output = process_post_tool(&input);
         assert!(output.blocked.is_none());
-        assert!(has_recent_steel_test(session_id), "State file should be written after release");
+        assert!(
+            has_recent_steel_test(session_id),
+            "State file should be written after release"
+        );
 
         let _ = std::fs::remove_file(&state_path);
     }
@@ -614,7 +620,10 @@ mod tests {
         };
         let output = process_post_tool(&input);
         assert!(output.blocked.is_none());
-        assert!(!state_path.exists(), "State file should NOT be created for Bash without STEEL_TEST_PASS");
+        assert!(
+            !state_path.exists(),
+            "State file should NOT be created for Bash without STEEL_TEST_PASS"
+        );
     }
 
     #[test]
@@ -631,7 +640,10 @@ mod tests {
         };
         let output = process_post_tool(&input);
         assert!(output.blocked.is_none());
-        assert!(has_recent_steel_test(session_id), "State file should be written after CDP test with STEEL_TEST_PASS marker");
+        assert!(
+            has_recent_steel_test(session_id),
+            "State file should be written after CDP test with STEEL_TEST_PASS marker"
+        );
 
         let _ = std::fs::remove_file(&state_path);
     }
@@ -650,6 +662,9 @@ mod tests {
         };
         let output = process_post_tool(&input);
         assert!(output.blocked.is_none());
-        assert!(!state_path.exists(), "State file should NOT be created for Read tool even with marker");
+        assert!(
+            !state_path.exists(),
+            "State file should NOT be created for Read tool even with marker"
+        );
     }
 }

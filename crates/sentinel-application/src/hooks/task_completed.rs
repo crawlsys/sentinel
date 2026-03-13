@@ -57,12 +57,14 @@ mod tests {
     #[test]
     fn test_task_completed_injects_context() {
         let mut input = HookInput::default();
-        input
-            .extra
-            .insert("task_subject".to_string(), serde_json::json!("Implement auth"));
-        input
-            .extra
-            .insert("teammate_name".to_string(), serde_json::json!("backend-dev"));
+        input.extra.insert(
+            "task_subject".to_string(),
+            serde_json::json!("Implement auth"),
+        );
+        input.extra.insert(
+            "teammate_name".to_string(),
+            serde_json::json!("backend-dev"),
+        );
         input
             .extra
             .insert("team_name".to_string(), serde_json::json!("auth-team"));

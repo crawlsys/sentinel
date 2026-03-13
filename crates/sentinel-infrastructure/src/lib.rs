@@ -6,14 +6,14 @@
 pub mod activity_log;
 pub mod anthropic;
 pub mod config;
-pub mod rig_classifier;
-pub mod rig_judge;
 pub mod error_log;
 pub mod git;
 pub mod ipc;
 pub mod mcp_transport;
 pub mod proof_store;
 pub mod rate_limit;
+pub mod rig_classifier;
+pub mod rig_judge;
 pub mod state_store;
 pub mod stdin;
 pub mod stdout;

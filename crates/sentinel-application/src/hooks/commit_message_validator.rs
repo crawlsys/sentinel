@@ -160,7 +160,9 @@ mod tests {
     fn test_allows_conventional_fix_with_scope() {
         let input = HookInput {
             tool_name: Some("Bash".into()),
-            tool_input: Some(json!({"command": "git commit -m \"fix(api): handle null response\""})),
+            tool_input: Some(
+                json!({"command": "git commit -m \"fix(api): handle null response\""}),
+            ),
             ..Default::default()
         };
         assert!(process(&input).blocked.is_none());

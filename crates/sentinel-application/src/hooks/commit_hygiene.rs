@@ -228,8 +228,7 @@ mod tests {
 
         // State file should exist with our 3 files
         assert!(tmp.exists(), "State file should have been written");
-        let state: CommitState =
-            serde_json::from_str(&fs::read_to_string(&tmp).unwrap()).unwrap();
+        let state: CommitState = serde_json::from_str(&fs::read_to_string(&tmp).unwrap()).unwrap();
         assert_eq!(state.file_count, 3);
 
         // Cleanup

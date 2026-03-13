@@ -375,7 +375,10 @@ pub fn infer_category(name: &str) -> String {
                 "deploy",
             ],
         ),
-        ("Architecture", &["ddd-hexagonal", "api-design", "atomic-design"]),
+        (
+            "Architecture",
+            &["ddd-hexagonal", "api-design", "atomic-design"],
+        ),
         ("UI Frameworks", &["mui", "react", "nextjs", "web-design"]),
         ("Enterprise", &["incident", "estimate", "onboard"]),
         (
@@ -478,7 +481,8 @@ pub fn parse_hooks_toml(content: &str) -> Vec<Hook> {
                     }
                     "depends_on" | "matcher" => {
                         // Parse TOML array: ["a", "b"] or []
-                        if let Some(arr_content) = val.strip_prefix('[').and_then(|s| s.strip_suffix(']'))
+                        if let Some(arr_content) =
+                            val.strip_prefix('[').and_then(|s| s.strip_suffix(']'))
                         {
                             let items: Vec<String> = arr_content
                                 .split(',')
@@ -693,7 +697,10 @@ fn scan_skills(root_dir: &Path, mp_data: &serde_json::Value) -> Vec<Skill> {
 
         skills.push(Skill {
             name: name.clone(),
-            version: fm.get("version").cloned().unwrap_or_else(|| "0.0.0".to_string()),
+            version: fm
+                .get("version")
+                .cloned()
+                .unwrap_or_else(|| "0.0.0".to_string()),
             description: fm.get("description").cloned().unwrap_or_default(),
             icon: fm.get("icon").cloned().unwrap_or_default(),
             priority,
@@ -794,8 +801,7 @@ fn scan_commands(root_dir: &Path) -> Vec<CommandDef> {
     command_files
         .iter()
         .map(|file| {
-            let content =
-                fs::read_to_string(commands_dir.join(file)).unwrap_or_default();
+            let content = fs::read_to_string(commands_dir.join(file)).unwrap_or_default();
             let fm = parse_frontmatter(&content);
 
             let allowed_tools: Vec<String> = fm
@@ -841,10 +847,7 @@ fn scan_mcp_servers(mp_data: &serde_json::Value) -> Vec<McpServer> {
                         .and_then(|v| v.as_str())
                         .unwrap_or("stdio")
                         .to_string(),
-                    optional: m
-                        .get("optional")
-                        .and_then(|v| v.as_bool())
-                        .unwrap_or(false),
+                    optional: m.get("optional").and_then(|v| v.as_bool()).unwrap_or(false),
                 })
                 .collect()
         })
@@ -908,9 +911,7 @@ fn run_validation(
                     category: "Count Consistency".to_string(),
                     rule: format!("marketplace.json description {key}"),
                     status: "fail".to_string(),
-                    message: format!(
-                        "{key}: description says {expected}, filesystem has {actual}"
-                    ),
+                    message: format!("{key}: description says {expected}, filesystem has {actual}"),
                     expected: Some(expected),
                     actual: Some(actual),
                 });
@@ -1033,14 +1034,8 @@ fn run_validation(
     let agents_dir = root_dir.join("agents");
     if let Some(mp_agents) = mp_data.get("agents").and_then(|v| v.as_array()) {
         for a in mp_agents {
-            let name = a
-                .get("name")
-                .and_then(|v| v.as_str())
-                .unwrap_or("?");
-            let file = a
-                .get("file")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            let name = a.get("name").and_then(|v| v.as_str()).unwrap_or("?");
+            let file = a.get("file").and_then(|v| v.as_str()).unwrap_or("");
             if !file.is_empty() && agents_dir.join(file).exists() {
                 results.push(ValidationResult {
                     category: "File Cross-Reference".to_string(),
@@ -1252,7 +1247,10 @@ fn parse_steel_tools(root_dir: &Path) -> usize {
 
     data.get("mcp")
         .and_then(|v| v.as_array())
-        .and_then(|arr| arr.iter().find(|m| m.get("name").and_then(|n| n.as_str()) == Some("steel")))
+        .and_then(|arr| {
+            arr.iter()
+                .find(|m| m.get("name").and_then(|n| n.as_str()) == Some("steel"))
+        })
         .and_then(|steel| steel.get("description").and_then(|d| d.as_str()))
         .and_then(|desc| {
             let re = regex::Regex::new(r"(\d+)\s*tools").ok()?;
@@ -1285,18 +1283,40 @@ pub fn sync_counts(root_dir: &Path, dry_run: bool) -> SyncCountsReport {
     // Note: regex crate doesn't support lookahead, so MCP server pattern
     // uses a simple match. The targeted updates handle specific files.
     let universal: Vec<(regex::Regex, String)> = vec![
-        (regex::Regex::new(r"All \d+ hooks").unwrap(), format!("All {} hooks", c.hooks)),
-        (regex::Regex::new(r"\d+ hooks \(sentinel").unwrap(), format!("{} hooks (sentinel", c.hooks)),
-        (regex::Regex::new(r"\d+ MCP servers\b").unwrap(), format!("{} MCP servers", c.mcp_servers)),
-        (regex::Regex::new(r"Steel MCP \(\d+ tools\)").unwrap(), format!("Steel MCP ({} tools)", ext.steel_tools)),
-        (regex::Regex::new(r"browser automation \(\d+ MCP tools\)").unwrap(), format!("browser automation ({} MCP tools)", ext.steel_tools)),
+        (
+            regex::Regex::new(r"All \d+ hooks").unwrap(),
+            format!("All {} hooks", c.hooks),
+        ),
+        (
+            regex::Regex::new(r"\d+ hooks \(sentinel").unwrap(),
+            format!("{} hooks (sentinel", c.hooks),
+        ),
+        (
+            regex::Regex::new(r"\d+ MCP servers\b").unwrap(),
+            format!("{} MCP servers", c.mcp_servers),
+        ),
+        (
+            regex::Regex::new(r"Steel MCP \(\d+ tools\)").unwrap(),
+            format!("Steel MCP ({} tools)", ext.steel_tools),
+        ),
+        (
+            regex::Regex::new(r"browser automation \(\d+ MCP tools\)").unwrap(),
+            format!("browser automation ({} MCP tools)", ext.steel_tools),
+        ),
     ];
 
     // Skills pattern needs special handling (preserve prefix)
-    let skills_re = regex::Regex::new(r"((?:All |all |ALL |\(|marketplace \())\d+( skills)").unwrap();
+    let skills_re =
+        regex::Regex::new(r"((?:All |all |ALL |\(|marketplace \())\d+( skills)").unwrap();
 
-    let skip_dirs: HashSet<&str> = ["node_modules", ".git", "target", "dist", ".next"].iter().copied().collect();
-    let text_exts: HashSet<&str> = ["md", "json", "js", "cjs", "ts", "toml"].iter().copied().collect();
+    let skip_dirs: HashSet<&str> = ["node_modules", ".git", "target", "dist", ".next"]
+        .iter()
+        .copied()
+        .collect();
+    let text_exts: HashSet<&str> = ["md", "json", "js", "cjs", "ts", "toml"]
+        .iter()
+        .copied()
+        .collect();
 
     let mut changed_files: Vec<String> = Vec::new();
 
@@ -1325,9 +1345,11 @@ pub fn sync_counts(root_dir: &Path, dry_run: bool) -> SyncCountsReport {
         }
 
         // Apply skills pattern with prefix preservation
-        result = skills_re.replace_all(&result, |caps: &regex::Captures| {
-            format!("{}{}{}", &caps[1], c.skills, &caps[2])
-        }).to_string();
+        result = skills_re
+            .replace_all(&result, |caps: &regex::Captures| {
+                format!("{}{}{}", &caps[1], c.skills, &caps[2])
+            })
+            .to_string();
 
         if result != original {
             if !dry_run {
@@ -1344,63 +1366,192 @@ pub fn sync_counts(root_dir: &Path, dry_run: bool) -> SyncCountsReport {
     );
 
     // marketplace.json description
-    targeted_update(root_dir, "marketplace.json", dry_run, &mut changed_files, &[
-        (r#""description":\s*"[^"]*""#, &format!(r#""description": "{}""#, desc_line)),
-    ]);
+    targeted_update(
+        root_dir,
+        "marketplace.json",
+        dry_run,
+        &mut changed_files,
+        &[(
+            r#""description":\s*"[^"]*""#,
+            &format!(r#""description": "{}""#, desc_line),
+        )],
+    );
 
     // .claude-plugin/plugin.json
-    targeted_update(root_dir, ".claude-plugin/plugin.json", dry_run, &mut changed_files, &[
-        (r#""description":\s*"[^"]*""#, &format!(r#""description": "{}""#, desc_line)),
-    ]);
+    targeted_update(
+        root_dir,
+        ".claude-plugin/plugin.json",
+        dry_run,
+        &mut changed_files,
+        &[(
+            r#""description":\s*"[^"]*""#,
+            &format!(r#""description": "{}""#, desc_line),
+        )],
+    );
 
     // .claude-plugin/marketplace.json
-    targeted_update(root_dir, ".claude-plugin/marketplace.json", dry_run, &mut changed_files, &[
-        (r#""summary":\s*"[^"]*""#, &format!(
-            r#""summary": "Complete dev lifecycle: {} skills, {} agents, {} hooks (sentinel engine), {} MCP servers ({} repos), and {} CLIs""#,
-            c.skills, c.agents, c.hooks, c.mcp_servers, c.mcp_repos, c.cli_repos
-        )),
-    ]);
+    targeted_update(
+        root_dir,
+        ".claude-plugin/marketplace.json",
+        dry_run,
+        &mut changed_files,
+        &[(
+            r#""summary":\s*"[^"]*""#,
+            &format!(
+                r#""summary": "Complete dev lifecycle: {} skills, {} agents, {} hooks (sentinel engine), {} MCP servers ({} repos), and {} CLIs""#,
+                c.skills, c.agents, c.hooks, c.mcp_servers, c.mcp_repos, c.cli_repos
+            ),
+        )],
+    );
 
     // README.md
-    targeted_update(root_dir, "README.md", dry_run, &mut changed_files, &[
-        (r#"> \*\*\d+ skills \+ \d+ agents \+ 1 sentinel engine \(\d+ hooks\) \+ \d+ MCP servers\*\*"#,
-         &format!("> **{} skills + {} agents + 1 sentinel engine ({} hooks) + {} MCP servers**", c.skills, c.agents, c.hooks, c.mcp_servers)),
-        (r"## Available Skills \(\d+ Total\)", &format!("## Available Skills ({} Total)", c.skills)),
-        (r"## Custom Agents \(\d+ Total\)", &format!("## Custom Agents ({} Total)", c.agents)),
-        (r"## Hooks \(\d+ Total", &format!("## Hooks ({} Total", c.hooks)),
-        (r"## MCP Integrations \(\d+ Total\)", &format!("## MCP Integrations ({} Total)", c.mcp_servers)),
-        (r"## Scripts \(\d+ Total\)", &format!("## Scripts ({} Total)", ext.scripts)),
-        (r"skills/\s+# \d+ skill directories.*", &format!("skills/                   # {} skill directories", c.skills)),
-        (r"agents/\s+# \d+ agent definitions.*", &format!("agents/                   # {} agent definitions (.md)", c.agents)),
-        (r"commands/\s+# \d+ slash commands.*", &format!("commands/                 # {} slash commands (.md)", c.commands)),
-        (r"scripts/\s+# \d+ utility scripts?.*", &format!("scripts/                  # {} utility scripts (.js)", ext.scripts)),
-        (r"templates/\s+# \d+ skill scaffolding.*", &format!("templates/                # {} skill scaffolding templates", ext.templates)),
-        (r"docs/\s+# \d+ documentation pages.*", &format!("docs/                     # {} documentation pages", ext.docs)),
-    ]);
+    targeted_update(
+        root_dir,
+        "README.md",
+        dry_run,
+        &mut changed_files,
+        &[
+            (
+                r#"> \*\*\d+ skills \+ \d+ agents \+ 1 sentinel engine \(\d+ hooks\) \+ \d+ MCP servers\*\*"#,
+                &format!(
+                    "> **{} skills + {} agents + 1 sentinel engine ({} hooks) + {} MCP servers**",
+                    c.skills, c.agents, c.hooks, c.mcp_servers
+                ),
+            ),
+            (
+                r"## Available Skills \(\d+ Total\)",
+                &format!("## Available Skills ({} Total)", c.skills),
+            ),
+            (
+                r"## Custom Agents \(\d+ Total\)",
+                &format!("## Custom Agents ({} Total)", c.agents),
+            ),
+            (
+                r"## Hooks \(\d+ Total",
+                &format!("## Hooks ({} Total", c.hooks),
+            ),
+            (
+                r"## MCP Integrations \(\d+ Total\)",
+                &format!("## MCP Integrations ({} Total)", c.mcp_servers),
+            ),
+            (
+                r"## Scripts \(\d+ Total\)",
+                &format!("## Scripts ({} Total)", ext.scripts),
+            ),
+            (
+                r"skills/\s+# \d+ skill directories.*",
+                &format!("skills/                   # {} skill directories", c.skills),
+            ),
+            (
+                r"agents/\s+# \d+ agent definitions.*",
+                &format!(
+                    "agents/                   # {} agent definitions (.md)",
+                    c.agents
+                ),
+            ),
+            (
+                r"commands/\s+# \d+ slash commands.*",
+                &format!(
+                    "commands/                 # {} slash commands (.md)",
+                    c.commands
+                ),
+            ),
+            (
+                r"scripts/\s+# \d+ utility scripts?.*",
+                &format!(
+                    "scripts/                  # {} utility scripts (.js)",
+                    ext.scripts
+                ),
+            ),
+            (
+                r"templates/\s+# \d+ skill scaffolding.*",
+                &format!(
+                    "templates/                # {} skill scaffolding templates",
+                    ext.templates
+                ),
+            ),
+            (
+                r"docs/\s+# \d+ documentation pages.*",
+                &format!(
+                    "docs/                     # {} documentation pages",
+                    ext.docs
+                ),
+            ),
+        ],
+    );
 
     // CLAUDE.md (repo-level)
-    targeted_update(root_dir, "CLAUDE.md", dry_run, &mut changed_files, &[
-        (r#"> \*\*\d+ skills \+ \d+ agents \+ 1 sentinel engine \(\d+ hooks\) \+ \d+ MCP servers\*\*"#,
-         &format!("> **{} skills + {} agents + 1 sentinel engine ({} hooks) + {} MCP servers**", c.skills, c.agents, c.hooks, c.mcp_servers)),
-        (r"skills/\s+<- \d+ skill directories.*", &format!("skills/                <- {} skill directories (SKILL.md each)", c.skills)),
-        (r"commands/\s+<- \d+ slash commands.*", &format!("commands/              <- {} slash commands (.md files)", c.commands)),
-        (r"agents/\s+<- \d+ agent definitions.*", &format!("agents/                <- {} agent definitions (.md files)", c.agents)),
-        (r"\| Skills \| \d+", &format!("| Skills | {}", c.skills)),
-        (r"\| Hooks \| \d+", &format!("| Hooks | {}", c.hooks)),
-        (r"\| Agents \| \d+", &format!("| Agents | {}", c.agents)),
-        (r"\| MCP Servers \| \d+", &format!("| MCP Servers | {}", c.mcp_servers)),
-        (r"\| Commands \| \d+", &format!("| Commands | {}", c.commands)),
-        (r"\| Scripts \| \d+", &format!("| Scripts | {}", ext.scripts)),
-        (r"\| Docs \| \d+", &format!("| Docs | {}", ext.docs)),
-        (r"\| Templates \| \d+", &format!("| Templates | {}", ext.templates)),
-    ]);
+    targeted_update(
+        root_dir,
+        "CLAUDE.md",
+        dry_run,
+        &mut changed_files,
+        &[
+            (
+                r#"> \*\*\d+ skills \+ \d+ agents \+ 1 sentinel engine \(\d+ hooks\) \+ \d+ MCP servers\*\*"#,
+                &format!(
+                    "> **{} skills + {} agents + 1 sentinel engine ({} hooks) + {} MCP servers**",
+                    c.skills, c.agents, c.hooks, c.mcp_servers
+                ),
+            ),
+            (
+                r"skills/\s+<- \d+ skill directories.*",
+                &format!(
+                    "skills/                <- {} skill directories (SKILL.md each)",
+                    c.skills
+                ),
+            ),
+            (
+                r"commands/\s+<- \d+ slash commands.*",
+                &format!(
+                    "commands/              <- {} slash commands (.md files)",
+                    c.commands
+                ),
+            ),
+            (
+                r"agents/\s+<- \d+ agent definitions.*",
+                &format!(
+                    "agents/                <- {} agent definitions (.md files)",
+                    c.agents
+                ),
+            ),
+            (r"\| Skills \| \d+", &format!("| Skills | {}", c.skills)),
+            (r"\| Hooks \| \d+", &format!("| Hooks | {}", c.hooks)),
+            (r"\| Agents \| \d+", &format!("| Agents | {}", c.agents)),
+            (
+                r"\| MCP Servers \| \d+",
+                &format!("| MCP Servers | {}", c.mcp_servers),
+            ),
+            (
+                r"\| Commands \| \d+",
+                &format!("| Commands | {}", c.commands),
+            ),
+            (
+                r"\| Scripts \| \d+",
+                &format!("| Scripts | {}", ext.scripts),
+            ),
+            (r"\| Docs \| \d+", &format!("| Docs | {}", ext.docs)),
+            (
+                r"\| Templates \| \d+",
+                &format!("| Templates | {}", ext.templates),
+            ),
+        ],
+    );
 
     // docs/marketplace-architecture.md
-    targeted_update(root_dir, "docs/marketplace-architecture.md", dry_run, &mut changed_files, &[
-        (r"ecosystem of \d+ skills, \d+ agents, \d+ hooks, \d+ commands, and \d+ MCP servers",
-         &format!("ecosystem of {} skills, {} agents, {} hooks, {} commands, and {} MCP servers",
-                  c.skills, c.agents, c.hooks, c.commands, c.mcp_servers)),
-    ]);
+    targeted_update(
+        root_dir,
+        "docs/marketplace-architecture.md",
+        dry_run,
+        &mut changed_files,
+        &[(
+            r"ecosystem of \d+ skills, \d+ agents, \d+ hooks, \d+ commands, and \d+ MCP servers",
+            &format!(
+                "ecosystem of {} skills, {} agents, {} hooks, {} commands, and {} MCP servers",
+                c.skills, c.agents, c.hooks, c.commands, c.mcp_servers
+            ),
+        )],
+    );
 
     // Deduplicate
     changed_files.sort();
@@ -1500,7 +1651,7 @@ pub struct Manifest {
 pub fn generate_manifest(root_dir: &Path) -> Manifest {
     let sync_dirs: &[(&str, Option<&[&str]>)] = &[
         ("commands", Some(&[".md"])),
-        ("skills", None),       // all files
+        ("skills", None), // all files
         ("agents", Some(&[".md"])),
         ("scripts", Some(&[".js"])),
         ("templates", Some(&[".md", ".template"])),
@@ -1516,7 +1667,13 @@ pub fn generate_manifest(root_dir: &Path) -> Manifest {
         if !dir_path.exists() {
             continue;
         }
-        walk_manifest_files(&dir_path, dir_name, extensions, &exclude_patterns, &mut files);
+        walk_manifest_files(
+            &dir_path,
+            dir_name,
+            extensions,
+            &exclude_patterns,
+            &mut files,
+        );
     }
 
     files.sort_by(|a, b| a.path.cmp(&b.path));
@@ -1560,7 +1717,10 @@ fn walk_manifest_files(
         let rel_path = format!("{}/{}", base_path, name_str);
 
         // Check exclusions
-        if exclude_patterns.iter().any(|p| rel_path.contains(p) || name_str.ends_with(p)) {
+        if exclude_patterns
+            .iter()
+            .any(|p| rel_path.contains(p) || name_str.ends_with(p))
+        {
             continue;
         }
 

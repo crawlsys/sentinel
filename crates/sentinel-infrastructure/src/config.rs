@@ -10,7 +10,9 @@ use serde::Deserialize;
 use sentinel_domain::events::HookEvent;
 use sentinel_domain::hooks::{HookId, HookSpec};
 use sentinel_domain::judge::JudgeModel;
-use sentinel_domain::workflow::{PhaseSteps, SkillSteps, SkillWorkflow, WorkflowPhase, WorkflowStep};
+use sentinel_domain::workflow::{
+    PhaseSteps, SkillSteps, SkillWorkflow, WorkflowPhase, WorkflowStep,
+};
 
 /// Raw TOML config for hooks
 #[derive(Debug, Deserialize)]
@@ -103,8 +105,7 @@ pub fn load_hooks(config_path: &Path) -> Result<Vec<HookSpec>> {
     let content = std::fs::read_to_string(&toml_path)
         .with_context(|| format!("Failed to read {}", toml_path.display()))?;
 
-    let config: HooksConfig =
-        toml::from_str(&content).context("Failed to parse hooks.toml")?;
+    let config: HooksConfig = toml::from_str(&content).context("Failed to parse hooks.toml")?;
 
     let mut specs: Vec<HookSpec> = Vec::new();
     for h in config.hooks {
@@ -115,10 +116,7 @@ pub fn load_hooks(config_path: &Path) -> Result<Vec<HookSpec>> {
             id: HookId::new(&h.id),
             event,
             matcher: h.matcher,
-            depends_on: h.depends_on
-                .into_iter()
-                .map(|d| HookId::new(&d))
-                .collect(),
+            depends_on: h.depends_on.into_iter().map(|d| HookId::new(&d)).collect(),
             has_api_call: h.has_api_call,
         });
     }
@@ -203,7 +201,11 @@ pub fn load_workflows(config_path: &Path) -> Result<Vec<SkillWorkflow>> {
         // **Attack #179 fix**: Validate all regex patterns at config load time.
         // Catches syntax errors and oversized patterns early instead of at
         // enforcement time where failures could silently skip enforcement.
-        for pattern in w.blocked_bash_patterns.iter().chain(w.bash_allowlist.iter()) {
+        for pattern in w
+            .blocked_bash_patterns
+            .iter()
+            .chain(w.bash_allowlist.iter())
+        {
             if pattern.len() > 256 {
                 anyhow::bail!(
                     "Workflow '{}': regex pattern exceeds 256 chars ({} chars). \
@@ -261,7 +263,12 @@ struct StepToml {
 pub fn load_skill_steps(config_path: &Path, skill: &str) -> Result<Option<SkillSteps>> {
     // **Attack #95 fix**: Sanitize skill name before using as path component.
     // Without this, skill="../../etc" reads `config/steps/../../etc.toml` (path traversal).
-    if skill.contains('.') || skill.contains('/') || skill.contains('\\') || skill.is_empty() || skill.len() > 64 {
+    if skill.contains('.')
+        || skill.contains('/')
+        || skill.contains('\\')
+        || skill.is_empty()
+        || skill.len() > 64
+    {
         anyhow::bail!("Invalid skill name for step loading: '{}'", skill);
     }
     let toml_path = config_path.join("steps").join(format!("{skill}.toml"));
@@ -272,8 +279,8 @@ pub fn load_skill_steps(config_path: &Path, skill: &str) -> Result<Option<SkillS
     let content = std::fs::read_to_string(&toml_path)
         .with_context(|| format!("Failed to read {}", toml_path.display()))?;
 
-    let config: StepsConfig =
-        toml::from_str(&content).with_context(|| format!("Failed to parse {}", toml_path.display()))?;
+    let config: StepsConfig = toml::from_str(&content)
+        .with_context(|| format!("Failed to parse {}", toml_path.display()))?;
 
     let skill_steps = SkillSteps {
         skill: skill.to_string(),
@@ -413,8 +420,14 @@ description = "No required phases — zero enforcement"
         let result = load_workflows(dir.path());
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("no required phases"), "Expected 'no required phases' error, got: {err}");
-        assert!(err.contains("sneaky"), "Expected skill name in error, got: {err}");
+        assert!(
+            err.contains("no required phases"),
+            "Expected 'no required phases' error, got: {err}"
+        );
+        assert!(
+            err.contains("sneaky"),
+            "Expected skill name in error, got: {err}"
+        );
     }
 
     #[test]

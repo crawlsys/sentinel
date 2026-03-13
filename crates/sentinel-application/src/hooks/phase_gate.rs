@@ -50,9 +50,7 @@ fn extract_phase_file(tool_input: &serde_json::Value) -> Option<PhaseFileInfo> {
     use std::path::{Component, Path};
 
     // tool_input for Read is { "file_path": "..." }
-    let path = tool_input
-        .get("file_path")
-        .and_then(|v| v.as_str())?;
+    let path = tool_input.get("file_path").and_then(|v| v.as_str())?;
 
     // Parse into path components — this handles both `/` and `\` separators
     // and gives us semantic components (Normal, ParentDir, RootDir, etc.)
@@ -60,7 +58,11 @@ fn extract_phase_file(tool_input: &serde_json::Value) -> Option<PhaseFileInfo> {
     // Paths like `\\?\C:\...` or `\\.\device\...` use extended-length syntax
     // that can bypass canonical path comparisons (starts_with may fail when
     // mixing prefixed and non-prefixed paths).
-    if path.starts_with("\\\\?\\") || path.starts_with("\\\\.\\") || path.starts_with("//?/") || path.starts_with("//./") {
+    if path.starts_with("\\\\?\\")
+        || path.starts_with("\\\\.\\")
+        || path.starts_with("//?/")
+        || path.starts_with("//./")
+    {
         return None;
     }
 
@@ -78,9 +80,9 @@ fn extract_phase_file(tool_input: &serde_json::Value) -> Option<PhaseFileInfo> {
     //   skills / {skill_name} / phases / {phase_file}.md
     // Match as full path components, not substring — prevents matching
     // paths like `/foo/myskills/linear/phases/claim.md` or `skills_evil/...`.
-    let skills_pos = components.iter().position(|c| {
-        matches!(c, Component::Normal(s) if *s == std::ffi::OsStr::new("skills"))
-    })?;
+    let skills_pos = components
+        .iter()
+        .position(|c| matches!(c, Component::Normal(s) if *s == std::ffi::OsStr::new("skills")))?;
 
     // Need exactly 3 more components after "skills": {name}, "phases", {file}.md
     // And nothing after the .md file.
@@ -88,15 +90,9 @@ fn extract_phase_file(tool_input: &serde_json::Value) -> Option<PhaseFileInfo> {
         return None;
     }
 
-    let skill_name = components[skills_pos + 1]
-        .as_os_str()
-        .to_str()?;
-    let phases_component = components[skills_pos + 2]
-        .as_os_str()
-        .to_str()?;
-    let phase_file = components[skills_pos + 3]
-        .as_os_str()
-        .to_str()?;
+    let skill_name = components[skills_pos + 1].as_os_str().to_str()?;
+    let phases_component = components[skills_pos + 2].as_os_str().to_str()?;
+    let phase_file = components[skills_pos + 3].as_os_str().to_str()?;
 
     // Verify the "phases" directory component
     if phases_component != "phases" {
@@ -134,9 +130,7 @@ fn extract_phase_file(tool_input: &serde_json::Value) -> Option<PhaseFileInfo> {
                 .expect("[sentinel] FATAL: Cannot determine home directory")
                 .join(".claude")
                 .join("skills");
-            let skills_canonical = skills_dir
-                .canonicalize()
-                .unwrap_or(skills_dir);
+            let skills_canonical = skills_dir.canonicalize().unwrap_or(skills_dir);
 
             if !canonical.starts_with(&skills_canonical) {
                 eprintln!(
@@ -269,13 +263,8 @@ pub fn process(
                     let hash = format!("{:x}", hasher.finalize());
 
                     let canonical_key = format!("{}/{}", info.skill, info.file);
-                    if let Err(tamper_msg) =
-                        state.record_phase_file_hash(&canonical_key, &hash)
-                    {
-                        eprintln!(
-                            "[sentinel] SECURITY: {}",
-                            tamper_msg
-                        );
+                    if let Err(tamper_msg) = state.record_phase_file_hash(&canonical_key, &hash) {
+                        eprintln!("[sentinel] SECURITY: {}", tamper_msg);
                         return HookOutput::block(format!(
                             "+============================================================+\n\
                              |  BLOCKED: Phase File Tampering Detected                    |\n\
@@ -438,11 +427,7 @@ fn check_blocked_bash_patterns(
     workflows: &HashMap<String, SkillWorkflow>,
     input: &HookInput,
 ) -> Option<HookOutput> {
-    let cmd = input
-        .tool_input
-        .as_ref()?
-        .get("command")?
-        .as_str()?;
+    let cmd = input.tool_input.as_ref()?.get("command")?.as_str()?;
 
     // ── Layer 0: Bash redirect to protected paths ────────────────────
     // Block Bash commands that use shell redirects (>, >>, tee) to write
@@ -487,35 +472,71 @@ fn check_blocked_bash_patterns(
         std::sync::LazyLock::new(|| {
             vec![
                 // eval + base64 decode: eval $(echo payload | base64 -d) or --decode
-                ("eval with base64 decode", Regex::new(r"eval.*base64\s+(-d|--decode)").unwrap()),
+                (
+                    "eval with base64 decode",
+                    Regex::new(r"eval.*base64\s+(-d|--decode)").unwrap(),
+                ),
                 // eval + command substitution: eval $(...) or eval `...`
-                ("eval with command substitution", Regex::new(r"eval\s+[\$`]").unwrap()),
+                (
+                    "eval with command substitution",
+                    Regex::new(r"eval\s+[\$`]").unwrap(),
+                ),
                 // Hex escape sequences: $'\x2d' etc.
-                ("hex escape sequence", Regex::new(r"\$'\\x[0-9a-fA-F]").unwrap()),
+                (
+                    "hex escape sequence",
+                    Regex::new(r"\$'\\x[0-9a-fA-F]").unwrap(),
+                ),
                 // Octal escape sequences: $'\055' etc.
-                ("octal escape sequence", Regex::new(r"\$'\\[0-7]{3}").unwrap()),
+                (
+                    "octal escape sequence",
+                    Regex::new(r"\$'\\[0-7]{3}").unwrap(),
+                ),
                 // Variable-based command construction + execution:
                 // cmd="steel-mcp"; $cmd  OR  cmd+="mcp"; $cmd
-                ("variable command execution", Regex::new(r#";\s*\$\w+"#).unwrap()),
+                (
+                    "variable command execution",
+                    Regex::new(r#";\s*\$\w+"#).unwrap(),
+                ),
                 // base64 decode piped to shell: | base64 -d | bash (or --decode)
-                ("base64 piped to shell", Regex::new(r"base64\s+(-d|--decode).*\|\s*(bash|sh|zsh)").unwrap()),
+                (
+                    "base64 piped to shell",
+                    Regex::new(r"base64\s+(-d|--decode).*\|\s*(bash|sh|zsh)").unwrap(),
+                ),
                 // base64 decode in command substitution: $(echo ... | base64 -d)
-                ("base64 in command substitution", Regex::new(r"\$\(.*base64\s+(-d|--decode)").unwrap()),
+                (
+                    "base64 in command substitution",
+                    Regex::new(r"\$\(.*base64\s+(-d|--decode)").unwrap(),
+                ),
                 // Python/perl/ruby one-liner execution for evasion
-                ("scripting language exec", Regex::new(r"(python3?|perl|ruby)\s+-[ec]\s+.*exec").unwrap()),
+                (
+                    "scripting language exec",
+                    Regex::new(r"(python3?|perl|ruby)\s+-[ec]\s+.*exec").unwrap(),
+                ),
                 // Process substitution: <(cmd) feeds blocked command output
                 ("process substitution", Regex::new(r"<\([^)]+\)").unwrap()),
                 // ANSI-C quoting: $'string' can encode arbitrary bytes via \xNN, \NNN, \uNNNN
                 // Already caught hex/octal inside $'...' above, but catch any $'...' with backslash escapes
-                ("ANSI-C quote with escape", Regex::new(r"\$'[^']*\\[^']+[^']*'").unwrap()),
+                (
+                    "ANSI-C quote with escape",
+                    Regex::new(r"\$'[^']*\\[^']+[^']*'").unwrap(),
+                ),
                 // Here-strings with command substitution or pipe to shell:
                 // e.g., `bash <<< $(blocked-cmd)` or `cat <<< $(cmd) | sh`
                 // **Attack #77 fix**: Only block <<< when followed by $() or `` or piped to shell,
                 // not plain `grep pattern <<< "$variable"` which is safe.
-                ("here-string with substitution", Regex::new(r"<<<\s*[\$`]").unwrap()),
-                ("here-string piped to shell", Regex::new(r"<<<.*\|\s*(bash|sh|zsh)").unwrap()),
+                (
+                    "here-string with substitution",
+                    Regex::new(r"<<<\s*[\$`]").unwrap(),
+                ),
+                (
+                    "here-string piped to shell",
+                    Regex::new(r"<<<.*\|\s*(bash|sh|zsh)").unwrap(),
+                ),
                 // printf with escape sequences to construct commands: printf '\x67\x69\x74'
-                ("printf escape construction", Regex::new(r"printf\s+.*\\x[0-9a-fA-F]").unwrap()),
+                (
+                    "printf escape construction",
+                    Regex::new(r"printf\s+.*\\x[0-9a-fA-F]").unwrap(),
+                ),
             ]
         });
 
@@ -546,23 +567,21 @@ fn check_blocked_bash_patterns(
     if !all_allow_patterns.is_empty() {
         // Split command on shell operators AND newlines to get individual segments
         // Pipe (|) added per Attack #29, newline (\n) per Attack #33
-        static SEGMENT_SPLIT: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
-            Regex::new(r"\s*(?:&&|\|\||\||;|\n)\s*").unwrap()
-        });
+        static SEGMENT_SPLIT: std::sync::LazyLock<Regex> =
+            std::sync::LazyLock::new(|| Regex::new(r"\s*(?:&&|\|\||\||;|\n)\s*").unwrap());
         // Detect subshell / command substitution embedded in segments
-        static SUBSHELL_RE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
-            Regex::new(r"(?:\$\([^)]+\)|`[^`]+`)").unwrap()
-        });
-        let segments: Vec<&str> = SEGMENT_SPLIT.split(cmd)
+        static SUBSHELL_RE: std::sync::LazyLock<Regex> =
+            std::sync::LazyLock::new(|| Regex::new(r"(?:\$\([^)]+\)|`[^`]+`)").unwrap());
+        let segments: Vec<&str> = SEGMENT_SPLIT
+            .split(cmd)
             .map(|s| s.trim())
             .filter(|s| !s.is_empty())
             .collect();
 
         // Safe subshell pattern: $(cat <<'EOF' or $(cat <<EOF — ONLY cat with heredoc.
         // Rejects $(cat /etc/passwd; evil-cmd) because it contains ; after cat.
-        static SAFE_SUBSHELL_RE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
-            Regex::new(r"^\$\(cat\s+<<").unwrap()
-        });
+        static SAFE_SUBSHELL_RE: std::sync::LazyLock<Regex> =
+            std::sync::LazyLock::new(|| Regex::new(r"^\$\(cat\s+<<").unwrap());
 
         for segment in &segments {
             // Reject segments containing command substitution — the inner
@@ -594,7 +613,11 @@ fn check_blocked_bash_patterns(
                 // Also reject backtick substitution entirely (no safe exemption)
                 let has_backtick = segment.contains('`');
                 if !all_subshells_safe || has_backtick {
-                    let seg_display = if segment.len() > 48 { &segment[..48] } else { segment };
+                    let seg_display = if segment.len() > 48 {
+                        &segment[..48]
+                    } else {
+                        segment
+                    };
                     return Some(HookOutput::deny(format!(
                         "+============================================================+\n\
                          |  BLOCKED: Command Substitution in Allowlisted Context      |\n\
@@ -643,7 +666,11 @@ fn check_blocked_bash_patterns(
                 }
             }
             if !segment_allowed {
-                let seg_display = if segment.len() > 48 { &segment[..48] } else { segment };
+                let seg_display = if segment.len() > 48 {
+                    &segment[..48]
+                } else {
+                    segment
+                };
                 return Some(HookOutput::deny(format!(
                     "+============================================================+\n\
                      |  BLOCKED: Command Segment Not in Bash Allowlist            |\n\
@@ -689,9 +716,8 @@ fn check_blocked_bash_patterns(
     }
 
     // Extract inner commands from $(...) subshells (Attack #30)
-    static SUBSHELL_EXTRACT_RE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
-        Regex::new(r"\$\(([^)]+)\)").unwrap()
-    });
+    static SUBSHELL_EXTRACT_RE: std::sync::LazyLock<Regex> =
+        std::sync::LazyLock::new(|| Regex::new(r"\$\(([^)]+)\)").unwrap());
     for cap in SUBSHELL_EXTRACT_RE.captures_iter(cmd) {
         if let Some(inner) = cap.get(1) {
             targets.push(inner.as_str().to_string());
@@ -699,9 +725,8 @@ fn check_blocked_bash_patterns(
     }
 
     // Extract inner commands from backtick substitution (Attack #30)
-    static BACKTICK_EXTRACT_RE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
-        Regex::new(r"`([^`]+)`").unwrap()
-    });
+    static BACKTICK_EXTRACT_RE: std::sync::LazyLock<Regex> =
+        std::sync::LazyLock::new(|| Regex::new(r"`([^`]+)`").unwrap());
     for cap in BACKTICK_EXTRACT_RE.captures_iter(cmd) {
         if let Some(inner) = cap.get(1) {
             targets.push(inner.as_str().to_string());
@@ -709,9 +734,8 @@ fn check_blocked_bash_patterns(
     }
 
     // Split on pipe and newline to catch piped/multi-line evasion (Attack #29/#33)
-    static PIPE_NEWLINE_SPLIT: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
-        Regex::new(r"\s*(?:\||\n)\s*").unwrap()
-    });
+    static PIPE_NEWLINE_SPLIT: std::sync::LazyLock<Regex> =
+        std::sync::LazyLock::new(|| Regex::new(r"\s*(?:\||\n)\s*").unwrap());
     for segment in PIPE_NEWLINE_SPLIT.split(cmd) {
         let seg = segment.trim();
         if !seg.is_empty() && seg != cmd {
@@ -814,7 +838,7 @@ fn normalize_shell_quoting(cmd: &str) -> String {
             // Process substitution: <(...) — extract inner content
             '<' if i + 1 < chars.len() && chars[i + 1] == '(' => {
                 i += 2; // skip <(
-                // Don't add the <( to result, the inner content will be added naturally
+                        // Don't add the <( to result, the inner content will be added naturally
             }
             c => {
                 result.push(c);
@@ -838,9 +862,8 @@ fn check_bash_redirect_to_protected(cmd: &str) -> Option<HookOutput> {
         Regex::new(r#"(?:>{1,2}|tee\s+(?:-a\s+)?|cp\s+\S+\s+|mv\s+\S+\s+|ln\s+(?:-[sf]+\s+)*\S+\s+|install\s+\S+\s+|curl\s+.*-o\s+|wget\s+.*-O\s+)\s*["']?([^\s"'|;&]+)"#).unwrap()
     });
     // Also check dd of= pattern separately (different syntax)
-    static DD_RE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
-        Regex::new(r#"dd\s+.*of=["']?([^\s"'|;&]+)"#).unwrap()
-    });
+    static DD_RE: std::sync::LazyLock<Regex> =
+        std::sync::LazyLock::new(|| Regex::new(r#"dd\s+.*of=["']?([^\s"'|;&]+)"#).unwrap());
 
     for cap in REDIRECT_RE.captures_iter(cmd) {
         if let Some(path_match) = cap.get(1) {
@@ -849,10 +872,14 @@ fn check_bash_redirect_to_protected(cmd: &str) -> Option<HookOutput> {
             // Expand ~ to home dir for textual check
             let expanded = if normalized.starts_with("~/") || normalized.starts_with("~\\") {
                 // **Attack #90 fix**: Panic instead of empty fallback — empty PathBuf
-// makes all ~/‐prefixed protected path checks silently pass.
-let home = dirs::home_dir()
-    .expect("[sentinel] FATAL: Cannot determine home directory");
-                format!("{}/{}", home.to_string_lossy().replace('\\', "/"), &normalized[2..])
+                // makes all ~/‐prefixed protected path checks silently pass.
+                let home =
+                    dirs::home_dir().expect("[sentinel] FATAL: Cannot determine home directory");
+                format!(
+                    "{}/{}",
+                    home.to_string_lossy().replace('\\', "/"),
+                    &normalized[2..]
+                )
             } else {
                 normalized
             };
@@ -867,7 +894,11 @@ let home = dirs::home_dir()
                      |  Shell redirects (>, >>, tee, cp) to sentinel               |\n\
                      |  infrastructure paths are blocked during active workflows.  |\n\
                      +============================================================+",
-                    if path.len() > 49 { &path[path.len()-49..] } else { path },
+                    if path.len() > 49 {
+                        &path[path.len() - 49..]
+                    } else {
+                        path
+                    },
                     reason,
                 )));
             }
@@ -881,10 +912,14 @@ let home = dirs::home_dir()
             let normalized = path.replace('\\', "/");
             let expanded = if normalized.starts_with("~/") || normalized.starts_with("~\\") {
                 // **Attack #90 fix**: Panic instead of empty fallback — empty PathBuf
-// makes all ~/‐prefixed protected path checks silently pass.
-let home = dirs::home_dir()
-    .expect("[sentinel] FATAL: Cannot determine home directory");
-                format!("{}/{}", home.to_string_lossy().replace('\\', "/"), &normalized[2..])
+                // makes all ~/‐prefixed protected path checks silently pass.
+                let home =
+                    dirs::home_dir().expect("[sentinel] FATAL: Cannot determine home directory");
+                format!(
+                    "{}/{}",
+                    home.to_string_lossy().replace('\\', "/"),
+                    &normalized[2..]
+                )
             } else {
                 normalized
             };
@@ -896,7 +931,11 @@ let home = dirs::home_dir()
                      |  Target: {:<49}|\n\
                      |  Reason: {:<49}|\n\
                      +============================================================+",
-                    if path.len() > 49 { &path[path.len()-49..] } else { path },
+                    if path.len() > 49 {
+                        &path[path.len() - 49..]
+                    } else {
+                        path
+                    },
                     reason,
                 )));
             }
@@ -926,8 +965,7 @@ fn check_protected_path_write(
     }
 
     // Only enforce when at least one workflow has been activated
-    let any_active = !state.workflows.is_empty()
-        || state.active_skill.is_some();
+    let any_active = !state.workflows.is_empty() || state.active_skill.is_some();
     if !any_active {
         return None;
     }
@@ -1007,7 +1045,9 @@ fn check_protected_textual(normalized: &str) -> Option<&'static str> {
     }
 
     // 3. Settings.json (hook registrations)
-    if normalized.ends_with("/.claude/settings.json") || normalized.contains("/.claude/settings.json") {
+    if normalized.ends_with("/.claude/settings.json")
+        || normalized.contains("/.claude/settings.json")
+    {
         return Some("hook registration file");
     }
 
@@ -1045,7 +1085,10 @@ fn check_protected_textual(normalized: &str) -> Option<&'static str> {
 
 /// Canonical path check for protected paths.
 /// Resolves symlinks/junctions and checks if real path is in protected areas.
-fn check_protected_canonical(file_path: &str, claude_dir: &std::path::Path) -> Option<&'static str> {
+fn check_protected_canonical(
+    file_path: &str,
+    claude_dir: &std::path::Path,
+) -> Option<&'static str> {
     use std::path::Path;
 
     let target = Path::new(file_path);
@@ -1054,7 +1097,8 @@ fn check_protected_canonical(file_path: &str, claude_dir: &std::path::Path) -> O
     let parent = target.parent()?;
     let canonical_parent = parent.canonicalize().ok()?;
 
-    let claude_canonical = claude_dir.canonicalize()
+    let claude_canonical = claude_dir
+        .canonicalize()
         .unwrap_or_else(|_| claude_dir.to_path_buf());
 
     // Check if under ~/.claude/ at all
@@ -1066,22 +1110,14 @@ fn check_protected_canonical(file_path: &str, claude_dir: &std::path::Path) -> O
     let components: Vec<_> = relative.components().collect();
 
     // sentinel/ directory
-    if components.first()
-        .and_then(|c| c.as_os_str().to_str())
-        == Some("sentinel")
-    {
+    if components.first().and_then(|c| c.as_os_str().to_str()) == Some("sentinel") {
         return Some("sentinel config/state directory");
     }
 
     // skills/ directory checks
-    if components.first()
-        .and_then(|c| c.as_os_str().to_str())
-        == Some("skills")
-    {
+    if components.first().and_then(|c| c.as_os_str().to_str()) == Some("skills") {
         // skills/{name}/phases/ — phase file
-        if components.len() >= 3
-            && components[2].as_os_str().to_str() == Some("phases")
-        {
+        if components.len() >= 3 && components[2].as_os_str().to_str() == Some("phases") {
             return Some("phase file modification");
         }
 
@@ -1105,8 +1141,7 @@ fn check_protected_canonical(file_path: &str, claude_dir: &std::path::Path) -> O
     // .claude.json at HOME root (parent of ~/.claude/)
     // canonical_parent is HOME dir, filename is .claude.json
     // **Attack #92 fix**: Panic instead of empty fallback
-    let home_dir = dirs::home_dir()
-        .expect("[sentinel] FATAL: Cannot determine home directory");
+    let home_dir = dirs::home_dir().expect("[sentinel] FATAL: Cannot determine home directory");
     let home_canonical = home_dir.canonicalize().unwrap_or(home_dir);
     if canonical_parent == home_canonical {
         let filename = target.file_name()?.to_str()?;
@@ -1134,9 +1169,19 @@ fn check_post_merge_skip(
     // **Attack #108 fix**: Removed "SendMessage" — can leak context to teammates.
     // This list MUST stay in sync with workflow.rs should_block() safe_tools.
     let safe_tools = [
-        "Read", "Glob", "Grep", "WebSearch", "WebFetch",
-        "AskUserQuestion", "EnterPlanMode", "ExitPlanMode", "TaskCreate",
-        "TaskUpdate", "TaskList", "TaskGet", "TaskOutput",
+        "Read",
+        "Glob",
+        "Grep",
+        "WebSearch",
+        "WebFetch",
+        "AskUserQuestion",
+        "EnterPlanMode",
+        "ExitPlanMode",
+        "TaskCreate",
+        "TaskUpdate",
+        "TaskList",
+        "TaskGet",
+        "TaskOutput",
         "ToolSearch",
     ];
     if safe_tools.contains(&tool_name) {
@@ -1145,7 +1190,11 @@ fn check_post_merge_skip(
 
     // **Attack #48**: Use active_skill if available, otherwise fall back to
     // find_incomplete_workflow to prevent clearing active_skill to bypass this check.
-    let (skill, workflow) = match state.active_skill.as_ref().and_then(|s| workflows.get(s).map(|w| (s.clone(), w))) {
+    let (skill, workflow) = match state
+        .active_skill
+        .as_ref()
+        .and_then(|s| workflows.get(s).map(|w| (s.clone(), w)))
+    {
         Some(pair) => pair,
         None => {
             // Fall back to most-progressed incomplete workflow (mirrors gate.rs logic)
@@ -1390,8 +1439,14 @@ mod tests {
             assert!(wf_state.is_phase_complete("claim"));
         } else {
             // File doesn't exist (CI/other machines) → untrusted → no advance
-            assert!(state.workflows.get("linear").is_none()
-                || !state.workflows.get("linear").unwrap().is_phase_complete("claim"));
+            assert!(
+                state.workflows.get("linear").is_none()
+                    || !state
+                        .workflows
+                        .get("linear")
+                        .unwrap()
+                        .is_phase_complete("claim")
+            );
         }
     }
 
@@ -1454,7 +1509,11 @@ mod tests {
         // No workflow state should be created for unknown phases
         assert!(
             state.workflows.get("linear").is_none()
-                || !state.workflows.get("linear").unwrap().is_phase_complete("evil-phase")
+                || !state
+                    .workflows
+                    .get("linear")
+                    .unwrap()
+                    .is_phase_complete("evil-phase")
         );
     }
 
@@ -1618,7 +1677,11 @@ mod tests {
             // But workflow NOT advanced (untrusted — file doesn't exist)
             assert!(
                 state.workflows.get("linear").is_none()
-                    || !state.workflows.get("linear").unwrap().is_phase_complete("claim")
+                    || !state
+                        .workflows
+                        .get("linear")
+                        .unwrap()
+                        .is_phase_complete("claim")
             );
         }
     }

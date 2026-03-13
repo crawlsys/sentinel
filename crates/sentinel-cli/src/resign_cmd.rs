@@ -91,13 +91,8 @@ fn resign_file(data_path: &std::path::Path, sig_path: &std::path::Path) -> Resul
     if sig_path.exists() {
         let old_sig = std::fs::read_to_string(sig_path)
             .with_context(|| format!("Failed to read {}", sig_path.display()))?;
-        if !sentinel_infrastructure::state_store::verify_hmac_for_proofs(
-            &data,
-            old_sig.trim(),
-        ) {
-            anyhow::bail!(
-                "Existing signature verification failed — file may be tampered"
-            );
+        if !sentinel_infrastructure::state_store::verify_hmac_for_proofs(&data, old_sig.trim()) {
+            anyhow::bail!("Existing signature verification failed — file may be tampered");
         }
     }
 

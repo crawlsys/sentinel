@@ -149,7 +149,10 @@ pub struct HookSpecificOutput {
     pub permission_decision: Option<PermissionDecision>,
 
     /// Reason for the permission decision
-    #[serde(skip_serializing_if = "Option::is_none", rename = "permissionDecisionReason")]
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        rename = "permissionDecisionReason"
+    )]
     pub permission_decision_reason: Option<String>,
 
     /// Modified tool input (PreToolUse only — replaces the original input)
@@ -340,14 +343,16 @@ impl HookOutput {
                         (Some(a), Some(b)) => {
                             let merged = format!("{a}\n\n{b}");
                             if merged.len() > MAX_CONTEXT_LEN {
-                                self_hso.additional_context = Some(merged[..MAX_CONTEXT_LEN].to_string());
+                                self_hso.additional_context =
+                                    Some(merged[..MAX_CONTEXT_LEN].to_string());
                             } else {
                                 self_hso.additional_context = Some(merged);
                             }
                         }
                         (None, Some(b)) => {
                             if b.len() > MAX_CONTEXT_LEN {
-                                self_hso.additional_context = Some(b[..MAX_CONTEXT_LEN].to_string());
+                                self_hso.additional_context =
+                                    Some(b[..MAX_CONTEXT_LEN].to_string());
                             } else {
                                 self_hso.additional_context = Some(b.clone());
                             }
@@ -450,10 +455,7 @@ mod tests {
         a.merge(&b);
         let hso = a.hook_specific_output.unwrap();
         assert_eq!(hso.permission_decision, Some(PermissionDecision::Deny));
-        assert_eq!(
-            hso.permission_decision_reason.as_deref(),
-            Some("no way")
-        );
+        assert_eq!(hso.permission_decision_reason.as_deref(), Some("no way"));
     }
 
     #[test]
@@ -479,11 +481,7 @@ mod tests {
         let mut a = HookOutput::inject_context(HookEvent::UserPromptSubmit, "context A");
         let b = HookOutput::inject_context(HookEvent::UserPromptSubmit, "context B");
         a.merge(&b);
-        let ctx = a
-            .hook_specific_output
-            .unwrap()
-            .additional_context
-            .unwrap();
+        let ctx = a.hook_specific_output.unwrap().additional_context.unwrap();
         assert!(ctx.contains("context A"));
         assert!(ctx.contains("context B"));
     }

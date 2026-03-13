@@ -66,20 +66,14 @@ fn main() -> ExitCode {
 }
 
 /// Consume a staged binary: verify integrity, swap into engine path, clean up.
-fn consume_staged(
-    staged: &PathBuf,
-    hash_file: &PathBuf,
-    engine: &PathBuf,
-) -> Result<(), String> {
+fn consume_staged(staged: &PathBuf, hash_file: &PathBuf, engine: &PathBuf) -> Result<(), String> {
     // Reject staged binaries without a hash file (may be attacker-planted)
     if !hash_file.exists() {
         // Delete the unverified staged binary
         let _ = std::fs::remove_file(staged);
-        return Err(
-            "SECURITY: Staged binary has no SHA-256 hash file. \
+        return Err("SECURITY: Staged binary has no SHA-256 hash file. \
              Not staged via `sentinel stage`. Removed."
-                .to_string(),
-        );
+            .to_string());
     }
 
     let expected_hash = std::fs::read_to_string(hash_file)
@@ -87,8 +81,8 @@ fn consume_staged(
         .trim()
         .to_string();
 
-    let actual_hash = sha256_file(staged)
-        .map_err(|e| format!("Failed to hash staged binary: {e}"))?;
+    let actual_hash =
+        sha256_file(staged).map_err(|e| format!("Failed to hash staged binary: {e}"))?;
 
     if actual_hash != expected_hash {
         // Tampered — delete both files
@@ -126,8 +120,8 @@ fn consume_staged(
 fn sha256_file(path: &PathBuf) -> Result<String, String> {
     use std::io::Read;
 
-    let mut file = std::fs::File::open(path)
-        .map_err(|e| format!("Failed to open {}: {e}", path.display()))?;
+    let mut file =
+        std::fs::File::open(path).map_err(|e| format!("Failed to open {}: {e}", path.display()))?;
 
     // Simple SHA-256 using manual implementation to avoid pulling in sha2 crate
     // in the launcher (keeping it minimal). We use the OS sha256sum instead.

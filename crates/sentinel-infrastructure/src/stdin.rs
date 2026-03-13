@@ -3,6 +3,8 @@
 //! Parses JSON from stdin with Windows backslash resilience.
 //! Handles the double-backslash encoding Claude Code uses on Windows.
 
+use std::time::Duration;
+
 use anyhow::{Context, Result};
 
 use sentinel_domain::events::HookInput;
@@ -15,27 +17,44 @@ use sentinel_domain::events::HookInput;
 /// If it times out, return a default empty HookInput so the hook pipeline
 /// can still proceed (just without input-specific context).
 pub fn read_hook_input() -> Result<HookInput> {
+    let buffer = read_raw_stdin(Duration::from_secs(3))?;
+    if buffer.is_empty() {
+        Ok(HookInput::default())
+    } else {
+        parse_hook_input(&buffer)
+    }
+}
+
+/// Read raw stdin with a timeout.
+///
+/// Returns an empty string on timeout so callers can decide whether to
+/// continue with an empty/default payload or treat the absence of input as
+/// an error. This keeps the low-level stdin behavior reusable for the hook
+/// supervisor and the internal hook worker.
+pub fn read_raw_stdin(timeout: Duration) -> Result<String> {
     use std::sync::mpsc;
-    use std::time::Duration;
 
     let (tx, rx) = mpsc::channel();
 
     std::thread::spawn(move || {
         let mut buffer = String::new();
-        let result = std::io::Read::read_to_string(&mut std::io::stdin(), &mut buffer)
-            .map(|_| buffer);
+        let result =
+            std::io::Read::read_to_string(&mut std::io::stdin(), &mut buffer).map(|_| buffer);
         let _ = tx.send(result);
     });
 
-    match rx.recv_timeout(Duration::from_secs(3)) {
-        Ok(Ok(buffer)) => parse_hook_input(&buffer),
+    match rx.recv_timeout(timeout) {
+        Ok(Ok(buffer)) => Ok(buffer),
         Ok(Err(e)) => {
             tracing::warn!(error = %e, "Failed to read stdin — using empty input");
-            Ok(HookInput::default())
+            Ok(String::new())
         }
         Err(_timeout) => {
-            tracing::warn!("Stdin read timed out (3s) — using empty input");
-            Ok(HookInput::default())
+            tracing::warn!(
+                timeout_ms = timeout.as_millis() as u64,
+                "Stdin read timed out — using empty input"
+            );
+            Ok(String::new())
         }
     }
 }

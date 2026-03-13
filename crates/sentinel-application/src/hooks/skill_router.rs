@@ -26,12 +26,10 @@ fn load_linear_team_keys() -> Vec<String> {
     }
 
     // Fallback — hardcoded keys (updated 2026-03-09 from Linear API)
-    vec![
-        "FPCRM", "FPFIELD", "FPROUTE", "GS", "COR", "LEG", "TRB",
-    ]
-    .into_iter()
-    .map(String::from)
-    .collect()
+    vec!["FPCRM", "FPFIELD", "FPROUTE", "GS", "COR", "LEG", "TRB"]
+        .into_iter()
+        .map(String::from)
+        .collect()
 }
 
 /// Build the default regex router with all skill patterns
@@ -208,9 +206,7 @@ pub fn default_router() -> RegexRouter {
     // DDD/Hexagonal
     if let Ok(rule) = sentinel_domain::routing::RoutingRule::new(
         "ddd-hexagonal",
-        vec![
-            r"(?i)\b(ddd|domain.driven|hexagonal|ports?.and.adapters|clean\s+arch)\b",
-        ],
+        vec![r"(?i)\b(ddd|domain.driven|hexagonal|ports?.and.adapters|clean\s+arch)\b"],
         85,
     ) {
         router.add_rule(rule);
@@ -386,7 +382,11 @@ fn write_routing_entry(skill: &str, run_id: &str, input: &HookInput, prompt: &st
         .append(true)
         .open(metrics_dir.join("routing.jsonl"))
     {
-        let _ = writeln!(file, "{}", serde_json::to_string(&entry).unwrap_or_default());
+        let _ = writeln!(
+            file,
+            "{}",
+            serde_json::to_string(&entry).unwrap_or_default()
+        );
     }
 }
 
@@ -453,7 +453,9 @@ pub async fn process_with_ai(
                 // **Attack #60 fix**: Validate AI classifier return against the
                 // candidate list. A compromised or prompt-injected classifier could
                 // return arbitrary skill names to bypass routing.
-                if candidates.contains(&skill) || router.route_all(prompt).iter().any(|m| m.skill == skill) {
+                if candidates.contains(&skill)
+                    || router.route_all(prompt).iter().any(|m| m.skill == skill)
+                {
                     return build_match_output(&skill, input, prompt, "ai");
                 }
                 tracing::warn!(
@@ -546,7 +548,10 @@ mod tests {
             let output = process(&input, &router);
             let ctx = output.hook_specific_output.unwrap();
             assert!(
-                ctx.additional_context.as_deref().unwrap().contains("linear"),
+                ctx.additional_context
+                    .as_deref()
+                    .unwrap()
+                    .contains("linear"),
                 "{prefix}-123 should route to linear"
             );
         }
@@ -561,7 +566,11 @@ mod tests {
         };
         let output = process(&input, &router);
         let ctx = output.hook_specific_output.unwrap();
-        assert!(ctx.additional_context.as_deref().unwrap().contains("linear"));
+        assert!(ctx
+            .additional_context
+            .as_deref()
+            .unwrap()
+            .contains("linear"));
     }
 
     #[test]
@@ -586,7 +595,11 @@ mod tests {
         let output = process(&input, &router);
         // No-match now injects "general conversation mode" context
         let ctx = output.hook_specific_output.unwrap();
-        assert!(ctx.additional_context.as_deref().unwrap().contains("No skill matched"));
+        assert!(ctx
+            .additional_context
+            .as_deref()
+            .unwrap()
+            .contains("No skill matched"));
         assert!(output.blocked.is_none());
     }
 
@@ -622,7 +635,11 @@ mod tests {
         };
         let output = process(&input, &router);
         let ctx = output.hook_specific_output.unwrap();
-        assert!(ctx.additional_context.as_deref().unwrap().contains("ddd-hexagonal"));
+        assert!(ctx
+            .additional_context
+            .as_deref()
+            .unwrap()
+            .contains("ddd-hexagonal"));
     }
 
     #[test]
@@ -635,7 +652,11 @@ mod tests {
         };
         let output = process(&input, &router);
         let ctx = output.hook_specific_output.unwrap();
-        assert!(ctx.additional_context.as_deref().unwrap().contains("deploy"));
+        assert!(ctx
+            .additional_context
+            .as_deref()
+            .unwrap()
+            .contains("deploy"));
     }
 
     #[test]
@@ -648,7 +669,11 @@ mod tests {
         };
         let output = process(&input, &router);
         let ctx = output.hook_specific_output.unwrap();
-        assert!(ctx.additional_context.as_deref().unwrap().contains("security"));
+        assert!(ctx
+            .additional_context
+            .as_deref()
+            .unwrap()
+            .contains("security"));
     }
 
     #[test]
@@ -662,7 +687,11 @@ mod tests {
         };
         let output = process(&input, &router);
         let ctx = output.hook_specific_output.unwrap();
-        assert!(ctx.additional_context.as_deref().unwrap().contains("No skill matched"));
+        assert!(ctx
+            .additional_context
+            .as_deref()
+            .unwrap()
+            .contains("No skill matched"));
     }
 
     #[test]
@@ -675,7 +704,11 @@ mod tests {
         };
         let output = process(&input, &router);
         let ctx = output.hook_specific_output.unwrap();
-        assert!(ctx.additional_context.as_deref().unwrap().contains("No skill matched"));
+        assert!(ctx
+            .additional_context
+            .as_deref()
+            .unwrap()
+            .contains("No skill matched"));
     }
 
     #[test]

@@ -262,11 +262,7 @@ mod tests {
     use crate::evidence::Evidence;
     use crate::judge::JudgeVerdict;
 
-    fn make_proof(
-        phase_id: &str,
-        skill: &str,
-        previous_hash: &str,
-    ) -> PhaseProof {
+    fn make_proof(phase_id: &str, skill: &str, previous_hash: &str) -> PhaseProof {
         let evidence = Evidence::default();
         let evidence_hash = PhaseProof::compute_evidence_hash(&evidence);
         let combined_hash =
@@ -411,10 +407,16 @@ mod tests {
             duration_ms: 100,
         };
 
-        assert!(!proof.verify_self(), "Proof with completed_at < started_at should fail");
+        assert!(
+            !proof.verify_self(),
+            "Proof with completed_at < started_at should fail"
+        );
 
         let mut chain = ProofChain::new("linear", "sess-1");
-        assert!(chain.add_proof(proof).is_err(), "Chain should reject backwards-timestamp proof");
+        assert!(
+            chain.add_proof(proof).is_err(),
+            "Chain should reject backwards-timestamp proof"
+        );
     }
 
     #[test]

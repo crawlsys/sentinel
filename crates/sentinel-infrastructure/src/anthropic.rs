@@ -65,8 +65,7 @@ impl AnthropicClient {
 
     /// Create from environment variable
     pub fn from_env() -> Result<Self> {
-        let key = std::env::var("ANTHROPIC_API_KEY")
-            .context("ANTHROPIC_API_KEY not set")?;
+        let key = std::env::var("ANTHROPIC_API_KEY").context("ANTHROPIC_API_KEY not set")?;
         Ok(Self::new(key))
     }
 
@@ -133,9 +132,7 @@ impl AnthropicClient {
             candidates.join(", ")
         };
 
-        let user_msg = format!(
-            "Candidates: {candidates_str}\n\nUser message: {message}"
-        );
+        let user_msg = format!("Candidates: {candidates_str}\n\nUser message: {message}");
 
         let response = self
             .message(JudgeModel::Haiku, system, &user_msg, 50)

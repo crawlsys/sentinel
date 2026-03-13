@@ -86,26 +86,22 @@ fn write_token_file(token: &str, port: u16) -> std::path::PathBuf {
 
 /// Axum middleware that validates the bearer token on every request.
 /// The /api/health endpoint is exempt (used for liveness checks).
-async fn bearer_auth(
-    req: Request,
-    next: Next,
-) -> Result<Response, axum::http::StatusCode> {
+async fn bearer_auth(req: Request, next: Next) -> Result<Response, axum::http::StatusCode> {
     // Allow health checks without auth
     if req.uri().path() == "/api/health" {
         return Ok(next.run(req).await);
     }
 
     // Extract expected token from extension
-    let expected = req.extensions()
-        .get::<BearerToken>()
-        .map(|t| t.0.clone());
+    let expected = req.extensions().get::<BearerToken>().map(|t| t.0.clone());
 
     let Some(expected) = expected else {
         return Err(axum::http::StatusCode::INTERNAL_SERVER_ERROR);
     };
 
     // Check Authorization header
-    let auth_header = req.headers()
+    let auth_header = req
+        .headers()
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
@@ -141,8 +137,12 @@ pub async fn run(port: u16) -> Result<()> {
     // state, and hook stats via the browser's CORS preflight.
     let cors = tower_http::cors::CorsLayer::new()
         .allow_origin([
-            format!("http://localhost:{port}").parse::<axum::http::HeaderValue>().unwrap(),
-            format!("http://127.0.0.1:{port}").parse::<axum::http::HeaderValue>().unwrap(),
+            format!("http://localhost:{port}")
+                .parse::<axum::http::HeaderValue>()
+                .unwrap(),
+            format!("http://127.0.0.1:{port}")
+                .parse::<axum::http::HeaderValue>()
+                .unwrap(),
         ])
         .allow_methods(tower_http::cors::Any)
         .allow_headers(tower_http::cors::Any);

@@ -25,22 +25,26 @@ fn default_binary_path() -> PathBuf {
 
 /// Path to the staged binary in ~/.cargo/bin/
 fn staged_path() -> Result<PathBuf> {
-    let home = dirs::home_dir()
-        .context("[sentinel] FATAL: Cannot determine home directory")?;
-    Ok(home.join(".cargo").join("bin").join("sentinel-engine.exe.staged"))
+    let home = dirs::home_dir().context("[sentinel] FATAL: Cannot determine home directory")?;
+    Ok(home
+        .join(".cargo")
+        .join("bin")
+        .join("sentinel-engine.exe.staged"))
 }
 
 /// Path to the staged binary's SHA-256 hash file
 fn staged_hash_path() -> Result<PathBuf> {
-    let home = dirs::home_dir()
-        .context("[sentinel] FATAL: Cannot determine home directory")?;
-    Ok(home.join(".cargo").join("bin").join("sentinel-engine.exe.staged.sha256"))
+    let home = dirs::home_dir().context("[sentinel] FATAL: Cannot determine home directory")?;
+    Ok(home
+        .join(".cargo")
+        .join("bin")
+        .join("sentinel-engine.exe.staged.sha256"))
 }
 
 /// Compute SHA-256 hash of a file
 fn sha256_file(path: &std::path::Path) -> Result<String> {
-    let bytes = std::fs::read(path)
-        .with_context(|| format!("Failed to read {}", path.display()))?;
+    let bytes =
+        std::fs::read(path).with_context(|| format!("Failed to read {}", path.display()))?;
     let mut hasher = Sha256::new();
     hasher.update(&bytes);
     Ok(format!("{:x}", hasher.finalize()))
@@ -132,10 +136,7 @@ pub async fn run(binary: Option<String>) -> Result<()> {
         size,
         &hash[..16],
     );
-    eprintln!(
-        "[sentinel] Hash file: {}",
-        hash_file.display(),
-    );
+    eprintln!("[sentinel] Hash file: {}", hash_file.display(),);
     eprintln!("[sentinel] Next hook invocation will consume the staged binary.");
 
     Ok(())

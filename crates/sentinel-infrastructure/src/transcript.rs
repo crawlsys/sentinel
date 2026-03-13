@@ -35,8 +35,7 @@ pub fn find_transcript(session_id: &str) -> Result<Option<PathBuf>> {
 
 /// Extract execution log markers from a transcript
 pub fn extract_log_markers(transcript_path: &std::path::Path) -> Result<Vec<String>> {
-    let content = std::fs::read_to_string(transcript_path)
-        .context("Failed to read transcript")?;
+    let content = std::fs::read_to_string(transcript_path).context("Failed to read transcript")?;
 
     let markers: Vec<String> = content
         .lines()

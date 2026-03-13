@@ -86,12 +86,7 @@ fn detect_error(input: &HookInput) -> Option<String> {
 }
 
 /// Log an MCP error to the errors JSONL file
-fn log_mcp_error(
-    tool_name: &str,
-    server_name: &str,
-    error_detail: &str,
-    session_id: &str,
-) {
+fn log_mcp_error(tool_name: &str, server_name: &str, error_detail: &str, session_id: &str) {
     let errors_path = match errors_file_path() {
         Some(p) => p,
         None => return,
@@ -103,7 +98,11 @@ fn log_mcp_error(
     }
 
     let ts = Utc::now().to_rfc3339();
-    let id = format!("err-{}-{}", chrono::Utc::now().timestamp_millis(), std::process::id());
+    let id = format!(
+        "err-{}-{}",
+        chrono::Utc::now().timestamp_millis(),
+        std::process::id()
+    );
     let severity = if error_detail.contains("refused") || error_detail.contains("spawn") {
         "critical"
     } else if error_detail.contains("timeout") || error_detail.contains("timed out") {
@@ -224,10 +223,7 @@ mod tests {
     fn test_extract_server_name() {
         assert_eq!(extract_server_name("mcp__linear__get_issue"), "linear");
         assert_eq!(extract_server_name("mcp__steel__navigate"), "steel");
-        assert_eq!(
-            extract_server_name("mcp__doppler__list_secrets"),
-            "doppler"
-        );
+        assert_eq!(extract_server_name("mcp__doppler__list_secrets"), "doppler");
         assert_eq!(extract_server_name("mcp__"), "");
         assert_eq!(extract_server_name("not_mcp"), "unknown");
     }

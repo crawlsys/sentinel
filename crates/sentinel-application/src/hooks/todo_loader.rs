@@ -121,7 +121,10 @@ pub fn process(input: &HookInput) -> HookOutput {
     }
 
     // Count by status
-    let pending_count = project_todos.iter().filter(|t| t.status == "pending").count();
+    let pending_count = project_todos
+        .iter()
+        .filter(|t| t.status == "pending")
+        .count();
     let in_progress_count = project_todos
         .iter()
         .filter(|t| t.status == "in_progress")
@@ -141,14 +144,8 @@ pub fn process(input: &HookInput) -> HookOutput {
         .filter(|t| t.status == "pending" || t.status == "in_progress")
         .collect();
 
-    let p0_count = active
-        .iter()
-        .filter(|t| t.priority == Some(0))
-        .count();
-    let p1_count = active
-        .iter()
-        .filter(|t| t.priority == Some(1))
-        .count();
+    let p0_count = active.iter().filter(|t| t.priority == Some(0)).count();
+    let p1_count = active.iter().filter(|t| t.priority == Some(1)).count();
 
     // Top 5 todo summaries sorted by priority
     let mut sorted_active: Vec<&TodoEntry> = active.iter().copied().copied().collect();

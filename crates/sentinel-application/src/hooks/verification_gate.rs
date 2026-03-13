@@ -454,10 +454,8 @@ mod tests {
         let _lock = STATE_LOCK.lock().unwrap();
 
         // Use a unique cooldown file to avoid interference from live sentinel
-        let unique_path = std::env::temp_dir().join(format!(
-            "claude-vg-test-inject-{}",
-            std::process::id()
-        ));
+        let unique_path =
+            std::env::temp_dir().join(format!("claude-vg-test-inject-{}", std::process::id()));
         *COOLDOWN_PATH_OVERRIDE.lock().unwrap() = Some(unique_path);
         let _ = fs::remove_file(cooldown_file());
 
@@ -520,10 +518,8 @@ mod tests {
     fn test_cooldown_prevents_repeated_warnings() {
         let _lock = STATE_LOCK.lock().unwrap();
 
-        let unique_path = std::env::temp_dir().join(format!(
-            "claude-vg-test-cooldown-{}",
-            std::process::id()
-        ));
+        let unique_path =
+            std::env::temp_dir().join(format!("claude-vg-test-cooldown-{}", std::process::id()));
         *COOLDOWN_PATH_OVERRIDE.lock().unwrap() = Some(unique_path);
 
         let _ = fs::remove_file(cooldown_file());
@@ -552,12 +548,7 @@ mod tests {
     #[test]
     fn test_evidence_patterns_match() {
         let patterns = evidence_patterns();
-        let test_cases = [
-            "42 passing",
-            "exit code: 0",
-            "BUILD SUCCESS",
-            "$ npm test",
-        ];
+        let test_cases = ["42 passing", "exit code: 0", "BUILD SUCCESS", "$ npm test"];
         for text in &test_cases {
             let matched = patterns.iter().any(|p| p.is_match(text));
             assert!(matched, "Expected evidence match for: {text}");

@@ -146,7 +146,11 @@ pub fn process_stop(input: &HookInput) -> HookOutput {
     }
 
     if pct > 65.0 {
-        tracing::warn!(usage = pct, zone = zone.label(), "Context window usage elevated");
+        tracing::warn!(
+            usage = pct,
+            zone = zone.label(),
+            "Context window usage elevated"
+        );
     }
 
     HookOutput::allow()

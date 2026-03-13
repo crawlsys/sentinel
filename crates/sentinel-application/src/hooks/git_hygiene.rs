@@ -37,12 +37,7 @@ pub fn process(input: &HookInput, git: &dyn GitStatusPort) -> HookOutput {
                      Changed files: {}",
                     files.len(),
                     MAX_UNCOMMITTED_FILES,
-                    files
-                        .iter()
-                        .take(5)
-                        .cloned()
-                        .collect::<Vec<_>>()
-                        .join(", ")
+                    files.iter().take(5).cloned().collect::<Vec<_>>().join(", ")
                 )),
                 _ => HookOutput::allow(),
             }

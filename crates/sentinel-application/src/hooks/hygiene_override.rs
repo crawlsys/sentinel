@@ -18,8 +18,8 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use regex::Regex;
-use sha2::{Digest, Sha256};
 use sentinel_domain::events::{HookInput, HookOutput};
+use sha2::{Digest, Sha256};
 
 /// Override files directory — under sentinel's protected path
 fn override_dir() -> PathBuf {
@@ -104,11 +104,9 @@ fn is_hygiene_override(prompt: &str) -> bool {
         r"force\s+continue",
         r"skip\s+hygiene",
     ];
-    patterns.iter().any(|p| {
-        Regex::new(p)
-            .map(|re| re.is_match(prompt))
-            .unwrap_or(false)
-    })
+    patterns
+        .iter()
+        .any(|p| Regex::new(p).map(|re| re.is_match(prompt)).unwrap_or(false))
 }
 
 /// Check if prompt matches verification override patterns
@@ -120,11 +118,9 @@ fn is_verification_override(prompt: &str) -> bool {
         r"skip\s+tests?",
         r"override\s+test",
     ];
-    patterns.iter().any(|p| {
-        Regex::new(p)
-            .map(|re| re.is_match(prompt))
-            .unwrap_or(false)
-    })
+    patterns
+        .iter()
+        .any(|p| Regex::new(p).map(|re| re.is_match(prompt)).unwrap_or(false))
 }
 
 /// Write a signed override file.
@@ -132,7 +128,11 @@ fn is_verification_override(prompt: &str) -> bool {
 ///
 /// **Attack #47**: Override files now contain signed tokens. `touch /path` or
 /// `echo "" > /path` creates invalid content that fails `verify_override_content()`.
-fn write_signed_override(path: &PathBuf, override_type: &str, session_id: &str) -> Result<(), std::io::Error> {
+fn write_signed_override(
+    path: &PathBuf,
+    override_type: &str,
+    session_id: &str,
+) -> Result<(), std::io::Error> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -145,7 +145,11 @@ fn write_signed_override(path: &PathBuf, override_type: &str, session_id: &str) 
 ///
 /// **Attack #47**: Replaces the old `is_override_active_at()` which only checked
 /// file mtime. Now verifies the content signature, preventing `touch`-based bypass.
-pub fn is_signed_override_active(path: &std::path::Path, override_type: &str, session_id: &str) -> bool {
+pub fn is_signed_override_active(
+    path: &std::path::Path,
+    override_type: &str,
+    session_id: &str,
+) -> bool {
     let content = match fs::read_to_string(path) {
         Ok(c) => c,
         Err(_) => return false,
@@ -187,7 +191,9 @@ pub fn process(input: &HookInput) -> HookOutput {
     let verification = is_verification_override(&prompt);
 
     if hygiene {
-        if let Err(e) = write_signed_override(&hygiene_override_path(session_id), "hygiene", session_id) {
+        if let Err(e) =
+            write_signed_override(&hygiene_override_path(session_id), "hygiene", session_id)
+        {
             eprintln!("Failed to set hygiene override: {e}");
             return HookOutput::allow();
         }
@@ -205,7 +211,11 @@ pub fn process(input: &HookInput) -> HookOutput {
     }
 
     if verification {
-        if let Err(e) = write_signed_override(&verification_override_path(session_id), "verification", session_id) {
+        if let Err(e) = write_signed_override(
+            &verification_override_path(session_id),
+            "verification",
+            session_id,
+        ) {
             eprintln!("Failed to set verification override: {e}");
             return HookOutput::allow();
         }
@@ -228,7 +238,11 @@ pub fn process(input: &HookInput) -> HookOutput {
 /// Test helper: write a signed override file at the given path.
 /// Only available for tests in sibling modules.
 #[doc(hidden)]
-pub fn write_signed_override_for_test(path: &std::path::Path, override_type: &str, session_id: &str) {
+pub fn write_signed_override_for_test(
+    path: &std::path::Path,
+    override_type: &str,
+    session_id: &str,
+) {
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
     }

@@ -105,9 +105,9 @@ fn transcript_has_test_evidence(transcript_path: &str) -> bool {
                         } else if let Some(arr) = c.as_array() {
                             arr.iter()
                                 .filter_map(|item| {
-                                    item.as_str()
-                                        .map(String::from)
-                                        .or_else(|| item.get("text").and_then(|t| t.as_str()).map(String::from))
+                                    item.as_str().map(String::from).or_else(|| {
+                                        item.get("text").and_then(|t| t.as_str()).map(String::from)
+                                    })
                                 })
                                 .collect::<Vec<_>>()
                                 .join(" ")
@@ -143,7 +143,11 @@ pub fn process(input: &HookInput) -> HookOutput {
 }
 
 /// Internal: process with an explicit override file path (for testability).
-fn process_with_override(input: &HookInput, override_path: &std::path::Path, session_id: &str) -> HookOutput {
+fn process_with_override(
+    input: &HookInput,
+    override_path: &std::path::Path,
+    session_id: &str,
+) -> HookOutput {
     // Only act on Bash tool calls
     let tool = match &input.tool_name {
         Some(name) if name == "Bash" => name.as_str(),
@@ -178,7 +182,8 @@ fn process_with_override(input: &HookInput, override_path: &std::path::Path, ses
     };
 
     // Check signed override file (Attack #47: replaces mtime-only check)
-    if super::hygiene_override::is_signed_override_active(override_path, "verification", session_id) {
+    if super::hygiene_override::is_signed_override_active(override_path, "verification", session_id)
+    {
         return HookOutput::allow();
     }
 
@@ -299,15 +304,21 @@ mod tests {
 
         // No override file — should not be active
         assert!(!hygiene_override::is_signed_override_active(
-            &override_path, "verification", session_id
+            &override_path,
+            "verification",
+            session_id
         ));
 
         // Write a properly signed override file
         hygiene_override::write_signed_override_for_test(
-            &override_path, "verification", session_id
+            &override_path,
+            "verification",
+            session_id,
         );
         assert!(hygiene_override::is_signed_override_active(
-            &override_path, "verification", session_id
+            &override_path,
+            "verification",
+            session_id
         ));
 
         // Verify process respects it
@@ -323,7 +334,9 @@ mod tests {
         let touch_path = tmpdir.path().join("touch-override");
         std::fs::write(&touch_path, "").unwrap();
         assert!(!hygiene_override::is_signed_override_active(
-            &touch_path, "verification", session_id
+            &touch_path,
+            "verification",
+            session_id
         ));
     }
 

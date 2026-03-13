@@ -26,7 +26,12 @@ const REPO_CANDIDATES: &[&str] = &[
 
 /// Directories to sync from repo to ~/.claude/
 const SYNC_DIRS: &[&str] = &[
-    "skills", "agents", "commands", "scripts", "templates", "docs",
+    "skills",
+    "agents",
+    "commands",
+    "scripts",
+    "templates",
+    "docs",
 ];
 
 /// Directories to sync recursively (including subdirectories)
@@ -69,7 +74,8 @@ pub fn process(input: &HookInput) -> HookOutput {
     let init_result = auto_init_project(cwd);
 
     // 7. Build startup context
-    let context = build_startup_context(&sync_result, &validation, &counts, session_id, &init_result);
+    let context =
+        build_startup_context(&sync_result, &validation, &counts, session_id, &init_result);
 
     HookOutput::inject_context(HookEvent::SessionStart, context)
 }
@@ -129,9 +135,7 @@ fn find_marketplace_repo() -> Option<PathBuf> {
 
 /// Check if a directory is the marketplace git repo
 fn is_marketplace_repo(dir: &Path) -> bool {
-    dir.join(".git").exists()
-        && dir.join("skills").exists()
-        && dir.join("install.js").exists()
+    dir.join(".git").exists() && dir.join("skills").exists() && dir.join("install.js").exists()
 }
 
 /// Sync marketplace repo to ~/.claude/
@@ -302,8 +306,7 @@ fn validate_sync(claude_dir: &Path) -> ValidationResult {
     }
 
     // 3. sentinel engine should be available
-    let cargo_bin = dirs::home_dir()
-        .map(|h| h.join(".cargo").join("bin"));
+    let cargo_bin = dirs::home_dir().map(|h| h.join(".cargo").join("bin"));
     let sentinel_available = cargo_bin
         .map(|d| {
             if cfg!(windows) {
@@ -874,8 +877,7 @@ pub fn regenerate_global_claude_md() -> PathBuf {
 pub fn template_source_path() -> PathBuf {
     // The sentinel repo lives at ~/Documents/GitHub/sentinel
     // **Attack #96 fix**: Panic instead of CWD fallback
-    let home = dirs::home_dir()
-        .expect("[sentinel] FATAL: Cannot determine home directory");
+    let home = dirs::home_dir().expect("[sentinel] FATAL: Cannot determine home directory");
     home.join("Documents")
         .join("GitHub")
         .join("sentinel")
@@ -957,10 +959,7 @@ fn build_startup_context(
                 .iter()
                 .map(|(f, e)| format!("{}: {}", f.path(), e))
                 .collect();
-            parts.push(format!(
-                "[Project Init] Errors: {}",
-                err_names.join("; ")
-            ));
+            parts.push(format!("[Project Init] Errors: {}", err_names.join("; ")));
         }
     }
 
@@ -1294,10 +1293,7 @@ mod tests {
         }
         let result = validate_sync(dir.path());
         assert!(!result.valid);
-        assert!(result
-            .reasons
-            .iter()
-            .any(|r| r.contains("invalid JSON")));
+        assert!(result.reasons.iter().any(|r| r.contains("invalid JSON")));
     }
 
     #[test]
@@ -1338,7 +1334,11 @@ mod tests {
             cli_repos: 30,
         };
         let projects = vec!["firefly-pro".to_string(), "legatus".to_string()];
-        let accounts = vec!["default".to_string(), "personal".to_string(), "firefly".to_string()];
+        let accounts = vec![
+            "default".to_string(),
+            "personal".to_string(),
+            "firefly".to_string(),
+        ];
         generate_claude_md(dir.path(), &counts, &projects, &accounts);
 
         let content = fs::read_to_string(dir.path().join("CLAUDE.md")).unwrap();
@@ -1451,7 +1451,11 @@ issue_prefix: TEAMA
 
         let init_result = Some(InitResult {
             repo_path: PathBuf::from("/tmp/test"),
-            created: vec![StandardFile::License, StandardFile::SecurityMd, StandardFile::BuildingMd],
+            created: vec![
+                StandardFile::License,
+                StandardFile::SecurityMd,
+                StandardFile::BuildingMd,
+            ],
             skipped: vec![StandardFile::Readme],
             errors: vec![],
         });

@@ -10,7 +10,9 @@
 //!   sentinel steel-test record --session <id>   # Mark test as passed
 //!   sentinel steel-test check  --session <id>   # Check if test is valid
 
-use sentinel_application::hooks::pre_push_steel_test::{has_recent_steel_test_pub, record_steel_test_passed};
+use sentinel_application::hooks::pre_push_steel_test::{
+    has_recent_steel_test_pub, record_steel_test_passed,
+};
 
 /// Record a passing browser test for the given session.
 /// If no session ID is provided, reads CLAUDE_SESSION_ID from env.

@@ -70,7 +70,11 @@ fn load_sessions() -> Vec<SessionSummary> {
         let path = entry.path();
         // Only process .json files (skip .sig files)
         if path.extension().is_some_and(|e| e == "json") {
-            let file_name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+            let file_name = path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
             let session_id = file_name.trim_end_matches(".json");
 
             // Use HMAC-verified load
@@ -80,7 +84,8 @@ fn load_sessions() -> Vec<SessionSummary> {
             };
 
             // Convert phases_read HashMap<String, Vec<String>> to flat list
-            let phases_flat: Vec<String> = state.phases_read
+            let phases_flat: Vec<String> = state
+                .phases_read
                 .values()
                 .flat_map(|v| v.iter().cloned())
                 .collect();
@@ -150,16 +155,14 @@ async fn list_sessions(
         .unwrap_or(0);
 
     let sessions = get_cached_sessions();
-    let paginated: Vec<SessionSummary> = sessions
-        .into_iter()
-        .skip(offset)
-        .take(limit)
-        .collect();
+    let paginated: Vec<SessionSummary> = sessions.into_iter().skip(offset).take(limit).collect();
 
     Json(paginated)
 }
 
-async fn get_session(Path(id): Path<String>) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+async fn get_session(
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
     // **Attack #146 fix**: Sanitize session ID to prevent path traversal.
     // **Attack #151 fix**: Use HMAC-verified state_store::load() instead of raw
     // fs::read_to_string(). The raw read bypassed HMAC verification, allowing an
@@ -168,8 +171,8 @@ async fn get_session(Path(id): Path<String>) -> Result<Json<serde_json::Value>, 
         .map_err(|_| axum::http::StatusCode::BAD_REQUEST)?
         .ok_or(axum::http::StatusCode::NOT_FOUND)?;
 
-    let json = serde_json::to_value(&state)
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    let json =
+        serde_json::to_value(&state).map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(json))
 }
 
@@ -229,7 +232,7 @@ fn parse_hooks_entries(content: &str) -> Vec<serde_json::Value> {
                 } else if value == "false" {
                     hook.insert(key, serde_json::json!(false));
                 } else if value.starts_with('"') && value.ends_with('"') {
-                    hook.insert(key, serde_json::json!(&value[1..value.len()-1]));
+                    hook.insert(key, serde_json::json!(&value[1..value.len() - 1]));
                 } else if value.starts_with('[') {
                     // Simple array parsing for string arrays like ["a", "b"]
                     let inner = &value[1..value.len().saturating_sub(1)];

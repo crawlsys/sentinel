@@ -22,8 +22,7 @@ const OPENAI_MODEL: &str = "gpt-5.3-codex";
 const ANTHROPIC_MODEL: &str = "claude-opus-4-6";
 
 /// Type-erased prompt function: (system, user_msg) -> response text
-type PromptFn =
-    Arc<dyn Fn(String, String) -> BoxFuture<'static, Result<String>> + Send + Sync>;
+type PromptFn = Arc<dyn Fn(String, String) -> BoxFuture<'static, Result<String>> + Send + Sync>;
 
 /// A single Rig-backed judge provider
 struct RigProvider {
@@ -34,8 +33,7 @@ struct RigProvider {
 impl RigProvider {
     /// Cerebras — OpenAI-compatible with custom `base_url`
     fn cerebras() -> Result<Self> {
-        let key =
-            std::env::var("CEREBRAS_API_KEY").context("CEREBRAS_API_KEY not set")?;
+        let key = std::env::var("CEREBRAS_API_KEY").context("CEREBRAS_API_KEY not set")?;
         let client: openai::CompletionsClient = openai::CompletionsClient::builder()
             .api_key(key)
             .base_url(CEREBRAS_BASE_URL)
@@ -59,8 +57,7 @@ impl RigProvider {
 
     /// OpenAI — standard endpoint
     fn openai() -> Result<Self> {
-        let key =
-            std::env::var("OPENAI_API_KEY").context("OPENAI_API_KEY not set")?;
+        let key = std::env::var("OPENAI_API_KEY").context("OPENAI_API_KEY not set")?;
         let client: openai::CompletionsClient = openai::CompletionsClient::builder()
             .api_key(key)
             .build()
@@ -83,8 +80,7 @@ impl RigProvider {
 
     /// Anthropic — native provider
     fn anthropic() -> Result<Self> {
-        let key =
-            std::env::var("ANTHROPIC_API_KEY").context("ANTHROPIC_API_KEY not set")?;
+        let key = std::env::var("ANTHROPIC_API_KEY").context("ANTHROPIC_API_KEY not set")?;
         let client: anthropic::Client = anthropic::Client::builder()
             .api_key(key)
             .build()
@@ -94,10 +90,9 @@ impl RigProvider {
             prompt_fn: Arc::new(move |system, user_msg| {
                 let client = client.clone();
                 Box::pin(async move {
-                    let agent =
-                        AgentBuilder::new(client.completion_model(ANTHROPIC_MODEL))
-                            .preamble(&system)
-                            .build();
+                    let agent = AgentBuilder::new(client.completion_model(ANTHROPIC_MODEL))
+                        .preamble(&system)
+                        .build();
                     let result: Result<String, _> = agent.prompt(user_msg).await;
                     result.map_err(|e| anyhow::anyhow!("Anthropic judge: {e}"))
                 })
@@ -108,8 +103,7 @@ impl RigProvider {
 
     /// Send a judge prompt and parse the JSON verdict
     async fn judge(&self, system: &str, user_msg: &str) -> Result<JudgeVerdict> {
-        let text =
-            (self.prompt_fn)(system.to_string(), user_msg.to_string()).await?;
+        let text = (self.prompt_fn)(system.to_string(), user_msg.to_string()).await?;
         debug!(
             provider = self.name,
             response_len = text.len(),
@@ -170,9 +164,7 @@ impl MultiModelJudge {
 
     /// Returns `true` if at least one provider is available.
     pub fn has_any_provider(&self) -> bool {
-        self.cerebras.is_some()
-            || self.openai.is_some()
-            || self.anthropic.is_some()
+        self.cerebras.is_some() || self.openai.is_some() || self.anthropic.is_some()
     }
 }
 
@@ -193,13 +185,8 @@ impl sentinel_application::judge_service::JudgeService for MultiModelJudge {
                 .as_ref()
                 .or(self.openai.as_ref())
                 .or(self.anthropic.as_ref()),
-            JudgeModel::Sonnet => self
-                .openai
-                .as_ref()
-                .or(self.anthropic.as_ref()),
-            JudgeModel::Opus => self
-                .anthropic
-                .as_ref(),
+            JudgeModel::Sonnet => self.openai.as_ref().or(self.anthropic.as_ref()),
+            JudgeModel::Opus => self.anthropic.as_ref(),
         };
 
         let provider = provider.ok_or_else(|| {
@@ -226,9 +213,8 @@ impl sentinel_application::judge_service::JudgeService for MultiModelJudge {
         );
 
         let evidence_json = serde_json::to_string_pretty(evidence)?;
-        let user_msg = format!(
-            "Evaluate this evidence for the '{phase_id}' phase:\n\n{evidence_json}"
-        );
+        let user_msg =
+            format!("Evaluate this evidence for the '{phase_id}' phase:\n\n{evidence_json}");
 
         provider.judge(&system, &user_msg).await
     }
@@ -239,9 +225,7 @@ impl sentinel_application::judge_service::JudgeService for MultiModelJudge {
 /// Walks forward from the first `{`, tracking brace depth, and extracts
 /// the first complete top-level object. This avoids the naive first-`{`
 /// to last-`}` approach which can span unrelated braces.
-fn extract_json_from_markdown(
-    text: &str,
-) -> Result<JudgeVerdict, serde_json::Error> {
+fn extract_json_from_markdown(text: &str) -> Result<JudgeVerdict, serde_json::Error> {
     let bytes = text.as_bytes();
     let mut i = 0;
 

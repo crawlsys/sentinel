@@ -47,8 +47,7 @@ pub fn check_rate_limit(session_id: &str) -> Result<()> {
 
     let path = rate_file(session_id);
     let dir = rate_dir();
-    std::fs::create_dir_all(&dir)
-        .context("Failed to create rate limit directory")?;
+    std::fs::create_dir_all(&dir).context("Failed to create rate limit directory")?;
 
     // Read existing timestamps
     let mut timestamps: Vec<u64> = if path.exists() {
@@ -85,8 +84,7 @@ pub fn check_rate_limit(session_id: &str) -> Result<()> {
         .map(|ts| ts.to_string())
         .collect::<Vec<_>>()
         .join("\n");
-    std::fs::write(&path, content)
-        .context("Failed to write rate limit file")?;
+    std::fs::write(&path, content).context("Failed to write rate limit file")?;
 
     Ok(())
 }

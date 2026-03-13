@@ -96,7 +96,15 @@ fn recent_source_changes(cwd: &Path) -> Vec<String> {
     let threshold = now_ms().saturating_sub(5 * 60 * 1000);
     let mut changed = Vec::new();
 
-    let source_dirs = ["src", "lib", "app", "pages", "crates", "packages", "components"];
+    let source_dirs = [
+        "src",
+        "lib",
+        "app",
+        "pages",
+        "crates",
+        "packages",
+        "components",
+    ];
     let source_exts = ["rs", "ts", "tsx", "js", "jsx", "py", "go", "java", "cs"];
 
     for dir_name in &source_dirs {
@@ -111,7 +119,10 @@ fn recent_source_changes(cwd: &Path) -> Vec<String> {
         for entry in entries.flatten() {
             if entry.file_type().map(|ft| ft.is_file()).unwrap_or(false) {
                 let name = entry.file_name().to_string_lossy().to_string();
-                if source_exts.iter().any(|ext| name.ends_with(&format!(".{ext}"))) {
+                if source_exts
+                    .iter()
+                    .any(|ext| name.ends_with(&format!(".{ext}")))
+                {
                     if let Some(mt) = file_mod_time(&entry.path()) {
                         if mt >= threshold {
                             changed.push(name);
@@ -151,7 +162,14 @@ fn collect_recent_files(
                 name.as_str(),
                 "node_modules" | ".git" | "target" | "dist" | "build" | ".next"
             ) {
-                collect_recent_files(&entry.path(), threshold, exts, results, depth + 1, max_depth);
+                collect_recent_files(
+                    &entry.path(),
+                    threshold,
+                    exts,
+                    results,
+                    depth + 1,
+                    max_depth,
+                );
             }
         } else if ft.is_file() {
             let name = entry.file_name().to_string_lossy().to_string();
@@ -249,12 +267,7 @@ fn check_readme_drift(
     None
 }
 
-fn check_claude_md_drift(
-    path: &Path,
-    cwd: &Path,
-    cwd_str: &str,
-    ts: &str,
-) -> Option<DriftEntry> {
+fn check_claude_md_drift(path: &Path, cwd: &Path, cwd_str: &str, ts: &str) -> Option<DriftEntry> {
     // Missing project CLAUDE.md
     if !path.exists() {
         let has_sources = cwd.join("src").is_dir()
@@ -322,7 +335,9 @@ fn check_changelog_drift(
         if recent_changes.len() >= 3 {
             return Some(DriftEntry {
                 doc: "CHANGELOG.md".into(),
-                reason: "CHANGELOG.md has no [Unreleased] section — recent changes may not be tracked".into(),
+                reason:
+                    "CHANGELOG.md has no [Unreleased] section — recent changes may not be tracked"
+                        .into(),
                 cwd: cwd_str.into(),
                 ts: ts.into(),
                 resolved: false,
@@ -433,14 +448,19 @@ fn build_drift_context(entries: &[DriftEntry]) -> String {
         match entry.doc.as_str() {
             "README.md" => {
                 lines.push("   - If missing: create with project name, description, quick start, and architecture overview".into());
-                lines.push("   - If stale: review recent changes and update relevant sections".into());
+                lines.push(
+                    "   - If stale: review recent changes and update relevant sections".into(),
+                );
             }
             "CLAUDE.md" => {
                 lines.push("   - If missing: create with project-specific instructions, key file paths, and conventions".into());
                 lines.push("   - If stub: add architecture overview, key commands, and project-specific rules".into());
             }
             "CHANGELOG.md" => {
-                lines.push("   - If missing: create with Keep a Changelog format and [Unreleased] section".into());
+                lines.push(
+                    "   - If missing: create with Keep a Changelog format and [Unreleased] section"
+                        .into(),
+                );
                 lines.push("   - If no [Unreleased]: add one and log recent changes under appropriate categories (Added/Changed/Fixed/Removed)".into());
             }
             "BUILDING.md" | "LICENSE" | "SECURITY.md" => {
@@ -457,7 +477,9 @@ fn build_drift_context(entries: &[DriftEntry]) -> String {
     }
 
     lines.push(String::new());
-    lines.push("After updating docs, the drift finding will clear automatically on next session.".into());
+    lines.push(
+        "After updating docs, the drift finding will clear automatically on next session.".into(),
+    );
 
     lines.join("\n")
 }
@@ -553,7 +575,12 @@ pub fn process_prompt(input: &HookInput) -> HookOutput {
                             .map(|c| c.split_whitespace().count() < 30)
                             .unwrap_or(true)
                 }
-                "CLAUDE.md" => !doc_path.exists() || fs::metadata(&doc_path).map(|m| m.len() < 200).unwrap_or(true),
+                "CLAUDE.md" => {
+                    !doc_path.exists()
+                        || fs::metadata(&doc_path)
+                            .map(|m| m.len() < 200)
+                            .unwrap_or(true)
+                }
                 "CHANGELOG.md" | "BUILDING.md" | "LICENSE" | "SECURITY.md" => !doc_path.exists(),
                 _ => false,
             }

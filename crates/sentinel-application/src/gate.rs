@@ -190,7 +190,10 @@ fn find_incomplete_workflow<'a>(
         // switch skill — the fallback picks the decoy and enforces fewer remaining gates.
         // "Least progressed" = most remaining required phases = strictest enforcement.
         let progress = prev_state.completed_phases.len();
-        if best.as_ref().map_or(true, |(_, _, _, best_p)| progress < *best_p) {
+        if best
+            .as_ref()
+            .map_or(true, |(_, _, _, best_p)| progress < *best_p)
+        {
             best = Some((prev_wf, prev_state, prev_skill.clone(), progress));
         }
     }

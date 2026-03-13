@@ -10,12 +10,7 @@ use sentinel_application::project_init;
 use sentinel_domain::project::StandardFile;
 
 /// Run the init command.
-pub async fn run(
-    dry_run: bool,
-    force: bool,
-    all: bool,
-    dir: Option<String>,
-) -> anyhow::Result<()> {
+pub async fn run(dry_run: bool, force: bool, all: bool, dir: Option<String>) -> anyhow::Result<()> {
     if all {
         run_batch(dry_run, force)
     } else {
@@ -66,11 +61,7 @@ fn run_single(repo: &PathBuf, dry_run: bool, force: bool) -> anyhow::Result<()> 
             eprintln!("  {} {} (exists)", "✓".green(), file);
         }
         for file in &audit.missing {
-            eprintln!(
-                "  {} {} (would create)",
-                "+".yellow(),
-                file
-            );
+            eprintln!("  {} {} (would create)", "+".yellow(), file);
         }
         eprintln!();
         eprintln!(
@@ -98,11 +89,7 @@ fn run_single(repo: &PathBuf, dry_run: bool, force: bool) -> anyhow::Result<()> 
             result.skipped.len().to_string().blue(),
         );
         if !result.errors.is_empty() {
-            eprintln!(
-                "{} {} error(s).",
-                "⚠".yellow(),
-                result.errors.len()
-            );
+            eprintln!("{} {} error(s).", "⚠".yellow(), result.errors.len());
         }
     }
 
@@ -139,11 +126,7 @@ fn run_batch(dry_run: bool, force: bool) -> anyhow::Result<()> {
             .unwrap_or_default();
 
         if audit.missing.is_empty() {
-            eprintln!(
-                "  {} {} — all files present",
-                "✓".green(),
-                dir_name
-            );
+            eprintln!("  {} {} — all files present", "✓".green(), dir_name);
             total_skipped += audit.existing.len() as u32;
             continue;
         }
@@ -164,15 +147,14 @@ fn run_batch(dry_run: bool, force: bool) -> anyhow::Result<()> {
             total_skipped += audit.existing.len() as u32;
         } else {
             let result = project_init::init_repo(repo, force);
-            let created_names: Vec<String> =
-                result.created.iter().map(|f| f.path().to_string()).collect();
+            let created_names: Vec<String> = result
+                .created
+                .iter()
+                .map(|f| f.path().to_string())
+                .collect();
 
             if result.created.is_empty() {
-                eprintln!(
-                    "  {} {} — nothing created",
-                    "–".dimmed(),
-                    dir_name,
-                );
+                eprintln!("  {} {} — nothing created", "–".dimmed(), dir_name,);
             } else {
                 eprintln!(
                     "  {} {} — created: {}",
@@ -196,22 +178,12 @@ fn run_batch(dry_run: bool, force: bool) -> anyhow::Result<()> {
     eprintln!("{}", "Summary".bold());
     eprintln!("{}", "-".repeat(30));
     eprintln!("Repos scanned:    {}", repos.len());
-    eprintln!(
-        "Repos needing work: {}",
-        repos_needing_work
-    );
+    eprintln!("Repos needing work: {}", repos_needing_work);
     let verb = if dry_run { "Would create" } else { "Created" };
-    eprintln!(
-        "{}: {}",
-        verb,
-        total_created.to_string().green()
-    );
+    eprintln!("{}: {}", verb, total_created.to_string().green());
     eprintln!("Skipped:          {}", total_skipped);
     if total_errors > 0 {
-        eprintln!(
-            "Errors:           {}",
-            total_errors.to_string().red()
-        );
+        eprintln!("Errors:           {}", total_errors.to_string().red());
     }
 
     Ok(())

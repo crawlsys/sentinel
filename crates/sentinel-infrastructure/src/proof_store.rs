@@ -61,10 +61,7 @@ fn sanitize_session_id(session_id: &str) -> Result<()> {
         .chars()
         .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
     {
-        anyhow::bail!(
-            "Session ID contains unsafe characters: '{}'",
-            session_id
-        );
+        anyhow::bail!("Session ID contains unsafe characters: '{}'", session_id);
     }
     Ok(())
 }
@@ -129,8 +126,7 @@ pub fn load_chain(session_id: &str) -> Result<Option<ProofChain>> {
         );
         return Ok(None);
     }
-    let sig = std::fs::read_to_string(&sig_path)
-        .context("Failed to read proof chain signature")?;
+    let sig = std::fs::read_to_string(&sig_path).context("Failed to read proof chain signature")?;
     if !verify_hmac(json.as_bytes(), sig.trim()) {
         eprintln!(
             "[sentinel] SECURITY: Proof chain integrity check FAILED for session '{}'. \
@@ -158,8 +154,10 @@ pub fn load_proofs(session_id: &str) -> Result<Vec<PhaseProof>> {
     let mut proofs = Vec::new();
     for line in content.lines() {
         if !line.is_empty() {
-            let proof: PhaseProof = serde_json::from_str(line)
-                .context(format!("Failed to parse proof line: {}", &line[..line.len().min(80)]))?;
+            let proof: PhaseProof = serde_json::from_str(line).context(format!(
+                "Failed to parse proof line: {}",
+                &line[..line.len().min(80)]
+            ))?;
             proofs.push(proof);
         }
     }

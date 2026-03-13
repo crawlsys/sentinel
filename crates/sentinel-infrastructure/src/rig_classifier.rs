@@ -129,11 +129,7 @@ impl RigClassifier {
         let skill = response.trim().to_lowercase();
 
         // Validate response is a single skill name or "none"
-        let skill = skill
-            .trim_matches('"')
-            .trim_matches('`')
-            .trim()
-            .to_string();
+        let skill = skill.trim_matches('"').trim_matches('`').trim().to_string();
 
         debug!(
             provider = self.provider_name,
@@ -229,7 +225,8 @@ pub fn build_skill_catalog() -> String {
                     // under the skills dir
                     match e.path().canonicalize() {
                         Ok(real) => {
-                            let skills_canonical = skills_dir.canonicalize()
+                            let skills_canonical = skills_dir
+                                .canonicalize()
                                 .unwrap_or_else(|_| skills_dir.clone());
                             real.starts_with(&skills_canonical) && real.is_dir()
                         }
@@ -289,15 +286,29 @@ fn extract_description(content: &str) -> Option<String> {
             .lines()
             .skip_while(|l| l.trim().is_empty()) // skip blank line after >
             .map(str::trim)
-            .take_while(|l| !l.is_empty() && !l.starts_with("keywords") && !l.starts_with("allowed") && !l.starts_with("version") && !l.starts_with("icon"))
+            .take_while(|l| {
+                !l.is_empty()
+                    && !l.starts_with("keywords")
+                    && !l.starts_with("allowed")
+                    && !l.starts_with("version")
+                    && !l.starts_with("icon")
+            })
             .collect();
         let desc = lines.join(" ").trim().to_string();
-        if desc.is_empty() { None } else { Some(desc) }
+        if desc.is_empty() {
+            None
+        } else {
+            Some(desc)
+        }
     } else {
         // Single line
         let line = trimmed.lines().next()?;
         let desc = line.trim().trim_matches('"').to_string();
-        if desc.is_empty() { None } else { Some(desc) }
+        if desc.is_empty() {
+            None
+        } else {
+            Some(desc)
+        }
     }
 }
 
@@ -313,7 +324,11 @@ fn extract_keywords(content: &str) -> Option<String> {
     let kw_start = frontmatter.find("keywords:")?;
     let after_kw = &frontmatter[kw_start + "keywords:".len()..];
     let line = after_kw.lines().next()?.trim();
-    if line.is_empty() { None } else { Some(line.to_string()) }
+    if line.is_empty() {
+        None
+    } else {
+        Some(line.to_string())
+    }
 }
 
 #[cfg(test)]

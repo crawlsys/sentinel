@@ -104,9 +104,7 @@ mod tests {
         let mut collection = PhaseCollectionState::new("claim", "linear");
         let input = HookInput {
             tool_name: Some("Read".to_string()),
-            tool_input: Some(
-                json!({ "file_path": "~/.claude/skills/linear/phases/claim.md" }),
-            ),
+            tool_input: Some(json!({ "file_path": "~/.claude/skills/linear/phases/claim.md" })),
             ..Default::default()
         };
         process(&input, Some(&mut collection));

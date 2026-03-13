@@ -17,8 +17,7 @@ static WRANGLER_DELETE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(wrangler-rs|wrangler).*(delete)").unwrap());
 static CONTAINERS_DELETE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"wrangler.*containers\s+delete").unwrap());
-static WRANGLER_RS: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"\bwrangler-rs\b").unwrap());
+static WRANGLER_RS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\bwrangler-rs\b").unwrap());
 static NODE_WRANGLER: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(npm/wrangler|npx wrangler|wrangler )").unwrap());
 static WRANGLER_ALLOWED: LazyLock<Regex> =

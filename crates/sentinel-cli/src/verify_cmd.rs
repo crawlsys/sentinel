@@ -24,10 +24,7 @@ pub async fn run(session: &str) -> Result<()> {
                     verification.phases_verified
                 );
             } else {
-                println!(
-                    "{} Chain verification FAILED!",
-                    "✗".red().bold()
-                );
+                println!("{} Chain verification FAILED!", "✗".red().bold());
                 for error in &verification.errors {
                     println!("  {} {error}", "•".red());
                 }

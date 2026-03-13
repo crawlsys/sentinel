@@ -4,7 +4,7 @@
 //! Routes to Cerebras (fast), OpenAI (normal), or Anthropic (critical)
 //! via the `MultiModelJudge` in infrastructure.
 
-use anyhow::{Result, bail};
+use anyhow::{bail, Result};
 
 use sentinel_domain::evidence::Evidence;
 use sentinel_domain::judge::{JudgeModel, JudgeVerdict};

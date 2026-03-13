@@ -101,24 +101,42 @@ mod tests {
 
     #[test]
     fn test_detects_marketplace_project() {
-        assert_eq!(detect_project("/home/gary/Documents/GitHub/claude-code-marketplace"), "marketplace");
+        assert_eq!(
+            detect_project("/home/gary/Documents/GitHub/claude-code-marketplace"),
+            "marketplace"
+        );
     }
 
     #[test]
     fn test_detects_firefly_project() {
-        assert_eq!(detect_project("/home/gary/Documents/GitHub/firefly-pro-crm"), "firefly-pro");
-        assert_eq!(detect_project("/home/gary/Documents/GitHub/firefly-pro-web-app"), "firefly-pro");
+        assert_eq!(
+            detect_project("/home/gary/Documents/GitHub/firefly-pro-crm"),
+            "firefly-pro"
+        );
+        assert_eq!(
+            detect_project("/home/gary/Documents/GitHub/firefly-pro-web-app"),
+            "firefly-pro"
+        );
     }
 
     #[test]
     fn test_detects_sentinel_project() {
-        assert_eq!(detect_project("/home/gary/Documents/GitHub/sentinel"), "sentinel");
-        assert_eq!(detect_project("/home/gary/Documents/GitHub/sentinel-launcher"), "sentinel");
+        assert_eq!(
+            detect_project("/home/gary/Documents/GitHub/sentinel"),
+            "sentinel"
+        );
+        assert_eq!(
+            detect_project("/home/gary/Documents/GitHub/sentinel-launcher"),
+            "sentinel"
+        );
     }
 
     #[test]
     fn test_detects_generic_project() {
-        assert_eq!(detect_project("/home/gary/Documents/GitHub/legatus"), "legatus");
+        assert_eq!(
+            detect_project("/home/gary/Documents/GitHub/legatus"),
+            "legatus"
+        );
         assert_eq!(detect_project("/home/gary/Documents/GitHub/velo"), "velo");
     }
 
@@ -130,8 +148,14 @@ mod tests {
 
     #[test]
     fn test_windows_paths() {
-        assert_eq!(detect_project("C:\\Users\\gary\\Documents\\GitHub\\sentinel"), "sentinel");
-        assert_eq!(detect_project("C:\\Users\\gary\\Documents\\GitHub\\claude-code-marketplace"), "marketplace");
+        assert_eq!(
+            detect_project("C:\\Users\\gary\\Documents\\GitHub\\sentinel"),
+            "sentinel"
+        );
+        assert_eq!(
+            detect_project("C:\\Users\\gary\\Documents\\GitHub\\claude-code-marketplace"),
+            "marketplace"
+        );
     }
 
     #[test]

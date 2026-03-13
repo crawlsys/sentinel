@@ -118,9 +118,7 @@ fn regenerate_summary(telemetry_path: &Path, summary_path: &Path) {
 
     let mut skills_by_usage: Vec<serde_json::Value> = skill_counts
         .iter()
-        .map(|(skill, count)| {
-            serde_json::json!({ "skill": skill, "count": count })
-        })
+        .map(|(skill, count)| serde_json::json!({ "skill": skill, "count": count }))
         .collect();
     skills_by_usage.sort_by(|a, b| {
         b.get("count")
@@ -131,9 +129,7 @@ fn regenerate_summary(telemetry_path: &Path, summary_path: &Path) {
 
     let mut langs_by_usage: Vec<serde_json::Value> = lang_counts
         .iter()
-        .map(|(lang, count)| {
-            serde_json::json!({ "language": lang, "count": count })
-        })
+        .map(|(lang, count)| serde_json::json!({ "language": lang, "count": count }))
         .collect();
     langs_by_usage.sort_by(|a, b| {
         b.get("count")
@@ -185,9 +181,7 @@ pub fn process(input: &HookInput) -> HookOutput {
     let run_id = read_run_id().unwrap_or_default();
     let start_time = read_start_time();
     let duration_ms = start_time
-        .map(|st| {
-            chrono::Utc::now().timestamp_millis() - st
-        })
+        .map(|st| chrono::Utc::now().timestamp_millis() - st)
         .unwrap_or(0);
 
     let language = detect_language(cwd);
@@ -211,7 +205,11 @@ pub fn process(input: &HookInput) -> HookOutput {
         .append(true)
         .open(&telemetry_file)
     {
-        let _ = writeln!(file, "{}", serde_json::to_string(&entry).unwrap_or_default());
+        let _ = writeln!(
+            file,
+            "{}",
+            serde_json::to_string(&entry).unwrap_or_default()
+        );
     }
 
     // Append completion entry to routing.jsonl if we have a run_id

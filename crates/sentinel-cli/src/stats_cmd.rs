@@ -24,19 +24,13 @@ pub async fn run() -> Result<()> {
             Ok(s) => s,
             Err(e) => {
                 corrupt_count += 1;
-                eprintln!(
-                    "  {} skipping {session_id}: {e:#}",
-                    "warning:".yellow()
-                );
+                eprintln!("  {} skipping {session_id}: {e:#}", "warning:".yellow());
                 continue;
             }
         };
         if let Some(state) = state_opt {
             println!("\n{}", format!("Session: {session_id}").cyan());
-            println!(
-                "  Hooks invoked: {}",
-                state.hook_stats.total_invocations
-            );
+            println!("  Hooks invoked: {}", state.hook_stats.total_invocations);
             println!("  Tool calls blocked: {}", state.hook_stats.total_blocked);
             println!(
                 "  Active skill: {}",
@@ -78,10 +72,7 @@ pub async fn run() -> Result<()> {
                 } else {
                     "INVALID".red()
                 };
-                println!(
-                    "  {session_id}: {} phases, {status}",
-                    chain.proofs.len()
-                );
+                println!("  {session_id}: {} phases, {status}", chain.proofs.len());
             }
         }
     }

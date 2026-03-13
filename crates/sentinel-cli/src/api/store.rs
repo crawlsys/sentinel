@@ -48,7 +48,9 @@ fn marketplace_json_path() -> PathBuf {
 
 /// Validate owner/repo format (alphanumeric, dots, hyphens, underscores only).
 fn is_valid_slug(s: &str) -> bool {
-    !s.is_empty() && s.chars().all(|c| c.is_alphanumeric() || c == '.' || c == '-' || c == '_')
+    !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_alphanumeric() || c == '.' || c == '-' || c == '_')
 }
 
 /// Clone or return cached repo directory.
@@ -202,11 +204,14 @@ async fn browse(AxumPath((owner, repo)): AxumPath<(String, String)>) -> Json<ser
                 })
                 .collect();
 
-            Json(serde_json::to_value(BrowseResponse {
-                owner,
-                repo,
-                skills: result,
-            }).unwrap_or_default())
+            Json(
+                serde_json::to_value(BrowseResponse {
+                    owner,
+                    repo,
+                    skills: result,
+                })
+                .unwrap_or_default(),
+            )
         }
         Err(e) => Json(serde_json::json!({"error": e})),
     }
@@ -230,7 +235,10 @@ async fn preview(
     match get_or_clone_repo(&owner, &repo) {
         Ok(repo_dir) => {
             let skills = discover_skills(&repo_dir);
-            match skills.iter().find(|s| s.dir_name == skill || s.name == skill) {
+            match skills
+                .iter()
+                .find(|s| s.dir_name == skill || s.name == skill)
+            {
                 Some(found) => Json(
                     serde_json::to_value(PreviewResponse {
                         name: found.name.clone(),
@@ -240,7 +248,9 @@ async fn preview(
                     })
                     .unwrap_or_default(),
                 ),
-                None => Json(serde_json::json!({"error": format!("Skill \"{skill}\" not found in {owner}/{repo}")})),
+                None => Json(
+                    serde_json::json!({"error": format!("Skill \"{skill}\" not found in {owner}/{repo}")}),
+                ),
             }
         }
         Err(e) => Json(serde_json::json!({"error": e})),
@@ -265,10 +275,15 @@ async fn install(Json(body): Json<InstallRequest>) -> Json<serde_json::Value> {
     };
 
     let skills = discover_skills(&repo_dir);
-    let found = match skills.iter().find(|s| s.dir_name == body.skill || s.name == body.skill) {
+    let found = match skills
+        .iter()
+        .find(|s| s.dir_name == body.skill || s.name == body.skill)
+    {
         Some(s) => s,
         None => {
-            return Json(serde_json::json!({"error": format!("Skill \"{}\" not found", body.skill)}))
+            return Json(
+                serde_json::json!({"error": format!("Skill \"{}\" not found", body.skill)}),
+            )
         }
     };
 
@@ -323,7 +338,9 @@ async fn install(Json(body): Json<InstallRequest>) -> Json<serde_json::Value> {
 async fn uninstall(AxumPath(name): AxumPath<String>) -> Json<serde_json::Value> {
     let dest_dir = skills_dir().join(&name);
     if !dest_dir.exists() {
-        return Json(serde_json::json!({"error": format!("Skill \"{name}\" not found in marketplace")}));
+        return Json(
+            serde_json::json!({"error": format!("Skill \"{name}\" not found in marketplace")}),
+        );
     }
 
     if let Err(e) = fs::remove_dir_all(&dest_dir) {

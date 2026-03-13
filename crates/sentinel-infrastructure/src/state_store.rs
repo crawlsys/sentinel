@@ -146,10 +146,7 @@ fn discover_key_versions() -> Vec<(u32, PathBuf)> {
 
 /// Get the current (latest) key version number.
 fn current_key_version() -> u32 {
-    discover_key_versions()
-        .last()
-        .map(|(v, _)| *v)
-        .unwrap_or(1)
+    discover_key_versions().last().map(|(v, _)| *v).unwrap_or(1)
 }
 
 /// Create a new key version. Returns the new version number.
@@ -295,7 +292,9 @@ fn validate_secret_permissions(path: &std::path::Path) {
     // programmatically requires the windows-sys crate which isn't worth
     // adding for this single check.
     #[cfg(windows)]
-    { let _ = path; }
+    {
+        let _ = path;
+    }
 }
 
 /// Derive the HMAC signing key from machine-local entropy PLUS a random secret.
@@ -344,8 +343,7 @@ pub fn verify_hmac_for_proofs(data: &[u8], sig_str: &str) -> bool {
 fn compute_hmac(data: &[u8]) -> String {
     let version = current_key_version();
     let key = derive_hmac_key();
-    let mut mac = HmacSha256::new_from_slice(&key)
-        .expect("HMAC accepts any key size");
+    let mut mac = HmacSha256::new_from_slice(&key).expect("HMAC accepts any key size");
     mac.update(data);
     let result = mac.finalize();
     let hex = to_hex(&result.into_bytes());
@@ -451,8 +449,7 @@ pub fn save(state: &mut SessionState) -> Result<()> {
     let tmp_path = dir.join(format!("{}.json.tmp", state.session_id));
 
     // Acquire exclusive lock
-    let lock_file =
-        std::fs::File::create(&lock_path).context("Failed to create lock file")?;
+    let lock_file = std::fs::File::create(&lock_path).context("Failed to create lock file")?;
     lock_file
         .lock_exclusive()
         .context("Failed to acquire state lock")?;
@@ -542,8 +539,7 @@ pub fn load(session_id: &str) -> Result<Option<SessionState>> {
     // Verify HMAC integrity
     let sig_path = state_dir().join(format!("{session_id}.json.sig"));
     if sig_path.exists() {
-        let sig = std::fs::read_to_string(&sig_path)
-            .context("Failed to read state signature")?;
+        let sig = std::fs::read_to_string(&sig_path).context("Failed to read state signature")?;
         if !verify_hmac(json.as_bytes(), sig.trim()) {
             eprintln!(
                 "[sentinel] SECURITY: State file integrity check FAILED for session '{}'. \

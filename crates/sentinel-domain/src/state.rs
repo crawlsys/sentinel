@@ -136,17 +136,13 @@ impl SessionState {
                 self.active_skill = Some(skill);
                 return;
             }
-            self.workflows.insert(
-                skill.clone(),
-                WorkflowState::new(&skill, &self.session_id),
-            );
+            self.workflows
+                .insert(skill.clone(), WorkflowState::new(&skill, &self.session_id));
         }
         // Initialize proof chain if not exists
         if !self.proof_chains.contains_key(&skill) {
-            self.proof_chains.insert(
-                skill.clone(),
-                ProofChain::new(&skill, &self.session_id),
-            );
+            self.proof_chains
+                .insert(skill.clone(), ProofChain::new(&skill, &self.session_id));
         }
         self.active_skill = Some(skill);
     }
@@ -184,7 +180,11 @@ impl SessionState {
     /// Record a hook invocation
     pub fn record_hook_invocation(&mut self, hook_id: &str, duration_ms: u64) {
         self.hook_stats.total_invocations += 1;
-        *self.hook_stats.per_hook.entry(hook_id.to_string()).or_insert(0) += 1;
+        *self
+            .hook_stats
+            .per_hook
+            .entry(hook_id.to_string())
+            .or_insert(0) += 1;
         *self
             .hook_stats
             .per_hook_time_ms
@@ -261,14 +261,12 @@ impl SessionState {
         #[cfg(target_os = "windows")]
         let canonical_path = &canonical_path.to_lowercase();
         match self.phase_file_hashes.get(canonical_path) {
-            Some(existing) if existing != content_hash => {
-                Err(format!(
-                    "Phase file content changed mid-session: '{}'. \
+            Some(existing) if existing != content_hash => Err(format!(
+                "Phase file content changed mid-session: '{}'. \
                      Original hash: {}, new hash: {}. \
                      This indicates file tampering.",
-                    canonical_path, existing, content_hash
-                ))
-            }
+                canonical_path, existing, content_hash
+            )),
             Some(_) => Ok(()), // Same hash — no change
             None => {
                 self.phase_file_hashes
@@ -373,7 +371,10 @@ mod tests {
             blocked_bash_patterns: Vec::new(),
             bash_allowlist: Vec::new(),
         };
-        state.active_workflow_mut().unwrap().advance_sequential("claim", &wf);
+        state
+            .active_workflow_mut()
+            .unwrap()
+            .advance_sequential("claim", &wf);
 
         // Setting same skill again should NOT reset the workflow
         state.set_active_skill("linear");

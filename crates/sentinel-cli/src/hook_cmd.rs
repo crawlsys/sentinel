@@ -1,9 +1,13 @@
 //! `sentinel hook` — Process hook events (thin client or standalone)
 
 use std::collections::HashMap;
+use std::io::Write;
+use std::process::{ExitStatus, Stdio};
+use std::time::Duration;
 
-use anyhow::Result;
-use tracing::debug;
+use anyhow::{Context, Result};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tracing::{debug, warn};
 
 use sentinel_application::hooks;
 use sentinel_domain::events::{HookEvent, HookOutput};
@@ -24,6 +28,28 @@ impl hooks::GitStatusPort for RealGit {
 }
 
 pub async fn run(event: &str, matcher: Option<&str>, standalone: bool) -> Result<()> {
+    if standalone {
+        return run_internal(event, matcher, standalone).await;
+    }
+
+    let start_time = std::time::Instant::now();
+    debug!(event, ?matcher, standalone, "Processing hook event");
+
+    let hook_event = parse_hook_event(event)?;
+    validate_caller();
+
+    let raw_input = sentinel_infrastructure::stdin::read_raw_stdin(Duration::from_secs(3))?;
+    run_supervised(hook_event, event, matcher, raw_input).await?;
+
+    debug!(
+        event,
+        elapsed_ms = start_time.elapsed().as_millis() as u64,
+        "Hook supervisor completed"
+    );
+    Ok(())
+}
+
+pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) -> Result<()> {
     let start_time = std::time::Instant::now();
     debug!(event, ?matcher, standalone, "Processing hook event");
 
@@ -32,18 +58,7 @@ pub async fn run(event: &str, matcher: Option<&str>, standalone: bool) -> Result
     // to Stop. Silently treating an unknown event as Stop would run Stop-phase hooks
     // (execution_log, skill_telemetry, context_monitor, etc.) which could confuse
     // state tracking. Better to error out so the issue is immediately visible.
-    let hook_event = match HookEvent::from_arg(event) {
-        Some(e) => e,
-        None => {
-            eprintln!(
-                "[sentinel] ERROR: Unknown hook event type '{}'. \
-                 Valid events: SessionStart, UserPromptSubmit, PreToolUse, PostToolUse, \
-                 Stop, PreCompact, TeammateIdle, TaskCompleted",
-                event
-            );
-            anyhow::bail!("Unknown hook event type: '{}'", event);
-        }
-    };
+    let hook_event = parse_hook_event(event)?;
 
     // **Stdin authentication**: Validate that we're being invoked by a plausible
     // caller (Claude Code / node process). This is defense-in-depth — not a hard
@@ -113,7 +128,9 @@ pub async fn run(event: &str, matcher: Option<&str>, standalone: bool) -> Result
                 hooks::skill_router::process_with_ai(
                     &input,
                     &router,
-                    classifier.as_ref().map(|c| c as &dyn sentinel_application::classifier::AiClassifier),
+                    classifier
+                        .as_ref()
+                        .map(|c| c as &dyn sentinel_application::classifier::AiClassifier),
                 ),
             )
             .await
@@ -158,7 +175,8 @@ pub async fn run(event: &str, matcher: Option<&str>, standalone: bool) -> Result
             }
 
             // Phase validator — inject phase + step progress context
-            let validator_output = hooks::phase_validator::process(&input, &state, &workflows, &step_configs);
+            let validator_output =
+                hooks::phase_validator::process(&input, &state, &workflows, &step_configs);
             output.merge(&validator_output);
 
             // Error reporter — inject Linear filing instructions for unresolved errors
@@ -373,6 +391,164 @@ pub async fn run(event: &str, matcher: Option<&str>, standalone: bool) -> Result
     Ok(())
 }
 
+fn parse_hook_event(event: &str) -> Result<HookEvent> {
+    match HookEvent::from_arg(event) {
+        Some(e) => Ok(e),
+        None => {
+            eprintln!(
+                "[sentinel] ERROR: Unknown hook event type '{}'. \
+                 Valid events: SessionStart, UserPromptSubmit, PreToolUse, PostToolUse, \
+                 Stop, PreCompact, TeammateIdle, TaskCompleted",
+                event
+            );
+            anyhow::bail!("Unknown hook event type: '{}'", event);
+        }
+    }
+}
+
+fn hook_timeout(hook_event: HookEvent) -> Duration {
+    match hook_event {
+        HookEvent::SessionStart | HookEvent::Stop | HookEvent::PreCompact => Duration::from_secs(8),
+        _ => Duration::from_secs(5),
+    }
+}
+
+async fn run_supervised(
+    hook_event: HookEvent,
+    event: &str,
+    matcher: Option<&str>,
+    raw_input: String,
+) -> Result<()> {
+    let current_exe = std::env::current_exe().context("Failed to resolve sentinel-engine path")?;
+    let mut command = tokio::process::Command::new(current_exe);
+    command
+        .arg("hook-internal")
+        .arg("--event")
+        .arg(event)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+
+    if let Some(matcher) = matcher {
+        command.arg("--matcher").arg(matcher);
+    }
+
+    let child = command.spawn().context("Failed to spawn hook worker")?;
+    let timeout = hook_timeout(hook_event);
+
+    match supervise_child(child, raw_input.into_bytes(), timeout).await? {
+        Some(output) => {
+            if !output.stderr.is_empty() {
+                std::io::stderr().write_all(&output.stderr)?;
+            }
+
+            if !output.status.success() {
+                warn!(
+                    event = %hook_event,
+                    exit_code = output.status.code().unwrap_or(-1),
+                    "Hook worker exited non-zero — returning safe allow response"
+                );
+                return write_safe_allow_response();
+            }
+
+            if output.stdout.is_empty() {
+                return write_safe_allow_response();
+            }
+
+            std::io::stdout().write_all(&output.stdout)?;
+            Ok(())
+        }
+        None => {
+            warn!(
+                event = %hook_event,
+                timeout_ms = timeout.as_millis() as u64,
+                "Hook worker timed out — returning safe allow response"
+            );
+            write_safe_allow_response()
+        }
+    }
+}
+
+struct ChildOutput {
+    status: ExitStatus,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+async fn supervise_child(
+    mut child: tokio::process::Child,
+    stdin_payload: Vec<u8>,
+    timeout: Duration,
+) -> Result<Option<ChildOutput>> {
+    let mut stdin = child.stdin.take();
+    let mut stdout = child
+        .stdout
+        .take()
+        .context("Hook worker stdout not captured")?;
+    let mut stderr = child
+        .stderr
+        .take()
+        .context("Hook worker stderr not captured")?;
+
+    let stdin_task = tokio::spawn(async move {
+        if let Some(mut stdin) = stdin.take() {
+            if !stdin_payload.is_empty() {
+                stdin.write_all(&stdin_payload).await?;
+            }
+            stdin.shutdown().await?;
+        }
+        Ok::<(), std::io::Error>(())
+    });
+
+    let stdout_task = tokio::spawn(async move {
+        let mut buffer = Vec::new();
+        stdout.read_to_end(&mut buffer).await?;
+        Ok::<Vec<u8>, std::io::Error>(buffer)
+    });
+
+    let stderr_task = tokio::spawn(async move {
+        let mut buffer = Vec::new();
+        stderr.read_to_end(&mut buffer).await?;
+        Ok::<Vec<u8>, std::io::Error>(buffer)
+    });
+
+    let wait_result = tokio::time::timeout(timeout, child.wait()).await;
+    let status = match wait_result {
+        Ok(result) => Some(result.context("Failed waiting for hook worker")?),
+        Err(_) => {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            None
+        }
+    };
+
+    stdin_task
+        .await
+        .context("Hook worker stdin task join failed")?
+        .context("Hook worker stdin write failed")?;
+
+    let stdout = stdout_task
+        .await
+        .context("Hook worker stdout task join failed")?
+        .context("Hook worker stdout read failed")?;
+
+    let stderr = stderr_task
+        .await
+        .context("Hook worker stderr task join failed")?
+        .context("Hook worker stderr read failed")?;
+
+    Ok(status.map(|status| ChildOutput {
+        status,
+        stdout,
+        stderr,
+    }))
+}
+
+fn write_safe_allow_response() -> Result<()> {
+    sentinel_infrastructure::stdout::write_hook_output(&HookOutput::allow())
+}
+
 /// Validate that the caller is plausibly Claude Code.
 ///
 /// Checks that stdin is piped (not a terminal) — hooks are always invoked via
@@ -412,6 +588,30 @@ fn extract_skill_name(context: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Stdio;
+
+    fn test_command(command_str: &str) -> tokio::process::Child {
+        #[cfg(windows)]
+        let mut cmd = {
+            let mut cmd = tokio::process::Command::new("cmd");
+            cmd.arg("/C").arg(command_str);
+            cmd
+        };
+
+        #[cfg(not(windows))]
+        let mut cmd = {
+            let mut cmd = tokio::process::Command::new("sh");
+            cmd.arg("-c").arg(command_str);
+            cmd
+        };
+
+        cmd.stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap()
+    }
 
     #[test]
     fn test_extract_skill_name() {
@@ -433,5 +633,47 @@ mod tests {
         // The clearing happens in the caller (run()) when extract_skill_name returns
         // None AND the context contains "No skill matched"
         assert!(no_match_context.contains("No skill matched"));
+    }
+
+    #[test]
+    fn test_hook_timeout_values() {
+        assert_eq!(
+            hook_timeout(HookEvent::UserPromptSubmit),
+            Duration::from_secs(5)
+        );
+        assert_eq!(hook_timeout(HookEvent::PreToolUse), Duration::from_secs(5));
+        assert_eq!(hook_timeout(HookEvent::Stop), Duration::from_secs(8));
+    }
+
+    #[tokio::test]
+    async fn test_supervise_child_returns_output_on_success() {
+        #[cfg(windows)]
+        let child = test_command("echo ok");
+
+        #[cfg(not(windows))]
+        let child = test_command("printf ok");
+
+        let output = supervise_child(child, Vec::new(), Duration::from_secs(1))
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8(output.stdout).unwrap().trim(), "ok");
+    }
+
+    #[tokio::test]
+    async fn test_supervise_child_times_out_and_kills_worker() {
+        #[cfg(windows)]
+        let child = test_command("ping -n 3 127.0.0.1 >nul");
+
+        #[cfg(not(windows))]
+        let child = test_command("sleep 2");
+
+        let output = supervise_child(child, Vec::new(), Duration::from_millis(50))
+            .await
+            .unwrap();
+
+        assert!(output.is_none());
     }
 }

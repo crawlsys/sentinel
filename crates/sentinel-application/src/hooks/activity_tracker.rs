@@ -108,16 +108,13 @@ fn extract_file_path(tool: &str, input: &serde_json::Value) -> Option<String> {
 
 /// Extract command from Bash tool input (truncated).
 fn extract_command(input: &serde_json::Value) -> Option<String> {
-    input
-        .get("command")
-        .and_then(|v| v.as_str())
-        .map(|s| {
-            if s.len() > 120 {
-                format!("{}...", &s[..120])
-            } else {
-                s.to_string()
-            }
-        })
+    input.get("command").and_then(|v| v.as_str()).map(|s| {
+        if s.len() > 120 {
+            format!("{}...", &s[..120])
+        } else {
+            s.to_string()
+        }
+    })
 }
 
 /// Extract MCP server and action from tool name like `mcp__linear__create_issue`.
@@ -168,7 +165,11 @@ pub fn process_post_tool(input: &HookInput) -> HookOutput {
 
     if let Some(path) = log_file() {
         if let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(&path) {
-            let _ = writeln!(file, "{}", serde_json::to_string(&entry).unwrap_or_default());
+            let _ = writeln!(
+                file,
+                "{}",
+                serde_json::to_string(&entry).unwrap_or_default()
+            );
         }
     }
 
@@ -226,11 +227,7 @@ pub fn process_stop(input: &HookInput) -> HookOutput {
         }
 
         if let Some(ref action) = entry.mcp_action {
-            let desc = format!(
-                "{}:{}",
-                entry.mcp_server.as_deref().unwrap_or("?"),
-                action
-            );
+            let desc = format!("{}:{}", entry.mcp_server.as_deref().unwrap_or("?"), action);
             if !mcp_actions.contains(&desc) {
                 mcp_actions.push(desc);
             }
@@ -427,10 +424,7 @@ mod tests {
     #[test]
     fn test_extract_file_path_glob() {
         let input = json!({"pattern": "**/*.rs"});
-        assert_eq!(
-            extract_file_path("Glob", &input),
-            Some("**/*.rs".into())
-        );
+        assert_eq!(extract_file_path("Glob", &input), Some("**/*.rs".into()));
     }
 
     #[test]

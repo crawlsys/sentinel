@@ -118,13 +118,10 @@ impl ProofEngine {
             let completed_at = Utc::now();
 
             let evidence_hash = PhaseProof::compute_evidence_hash(&evidence);
-            let previous_hash = state
-                .proof_chains
-                .get(skill)
-                .map_or_else(
-                    || sentinel_domain::proof::GENESIS_HASH.to_string(),
-                    |chain| chain.head_hash().to_string(),
-                );
+            let previous_hash = state.proof_chains.get(skill).map_or_else(
+                || sentinel_domain::proof::GENESIS_HASH.to_string(),
+                |chain| chain.head_hash().to_string(),
+            );
             let combined_hash =
                 PhaseProof::compute_combined_hash(phase_id, &evidence_hash, &previous_hash);
 
@@ -140,7 +137,9 @@ impl ProofEngine {
                 judge_verdict: verdict,
                 started_at,
                 completed_at,
-                duration_ms: (completed_at - started_at).num_milliseconds().unsigned_abs(),
+                duration_ms: (completed_at - started_at)
+                    .num_milliseconds()
+                    .unsigned_abs(),
             };
 
             // Add to chain

@@ -62,10 +62,7 @@ pub fn extract_metadata(repo: &Path) -> ProjectMetadata {
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_default();
         if !dir_name.is_empty() {
-            meta.repository = Some(format!(
-                "https://github.com/garysomerhalder/{}",
-                dir_name
-            ));
+            meta.repository = Some(format!("https://github.com/garysomerhalder/{}", dir_name));
         }
     }
 
@@ -122,8 +119,7 @@ fn parse_cargo_toml(content: &str, meta: &mut ProjectMetadata) {
         .cloned()
         .unwrap_or_default();
 
-    let has_vulcan = deps.contains_key("vulcan")
-        || deps.contains_key("vulcan-mcp-sdk");
+    let has_vulcan = deps.contains_key("vulcan") || deps.contains_key("vulcan-mcp-sdk");
     let has_clap = deps.contains_key("clap");
 
     meta.rust_flavor = Some(if has_vulcan {
@@ -431,10 +427,7 @@ fn gen_readme(meta: &ProjectMetadata) -> String {
             .iter()
             .map(|m| format!("- `{}`", m))
             .collect();
-        format!(
-            "\n## Workspace Members\n\n{}\n",
-            members.join("\n")
-        )
+        format!("\n## Workspace Members\n\n{}\n", members.join("\n"))
     } else {
         String::new()
     };
@@ -655,10 +648,7 @@ SOFTWARE.
 }
 
 fn gen_building_md(meta: &ProjectMetadata) -> String {
-    let rust_version = meta
-        .rust_version
-        .as_deref()
-        .unwrap_or("1.87+");
+    let rust_version = meta.rust_version.as_deref().unwrap_or("1.87+");
 
     let path_deps_note = if meta.path_dependencies.is_empty() {
         String::new()
@@ -881,7 +871,11 @@ clap = { version = "4", features = ["derive"] }
     #[test]
     fn test_audit_all_missing() {
         let dir = tempfile::tempdir().unwrap();
-        fs::write(dir.path().join("Cargo.toml"), "[package]\nname = \"test\"\nversion = \"0.1.0\"\n").unwrap();
+        fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname = \"test\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
 
         let result = audit(dir.path());
         assert!(result.missing.contains(&StandardFile::Readme));
@@ -893,7 +887,11 @@ clap = { version = "4", features = ["derive"] }
     #[test]
     fn test_audit_some_existing() {
         let dir = tempfile::tempdir().unwrap();
-        fs::write(dir.path().join("Cargo.toml"), "[package]\nname = \"test\"\nversion = \"0.1.0\"\n").unwrap();
+        fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname = \"test\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
         fs::write(dir.path().join("README.md"), "# Test").unwrap();
         fs::write(dir.path().join("LICENSE"), "MIT").unwrap();
 
@@ -927,13 +925,22 @@ clap = { version = "4", features = ["derive"] }
         assert!(dir.path().join(".gitattributes").exists());
         assert!(dir.path().join(".gitignore").exists());
         assert!(dir.path().join("rustfmt.toml").exists());
-        assert!(dir.path().join("docs").join("adr").join(".gitkeep").exists());
+        assert!(dir
+            .path()
+            .join("docs")
+            .join("adr")
+            .join(".gitkeep")
+            .exists());
     }
 
     #[test]
     fn test_init_skips_existing() {
         let dir = tempfile::tempdir().unwrap();
-        fs::write(dir.path().join("Cargo.toml"), "[package]\nname = \"test\"\nversion = \"0.1.0\"\n").unwrap();
+        fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname = \"test\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
         fs::write(dir.path().join("README.md"), "# My Custom README").unwrap();
 
         let result = init_repo(dir.path(), false);
@@ -948,7 +955,11 @@ clap = { version = "4", features = ["derive"] }
     #[test]
     fn test_init_force_overwrites() {
         let dir = tempfile::tempdir().unwrap();
-        fs::write(dir.path().join("Cargo.toml"), "[package]\nname = \"test\"\nversion = \"0.1.0\"\n").unwrap();
+        fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname = \"test\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
         fs::write(dir.path().join("README.md"), "old content").unwrap();
 
         let result = init_repo(dir.path(), true);
@@ -1053,11 +1064,41 @@ clap = { version = "4", features = ["derive"] }
     fn test_docs_dir_creation() {
         let dir = tempfile::tempdir().unwrap();
         create_docs_dir(dir.path()).unwrap();
-        assert!(dir.path().join("docs").join("adr").join(".gitkeep").exists());
-        assert!(dir.path().join("docs").join("architecture").join(".gitkeep").exists());
-        assert!(dir.path().join("docs").join("guides").join(".gitkeep").exists());
-        assert!(dir.path().join("docs").join("runbooks").join(".gitkeep").exists());
-        assert!(dir.path().join("docs").join("testing").join(".gitkeep").exists());
-        assert!(dir.path().join("docs").join("archive").join(".gitkeep").exists());
+        assert!(dir
+            .path()
+            .join("docs")
+            .join("adr")
+            .join(".gitkeep")
+            .exists());
+        assert!(dir
+            .path()
+            .join("docs")
+            .join("architecture")
+            .join(".gitkeep")
+            .exists());
+        assert!(dir
+            .path()
+            .join("docs")
+            .join("guides")
+            .join(".gitkeep")
+            .exists());
+        assert!(dir
+            .path()
+            .join("docs")
+            .join("runbooks")
+            .join(".gitkeep")
+            .exists());
+        assert!(dir
+            .path()
+            .join("docs")
+            .join("testing")
+            .join(".gitkeep")
+            .exists());
+        assert!(dir
+            .path()
+            .join("docs")
+            .join("archive")
+            .join(".gitkeep")
+            .exists());
     }
 }

@@ -11,11 +11,11 @@ use chrono::Utc;
 use tokio::sync::RwLock;
 use tracing::{info, warn};
 use vulcan::{
-    ErrorData, ServerHandler, ServiceExt,
     handler::server::tool::ToolRouter,
-    model::{ServerInfo, ProtocolVersion, ServerCapabilities, Implementation},
+    model::{Implementation, ProtocolVersion, ServerCapabilities, ServerInfo},
     tool, tool_handler, tool_router,
     transport::stdio,
+    ErrorData, ServerHandler, ServiceExt,
 };
 
 use sentinel_application::hooks::session_init;
@@ -43,13 +43,14 @@ impl SentinelMcp {
             .or_else(|_| std::env::var("CLAUDE_SESSION_ID"))
             .unwrap_or_else(|_| format!("mcp-{}", Utc::now().timestamp()));
 
-        let state = if let Ok(Some(existing)) = sentinel_infrastructure::state_store::load(&session_id) {
-            info!(session_id = %session_id, "Loaded existing session state");
-            Arc::new(RwLock::new(existing))
-        } else {
-            info!(session_id = %session_id, "Creating new session state");
-            Arc::new(RwLock::new(SessionState::new(&session_id)))
-        };
+        let state =
+            if let Ok(Some(existing)) = sentinel_infrastructure::state_store::load(&session_id) {
+                info!(session_id = %session_id, "Loaded existing session state");
+                Arc::new(RwLock::new(existing))
+            } else {
+                info!(session_id = %session_id, "Creating new session state");
+                Arc::new(RwLock::new(SessionState::new(&session_id)))
+            };
 
         let judge: Arc<dyn JudgeService> = {
             let multi = sentinel_infrastructure::rig_judge::MultiModelJudge::from_env();
@@ -79,7 +80,9 @@ impl SentinelMcp {
 impl SentinelMcp {
     /// Get the cryptographic proof chain for a skill execution.
     /// Returns all phase proofs with tessera hashes, evidence, and judge verdicts.
-    #[tool(description = "Get the cryptographic proof chain for a skill execution. Returns all phase proofs with tessera hashes, evidence, and judge verdicts.")]
+    #[tool(
+        description = "Get the cryptographic proof chain for a skill execution. Returns all phase proofs with tessera hashes, evidence, and judge verdicts."
+    )]
     async fn get_proof_chain(&self, skill: String) -> Result<String, ErrorData> {
         let state = self.state.read().await;
         match state.proof_chains.get(&skill) {
@@ -94,7 +97,9 @@ impl SentinelMcp {
 
     /// Get the current workflow state for a skill.
     /// Shows which phases are completed, current phase, and what's next.
-    #[tool(description = "Get the current workflow state for a skill. Shows which phases are completed, current phase, and what's next.")]
+    #[tool(
+        description = "Get the current workflow state for a skill. Shows which phases are completed, current phase, and what's next."
+    )]
     async fn get_workflow_status(&self, skill: String) -> Result<String, ErrorData> {
         let state = self.state.read().await;
         match state.workflows.get(&skill) {
@@ -109,7 +114,9 @@ impl SentinelMcp {
 
     /// Re-verify the integrity of a skill's proof chain.
     /// Checks all hashes are consistent and no tampering has occurred.
-    #[tool(description = "Re-verify the integrity of a skill's proof chain. Checks all hashes are consistent and no tampering has occurred.")]
+    #[tool(
+        description = "Re-verify the integrity of a skill's proof chain. Checks all hashes are consistent and no tampering has occurred."
+    )]
     async fn verify_chain(&self, skill: String) -> Result<String, ErrorData> {
         match self.proof_engine.verify_chain(&skill).await {
             Ok(verification) => serde_json::to_string_pretty(&verification)
@@ -123,7 +130,9 @@ impl SentinelMcp {
 
     /// Notify sentinel that a skill phase has been completed.
     /// Sentinel will evaluate the evidence and add a proof to the chain if sufficient.
-    #[tool(description = "Notify sentinel that a skill phase has been completed. Sentinel will evaluate the evidence and add a proof to the chain if sufficient.")]
+    #[tool(
+        description = "Notify sentinel that a skill phase has been completed. Sentinel will evaluate the evidence and add a proof to the chain if sufficient."
+    )]
     async fn submit_phase_complete(
         &self,
         skill: String,
@@ -139,7 +148,10 @@ impl SentinelMcp {
         // phases_read entries that pollute state without advancing any workflow.
         if !workflow_configs.contains_key(&skill) {
             return Err(ErrorData::invalid_params(
-                format!("No workflow definition for skill '{}'. Cannot submit evidence.", skill),
+                format!(
+                    "No workflow definition for skill '{}'. Cannot submit evidence.",
+                    skill
+                ),
                 None,
             ));
         }
@@ -195,7 +207,15 @@ impl SentinelMcp {
         let started_at = Utc::now() - chrono::Duration::seconds(1);
         let proof_result = self
             .proof_engine
-            .submit_evidence(&skill, &phase_id, &phase_objectives, evidence, judge_model, started_at, workflow_configs.get(&skill))
+            .submit_evidence(
+                &skill,
+                &phase_id,
+                &phase_objectives,
+                evidence,
+                judge_model,
+                started_at,
+                workflow_configs.get(&skill),
+            )
             .await;
 
         // Persist state to disk regardless of outcome
@@ -234,8 +254,9 @@ impl SentinelMcp {
                     "completed_phases": completed,
                 });
 
-                serde_json::to_string_pretty(&result)
-                    .map_err(|e| ErrorData::internal_error(format!("Serialization error: {e}"), None))
+                serde_json::to_string_pretty(&result).map_err(|e| {
+                    ErrorData::internal_error(format!("Serialization error: {e}"), None)
+                })
             }
             Err(_) => {
                 // BLOCKED — Claude sees generic error, NOT the judge's reasoning.
@@ -254,7 +275,9 @@ impl SentinelMcp {
 
     /// Get execution statistics for the current session.
     /// Returns hook invocations, blocked calls, and per-hook timing.
-    #[tool(description = "Get execution statistics for the current session — hook invocations, blocked calls, per-hook timing.")]
+    #[tool(
+        description = "Get execution statistics for the current session — hook invocations, blocked calls, per-hook timing."
+    )]
     async fn get_session_stats(&self) -> Result<String, ErrorData> {
         let s = self.state.read().await;
         let stats = serde_json::json!({
@@ -273,7 +296,9 @@ impl SentinelMcp {
 
     /// Update a step's status within a skill phase.
     /// Call this as you complete each step in a workflow phase.
-    #[tool(description = "Update a step's status within a skill phase. Call this as you complete each step in a workflow phase.")]
+    #[tool(
+        description = "Update a step's status within a skill phase. Call this as you complete each step in a workflow phase."
+    )]
     async fn update_step(
         &self,
         skill: String,
@@ -283,10 +308,12 @@ impl SentinelMcp {
         summary: Option<String>,
     ) -> Result<String, ErrorData> {
         // Parse status
-        let step_status: StepStatus = serde_json::from_value(serde_json::json!(status))
-            .map_err(|_| {
+        let step_status: StepStatus =
+            serde_json::from_value(serde_json::json!(status)).map_err(|_| {
                 ErrorData::invalid_params(
-                    format!("Invalid status '{status}'. Use: completed, skipped, blocked, in_progress"),
+                    format!(
+                        "Invalid status '{status}'. Use: completed, skipped, blocked, in_progress"
+                    ),
                     None,
                 )
             })?;
@@ -317,10 +344,10 @@ impl SentinelMcp {
 
         let overall_progress = steps_config.as_ref().map(|sc| {
             let total = sc.total_steps();
-            let completed = s
-                .workflows
-                .get(&skill)
-                .map_or(0, sentinel_domain::workflow::WorkflowState::total_steps_completed);
+            let completed = s.workflows.get(&skill).map_or(
+                0,
+                sentinel_domain::workflow::WorkflowState::total_steps_completed,
+            );
             format!("{completed}/{total} steps")
         });
 
@@ -346,12 +373,10 @@ impl SentinelMcp {
 
     /// Get all steps and their status for a specific phase.
     /// Shows step descriptions from config and current execution status.
-    #[tool(description = "Get all steps and their status for a specific phase. Shows step descriptions from config and current execution status.")]
-    async fn get_phase_steps(
-        &self,
-        skill: String,
-        phase_id: String,
-    ) -> Result<String, ErrorData> {
+    #[tool(
+        description = "Get all steps and their status for a specific phase. Shows step descriptions from config and current execution status."
+    )]
+    async fn get_phase_steps(&self, skill: String, phase_id: String) -> Result<String, ErrorData> {
         let s = self.state.read().await;
         let steps_config = load_steps_config(&skill);
 
@@ -360,17 +385,13 @@ impl SentinelMcp {
         if let Some(ref sc) = steps_config {
             if let Some(phase_steps) = sc.phase_steps(&phase_id) {
                 for step_def in &phase_steps.steps {
-                    let step_state = s
-                        .workflows
-                        .get(&skill)
-                        .and_then(|wf| {
-                            wf.step_states
-                                .iter()
-                                .find(|ss| ss.step_id == step_def.id && ss.phase_id == phase_id)
-                        });
+                    let step_state = s.workflows.get(&skill).and_then(|wf| {
+                        wf.step_states
+                            .iter()
+                            .find(|ss| ss.step_id == step_def.id && ss.phase_id == phase_id)
+                    });
 
-                    let status = step_state
-                        .map_or(StepStatus::Pending, |ss| ss.status.clone());
+                    let status = step_state.map_or(StepStatus::Pending, |ss| ss.status.clone());
                     let summary = step_state.and_then(|ss| ss.summary.clone());
 
                     let mut entry = serde_json::json!({
@@ -426,11 +447,14 @@ impl SentinelMcp {
     /// Re-counts all marketplace components (skills, MCP servers, CLIs, hooks, agents, commands),
     /// refreshes project configs and Linear accounts, updates the date, and writes a fresh file.
     /// Call this after changing marketplace components, or to fix a stale/broken CLAUDE.md.
-    #[tool(description = "Regenerate ~/.claude/CLAUDE.md from the template. Re-counts all marketplace components, refreshes project configs and Linear accounts, updates date, and writes a fresh file. Call after changing marketplace components or to fix stale CLAUDE.md.")]
+    #[tool(
+        description = "Regenerate ~/.claude/CLAUDE.md from the template. Re-counts all marketplace components, refreshes project configs and Linear accounts, updates date, and writes a fresh file. Call after changing marketplace components or to fix stale CLAUDE.md."
+    )]
     async fn regenerate_claude_md(&self) -> Result<String, ErrorData> {
         let path = session_init::regenerate_global_claude_md();
-        let metadata = std::fs::metadata(&path)
-            .map_err(|e| ErrorData::internal_error(format!("Failed to stat {}: {e}", path.display()), None))?;
+        let metadata = std::fs::metadata(&path).map_err(|e| {
+            ErrorData::internal_error(format!("Failed to stat {}: {e}", path.display()), None)
+        })?;
         let size = metadata.len();
         let result = serde_json::json!({
             "status": "regenerated",
@@ -445,18 +469,24 @@ impl SentinelMcp {
     /// then regenerate ~/.claude/CLAUDE.md from the updated template.
     /// Use this to fix wrong or stale text in the generated CLAUDE.md.
     /// The change persists — every future session will use the updated template.
-    #[tool(description = "Edit the CLAUDE.md generator template with find-and-replace, then regenerate. Use to fix wrong/stale text. Provide old_text (exact match in template) and new_text (replacement). Change persists across sessions.")]
+    #[tool(
+        description = "Edit the CLAUDE.md generator template with find-and-replace, then regenerate. Use to fix wrong/stale text. Provide old_text (exact match in template) and new_text (replacement). Change persists across sessions."
+    )]
     async fn edit_claude_md_template(
         &self,
         old_text: String,
         new_text: String,
     ) -> Result<String, ErrorData> {
         let template_path = session_init::template_source_path();
-        let content = std::fs::read_to_string(&template_path)
-            .map_err(|e| ErrorData::internal_error(
-                format!("Failed to read template at {}: {e}", template_path.display()),
+        let content = std::fs::read_to_string(&template_path).map_err(|e| {
+            ErrorData::internal_error(
+                format!(
+                    "Failed to read template at {}: {e}",
+                    template_path.display()
+                ),
                 None,
-            ))?;
+            )
+        })?;
 
         if !content.contains(&old_text) {
             return Err(ErrorData::invalid_params(
@@ -466,11 +496,9 @@ impl SentinelMcp {
         }
 
         let updated = content.replacen(&old_text, &new_text, 1);
-        std::fs::write(&template_path, &updated)
-            .map_err(|e| ErrorData::internal_error(
-                format!("Failed to write template: {e}"),
-                None,
-            ))?;
+        std::fs::write(&template_path, &updated).map_err(|e| {
+            ErrorData::internal_error(format!("Failed to write template: {e}"), None)
+        })?;
 
         // Regenerate from the updated template
         let claude_md_path = session_init::regenerate_global_claude_md();
@@ -491,19 +519,24 @@ impl SentinelMcp {
     /// Restart all MCP servers by touching their watched binary files.
     /// Reads ~/.claude.json, finds all mcp-router entries with --watch paths,
     /// and touches each binary to trigger mcp-router's file watcher auto-restart.
-    #[tool(description = "Restart all MCP servers at once. Reads ~/.claude.json, finds all mcp-router --watch paths, and touches each binary to trigger auto-restart via mcp-router's file watcher.")]
+    #[tool(
+        description = "Restart all MCP servers at once. Reads ~/.claude.json, finds all mcp-router --watch paths, and touches each binary to trigger auto-restart via mcp-router's file watcher."
+    )]
     async fn restart_all_mcps(&self) -> Result<String, ErrorData> {
         let home = std::env::var("USERPROFILE")
             .or_else(|_| std::env::var("HOME"))
             .map(std::path::PathBuf::from)
             .map_err(|_| ErrorData::internal_error("Cannot determine home directory", None))?;
         let claude_json_path = home.join(".claude.json");
-        let content = std::fs::read_to_string(&claude_json_path)
-            .map_err(|e| ErrorData::internal_error(format!("Failed to read ~/.claude.json: {e}"), None))?;
-        let json: serde_json::Value = serde_json::from_str(&content)
-            .map_err(|e| ErrorData::internal_error(format!("Failed to parse ~/.claude.json: {e}"), None))?;
+        let content = std::fs::read_to_string(&claude_json_path).map_err(|e| {
+            ErrorData::internal_error(format!("Failed to read ~/.claude.json: {e}"), None)
+        })?;
+        let json: serde_json::Value = serde_json::from_str(&content).map_err(|e| {
+            ErrorData::internal_error(format!("Failed to parse ~/.claude.json: {e}"), None)
+        })?;
 
-        let servers = json.get("mcpServers")
+        let servers = json
+            .get("mcpServers")
             .and_then(|s| s.as_object())
             .ok_or_else(|| ErrorData::internal_error("No mcpServers in ~/.claude.json", None))?;
 
@@ -518,7 +551,8 @@ impl SentinelMcp {
                 continue;
             }
 
-            let args = config.get("args")
+            let args = config
+                .get("args")
                 .and_then(|a| a.as_array())
                 .map(|a| a.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>())
                 .unwrap_or_default();
@@ -530,10 +564,12 @@ impl SentinelMcp {
             }
 
             // Find --watch path, fall back to --single path
-            let watch_path = args.windows(2)
+            let watch_path = args
+                .windows(2)
                 .find(|w| w[0] == "--watch")
                 .map(|w| w[1].to_string());
-            let single_path = args.windows(2)
+            let single_path = args
+                .windows(2)
                 .find(|w| w[0] == "--single")
                 .map(|w| w[1].to_string());
             let target_path = watch_path.or(single_path);
@@ -543,10 +579,7 @@ impl SentinelMcp {
                     let p = std::path::Path::new(&path);
                     if p.exists() {
                         // Touch the file to trigger mcp-router's file watcher
-                        match std::fs::OpenOptions::new()
-                            .append(true)
-                            .open(p)
-                        {
+                        match std::fs::OpenOptions::new().append(true).open(p) {
                             Ok(_) => restarted.push(name.clone()),
                             Err(e) => failed.push(format!("{name}: {e}")),
                         }
@@ -570,7 +603,9 @@ impl SentinelMcp {
 
     /// Get full hierarchical progress for a skill workflow.
     /// Shows phase-level and step-level completion across the entire workflow.
-    #[tool(description = "Get full hierarchical progress for a skill workflow. Shows phase-level and step-level completion across the entire workflow.")]
+    #[tool(
+        description = "Get full hierarchical progress for a skill workflow. Shows phase-level and step-level completion across the entire workflow."
+    )]
     async fn get_workflow_progress(&self, skill: String) -> Result<String, ErrorData> {
         let s = self.state.read().await;
         let steps_config = load_steps_config(&skill);
@@ -584,37 +619,31 @@ impl SentinelMcp {
 
         if let Some(workflow) = workflow_configs.get(&skill) {
             for phase in &workflow.phases {
-                let phase_status = if wf_state
-                    .is_some_and(|w| w.is_phase_complete(&phase.id))
-                {
+                let phase_status = if wf_state.is_some_and(|w| w.is_phase_complete(&phase.id)) {
                     "completed"
-                } else if wf_state
-                    .is_some_and(|w| {
-                        w.current_phase.is_some()
-                            && !w.completed_phases.contains(&phase.id)
-                            && w.completed_phases.len()
-                                == workflow
-                                    .phases
-                                    .iter()
-                                    .position(|p| p.id == phase.id)
-                                    .unwrap_or(0)
-                    })
-                {
+                } else if wf_state.is_some_and(|w| {
+                    w.current_phase.is_some()
+                        && !w.completed_phases.contains(&phase.id)
+                        && w.completed_phases.len()
+                            == workflow
+                                .phases
+                                .iter()
+                                .position(|p| p.id == phase.id)
+                                .unwrap_or(0)
+                }) {
                     "in_progress"
                 } else {
                     "pending"
                 };
 
-                let steps_completed = wf_state
-                    .map_or(0, |w| w.phase_steps_completed(&phase.id));
+                let steps_completed = wf_state.map_or(0, |w| w.phase_steps_completed(&phase.id));
 
                 let steps_total = steps_config
                     .as_ref()
                     .and_then(|sc| sc.phase_steps(&phase.id))
                     .map(|ps| ps.steps.len())
                     .unwrap_or_else(|| {
-                        wf_state
-                            .map_or(0, |w| w.phase_step_states(&phase.id).len())
+                        wf_state.map_or(0, |w| w.phase_step_states(&phase.id).len())
                     });
 
                 overall_completed += steps_completed;
@@ -630,8 +659,7 @@ impl SentinelMcp {
                                     .find(|ss| ss.step_id == step_def.id && ss.phase_id == phase.id)
                             });
 
-                            let st = step_state
-                                .map_or(StepStatus::Pending, |ss| ss.status.clone());
+                            let st = step_state.map_or(StepStatus::Pending, |ss| ss.status.clone());
 
                             step_details.push(serde_json::json!({
                                 "id": step_def.id,
@@ -718,9 +746,7 @@ impl ServerHandler for SentinelMcp {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
             protocol_version: ProtocolVersion::V_2024_11_05,
-            capabilities: ServerCapabilities::builder()
-                .enable_tools()
-                .build(),
+            capabilities: ServerCapabilities::builder().enable_tools().build(),
             server_info: Implementation {
                 name: "sentinel-mcp".to_string(),
                 version: env!("CARGO_PKG_VERSION").to_string(),

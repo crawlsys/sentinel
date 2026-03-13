@@ -186,9 +186,9 @@ pub fn process(input: &HookInput) -> HookOutput {
 
         // Match against existing by content to preserve IDs
         let existing_match = existing.iter().find(|t| t.content == content);
-        let id = existing_match
-            .map(|t| t.id.clone())
-            .unwrap_or_else(|| format!("todo_{}_{}", Utc::now().timestamp_millis(), &proj_hash[..4]));
+        let id = existing_match.map(|t| t.id.clone()).unwrap_or_else(|| {
+            format!("todo_{}_{}", Utc::now().timestamp_millis(), &proj_hash[..4])
+        });
         let created_at = existing_match
             .map(|t| t.created_at.clone())
             .unwrap_or_else(|| timestamp.clone());

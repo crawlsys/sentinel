@@ -56,6 +56,22 @@ enum Commands {
         standalone: bool,
     },
 
+    /// Internal hook worker invoked by `sentinel hook`
+    #[command(hide = true)]
+    HookInternal {
+        /// Hook event type
+        #[arg(long)]
+        event: String,
+
+        /// Tool name matcher (for PreToolUse/PostToolUse)
+        #[arg(long)]
+        matcher: Option<String>,
+
+        /// Preserve the old direct execution path for debugging
+        #[arg(long)]
+        standalone: bool,
+    },
+
     /// Verify a session's proof chain
     Verify {
         /// Session ID to verify
@@ -170,6 +186,11 @@ async fn main() -> anyhow::Result<()> {
             matcher,
             standalone,
         } => hook_cmd::run(&event, matcher.as_deref(), standalone).await,
+        Commands::HookInternal {
+            event,
+            matcher,
+            standalone,
+        } => hook_cmd::run_internal(&event, matcher.as_deref(), standalone).await,
         Commands::Verify { session } => verify_cmd::run(&session).await,
         Commands::Mcp => mcp_cmd::run().await,
         Commands::Scan {

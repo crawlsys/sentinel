@@ -171,10 +171,7 @@ fn read_session_state(session_id: &str) -> (Option<String>, Vec<String>, u64) {
         })
         .unwrap_or_default();
 
-    let tool_calls = val
-        .get("tool_calls")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0);
+    let tool_calls = val.get("tool_calls").and_then(|v| v.as_u64()).unwrap_or(0);
 
     (active_skill, phases_read, tool_calls)
 }
@@ -214,7 +211,10 @@ pub fn process(input: &HookInput) -> HookOutput {
     };
 
     if let Some(path) = snapshot_file() {
-        let _ = fs::write(&path, serde_json::to_string_pretty(&snapshot).unwrap_or_default());
+        let _ = fs::write(
+            &path,
+            serde_json::to_string_pretty(&snapshot).unwrap_or_default(),
+        );
     }
 
     tracing::info!(

@@ -221,7 +221,11 @@ impl WorkflowState {
         }
 
         // Find this phase's position in the workflow
-        let target_idx = match workflow.phases.iter().position(|p| p.id == completed_phase_id) {
+        let target_idx = match workflow
+            .phases
+            .iter()
+            .position(|p| p.id == completed_phase_id)
+        {
             Some(idx) => idx,
             None => return false, // Unknown phase
         };
@@ -239,8 +243,7 @@ impl WorkflowState {
             }
         }
 
-        self.completed_phases
-            .push(completed_phase_id.to_string());
+        self.completed_phases.push(completed_phase_id.to_string());
         self.current_phase = Some(self.completed_phases.len());
 
         // **Attack #139 fix**: Set the `complete` flag when all required phases
@@ -276,11 +279,7 @@ impl WorkflowState {
 
     /// Check if a tool call should be blocked based on workflow state
     #[must_use]
-    pub fn should_block(
-        &self,
-        workflow: &SkillWorkflow,
-        tool_name: &str,
-    ) -> Option<WorkflowBlock> {
+    pub fn should_block(&self, workflow: &SkillWorkflow, tool_name: &str) -> Option<WorkflowBlock> {
         // Never block read-only or meta tools
         // **Attack #69 fix**: Removed "Task" and "Agent" from safe tools.
         // These spawn sub-agents that can execute ANY tool (Bash, Write, MCP)
@@ -305,9 +304,19 @@ impl WorkflowState {
         //   TaskCreate/TaskUpdate/TaskList/TaskGet/TaskOutput — task management metadata
         //   ToolSearch — schema fetcher, read-only
         let safe_tools = [
-            "Read", "Glob", "Grep", "WebSearch", "WebFetch",
-            "AskUserQuestion", "EnterPlanMode", "ExitPlanMode", "TaskCreate",
-            "TaskUpdate", "TaskList", "TaskGet", "TaskOutput",
+            "Read",
+            "Glob",
+            "Grep",
+            "WebSearch",
+            "WebFetch",
+            "AskUserQuestion",
+            "EnterPlanMode",
+            "ExitPlanMode",
+            "TaskCreate",
+            "TaskUpdate",
+            "TaskList",
+            "TaskGet",
+            "TaskOutput",
             "ToolSearch",
         ];
         if safe_tools.contains(&tool_name) {
@@ -375,9 +384,7 @@ impl WorkflowState {
             return Some(WorkflowBlock {
                 reason: format!(
                     "Workflow '{}': {} phase(s) skipped. Next required: '{}'",
-                    workflow.skill,
-                    gap,
-                    next.id
+                    workflow.skill, gap, next.id
                 ),
                 next_phase: next.id.clone(),
                 next_phase_file: next.file.clone(),

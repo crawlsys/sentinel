@@ -151,7 +151,9 @@ async fn logs(Query(params): Query<LogsQuery>) -> Json<LogsResponse> {
             }
             if let Some(ref search) = params.search {
                 let search_lower = search.to_lowercase();
-                let json_str = serde_json::to_string(&e.data).unwrap_or_default().to_lowercase();
+                let json_str = serde_json::to_string(&e.data)
+                    .unwrap_or_default()
+                    .to_lowercase();
                 if !json_str.contains(&search_lower) {
                     return false;
                 }

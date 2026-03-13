@@ -34,7 +34,8 @@ pub fn process(
     let total = workflow.phases.len();
     // **Attack #76 fix**: Use per-skill count, not global. Cross-skill reads
     // inflated the counter, misleading Claude into thinking more phases were done.
-    let loaded = state.phases_read
+    let loaded = state
+        .phases_read
         .get(skill_name)
         .map(|v| v.len())
         .unwrap_or(0);
@@ -133,9 +134,7 @@ fn format_step_progress(
         })
         .or_else(|| {
             // Fall back to the next incomplete required phase
-            wf_state
-                .next_required_phase(workflow)
-                .map(|p| p.id.clone())
+            wf_state.next_required_phase(workflow).map(|p| p.id.clone())
         });
 
     let pct = if total_steps > 0 {
@@ -257,16 +256,36 @@ mod tests {
                 PhaseSteps {
                     phase_id: "claim".to_string(),
                     steps: vec![
-                        WorkflowStep { id: "0.1".to_string(), description: "Look up started state".to_string(), blocker: false },
-                        WorkflowStep { id: "0.2".to_string(), description: "Get current user".to_string(), blocker: false },
-                        WorkflowStep { id: "0.3".to_string(), description: "Set In Progress".to_string(), blocker: true },
+                        WorkflowStep {
+                            id: "0.1".to_string(),
+                            description: "Look up started state".to_string(),
+                            blocker: false,
+                        },
+                        WorkflowStep {
+                            id: "0.2".to_string(),
+                            description: "Get current user".to_string(),
+                            blocker: false,
+                        },
+                        WorkflowStep {
+                            id: "0.3".to_string(),
+                            description: "Set In Progress".to_string(),
+                            blocker: true,
+                        },
                     ],
                 },
                 PhaseSteps {
                     phase_id: "fetch".to_string(),
                     steps: vec![
-                        WorkflowStep { id: "1.1".to_string(), description: "Get issue".to_string(), blocker: false },
-                        WorkflowStep { id: "1.2".to_string(), description: "Get comments".to_string(), blocker: false },
+                        WorkflowStep {
+                            id: "1.1".to_string(),
+                            description: "Get issue".to_string(),
+                            blocker: false,
+                        },
+                        WorkflowStep {
+                            id: "1.2".to_string(),
+                            description: "Get comments".to_string(),
+                            blocker: false,
+                        },
                     ],
                 },
             ],
@@ -365,7 +384,12 @@ mod tests {
 
         // Update some steps in the workflow state
         if let Some(wf) = state.active_workflow_mut() {
-            wf.update_step("claim", "0.1", StepStatus::Completed, Some("Found state ID".to_string()));
+            wf.update_step(
+                "claim",
+                "0.1",
+                StepStatus::Completed,
+                Some("Found state ID".to_string()),
+            );
             wf.update_step("claim", "0.2", StepStatus::InProgress, None);
         }
 
