@@ -445,14 +445,11 @@ pub fn save(state: &mut SessionState) -> Result<()> {
 
     let path = dir.join(format!("{}.json", state.session_id));
     let sig_path = dir.join(format!("{}.json.sig", state.session_id));
-    let lock_path = dir.join(format!("{}.json.lock", state.session_id));
     let tmp_path = dir.join(format!("{}.json.tmp", state.session_id));
 
-    // Acquire exclusive lock
-    let lock_file = std::fs::File::create(&lock_path).context("Failed to create lock file")?;
-    lock_file
-        .lock_exclusive()
-        .context("Failed to acquire state lock")?;
+    // NOTE: No lock acquired here — the caller (hook_cmd) already holds the
+    // session lock via acquire_session_lock(). Taking a second exclusive lock
+    // on the same file deadlocks on Windows (per-handle, not re-entrant).
 
     let json = serde_json::to_string_pretty(state)?;
 
@@ -470,10 +467,6 @@ pub fn save(state: &mut SessionState) -> Result<()> {
 
     std::fs::write(&tmp_path, &json).context("Failed to write temp state file")?;
     std::fs::rename(&tmp_path, &path).context("Failed to rename temp state file")?;
-
-    // Lock released on drop
-    drop(lock_file);
-    let _ = std::fs::remove_file(&lock_path);
 
     Ok(())
 }
