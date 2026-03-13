@@ -118,6 +118,7 @@ impl RigProvider {
 
         serde_json::from_str::<JudgeVerdict>(&text)
             .or_else(|_| extract_json_from_markdown(&text))
+            .map(|v| v.sanitized()) // Attack #127: clamp confidence to [0.0, 1.0]
             .context("Failed to parse judge verdict JSON")
     }
 }
@@ -148,6 +149,16 @@ impl MultiModelJudge {
         .flatten()
         .collect();
 
+        // **Attack #125 fix**: Warn loudly if no AI providers are available.
+        // Without any provider, all proof submissions will fail. This is fail-safe
+        // (phases can't be proven → tools stay blocked), but the user should know.
+        if providers.is_empty() {
+            eprintln!(
+                "[sentinel] WARNING: No AI judge providers available. \
+                 Set ANTHROPIC_API_KEY, OPENAI_API_KEY, or CEREBRAS_API_KEY. \
+                 All proof submissions will fail until a provider is configured."
+            );
+        }
         info!(providers = ?providers, "MultiModelJudge initialized via Rig");
 
         Self {
@@ -255,7 +266,7 @@ fn extract_json_from_markdown(
                         if depth == 0 {
                             let candidate = &text[start..=j];
                             if let Ok(v) = serde_json::from_str::<JudgeVerdict>(candidate) {
-                                return Ok(v);
+                                return Ok(v.sanitized()); // Attack #127: clamp confidence
                             }
                             // Not a valid verdict — keep scanning
                             break;

@@ -34,14 +34,14 @@ static REPO_CACHE: Mutex<Option<HashMap<String, RepoEntry>>> = Mutex::new(None);
 
 fn skills_dir() -> PathBuf {
     dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
+        .expect("[sentinel] FATAL: Cannot determine home directory")
         .join(".claude")
         .join("skills")
 }
 
 fn marketplace_json_path() -> PathBuf {
     dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
+        .expect("[sentinel] FATAL: Cannot determine home directory")
         .join(".claude")
         .join("marketplace.json")
 }
@@ -66,9 +66,18 @@ fn get_or_clone_repo(owner: &str, repo: &str) -> Result<PathBuf, String> {
         let _ = fs::remove_dir_all(&entry.dir);
     }
 
-    let tmp_dir = std::env::temp_dir().join(format!("skills-{}-{}", owner, repo));
+    // **Attack #156 fix**: Use a unique temp dir name with a random suffix to
+    // prevent symlink race attacks. The previous predictable name
+    // `skills-{owner}-{repo}` allowed an attacker to pre-create a symlink at
+    // that path, redirecting git clone output to an arbitrary directory.
+    let mut rand_bytes = [0u8; 8];
+    let _ = getrandom::getrandom(&mut rand_bytes);
+    let rand_suffix: String = rand_bytes.iter().map(|b| format!("{b:02x}")).collect();
+    let tmp_dir = std::env::temp_dir().join(format!("skills-{}-{}-{}", owner, repo, rand_suffix));
+
+    // Verify the path doesn't already exist (extremely unlikely with random suffix)
     if tmp_dir.exists() {
-        let _ = fs::remove_dir_all(&tmp_dir);
+        return Err(format!("Temp directory collision: {}", tmp_dir.display()));
     }
 
     let output = Command::new("git")

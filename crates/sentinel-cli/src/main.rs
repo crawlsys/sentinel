@@ -16,7 +16,10 @@ mod daemon_cmd;
 mod hook_cmd;
 mod init_cmd;
 mod mcp_cmd;
+mod resign_cmd;
+mod rotate_key_cmd;
 mod scan_cmd;
+mod stage_cmd;
 mod stats_cmd;
 mod steel_test_cmd;
 mod verify_cmd;
@@ -99,6 +102,19 @@ enum Commands {
         action: SteelTestAction,
     },
 
+    /// Stage a new sentinel-engine binary with integrity verification
+    Stage {
+        /// Path to the new binary (default: target/release/sentinel-engine.exe)
+        #[arg(long)]
+        binary: Option<String>,
+    },
+
+    /// Rotate the HMAC signing key (versioned, preserves old keys for verification)
+    RotateKey,
+
+    /// Re-sign all state and proof files with the current key version
+    Resign,
+
     /// Generate standard project files (README, CLAUDE.md, LICENSE, etc.)
     Init {
         /// Preview only — show what would be created without writing
@@ -169,6 +185,9 @@ async fn main() -> anyhow::Result<()> {
             SteelTestAction::Record { session } => steel_test_cmd::record(session).await,
             SteelTestAction::Check { session } => steel_test_cmd::check(session).await,
         },
+        Commands::Stage { binary } => stage_cmd::run(binary).await,
+        Commands::RotateKey => rotate_key_cmd::run().await,
+        Commands::Resign => resign_cmd::run().await,
         Commands::Init {
             dry_run,
             force,

@@ -242,29 +242,16 @@ impl WorkflowState {
         self.completed_phases
             .push(completed_phase_id.to_string());
         self.current_phase = Some(self.completed_phases.len());
-        true
-    }
 
-    /// Advance a phase WITHOUT sequential ordering checks.
-    ///
-    /// **SECURITY WARNING**: This skips the sequential enforcement that prevents
-    /// out-of-order phase completion (Attack #21). Only use this when the caller
-    /// has its own authorization gate (e.g., `ProofEngine` — AI judge approved
-    /// the evidence). All other callers MUST use `advance_sequential()`.
-    ///
-    /// This is intentionally named `advance_unchecked` to make the danger obvious
-    /// at every call site.
-    ///
-    /// **Attack #79 fix**: Production code MUST use `advance_sequential()` instead.
-    /// This method exists only for test setup convenience. The ProofEngine fallback
-    /// path that previously called this was changed to fail closed (bail!).
-    #[cfg_attr(not(test), deprecated(note = "Use advance_sequential() in production code"))]
-    pub fn advance_unchecked(&mut self, completed_phase_id: &str) {
-        if !self.is_phase_complete(completed_phase_id) {
-            self.completed_phases
-                .push(completed_phase_id.to_string());
+        // **Attack #139 fix**: Set the `complete` flag when all required phases
+        // are done. Without this, the flag was always false — meaning code that
+        // checks `workflow_state.complete` (e.g., daemon API, proof chain display)
+        // would never report a workflow as finished.
+        if self.next_required_phase(workflow).is_none() {
+            self.complete = true;
         }
-        self.current_phase = Some(self.completed_phases.len());
+
+        true
     }
 
     /// Check if a specific phase has been completed
@@ -299,11 +286,29 @@ impl WorkflowState {
         // These spawn sub-agents that can execute ANY tool (Bash, Write, MCP)
         // in a separate context that may not inherit the same sentinel hooks.
         // Claude should use Task/Agent only after completing required phases.
+        //
+        // **Attack #107 fix**: Removed "Skill" from safe tools. The Skill tool
+        // can invoke arbitrary skills that may trigger nested workflow activations,
+        // potentially confusing the state machine (e.g., activating a second skill
+        // mid-workflow to clear the active_skill). Blocked until phases loaded.
+        //
+        // **Attack #108 fix**: Removed "SendMessage" from safe tools. SendMessage
+        // sends messages to other agents/teammates, potentially leaking skill context,
+        // phase file contents, or workflow state to contexts without sentinel enforcement.
+        // **Attack #99 note**: ToolSearch is safe — it only fetches tool schemas
+        // (no execution). It's a deferred-tool loader that returns JSON definitions.
+        //
+        // Safe tools rationale:
+        //   Read/Glob/Grep/WebSearch/WebFetch — read-only, no side effects
+        //   AskUserQuestion — prompts user, no execution
+        //   EnterPlanMode/ExitPlanMode — plan mode toggle, no execution
+        //   TaskCreate/TaskUpdate/TaskList/TaskGet/TaskOutput — task management metadata
+        //   ToolSearch — schema fetcher, read-only
         let safe_tools = [
             "Read", "Glob", "Grep", "WebSearch", "WebFetch",
             "AskUserQuestion", "EnterPlanMode", "ExitPlanMode", "TaskCreate",
-            "TaskUpdate", "TaskList", "TaskGet", "TaskOutput", "Skill",
-            "ToolSearch", "SendMessage",
+            "TaskUpdate", "TaskList", "TaskGet", "TaskOutput",
+            "ToolSearch",
         ];
         if safe_tools.contains(&tool_name) {
             return None;
@@ -535,8 +540,9 @@ mod tests {
 
     #[test]
     fn test_advance_phase() {
+        let wf = linear_workflow();
         let mut state = WorkflowState::new("linear", "sess-1");
-        state.advance_unchecked("claim");
+        state.advance_sequential("claim", &wf);
         assert_eq!(state.completed_phases, vec!["claim"]);
         assert!(state.is_phase_complete("claim"));
         assert!(!state.is_phase_complete("fetch"));
@@ -549,14 +555,45 @@ mod tests {
 
         assert_eq!(state.next_required_phase(&wf).unwrap().id, "claim");
 
-        state.advance_unchecked("claim");
+        state.advance_sequential("claim", &wf);
         assert_eq!(state.next_required_phase(&wf).unwrap().id, "fetch");
 
-        state.advance_unchecked("fetch");
+        state.advance_sequential("fetch", &wf);
         assert_eq!(state.next_required_phase(&wf).unwrap().id, "review");
 
-        state.advance_unchecked("review");
+        state.advance_sequential("review", &wf);
         assert!(state.next_required_phase(&wf).is_none());
+    }
+
+    #[test]
+    fn test_advance_sequential_sets_complete() {
+        let wf = linear_workflow();
+        let mut state = WorkflowState::new("linear", "sess-1");
+
+        // Not complete yet
+        assert!(!state.complete);
+
+        // Advance through all required phases
+        assert!(state.advance_sequential("claim", &wf));
+        assert!(!state.complete);
+        assert!(state.advance_sequential("fetch", &wf));
+        assert!(!state.complete);
+        assert!(state.advance_sequential("review", &wf));
+
+        // Now all required phases done — complete should be true
+        assert!(state.complete);
+        assert!(state.next_required_phase(&wf).is_none());
+    }
+
+    #[test]
+    fn test_advance_sequential_rejects_out_of_order() {
+        let wf = linear_workflow();
+        let mut state = WorkflowState::new("linear", "sess-1");
+
+        // Trying to advance "fetch" before "claim" — should fail
+        assert!(!state.advance_sequential("fetch", &wf));
+        assert!(!state.is_phase_complete("fetch"));
+        assert!(!state.complete);
     }
 
     #[test]
@@ -576,16 +613,20 @@ mod tests {
 
         assert!(state.should_block(&wf, "Read").is_none());
         assert!(state.should_block(&wf, "Glob").is_none());
+        assert!(state.should_block(&wf, "ToolSearch").is_none());
         // Task and Agent removed from safe tools (Attack #69)
         assert!(state.should_block(&wf, "Task").is_some());
         assert!(state.should_block(&wf, "Agent").is_some());
+        // Skill and SendMessage removed from safe tools (Attacks #107, #108)
+        assert!(state.should_block(&wf, "Skill").is_some());
+        assert!(state.should_block(&wf, "SendMessage").is_some());
     }
 
     #[test]
     fn test_block_on_skip() {
         let wf = linear_workflow();
         let mut state = WorkflowState::new("linear", "sess-1");
-        state.advance_unchecked("claim");
+        state.advance_sequential("claim", &wf);
         // Trying to use tools without completing "fetch" (skipping to review territory)
         // Gap is 0 here (fetch is the very next one), so it should NOT block
         assert!(state.should_block(&wf, "Bash").is_none());

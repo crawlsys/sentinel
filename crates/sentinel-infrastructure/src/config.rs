@@ -99,6 +99,7 @@ pub fn config_dir() -> PathBuf {
 /// Load hook specs from hooks.toml
 pub fn load_hooks(config_path: &Path) -> Result<Vec<HookSpec>> {
     let toml_path = config_path.join("hooks.toml");
+    warn_if_world_writable(&toml_path);
     let content = std::fs::read_to_string(&toml_path)
         .with_context(|| format!("Failed to read {}", toml_path.display()))?;
 
@@ -125,40 +126,110 @@ pub fn load_hooks(config_path: &Path) -> Result<Vec<HookSpec>> {
     Ok(specs)
 }
 
+/// **Attack #166 fix**: Warn if config files are world-writable (Unix).
+/// A world-writable workflows.toml lets any local user inject workflows
+/// with no required phases or disable enforcement entirely.
+#[cfg(unix)]
+fn warn_if_world_writable(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    if let Ok(meta) = std::fs::metadata(path) {
+        let mode = meta.permissions().mode();
+        if mode & 0o002 != 0 {
+            eprintln!(
+                "[sentinel] SECURITY WARNING: Config file '{}' is world-writable (mode {:04o}). \
+                 Other users on this system can modify sentinel enforcement rules. \
+                 Fix with: chmod 644 {}",
+                path.display(),
+                mode & 0o777,
+                path.display(),
+            );
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn warn_if_world_writable(_path: &Path) {
+    // Windows ACLs are handled by icacls elsewhere; no simple mode check.
+}
+
 /// Load workflow definitions from workflows.toml
 pub fn load_workflows(config_path: &Path) -> Result<Vec<SkillWorkflow>> {
     let toml_path = config_path.join("workflows.toml");
+    warn_if_world_writable(&toml_path);
     let content = std::fs::read_to_string(&toml_path)
         .with_context(|| format!("Failed to read {}", toml_path.display()))?;
 
     let config: WorkflowsConfig =
         toml::from_str(&content).context("Failed to parse workflows.toml")?;
 
-    let workflows: Vec<SkillWorkflow> = config
-        .workflows
-        .into_iter()
-        .map(|w| SkillWorkflow {
+    let mut workflows: Vec<SkillWorkflow> = Vec::new();
+    for w in config.workflows {
+        let phases: Vec<WorkflowPhase> = w
+            .phases
+            .into_iter()
+            .map(|p| WorkflowPhase {
+                id: p.id,
+                file: p.file,
+                required: p.required,
+                judge: match p.judge.as_str() {
+                    "opus" => JudgeModel::Opus,
+                    "haiku" => JudgeModel::Haiku,
+                    _ => JudgeModel::Sonnet,
+                },
+                description: p.description,
+            })
+            .collect();
+
+        // **Attack #181 fix**: Reject empty skill names.
+        // An empty string key in the workflows HashMap creates state confusion
+        // and could match unintended skill routing results.
+        if w.skill.is_empty() {
+            anyhow::bail!("Workflow skill name cannot be empty");
+        }
+
+        // **Attack #158 fix**: Reject workflows with zero required phases.
+        // A workflow with no required phases creates a zero-enforcement zone:
+        // the phase gate never blocks because there are no phases to enforce,
+        // but the workflow's presence prevents fallback to other enforcement.
+        let required_count = phases.iter().filter(|p| p.required).count();
+        if required_count == 0 {
+            anyhow::bail!(
+                "Workflow '{}' has no required phases. This creates a zero-enforcement zone. \
+                 Every workflow must have at least one required phase.",
+                w.skill
+            );
+        }
+
+        // **Attack #179 fix**: Validate all regex patterns at config load time.
+        // Catches syntax errors and oversized patterns early instead of at
+        // enforcement time where failures could silently skip enforcement.
+        for pattern in w.blocked_bash_patterns.iter().chain(w.bash_allowlist.iter()) {
+            if pattern.len() > 256 {
+                anyhow::bail!(
+                    "Workflow '{}': regex pattern exceeds 256 chars ({} chars). \
+                     This could cause performance issues during enforcement.",
+                    w.skill,
+                    pattern.len()
+                );
+            }
+            if let Err(e) = regex::Regex::new(pattern) {
+                anyhow::bail!(
+                    "Workflow '{}': invalid regex pattern '{}': {}",
+                    w.skill,
+                    pattern,
+                    e
+                );
+            }
+        }
+
+        workflows.push(SkillWorkflow {
             skill: w.skill,
-            phases: w
-                .phases
-                .into_iter()
-                .map(|p| WorkflowPhase {
-                    id: p.id,
-                    file: p.file,
-                    required: p.required,
-                    judge: match p.judge.as_str() {
-                        "opus" => JudgeModel::Opus,
-                        "haiku" => JudgeModel::Haiku,
-                        _ => JudgeModel::Sonnet,
-                    },
-                    description: p.description,
-                })
-                .collect(),
+            phases,
             blocked_tool_prefixes: w.blocked_tool_prefixes,
             blocked_bash_patterns: w.blocked_bash_patterns,
             bash_allowlist: w.bash_allowlist,
-        })
-        .collect();
+        });
+    }
 
     Ok(workflows)
 }
@@ -319,6 +390,78 @@ description = "Cleanup"
 
         assert_eq!(wf.phases[2].id, "cleanup");
         assert!(!wf.phases[2].required);
+    }
+
+    #[test]
+    fn test_load_workflows_rejects_zero_required_phases() {
+        let dir = tempfile::tempdir().unwrap();
+        let workflows_toml = r#"
+[[workflows]]
+skill = "sneaky"
+
+[[workflows.phases]]
+id = "optional-only"
+file = "optional.md"
+required = false
+judge = "sonnet"
+description = "No required phases — zero enforcement"
+"#;
+        let path = dir.path().join("workflows.toml");
+        let mut f = std::fs::File::create(&path).unwrap();
+        f.write_all(workflows_toml.as_bytes()).unwrap();
+
+        let result = load_workflows(dir.path());
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("no required phases"), "Expected 'no required phases' error, got: {err}");
+        assert!(err.contains("sneaky"), "Expected skill name in error, got: {err}");
+    }
+
+    #[test]
+    fn test_load_workflows_rejects_empty_skill_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let workflows_toml = r#"
+[[workflows]]
+skill = ""
+
+[[workflows.phases]]
+id = "phase1"
+file = "phase1.md"
+required = true
+judge = "sonnet"
+description = "A phase"
+"#;
+        let path = dir.path().join("workflows.toml");
+        let mut f = std::fs::File::create(&path).unwrap();
+        f.write_all(workflows_toml.as_bytes()).unwrap();
+
+        let result = load_workflows(dir.path());
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("cannot be empty"));
+    }
+
+    #[test]
+    fn test_load_workflows_rejects_invalid_regex() {
+        let dir = tempfile::tempdir().unwrap();
+        let workflows_toml = r#"
+[[workflows]]
+skill = "test"
+blocked_bash_patterns = ["(unclosed"]
+
+[[workflows.phases]]
+id = "phase1"
+file = "phase1.md"
+required = true
+judge = "sonnet"
+description = "A phase"
+"#;
+        let path = dir.path().join("workflows.toml");
+        let mut f = std::fs::File::create(&path).unwrap();
+        f.write_all(workflows_toml.as_bytes()).unwrap();
+
+        let result = load_workflows(dir.path());
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("invalid regex"));
     }
 
     #[test]

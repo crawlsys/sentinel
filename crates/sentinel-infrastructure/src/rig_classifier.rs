@@ -145,16 +145,37 @@ impl RigClassifier {
     }
 }
 
+/// Maximum time to wait for AI classifier response before falling back to regex.
+/// 3 seconds is generous for Cerebras (~200ms typical) and OpenAI (~500ms typical).
+/// Without this timeout, a hung API connection blocks message submission indefinitely.
+const CLASSIFIER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
 #[async_trait::async_trait]
 impl sentinel_application::classifier::AiClassifier for RigClassifier {
     async fn classify(&self, message: &str, candidates: &[String]) -> Result<Option<String>> {
         // Build catalog on each call (could be cached, but skills dir rarely changes)
         let catalog = build_skill_catalog();
-        match self.classify(message, &catalog, candidates).await {
-            Ok(skill) if skill == "none" || skill.is_empty() => Ok(None),
-            Ok(skill) => Ok(Some(skill)),
-            Err(e) => {
-                warn!(error = %e, "AI classification failed, falling back to None");
+
+        // Wrap in timeout to prevent hung API calls from blocking message submission.
+        // This was the root cause of UserPromptSubmit hooks silently blocking input.
+        match tokio::time::timeout(
+            CLASSIFIER_TIMEOUT,
+            self.classify(message, &catalog, candidates),
+        )
+        .await
+        {
+            Ok(Ok(skill)) if skill == "none" || skill.is_empty() => Ok(None),
+            Ok(Ok(skill)) => Ok(Some(skill)),
+            Ok(Err(e)) => {
+                warn!(error = %e, "AI classification failed, falling back to regex");
+                Ok(None)
+            }
+            Err(_) => {
+                warn!(
+                    timeout_secs = CLASSIFIER_TIMEOUT.as_secs(),
+                    provider = self.provider_name,
+                    "AI classifier timed out, falling back to regex"
+                );
                 Ok(None)
             }
         }
@@ -194,7 +215,30 @@ pub fn build_skill_catalog() -> String {
     if let Ok(read_dir) = std::fs::read_dir(&skills_dir) {
         let mut dirs: Vec<_> = read_dir
             .filter_map(|e| e.ok())
-            .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+            .filter(|e| {
+                // **Attack #126 fix**: Use metadata() instead of file_type() to follow
+                // symlinks and verify the target exists. Reject symlinks that resolve
+                // outside ~/.claude/skills/ to prevent catalog injection via symlinks
+                // pointing to attacker-controlled directories.
+                let ft = match e.file_type() {
+                    Ok(ft) => ft,
+                    Err(_) => return false,
+                };
+                if ft.is_symlink() {
+                    // Follow the symlink and check if target is a real directory
+                    // under the skills dir
+                    match e.path().canonicalize() {
+                        Ok(real) => {
+                            let skills_canonical = skills_dir.canonicalize()
+                                .unwrap_or_else(|_| skills_dir.clone());
+                            real.starts_with(&skills_canonical) && real.is_dir()
+                        }
+                        Err(_) => false, // Dangling symlink
+                    }
+                } else {
+                    ft.is_dir()
+                }
+            })
             .collect();
         dirs.sort_by_key(|d| d.file_name());
 

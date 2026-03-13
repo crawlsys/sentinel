@@ -28,6 +28,11 @@ struct PhaseFileInfo {
     /// and resolves to within ~/.claude/skills/). Untrusted files are
     /// recorded for tracking but do NOT advance workflow state.
     trusted: bool,
+    /// **Attack #141 fix**: The canonicalized absolute path to the phase file.
+    /// Used for content hashing instead of the user-supplied tool_input path
+    /// to close a TOCTOU gap where a symlink swap between canonicalize() and
+    /// read_to_string() could feed different content than what we validated.
+    canonical_path: Option<std::path::PathBuf>,
 }
 
 /// Extract the phase file name AND skill name from a Read() tool_input path.
@@ -155,6 +160,7 @@ fn extract_phase_file(tool_input: &serde_json::Value) -> Option<PhaseFileInfo> {
         file: phase_file.to_string(),
         skill: skill_name.to_string(),
         trusted,
+        canonical_path: canonical_result.ok(),
     })
 }
 
@@ -187,6 +193,21 @@ pub fn process(
         Some(name) => name.as_str(),
         None => return HookOutput::allow(),
     };
+
+    // **Attack #100/#114 defense-in-depth**: Validate tool name format.
+    // Claude Code sends PascalCase (Read, Bash, Edit) or mcp__prefix (mcp__linear__*).
+    // If we see unexpected casing, log a warning. This catches potential bypass
+    // attempts via tool name spoofing (e.g., "read" instead of "Read").
+    if !tool_name.is_empty() && !tool_name.starts_with("mcp__") {
+        let first = tool_name.chars().next().unwrap_or('_');
+        if !first.is_ascii_uppercase() {
+            eprintln!(
+                "[sentinel] WARNING: Unexpected tool name casing '{}'. \
+                 Expected PascalCase or mcp__prefix. Treating as non-safe.",
+                tool_name
+            );
+        }
+    }
 
     // Track ALL tool calls for phase-skip detection
     state.record_tool_call();
@@ -230,14 +251,19 @@ pub fn process(
                 //   3. The Bash redirect protection (blocks > to phase file paths)
                 // Together these make the swap window unexploitable without
                 // out-of-band file system access (which is out of threat model).
-                if let Ok(content) = std::fs::read_to_string(
+                // **Attack #141 fix**: Use the canonical path (resolved by
+                // extract_phase_file) for content hashing, not the user-supplied
+                // tool_input path. This closes the TOCTOU gap where a symlink
+                // could be swapped between canonicalize() and read_to_string().
+                let read_path = info.canonical_path.as_deref().unwrap_or_else(|| {
                     std::path::Path::new(
                         tool_input
                             .get("file_path")
                             .and_then(|v| v.as_str())
                             .unwrap_or(""),
-                    ),
-                ) {
+                    )
+                });
+                if let Ok(content) = std::fs::read_to_string(read_path) {
                     let mut hasher = Sha256::new();
                     hasher.update(content.as_bytes());
                     let hash = format!("{:x}", hasher.finalize());
@@ -1103,14 +1129,15 @@ fn check_post_merge_skip(
 ) -> Option<HookOutput> {
     // Only check safe-tool-exempt tools
     // **Attack #78 fix**: Removed "Task" and "Agent" from safe tools here too.
-    // Attack #69 removed them from workflow.rs but this duplicate list was missed.
-    // Sub-agents spawned via Task/Agent execute tools in separate contexts that
-    // may not inherit sentinel hooks, bypassing post-merge skip enforcement.
+    // **Attack #101 fix**: NotebookEdit is NOT safe — it can modify code cells.
+    // **Attack #107 fix**: Removed "Skill" — can trigger nested workflow bypass.
+    // **Attack #108 fix**: Removed "SendMessage" — can leak context to teammates.
+    // This list MUST stay in sync with workflow.rs should_block() safe_tools.
     let safe_tools = [
         "Read", "Glob", "Grep", "WebSearch", "WebFetch",
         "AskUserQuestion", "EnterPlanMode", "ExitPlanMode", "TaskCreate",
-        "TaskUpdate", "TaskList", "TaskGet", "TaskOutput", "Skill",
-        "ToolSearch", "SendMessage",
+        "TaskUpdate", "TaskList", "TaskGet", "TaskOutput",
+        "ToolSearch",
     ];
     if safe_tools.contains(&tool_name) {
         return None;
@@ -1503,10 +1530,11 @@ mod tests {
         state.record_phase_read("linear", "review.md");
 
         // Complete claim, fetch, review phases so gate doesn't block on those
+        let tw = test_workflow();
         if let Some(wf) = state.workflows.get_mut("linear") {
-            wf.advance_unchecked("claim");
-            wf.advance_unchecked("fetch");
-            wf.advance_unchecked("review");
+            wf.advance_sequential("claim", &tw);
+            wf.advance_sequential("fetch", &tw);
+            wf.advance_sequential("review", &tw);
         }
 
         let mut workflows = HashMap::new();
@@ -1539,11 +1567,12 @@ mod tests {
         state.record_phase_read("linear", "qa-handoff.md");
 
         // Complete all phases
+        let tw = test_workflow();
         if let Some(wf) = state.workflows.get_mut("linear") {
-            wf.advance_unchecked("claim");
-            wf.advance_unchecked("fetch");
-            wf.advance_unchecked("review");
-            wf.advance_unchecked("qa-handoff");
+            wf.advance_sequential("claim", &tw);
+            wf.advance_sequential("fetch", &tw);
+            wf.advance_sequential("review", &tw);
+            wf.advance_sequential("qa-handoff", &tw);
         }
 
         let mut workflows = HashMap::new();

@@ -80,9 +80,17 @@ impl PhaseProof {
         format!("{:x}", hasher.finalize())
     }
 
-    /// Verify this proof's hashes are internally consistent
+    /// Verify this proof's hashes and timestamps are internally consistent
     #[must_use]
     pub fn verify_self(&self) -> bool {
+        // **Attack #170 fix**: Validate temporal ordering.
+        // completed_at must be >= started_at. Without this, an attacker can craft
+        // proofs with nonsensical timestamps (completed before started) that still
+        // pass hash verification, confusing audit trails and AI judges.
+        if self.completed_at < self.started_at {
+            return false;
+        }
+
         // Verify evidence hash
         let expected_evidence = Self::compute_evidence_hash(&self.evidence);
         if self.evidence_hash != expected_evidence {
@@ -140,8 +148,21 @@ impl ProofChain {
             .map_or(GENESIS_HASH, |p| &p.combined_hash)
     }
 
+    /// **Attack #175 fix**: Maximum proofs per chain.
+    /// Prevents disk/memory exhaustion from unbounded proof accumulation.
+    /// 500 phases per skill is far beyond any legitimate workflow.
+    const MAX_PROOFS_PER_CHAIN: usize = 500;
+
     /// Add a proof to the chain. Returns error if previous_hash doesn't match.
     pub fn add_proof(&mut self, proof: PhaseProof) -> Result<(), ProofChainError> {
+        // **Attack #175 fix**: Reject proofs beyond the per-chain cap.
+        if self.proofs.len() >= Self::MAX_PROOFS_PER_CHAIN {
+            return Err(ProofChainError::ChainFull {
+                skill: self.skill.clone(),
+                max: Self::MAX_PROOFS_PER_CHAIN,
+            });
+        }
+
         // Verify the chain link
         if proof.previous_hash != self.head_hash() {
             return Err(ProofChainError::BrokenChain {
@@ -167,6 +188,7 @@ impl ProofChain {
     pub fn verify(&self) -> ChainVerification {
         let mut expected_previous = GENESIS_HASH.to_string();
         let mut errors = Vec::new();
+        let mut last_completed: Option<DateTime<Utc>> = None;
 
         for (i, proof) in self.proofs.iter().enumerate() {
             // Check chain link
@@ -177,13 +199,25 @@ impl ProofChain {
                 ));
             }
 
-            // Check internal consistency
+            // Check internal consistency (includes timestamp ordering)
             if !proof.verify_self() {
                 errors.push(format!(
                     "Phase {} ({}): internal hash verification failed",
                     i, proof.phase_id
                 ));
             }
+
+            // **Attack #170 fix**: Cross-phase temporal ordering.
+            // Phase N must start at or after Phase N-1 completed.
+            if let Some(prev_completed) = last_completed {
+                if proof.started_at < prev_completed {
+                    errors.push(format!(
+                        "Phase {} ({}): started_at ({}) is before previous phase completed_at ({})",
+                        i, proof.phase_id, proof.started_at, prev_completed
+                    ));
+                }
+            }
+            last_completed = Some(proof.completed_at);
 
             expected_previous = proof.combined_hash.clone();
         }
@@ -216,6 +250,10 @@ pub enum ProofChainError {
 
     #[error("invalid proof for phase '{phase}': hash verification failed")]
     InvalidProof { phase: String },
+
+    /// **Attack #175 fix**: Proof chain capacity exceeded.
+    #[error("proof chain for skill '{skill}' is full ({max} proofs max)")]
+    ChainFull { skill: String, max: usize },
 }
 
 #[cfg(test)]
@@ -342,6 +380,41 @@ mod tests {
         let c1 = PhaseProof::compute_combined_hash("claim", &h1, GENESIS_HASH);
         let c2 = PhaseProof::compute_combined_hash("claim", &h2, GENESIS_HASH);
         assert_eq!(c1, c2);
+    }
+
+    #[test]
+    fn test_proof_rejects_backwards_timestamps() {
+        let evidence = Evidence::default();
+        let evidence_hash = PhaseProof::compute_evidence_hash(&evidence);
+        let combined_hash =
+            PhaseProof::compute_combined_hash("claim", &evidence_hash, GENESIS_HASH);
+
+        let now = Utc::now();
+        let proof = PhaseProof {
+            phase_id: "claim".to_string(),
+            skill: "linear".to_string(),
+            session_id: "test-session".to_string(),
+            evidence,
+            evidence_hash,
+            previous_hash: GENESIS_HASH.to_string(),
+            combined_hash,
+            judge_model: "sonnet-4.6".to_string(),
+            judge_verdict: JudgeVerdict {
+                sufficient: true,
+                confidence: 0.95,
+                reasoning: "Evidence verified".to_string(),
+                requested_evidence: None,
+            },
+            // completed_at BEFORE started_at — should fail verification
+            started_at: now,
+            completed_at: now - chrono::Duration::seconds(60),
+            duration_ms: 100,
+        };
+
+        assert!(!proof.verify_self(), "Proof with completed_at < started_at should fail");
+
+        let mut chain = ProofChain::new("linear", "sess-1");
+        assert!(chain.add_proof(proof).is_err(), "Chain should reject backwards-timestamp proof");
     }
 
     #[test]

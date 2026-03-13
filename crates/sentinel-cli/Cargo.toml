@@ -12,6 +12,10 @@ rust-version.workspace = true
 name = "sentinel-engine"
 path = "src/main.rs"
 
+[[bin]]
+name = "sentinel"
+path = "src/launcher.rs"
+
 [dependencies]
 sentinel-domain = { workspace = true }
 sentinel-application = { workspace = true }
@@ -29,6 +33,8 @@ tower-http = { workspace = true }
 colored = { workspace = true }
 chrono = { workspace = true }
 dirs = { workspace = true }
+getrandom = { workspace = true }
+sha2 = { workspace = true }
 
 [lints]
 workspace = true

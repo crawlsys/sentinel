@@ -45,8 +45,10 @@ pub struct SessionState {
     pub phases_read: HashMap<String, Vec<String>>,
 
     /// Total tool calls in this session (for phase-skip detection)
+    /// **Attack #152 fix**: Changed from u32 to u64 to match HookStats.total_invocations.
+    /// u32 wraps at ~4.3B, silently corrupting audit data in long-running sessions.
     #[serde(default)]
-    pub tool_calls: u32,
+    pub tool_calls: u64,
 
     /// Failed submission attempts per phase key ("skill:phase_id")
     /// Used for resubmission rate limiting
@@ -112,11 +114,28 @@ impl SessionState {
         }
     }
 
+    /// **Attack #169 fix**: Maximum distinct skills per session.
+    /// Prevents unbounded HashMap growth from skill router manipulation.
+    const MAX_SKILLS_PER_SESSION: usize = 100;
+
     /// Set the active skill (from skill router)
     pub fn set_active_skill(&mut self, skill: impl Into<String>) {
         let skill = skill.into();
         // Initialize workflow state if not exists
         if !self.workflows.contains_key(&skill) {
+            // **Attack #169 fix**: Reject new skills beyond the cap.
+            if self.workflows.len() >= Self::MAX_SKILLS_PER_SESSION {
+                eprintln!(
+                    "[sentinel] WARNING: Session '{}' hit max skill limit ({}). \
+                     Ignoring new skill '{}'. This may indicate skill router manipulation.",
+                    self.session_id,
+                    Self::MAX_SKILLS_PER_SESSION,
+                    skill,
+                );
+                // Still set active_skill so routing works, but don't allocate new state
+                self.active_skill = Some(skill);
+                return;
+            }
             self.workflows.insert(
                 skill.clone(),
                 WorkflowState::new(&skill, &self.session_id),
@@ -229,11 +248,18 @@ impl SessionState {
     /// Record the SHA-256 hash of a phase file's content on first Read().
     /// Returns `Ok(())` if this is the first read or the hash matches.
     /// Returns `Err(reason)` if the content has changed (tampering detected).
+    /// **Attack #106 fix**: Normalize hash keys to lowercase on Windows.
+    /// Windows paths are case-insensitive, so `skills/Linear/phases/Claim.md`
+    /// and `skills/linear/phases/claim.md` reference the same file. Without
+    /// normalization, an attacker could read a phase file with altered casing
+    /// to bypass the tamper-detection check (different key → no prior hash).
     pub fn record_phase_file_hash(
         &mut self,
         canonical_path: &str,
         content_hash: &str,
     ) -> Result<(), String> {
+        #[cfg(target_os = "windows")]
+        let canonical_path = &canonical_path.to_lowercase();
         match self.phase_file_hashes.get(canonical_path) {
             Some(existing) if existing != content_hash => {
                 Err(format!(
@@ -333,8 +359,21 @@ mod tests {
         let mut state = SessionState::new("sess-1");
         state.set_active_skill("linear");
 
-        // Advance workflow
-        state.active_workflow_mut().unwrap().advance_unchecked("claim");
+        // Advance workflow — need a workflow definition for advance_sequential
+        let wf = crate::workflow::SkillWorkflow {
+            skill: "linear".to_string(),
+            phases: vec![crate::workflow::WorkflowPhase {
+                id: "claim".to_string(),
+                file: "claim.md".to_string(),
+                required: true,
+                judge: crate::judge::JudgeModel::Sonnet,
+                description: "Claim".to_string(),
+            }],
+            blocked_tool_prefixes: Vec::new(),
+            blocked_bash_patterns: Vec::new(),
+            bash_allowlist: Vec::new(),
+        };
+        state.active_workflow_mut().unwrap().advance_sequential("claim", &wf);
 
         // Setting same skill again should NOT reset the workflow
         state.set_active_skill("linear");
@@ -432,5 +471,22 @@ mod tests {
         let state = SessionState::new("sess-1");
         assert!(state.phases_read.is_empty());
         assert_eq!(state.tool_calls, 0);
+    }
+
+    #[test]
+    fn test_max_skills_per_session() {
+        let mut state = SessionState::new("sess-1");
+        // Fill to the cap
+        for i in 0..SessionState::MAX_SKILLS_PER_SESSION {
+            state.set_active_skill(format!("skill_{i}"));
+        }
+        assert_eq!(state.workflows.len(), SessionState::MAX_SKILLS_PER_SESSION);
+
+        // One more should NOT create a new workflow entry
+        state.set_active_skill("overflow_skill");
+        assert_eq!(state.workflows.len(), SessionState::MAX_SKILLS_PER_SESSION);
+        assert!(!state.workflows.contains_key("overflow_skill"));
+        // But active_skill is still set for routing
+        assert_eq!(state.active_skill.as_deref(), Some("overflow_skill"));
     }
 }

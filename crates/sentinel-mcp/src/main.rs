@@ -130,16 +130,26 @@ impl SentinelMcp {
         phase_id: String,
         summary: String,
     ) -> Result<String, ErrorData> {
-        // Record phase read in state
+        // Look up phase config for judge model + objectives
+        let workflow_configs = load_workflow_configs();
+
+        // **Attack #142 fix**: Only record phase read and set active_skill if the
+        // skill has a workflow definition. Without this check, calling
+        // submit_phase_complete with a fake skill name would record phantom
+        // phases_read entries that pollute state without advancing any workflow.
+        if !workflow_configs.contains_key(&skill) {
+            return Err(ErrorData::invalid_params(
+                format!("No workflow definition for skill '{}'. Cannot submit evidence.", skill),
+                None,
+            ));
+        }
+
         let phase_file = format!("{phase_id}.md");
         {
             let mut s = self.state.write().await;
             s.set_active_skill(&skill);
             s.record_phase_read(&skill, &phase_file);
         }
-
-        // Look up phase config for judge model + objectives
-        let workflow_configs = load_workflow_configs();
         let (judge_model, phase_objectives) = workflow_configs
             .get(&skill)
             .and_then(|wf| wf.phases.iter().find(|p| p.id == phase_id))
@@ -473,6 +483,86 @@ impl SentinelMcp {
             "template_path": template_path.display().to_string(),
             "claude_md_path": claude_md_path.display().to_string(),
             "claude_md_size_bytes": size,
+        });
+        serde_json::to_string_pretty(&result)
+            .map_err(|e| ErrorData::internal_error(format!("Serialization error: {e}"), None))
+    }
+
+    /// Restart all MCP servers by touching their watched binary files.
+    /// Reads ~/.claude.json, finds all mcp-router entries with --watch paths,
+    /// and touches each binary to trigger mcp-router's file watcher auto-restart.
+    #[tool(description = "Restart all MCP servers at once. Reads ~/.claude.json, finds all mcp-router --watch paths, and touches each binary to trigger auto-restart via mcp-router's file watcher.")]
+    async fn restart_all_mcps(&self) -> Result<String, ErrorData> {
+        let home = std::env::var("USERPROFILE")
+            .or_else(|_| std::env::var("HOME"))
+            .map(std::path::PathBuf::from)
+            .map_err(|_| ErrorData::internal_error("Cannot determine home directory", None))?;
+        let claude_json_path = home.join(".claude.json");
+        let content = std::fs::read_to_string(&claude_json_path)
+            .map_err(|e| ErrorData::internal_error(format!("Failed to read ~/.claude.json: {e}"), None))?;
+        let json: serde_json::Value = serde_json::from_str(&content)
+            .map_err(|e| ErrorData::internal_error(format!("Failed to parse ~/.claude.json: {e}"), None))?;
+
+        let servers = json.get("mcpServers")
+            .and_then(|s| s.as_object())
+            .ok_or_else(|| ErrorData::internal_error("No mcpServers in ~/.claude.json", None))?;
+
+        let mut restarted = Vec::new();
+        let mut failed = Vec::new();
+        let mut skipped = Vec::new();
+
+        for (name, config) in servers {
+            // Skip sentinel itself — we're running inside it
+            if name == "sentinel" {
+                skipped.push(format!("{name}: skipped (self)"));
+                continue;
+            }
+
+            let args = config.get("args")
+                .and_then(|a| a.as_array())
+                .map(|a| a.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>())
+                .unwrap_or_default();
+
+            let command = config.get("command").and_then(|c| c.as_str()).unwrap_or("");
+            if !command.contains("mcp-router") {
+                skipped.push(format!("{name}: not mcp-router"));
+                continue;
+            }
+
+            // Find --watch path, fall back to --single path
+            let watch_path = args.windows(2)
+                .find(|w| w[0] == "--watch")
+                .map(|w| w[1].to_string());
+            let single_path = args.windows(2)
+                .find(|w| w[0] == "--single")
+                .map(|w| w[1].to_string());
+            let target_path = watch_path.or(single_path);
+
+            match target_path {
+                Some(path) => {
+                    let p = std::path::Path::new(&path);
+                    if p.exists() {
+                        // Touch the file to trigger mcp-router's file watcher
+                        match std::fs::OpenOptions::new()
+                            .append(true)
+                            .open(p)
+                        {
+                            Ok(_) => restarted.push(name.clone()),
+                            Err(e) => failed.push(format!("{name}: {e}")),
+                        }
+                    } else {
+                        failed.push(format!("{name}: binary not found at {path}"));
+                    }
+                }
+                None => skipped.push(format!("{name}: no --watch or --single path")),
+            }
+        }
+
+        let result = serde_json::json!({
+            "restarted": restarted,
+            "failed": failed,
+            "skipped": skipped,
+            "total_restarted": restarted.len(),
         });
         serde_json::to_string_pretty(&result)
             .map_err(|e| ErrorData::internal_error(format!("Serialization error: {e}"), None))

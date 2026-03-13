@@ -2,6 +2,10 @@
 //!
 //! Persists proof chains to JSONL files for audit trails.
 //! Each session gets its own proof file.
+//!
+//! **Attack #123 fix**: Proof chain files are now HMAC-signed (`.sig` companion
+//! files), mirroring the state_store integrity pattern. Without this, an attacker
+//! could inject forged proofs into JSONL files to fake phase completion evidence.
 
 use std::path::PathBuf;
 
@@ -9,17 +13,65 @@ use anyhow::{Context, Result};
 
 use sentinel_domain::proof::{PhaseProof, ProofChain};
 
+/// Reuse the same versioned HMAC signing as state_store.
+/// Returns `v{N}:{hex}` format for consistency with state file signatures.
+fn compute_hmac(data: &[u8]) -> String {
+    // Delegate to state_store's versioned compute_hmac
+    crate::state_store::compute_hmac_for_proofs(data)
+}
+
+/// Verify HMAC of data against expected signature string.
+/// Supports versioned (`v{N}:{hex}`) and legacy (`{hex}`) formats.
+fn verify_hmac(data: &[u8], sig_str: &str) -> bool {
+    crate::state_store::verify_hmac_for_proofs(data, sig_str)
+}
+
+/// Public accessor for proof directory path (used by resign_cmd).
+pub fn proof_dir_public() -> PathBuf {
+    proof_dir()
+}
+
 /// Proof storage directory
+///
+/// **Attack #122 fix**: Panic instead of falling back to `"."` when HOME is unset.
+/// The `"."` fallback writes proof files to CWD (attacker-controlled project dir),
+/// letting an attacker plant forged proof files that sentinel will load as real.
 fn proof_dir() -> PathBuf {
     dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
+        .expect("[sentinel] FATAL: Cannot determine home directory. HOME/USERPROFILE must be set.")
         .join(".claude")
         .join("sentinel")
         .join("proofs")
 }
 
+/// Validate session ID for safe filesystem use (mirrors state_store::sanitize_session_id).
+/// **Attack #121 fix**: Without this, `session_id = "../../etc/passwd"` writes proof
+/// files outside the intended directory via path traversal.
+fn sanitize_session_id(session_id: &str) -> Result<()> {
+    if session_id.is_empty() {
+        anyhow::bail!("Session ID is empty");
+    }
+    if session_id.len() > 128 {
+        anyhow::bail!("Session ID too long (max 128 chars): {}", session_id.len());
+    }
+    if session_id.contains("..") {
+        anyhow::bail!("Session ID contains path traversal: '{}'", session_id);
+    }
+    if !session_id
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        anyhow::bail!(
+            "Session ID contains unsafe characters: '{}'",
+            session_id
+        );
+    }
+    Ok(())
+}
+
 /// Append a proof to the session's proof file (JSONL format)
 pub fn append_proof(session_id: &str, proof: &PhaseProof) -> Result<()> {
+    sanitize_session_id(session_id)?;
     let dir = proof_dir();
     std::fs::create_dir_all(&dir)?;
 
@@ -36,32 +88,67 @@ pub fn append_proof(session_id: &str, proof: &PhaseProof) -> Result<()> {
     Ok(())
 }
 
-/// Save a complete proof chain
+/// Save a complete proof chain with HMAC signature
 pub fn save_chain(chain: &ProofChain) -> Result<()> {
+    sanitize_session_id(&chain.session_id)?;
     let dir = proof_dir();
     std::fs::create_dir_all(&dir)?;
 
     let path = dir.join(format!("{}-chain.json", chain.session_id));
+    let sig_path = dir.join(format!("{}-chain.json.sig", chain.session_id));
     let json = serde_json::to_string_pretty(chain)?;
+
+    // Write sig first (same pattern as state_store — sig before data)
+    let sig = compute_hmac(json.as_bytes());
+    std::fs::write(&sig_path, &sig)?;
     std::fs::write(&path, json)?;
 
     Ok(())
 }
 
-/// Load a proof chain
+/// Load a proof chain with HMAC verification
 pub fn load_chain(session_id: &str) -> Result<Option<ProofChain>> {
+    sanitize_session_id(session_id)?;
     let path = proof_dir().join(format!("{session_id}-chain.json"));
     if !path.exists() {
         return Ok(None);
     }
 
     let json = std::fs::read_to_string(&path)?;
+
+    // Verify HMAC signature — reject unsigned or tampered chains.
+    // **Attack #147 fix**: Removed backward-compat acceptance of unsigned chains.
+    // An attacker could write a forged chain JSON without a .sig file and it would
+    // be silently accepted. Now all chains MUST have valid HMAC signatures.
+    let sig_path = proof_dir().join(format!("{session_id}-chain.json.sig"));
+    if !sig_path.exists() {
+        eprintln!(
+            "[sentinel] SECURITY: Proof chain for session '{}' has no signature file. \
+             Rejecting unsigned chain (may be forged).",
+            session_id
+        );
+        return Ok(None);
+    }
+    let sig = std::fs::read_to_string(&sig_path)
+        .context("Failed to read proof chain signature")?;
+    if !verify_hmac(json.as_bytes(), sig.trim()) {
+        eprintln!(
+            "[sentinel] SECURITY: Proof chain integrity check FAILED for session '{}'. \
+             The proof chain may have been tampered with. Discarding.",
+            session_id
+        );
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&sig_path);
+        return Ok(None);
+    }
+
     let chain: ProofChain = serde_json::from_str(&json)?;
     Ok(Some(chain))
 }
 
 /// Load individual proofs from JSONL
 pub fn load_proofs(session_id: &str) -> Result<Vec<PhaseProof>> {
+    sanitize_session_id(session_id)?;
     let path = proof_dir().join(format!("{session_id}.jsonl"));
     if !path.exists() {
         return Ok(vec![]);

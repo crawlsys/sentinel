@@ -17,6 +17,10 @@ pub enum DependencyError {
 
     #[error("hook '{0}' depends on unknown hook '{1}'")]
     UnknownDependency(String, String),
+
+    /// **Attack #180 fix**: Dependency chain too deep.
+    #[error("hook dependency chain depth ({depth}) exceeds maximum ({max})")]
+    ExcessiveDepth { depth: usize, max: usize },
 }
 
 /// Resolved execution plan — hooks grouped into parallel batches
@@ -79,8 +83,19 @@ pub fn resolve(specs: &[HookSpec]) -> Result<ExecutionPlan, DependencyError> {
         depths.insert(node_idx, max_parent_depth);
     }
 
+    // **Attack #180 fix**: Reject excessively deep dependency chains.
+    // A long chain creates many sequential batches, delaying phase_gate
+    // execution. 50 levels is far beyond any legitimate hook config.
+    const MAX_CHAIN_DEPTH: usize = 50;
+
     // Find max depth
     let max_depth = depths.values().copied().max().unwrap_or(0);
+    if max_depth > MAX_CHAIN_DEPTH {
+        return Err(DependencyError::ExcessiveDepth {
+            depth: max_depth,
+            max: MAX_CHAIN_DEPTH,
+        });
+    }
 
     // Build batches
     let mut batches: Vec<Vec<HookId>> = vec![vec![]; max_depth + 1];
@@ -170,6 +185,32 @@ mod tests {
         assert!(matches!(
             resolve(&specs),
             Err(DependencyError::UnknownDependency(_, _))
+        ));
+    }
+
+    #[test]
+    fn test_excessive_depth_rejected() {
+        // Build a chain of 60 hooks: h0 → h1 → h2 → ... → h59
+        let specs: Vec<HookSpec> = (0..60)
+            .map(|i| {
+                let deps = if i == 0 {
+                    vec![]
+                } else {
+                    vec![format!("h{}", i - 1).as_str().to_string()]
+                };
+                HookSpec {
+                    id: HookId::new(&format!("h{i}")),
+                    event: HookEvent::UserPromptSubmit,
+                    matcher: vec![],
+                    depends_on: deps.into_iter().map(|d| HookId::new(&d)).collect(),
+                    has_api_call: false,
+                }
+            })
+            .collect();
+
+        assert!(matches!(
+            resolve(&specs),
+            Err(DependencyError::ExcessiveDepth { .. })
         ));
     }
 }

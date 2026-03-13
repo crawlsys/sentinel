@@ -13,6 +13,7 @@ pub mod git;
 pub mod ipc;
 pub mod mcp_transport;
 pub mod proof_store;
+pub mod rate_limit;
 pub mod state_store;
 pub mod stdin;
 pub mod stdout;

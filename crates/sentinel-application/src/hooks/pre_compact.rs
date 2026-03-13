@@ -20,7 +20,7 @@ struct CompactSnapshot {
     /// Phase files already read in this session
     phases_read: Vec<String>,
     /// Total tool calls before compaction
-    tool_calls: u32,
+    tool_calls: u64,
     /// Current working directory
     cwd: Option<String>,
     /// Git branch (if detectable from cwd)
@@ -135,7 +135,7 @@ fn detect_git_branch(cwd: &str) -> Option<String> {
 }
 
 /// Read session state from the state store
-fn read_session_state(session_id: &str) -> (Option<String>, Vec<String>, u32) {
+fn read_session_state(session_id: &str) -> (Option<String>, Vec<String>, u64) {
     let home = match dirs::home_dir() {
         Some(h) => h,
         None => return (None, Vec::new(), 0),
@@ -174,7 +174,7 @@ fn read_session_state(session_id: &str) -> (Option<String>, Vec<String>, u32) {
     let tool_calls = val
         .get("tool_calls")
         .and_then(|v| v.as_u64())
-        .unwrap_or(0) as u32;
+        .unwrap_or(0);
 
     (active_skill, phases_read, tool_calls)
 }

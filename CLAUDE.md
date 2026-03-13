@@ -38,7 +38,33 @@ sentinel mcp                           Start MCP server over stdio
 | `sentinel-application` | — | Use cases: engine, classifier, gate, 27 hook modules |
 | `sentinel-infrastructure` | — | IO adapters: config, state store, git, MCP transport, AI judge |
 | `sentinel-cli` | `sentinel` | CLI (7 subcommands) + dashboard REST API (axum) |
-| `sentinel-mcp` | `sentinel-mcp` | Standalone MCP server (Vulcan SDK) |
+| `sentinel-mcp` | `sentinel-mcp` | Standalone MCP server (Vulcan SDK) — 11 tools |
+
+## MCP Server Tools
+
+`sentinel-mcp` exposes 11 tools via Claude Code (`mcp__sentinel__<tool>`):
+
+| Tool | Description |
+|------|-------------|
+| `get_proof_chain` | Get cryptographic proof chain for a skill execution |
+| `get_workflow_status` | Current workflow state (completed/current/next phases) |
+| `verify_chain` | Re-verify proof chain integrity (hash consistency) |
+| `submit_phase_complete` | Submit phase completion for AI judge evaluation |
+| `get_session_stats` | Hook invocations, blocked calls, per-hook timing |
+| `update_step` | Update step status within a skill phase |
+| `get_phase_steps` | All steps and status for a specific phase |
+| `get_workflow_progress` | Full hierarchical progress (phase + step level) |
+| `regenerate_claude_md` | Regenerate `~/.claude/CLAUDE.md` from template with fresh counts |
+| `edit_claude_md_template` | Find-and-replace on generator template source, then auto-regenerate |
+| `restart_all_mcps` | Touch all mcp-router watched binaries to trigger mass restart |
+
+### CLAUDE.md Self-Maintenance
+
+The global `~/.claude/CLAUDE.md` is generated from a template in `session_init.rs`:
+- **Template location**: `crates/sentinel-application/src/hooks/session_init.rs` (the `format!()` string in `generate_claude_md()`)
+- **Public API**: `session_init::regenerate_global_claude_md()` — re-counts components, writes fresh file
+- **Public API**: `session_init::template_source_path()` — returns path to the template source file
+- Template changes require rebuilding `sentinel-mcp` (template is compiled into the binary)
 
 ## Hook System
 

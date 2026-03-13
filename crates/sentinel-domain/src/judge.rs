@@ -50,12 +50,20 @@ pub struct JudgeVerdict {
 }
 
 impl JudgeVerdict {
+    /// Clamp confidence to valid range [0.0, 1.0].
+    /// **Attack #127 fix**: Deserialized confidence values may be out of range
+    /// (e.g., `-99999.0` or `1e308` from a forged judge response). Clamping
+    /// prevents logic bypass via out-of-range confidence values.
+    fn clamp_confidence(c: f64) -> f64 {
+        c.clamp(0.0, 1.0)
+    }
+
     /// Create a passing verdict
     #[must_use]
     pub fn pass(confidence: f64, reasoning: impl Into<String>) -> Self {
         Self {
             sufficient: true,
-            confidence,
+            confidence: Self::clamp_confidence(confidence),
             reasoning: reasoning.into(),
             requested_evidence: None,
         }
@@ -66,12 +74,20 @@ impl JudgeVerdict {
     pub fn fail(confidence: f64, reasoning: impl Into<String>, missing: Vec<String>) -> Self {
         Self {
             sufficient: false,
-            confidence,
+            confidence: Self::clamp_confidence(confidence),
             reasoning: reasoning.into(),
             requested_evidence: Some(missing),
         }
     }
 
+    /// Sanitize a deserialized verdict — clamps confidence to [0.0, 1.0].
+    /// Call this after `serde_json::from_str::<JudgeVerdict>()` to ensure
+    /// out-of-range values from AI responses don't corrupt proof chains.
+    #[must_use]
+    pub fn sanitized(mut self) -> Self {
+        self.confidence = Self::clamp_confidence(self.confidence);
+        self
+    }
 }
 
 #[cfg(test)]

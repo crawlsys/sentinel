@@ -75,14 +75,36 @@ pub struct EvidenceCollector {
     entries: Vec<EvidenceEntry>,
 }
 
+/// **Attack #171 fix**: Maximum evidence entries per phase.
+/// Prevents unbounded memory/disk growth from tool call loops.
+/// 10,000 entries is generous for any legitimate phase (most have <100).
+const MAX_EVIDENCE_ENTRIES: usize = 10_000;
+
 impl EvidenceCollector {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Check if we've hit the evidence entry cap. If so, log a warning once.
+    fn check_capacity(&self) -> bool {
+        if self.entries.len() >= MAX_EVIDENCE_ENTRIES {
+            if self.entries.len() == MAX_EVIDENCE_ENTRIES {
+                eprintln!(
+                    "[sentinel] WARNING: Evidence collector hit max entries ({MAX_EVIDENCE_ENTRIES}). \
+                     Further evidence will be dropped. This may indicate a tool call loop."
+                );
+            }
+            return false;
+        }
+        true
+    }
+
     /// Record a tool call
     pub fn record_tool_call(&mut self, tool: &str, args_summary: &str) {
+        if !self.check_capacity() {
+            return;
+        }
         self.entries.push(EvidenceEntry::ToolCall(ToolCallEvidence {
             tool: tool.to_string(),
             args_summary: args_summary.chars().take(200).collect(),
@@ -92,6 +114,9 @@ impl EvidenceCollector {
 
     /// Record a tool result
     pub fn record_tool_result(&mut self, tool: &str, result: &str, success: bool) {
+        if !self.check_capacity() {
+            return;
+        }
         self.entries
             .push(EvidenceEntry::ToolResult(ToolResultEvidence {
                 tool: tool.to_string(),
@@ -102,19 +127,46 @@ impl EvidenceCollector {
 
     /// Record a file change
     pub fn record_file_changed(&mut self, path: &str) {
+        if !self.check_capacity() {
+            return;
+        }
         self.entries
             .push(EvidenceEntry::FileChanged(path.to_string()));
     }
 
     /// Record that the phase file was read
     pub fn record_phase_file_read(&mut self) {
+        if !self.check_capacity() {
+            return;
+        }
         self.entries.push(EvidenceEntry::PhaseFileRead);
     }
 
-    /// Record custom evidence
+    /// Record custom evidence.
+    /// **Attack #134 fix**: Limits key to 128 chars and serialized value to 8KB
+    /// to prevent memory/disk exhaustion via evidence bloat.
     pub fn record_custom(&mut self, key: &str, value: serde_json::Value) {
-        self.entries
-            .push(EvidenceEntry::Custom(key.to_string(), value));
+        if !self.check_capacity() {
+            return;
+        }
+        let key = if key.len() > 128 { &key[..128] } else { key };
+        // Cap serialized value at 8KB
+        let serialized_len = serde_json::to_string(&value)
+            .map(|s| s.len())
+            .unwrap_or(0);
+        if serialized_len > 8192 {
+            eprintln!(
+                "[sentinel] WARNING: Custom evidence '{}' exceeds 8KB ({} bytes), truncating to null",
+                key, serialized_len
+            );
+            self.entries.push(EvidenceEntry::Custom(
+                key.to_string(),
+                serde_json::json!("(truncated — exceeded 8KB limit)"),
+            ));
+        } else {
+            self.entries
+                .push(EvidenceEntry::Custom(key.to_string(), value));
+        }
     }
 
     /// Finalize into an Evidence struct
@@ -183,6 +235,18 @@ mod tests {
         let evidence = collector.finalize();
         assert!(evidence.tool_calls.is_empty());
         assert!(!evidence.phase_file_read);
+    }
+
+    #[test]
+    fn test_evidence_entry_cap() {
+        let mut collector = EvidenceCollector::new();
+        for i in 0..MAX_EVIDENCE_ENTRIES + 100 {
+            collector.record_tool_call("Bash", &format!("cmd_{i}"));
+        }
+        // Should be capped at MAX_EVIDENCE_ENTRIES
+        assert_eq!(collector.len(), MAX_EVIDENCE_ENTRIES);
+        let evidence = collector.finalize();
+        assert_eq!(evidence.tool_calls.len(), MAX_EVIDENCE_ENTRIES);
     }
 
     #[test]

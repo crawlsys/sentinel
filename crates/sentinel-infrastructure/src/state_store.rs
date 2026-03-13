@@ -34,7 +34,11 @@ type HmacSha256 = Hmac<Sha256>;
 ///
 /// **Attack #43**: Without this, `session_id = "../../.bashrc"` writes outside
 /// the state directory via path traversal.
-fn sanitize_session_id(session_id: &str) -> Result<()> {
+/// Validate session ID for safe filesystem use.
+/// **Attack #121 fix**: Without this, `session_id = "../../etc/passwd"` writes state
+/// files outside the intended directory via path traversal.
+/// **Attack #146 note**: Made public so the daemon API can reuse it for request validation.
+pub fn sanitize_session_id(session_id: &str) -> Result<()> {
     if session_id.is_empty() {
         anyhow::bail!("Session ID is empty");
     }
@@ -61,7 +65,7 @@ fn sanitize_session_id(session_id: &str) -> Result<()> {
 /// **Attack #85 fix**: Panic instead of falling back to `"."` when HOME is unset.
 /// The `"."` fallback writes state files to CWD (attacker-controlled project dir),
 /// letting an attacker plant forged state files that sentinel will load as real session state.
-fn state_dir() -> PathBuf {
+pub fn state_dir() -> PathBuf {
     dirs::home_dir()
         .expect("[sentinel] FATAL: Cannot determine home directory. HOME/USERPROFILE must be set.")
         .join(".claude")
@@ -85,19 +89,91 @@ fn from_hex(s: &str) -> Option<Vec<u8>> {
         .collect()
 }
 
-/// Path to the random secret file used for HMAC key derivation.
-/// Generated once on first use, never regenerated.
-///
-/// **Attack #86 fix**: Panic instead of falling back to `"."` when HOME is unset.
-/// The `"."` fallback reads/writes the HMAC secret from CWD — an attacker plants
-/// a known secret file in the project dir, sentinel uses it, and all state file
-/// HMACs become forgeable with a known key.
-fn hmac_secret_path() -> PathBuf {
+/// Base directory for HMAC secret files.
+fn hmac_secret_dir() -> PathBuf {
     dirs::home_dir()
         .expect("[sentinel] FATAL: Cannot determine home directory. HOME/USERPROFILE must be set.")
         .join(".claude")
         .join("sentinel")
-        .join(".hmac-secret")
+}
+
+/// Path to the random secret file used for HMAC key derivation.
+///
+/// **Key rotation support**: Secrets are now versioned as `.hmac-secret-v{N}`.
+/// The legacy unversioned `.hmac-secret` is treated as v1 for backward compat.
+///
+/// **Attack #86 fix**: Panic instead of falling back to `"."` when HOME is unset.
+fn hmac_secret_path() -> PathBuf {
+    hmac_secret_dir().join(".hmac-secret")
+}
+
+/// Path to a versioned secret file.
+fn hmac_secret_path_versioned(version: u32) -> PathBuf {
+    hmac_secret_dir().join(format!(".hmac-secret-v{version}"))
+}
+
+/// Discover all key versions available on disk.
+/// Returns sorted list of (version, path) pairs, highest version last.
+fn discover_key_versions() -> Vec<(u32, PathBuf)> {
+    let dir = hmac_secret_dir();
+    let mut versions = Vec::new();
+
+    // Check legacy unversioned secret (treated as v1)
+    let legacy = dir.join(".hmac-secret");
+    if legacy.exists() {
+        // Only count as v1 if no explicit v1 exists
+        let v1_path = dir.join(".hmac-secret-v1");
+        if !v1_path.exists() {
+            versions.push((1, legacy));
+        }
+    }
+
+    // Scan for versioned secrets
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if let Some(v_str) = name.strip_prefix(".hmac-secret-v") {
+                if let Ok(v) = v_str.parse::<u32>() {
+                    versions.push((v, entry.path()));
+                }
+            }
+        }
+    }
+
+    versions.sort_by_key(|(v, _)| *v);
+    versions
+}
+
+/// Get the current (latest) key version number.
+fn current_key_version() -> u32 {
+    discover_key_versions()
+        .last()
+        .map(|(v, _)| *v)
+        .unwrap_or(1)
+}
+
+/// Create a new key version. Returns the new version number.
+/// The old key versions are preserved for verification of existing signatures.
+pub fn rotate_hmac_key() -> Result<u32> {
+    let new_version = current_key_version() + 1;
+    let path = hmac_secret_path_versioned(new_version);
+
+    let mut secret = vec![0u8; 32];
+    getrandom::getrandom(&mut secret)
+        .map_err(|e| anyhow::anyhow!("CSPRNG failed during key rotation: {e}"))?;
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&path, &secret)?;
+    restrict_secret_permissions(&path);
+
+    eprintln!(
+        "[sentinel] HMAC key rotated to version {new_version}. \
+         Old versions preserved for signature verification."
+    );
+
+    Ok(new_version)
 }
 
 /// Get or create the random secret for HMAC key derivation.
@@ -108,11 +184,22 @@ fn hmac_secret_path() -> PathBuf {
 /// secret file makes the key non-derivable from system observations.
 /// The secret is readable only by the owning user (mode 0600 on Unix).
 fn get_or_create_secret() -> Vec<u8> {
-    let path = hmac_secret_path();
+    // Use the latest versioned key if available, else fall back to legacy
+    let versions = discover_key_versions();
+    if let Some((_, ref path)) = versions.last() {
+        if let Ok(bytes) = std::fs::read(path) {
+            if bytes.len() >= 32 {
+                validate_secret_permissions(path);
+                return bytes;
+            }
+        }
+    }
 
-    // Try to read existing secret
+    // Fall back to legacy path for backward compat
+    let path = hmac_secret_path();
     if let Ok(bytes) = std::fs::read(&path) {
         if bytes.len() >= 32 {
+            validate_secret_permissions(&path);
             return bytes;
         }
     }
@@ -143,14 +230,72 @@ fn get_or_create_secret() -> Vec<u8> {
     }
     let _ = std::fs::write(&path, &secret);
 
-    // On Unix, restrict permissions to owner-only
+    // Restrict permissions to owner-only
+    restrict_secret_permissions(&path);
+
+    secret
+}
+
+/// Restrict file permissions to owner-only on all platforms.
+/// On Windows, uses `icacls` to remove inherited permissions and grant only the current user.
+/// On Unix, uses chmod 600.
+fn restrict_secret_permissions(path: &std::path::Path) {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
     }
 
-    secret
+    #[cfg(windows)]
+    {
+        // Use icacls to restrict to current user only:
+        // 1. Disable inheritance, removing inherited ACEs
+        // 2. Grant current user full control
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        let path_str = path.to_string_lossy();
+        let username = std::env::var("USERNAME").unwrap_or_default();
+        if !username.is_empty() {
+            // Disable inheritance and remove inherited ACEs
+            let _ = std::process::Command::new("icacls")
+                .args([path_str.as_ref(), "/inheritance:r"])
+                .creation_flags(CREATE_NO_WINDOW)
+                .output();
+            // Grant only current user full control
+            let _ = std::process::Command::new("icacls")
+                .args([path_str.as_ref(), "/grant:r", &format!("{username}:F")])
+                .creation_flags(CREATE_NO_WINDOW)
+                .output();
+        }
+    }
+}
+
+/// Validate that the HMAC secret file has restricted permissions.
+/// Warns if the file is readable by other users (potential key compromise).
+fn validate_secret_permissions(path: &std::path::Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(metadata) = std::fs::metadata(path) {
+            let mode = metadata.permissions().mode();
+            if mode & 0o077 != 0 {
+                eprintln!(
+                    "[sentinel] WARNING: HMAC secret file has overly permissive mode {:o}. \
+                     Expected 600 (owner-only). Run: chmod 600 {}",
+                    mode & 0o777,
+                    path.display()
+                );
+                // Auto-fix
+                let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+            }
+        }
+    }
+
+    // On Windows, we trust the icacls setup from creation. Checking ACLs
+    // programmatically requires the windows-sys crate which isn't worth
+    // adding for this single check.
+    #[cfg(windows)]
+    { let _ = path; }
 }
 
 /// Derive the HMAC signing key from machine-local entropy PLUS a random secret.
@@ -178,26 +323,108 @@ fn derive_hmac_key() -> Vec<u8> {
     hasher.finalize().to_vec()
 }
 
-/// Compute HMAC-SHA256 of the given data
+/// Expose HMAC key derivation for proof_store to reuse the same signing key.
+/// **Attack #123**: Proof files need the same integrity protection as state files.
+pub fn derive_hmac_key_for_proofs() -> Vec<u8> {
+    derive_hmac_key()
+}
+
+/// Compute versioned HMAC for proof_store (delegates to internal compute_hmac).
+pub fn compute_hmac_for_proofs(data: &[u8]) -> String {
+    compute_hmac(data)
+}
+
+/// Verify versioned HMAC for proof_store (delegates to internal verify_hmac).
+pub fn verify_hmac_for_proofs(data: &[u8], sig_str: &str) -> bool {
+    verify_hmac(data, sig_str)
+}
+
+/// Compute HMAC-SHA256 of the given data using the current (latest) key.
+/// Returns a versioned signature string: `v{N}:{hex}`.
 fn compute_hmac(data: &[u8]) -> String {
+    let version = current_key_version();
     let key = derive_hmac_key();
     let mut mac = HmacSha256::new_from_slice(&key)
         .expect("HMAC accepts any key size");
     mac.update(data);
     let result = mac.finalize();
-    to_hex(&result.into_bytes())
+    let hex = to_hex(&result.into_bytes());
+    format!("v{version}:{hex}")
 }
 
-/// Verify HMAC-SHA256 of the given data against expected signature
-fn verify_hmac(data: &[u8], expected_hex: &str) -> bool {
-    let key = derive_hmac_key();
-    let mut mac = HmacSha256::new_from_slice(&key)
-        .expect("HMAC accepts any key size");
-    mac.update(data);
-    let expected = match from_hex(expected_hex) {
+/// Derive an HMAC key for a specific key version (used during verification).
+fn derive_hmac_key_for_version(version: u32) -> Option<Vec<u8>> {
+    let path = hmac_secret_path_versioned(version);
+    let secret = if path.exists() {
+        std::fs::read(&path).ok()?
+    } else if version == 1 {
+        // Fall back to legacy unversioned path for v1
+        std::fs::read(hmac_secret_path()).ok()?
+    } else {
+        return None;
+    };
+
+    if secret.len() < 32 {
+        return None;
+    }
+
+    let hostname = std::env::var("COMPUTERNAME")
+        .or_else(|_| std::env::var("HOSTNAME"))
+        .unwrap_or_default();
+    let username = std::env::var("USERNAME")
+        .or_else(|_| std::env::var("USER"))
+        .unwrap_or_default();
+    let salt = "sentinel-state-integrity-v2";
+    let key_material = format!("{hostname}:{username}:{salt}:{}", to_hex(&secret));
+
+    use sha2::Digest;
+    let mut hasher = Sha256::new();
+    hasher.update(key_material.as_bytes());
+    Some(hasher.finalize().to_vec())
+}
+
+/// Verify HMAC-SHA256 of the given data against expected signature.
+/// Supports versioned signatures (`v{N}:{hex}`) and legacy unversioned (`{hex}`).
+/// For versioned sigs, only tries the specified key version.
+/// For legacy sigs, tries the current key (backward compat).
+fn verify_hmac(data: &[u8], sig_str: &str) -> bool {
+    // Parse versioned signature: "v{N}:{hex}"
+    let (version, hex) = if let Some(rest) = sig_str.strip_prefix('v') {
+        if let Some((v_str, hex_part)) = rest.split_once(':') {
+            if let Ok(v) = v_str.parse::<u32>() {
+                (Some(v), hex_part)
+            } else {
+                (None, sig_str) // Malformed version, treat as legacy
+            }
+        } else {
+            (None, sig_str) // No colon, treat as legacy
+        }
+    } else {
+        (None, sig_str) // No 'v' prefix, legacy format
+    };
+
+    let expected = match from_hex(hex) {
         Some(v) => v,
         None => return false,
     };
+
+    // Derive the correct key based on version
+    let key = if let Some(v) = version {
+        // Versioned signature: use the specific key version
+        match derive_hmac_key_for_version(v) {
+            Some(k) => k,
+            None => return false, // Unknown version, reject
+        }
+    } else {
+        // Legacy unversioned signature: try current key
+        derive_hmac_key()
+    };
+
+    let mut mac = match HmacSha256::new_from_slice(&key) {
+        Ok(m) => m,
+        Err(_) => return false,
+    };
+    mac.update(data);
     mac.verify_slice(&expected).is_ok()
 }
 
@@ -266,8 +493,38 @@ pub fn acquire_session_lock(session_id: &str) -> Result<std::fs::File> {
     std::fs::create_dir_all(&dir).context("Failed to create state directory")?;
     let lock_path = dir.join(format!("{session_id}.json.lock"));
     let lock_file = std::fs::File::create(&lock_path).context("Failed to create lock file")?;
-    lock_file.lock_exclusive().context("Failed to acquire session lock")?;
-    Ok(lock_file)
+
+    // **Attack #186 fix**: Restrict lock file permissions on Unix.
+    // Default umask may leave lock files world-writable, allowing another
+    // user to hold the lock and block or hijack session state updates.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&lock_path, std::fs::Permissions::from_mode(0o600));
+    }
+
+    // Try non-blocking lock with retry + timeout.
+    // If a previous sentinel process hung (e.g., on stdin), its lock may still
+    // be held. Blocking indefinitely here would cascade the hang to all
+    // subsequent hook invocations for this session.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        match lock_file.try_lock_exclusive() {
+            Ok(()) => return Ok(lock_file),
+            Err(_) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Err(_) => {
+                tracing::warn!(
+                    session_id,
+                    "Session lock contention — proceeding without lock after 2s timeout"
+                );
+                // Proceed without lock rather than blocking forever.
+                // Slight risk of lost state updates, but vastly better than hanging.
+                return Ok(lock_file);
+            }
+        }
+    }
 }
 
 /// Load session state from disk with HMAC integrity verification.

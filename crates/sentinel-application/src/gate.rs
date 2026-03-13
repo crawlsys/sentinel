@@ -107,7 +107,7 @@ pub fn evaluate(
     // Check if workflow blocks this tool
     if let Some(block) = workflow_state.should_block(workflow, tool_name) {
         let phases_dir = dirs::home_dir()
-            .unwrap_or_default()
+            .expect("[sentinel] FATAL: Cannot determine home directory")
             .join(".claude/skills")
             .join(&effective_skill)
             .join("phases");

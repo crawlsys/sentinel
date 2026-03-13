@@ -25,7 +25,7 @@ static SESSION_CACHE: Mutex<Option<(Instant, Vec<SessionSummary>)>> = Mutex::new
 
 fn state_dir() -> PathBuf {
     dirs::home_dir()
-        .unwrap_or_default()
+        .expect("[sentinel] FATAL: Cannot determine home directory")
         .join(".claude")
         .join("sentinel")
         .join("state")
@@ -33,7 +33,7 @@ fn state_dir() -> PathBuf {
 
 fn config_dir() -> PathBuf {
     dirs::home_dir()
-        .unwrap_or_default()
+        .expect("[sentinel] FATAL: Cannot determine home directory")
         .join(".claude")
         .join("sentinel")
         .join("config")
@@ -46,7 +46,9 @@ struct SessionSummary {
     started_at: Option<String>,
     active: bool,
     active_skill: Option<String>,
-    tool_calls: u32,
+    // **Attack #148 fix**: Use u64 to match SessionState's field type.
+    // u32 truncation silently wraps counts above 4.3 billion, corrupting audit data.
+    tool_calls: u64,
     phases_read: Vec<String>,
     workflow_count: usize,
     proof_chain_count: usize,
@@ -54,6 +56,9 @@ struct SessionSummary {
 }
 
 fn load_sessions() -> Vec<SessionSummary> {
+    // **Attack #150 fix**: Use HMAC-verified state_store::load() instead of raw
+    // fs::read_to_string(). Raw reads bypass HMAC verification, allowing an attacker
+    // with filesystem access to inject forged session state into the dashboard.
     let dir = state_dir();
     let entries = match fs::read_dir(&dir) {
         Ok(e) => e,
@@ -63,36 +68,34 @@ fn load_sessions() -> Vec<SessionSummary> {
     let mut sessions = Vec::new();
     for entry in entries.flatten() {
         let path = entry.path();
+        // Only process .json files (skip .sig files)
         if path.extension().is_some_and(|e| e == "json") {
-            let Ok(content) = fs::read_to_string(&path) else { continue };
-            let Ok(state) = serde_json::from_str::<serde_json::Value>(&content) else { continue };
-
             let file_name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
-            let id = state["session_id"]
-                .as_str()
-                .unwrap_or_else(|| file_name.trim_end_matches(".json"))
-                .to_string();
+            let session_id = file_name.trim_end_matches(".json");
+
+            // Use HMAC-verified load
+            let state = match sentinel_infrastructure::state_store::load(session_id) {
+                Ok(Some(s)) => s,
+                _ => continue, // Skip invalid, tampered, or unsigned state files
+            };
+
+            // Convert phases_read HashMap<String, Vec<String>> to flat list
+            let phases_flat: Vec<String> = state.phases_read
+                .values()
+                .flat_map(|v| v.iter().cloned())
+                .collect();
 
             sessions.push(SessionSummary {
-                id,
+                id: state.session_id.clone(),
                 file: file_name,
-                started_at: state["started_at"].as_str().map(String::from),
-                active: state["active"].as_bool().unwrap_or(false),
-                active_skill: state["active_skill"].as_str().map(String::from),
-                tool_calls: state["tool_calls"].as_u64().unwrap_or(0) as u32,
-                phases_read: state["phases_read"]
-                    .as_array()
-                    .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
-                    .unwrap_or_default(),
-                workflow_count: state["workflows"]
-                    .as_object()
-                    .map(|o| o.len())
-                    .unwrap_or(0),
-                proof_chain_count: state["proof_chains"]
-                    .as_object()
-                    .map(|o| o.len())
-                    .unwrap_or(0),
-                hook_stats: state.get("hook_stats").cloned(),
+                started_at: Some(state.started_at.to_rfc3339()),
+                active: state.active,
+                active_skill: state.active_skill.clone(),
+                tool_calls: state.tool_calls,
+                phases_read: phases_flat,
+                workflow_count: state.workflows.len(),
+                proof_chain_count: state.proof_chains.len(),
+                hook_stats: serde_json::to_value(&state.hook_stats).ok(),
             });
         }
     }
@@ -127,17 +130,47 @@ pub fn router() -> Router<AppState> {
         .route("/stats", get(get_stats))
 }
 
-async fn list_sessions() -> Json<Vec<SessionSummary>> {
-    Json(get_cached_sessions())
+/// **Attack #172 fix**: Default and max limits for session listing.
+/// Prevents DoS from loading thousands of session state files.
+const DEFAULT_SESSION_LIMIT: usize = 100;
+const MAX_SESSION_LIMIT: usize = 500;
+
+async fn list_sessions(
+    query: axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Json<Vec<SessionSummary>> {
+    let limit = query
+        .get("limit")
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(DEFAULT_SESSION_LIMIT)
+        .min(MAX_SESSION_LIMIT);
+
+    let offset = query
+        .get("offset")
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(0);
+
+    let sessions = get_cached_sessions();
+    let paginated: Vec<SessionSummary> = sessions
+        .into_iter()
+        .skip(offset)
+        .take(limit)
+        .collect();
+
+    Json(paginated)
 }
 
 async fn get_session(Path(id): Path<String>) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let file_path = state_dir().join(format!("{id}.json"));
-    let content = fs::read_to_string(&file_path)
-        .map_err(|_| axum::http::StatusCode::NOT_FOUND)?;
-    let state: serde_json::Value = serde_json::from_str(&content)
+    // **Attack #146 fix**: Sanitize session ID to prevent path traversal.
+    // **Attack #151 fix**: Use HMAC-verified state_store::load() instead of raw
+    // fs::read_to_string(). The raw read bypassed HMAC verification, allowing an
+    // attacker with filesystem access to inject forged session state into the API.
+    let state = sentinel_infrastructure::state_store::load(&id)
+        .map_err(|_| axum::http::StatusCode::BAD_REQUEST)?
+        .ok_or(axum::http::StatusCode::NOT_FOUND)?;
+
+    let json = serde_json::to_value(&state)
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-    Ok(Json(state))
+    Ok(Json(json))
 }
 
 async fn get_config() -> Json<serde_json::Value> {

@@ -373,6 +373,25 @@ async fn handle_submit_phase(
         .unwrap_or("")
         .to_string();
 
+    // Look up phase config for judge model + objectives from workflows.toml
+    let workflow_configs = load_workflow_configs();
+
+    // **Attack #142 fix**: Verify the skill has a workflow definition before
+    // recording phase reads. Without this check, an attacker could submit evidence
+    // for a non-existent skill, creating workflow state entries that have no
+    // enforcement gates (no phases to complete, so everything passes).
+    if !workflow_configs.contains_key(&skill) {
+        return JsonRpcResponse::success(
+            request.id.clone(),
+            mcp_tool_result(
+                false,
+                serde_json::json!({"error": format!(
+                    "No workflow definition for skill '{}'. Cannot submit evidence.", skill
+                )}),
+            ),
+        );
+    }
+
     // Record phase read in state (submitting implies the phase was read)
     let phase_file = format!("{}.md", phase_id);
     {
@@ -380,9 +399,6 @@ async fn handle_submit_phase(
         s.set_active_skill(&skill);
         s.record_phase_read(&skill, &phase_file);
     }
-
-    // Look up phase config for judge model + objectives from workflows.toml
-    let workflow_configs = load_workflow_configs();
     let (judge_model, phase_objectives) = workflow_configs
         .get(&skill)
         .and_then(|wf| wf.phases.iter().find(|p| p.id == phase_id))

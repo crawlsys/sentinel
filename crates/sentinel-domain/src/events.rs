@@ -106,7 +106,11 @@ pub struct HookInput {
     #[serde(default)]
     pub context_window: Option<serde_json::Value>,
 
-    /// Catch-all for unknown fields
+    /// Catch-all for unknown fields — absorbs new Claude Code fields without
+    /// breaking deserialization. **Attack #124 note**: Values here are untrusted
+    /// and unvalidated. Hooks that read from `extra` MUST treat values as
+    /// potentially attacker-controlled. Never use `extra` for security-critical
+    /// decisions (tool gating, skill routing, phase advancement).
     #[serde(flatten)]
     pub extra: serde_json::Map<String, serde_json::Value>,
 }
@@ -318,17 +322,35 @@ impl HookOutput {
                     }
 
                     // updatedInput: last writer wins
-                    if other_hso.updated_input.is_some() {
+                    // **Attack #149 fix**: Clear updatedInput when permission is Deny.
+                    // A contradictory Deny + updatedInput could confuse clients into
+                    // executing a rewritten tool call despite the deny decision.
+                    if self_hso.permission_decision == Some(PermissionDecision::Deny) {
+                        self_hso.updated_input = None;
+                    } else if other_hso.updated_input.is_some() {
                         self_hso.updated_input = other_hso.updated_input.clone();
                     }
 
                     // additionalContext: concatenate
+                    // **Attack #136 fix**: Cap total additionalContext to 32KB.
+                    // Without a limit, merged hook outputs could grow unbounded.
+                    // 32KB is generous for all legitimate hook context combined.
+                    const MAX_CONTEXT_LEN: usize = 32_768;
                     match (&self_hso.additional_context, &other_hso.additional_context) {
                         (Some(a), Some(b)) => {
-                            self_hso.additional_context = Some(format!("{a}\n\n{b}"));
+                            let merged = format!("{a}\n\n{b}");
+                            if merged.len() > MAX_CONTEXT_LEN {
+                                self_hso.additional_context = Some(merged[..MAX_CONTEXT_LEN].to_string());
+                            } else {
+                                self_hso.additional_context = Some(merged);
+                            }
                         }
                         (None, Some(b)) => {
-                            self_hso.additional_context = Some(b.clone());
+                            if b.len() > MAX_CONTEXT_LEN {
+                                self_hso.additional_context = Some(b[..MAX_CONTEXT_LEN].to_string());
+                            } else {
+                                self_hso.additional_context = Some(b.clone());
+                            }
                         }
                         _ => {}
                     }
@@ -340,12 +362,25 @@ impl HookOutput {
         }
 
         // Merge systemMessage: concatenate with newline
+        // **Attack #102 fix**: Cap total systemMessage length to 4KB.
+        // Without a limit, a compromised hook could inject megabytes of text
+        // into the system message, either causing DoS or burying legitimate
+        // warnings in noise. 4KB is generous for real warnings.
         match (&self.system_message, &other.system_message) {
             (Some(a), Some(b)) => {
-                self.system_message = Some(format!("{a}\n{b}"));
+                let merged = format!("{a}\n{b}");
+                if merged.len() > 4096 {
+                    self.system_message = Some(merged[..4096].to_string());
+                } else {
+                    self.system_message = Some(merged);
+                }
             }
             (None, Some(b)) => {
-                self.system_message = Some(b.clone());
+                if b.len() > 4096 {
+                    self.system_message = Some(b[..4096].to_string());
+                } else {
+                    self.system_message = Some(b.clone());
+                }
             }
             _ => {}
         }

@@ -586,9 +586,10 @@ Dev workflow:
 
 **Self-healing MCP servers**: Every mcp-router instance exposes `mcp_restart_server` as a tool. Call `mcp__<name>__mcp_restart_server` to kill and respawn any MCP server binary without disconnecting from Claude Code. Use after rebuilding a binary, or to fix a broken server.
 
-**Self-maintaining CLAUDE.md**: Sentinel MCP exposes two tools for managing this file:
+**Self-maintaining CLAUDE.md**: Sentinel MCP exposes tools for managing this file:
 - `mcp__sentinel__regenerate_claude_md` — Re-counts all components, refreshes dates/projects, writes a fresh CLAUDE.md from the template
 - `mcp__sentinel__edit_claude_md_template` — Find-and-replace on the generator template source, then auto-regenerates. Changes persist across all future sessions
+- `mcp__sentinel__restart_all_mcps` — Reads ~/.claude.json, touches all mcp-router watched binaries to trigger mass restart of every MCP server at once
 
 ### Sentinel Shadow Binary System (Windows)
 
