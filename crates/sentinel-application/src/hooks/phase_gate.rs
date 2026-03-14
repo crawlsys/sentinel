@@ -203,6 +203,26 @@ pub fn process(
         }
     }
 
+    // **Attack #200 fix**: MCP tools with write/exec capabilities MUST go through
+    // phase gate enforcement. Previously ALL mcp__ tools were auto-allowed, letting
+    // any MCP server (codex, steel, etc.) bypass workflow restrictions by writing
+    // files, running commands, or applying patches through their own tools.
+    //
+    // Dangerous MCP tool suffixes — any mcp__*__<suffix> matching these is treated
+    // as a non-safe tool and subject to the same gate enforcement as Bash/Edit/Write.
+    if tool_name.starts_with("mcp__") {
+        if is_dangerous_mcp_tool(tool_name) {
+            // Fall through to gate enforcement below (same as Bash/Edit/Write)
+            eprintln!(
+                "[sentinel] MCP tool '{}' classified as dangerous — applying gate enforcement",
+                tool_name
+            );
+        } else {
+            // Safe/read-only MCP tool — allow without gate check
+            return HookOutput::allow();
+        }
+    }
+
     // Track ALL tool calls for phase-skip detection
     state.record_tool_call();
 
@@ -1023,6 +1043,48 @@ fn check_protected_path_write(
     None
 }
 
+/// Classify an MCP tool as dangerous (write/exec capability).
+///
+/// MCP tools follow the pattern `mcp__<server>__<method>`. A tool is dangerous
+/// if its method suffix indicates file writing, command execution, code patching,
+/// or state mutation. Read-only tools (get, list, search, read) are safe.
+///
+/// This is a denylist approach — unknown suffixes default to DANGEROUS (fail-closed)
+/// so new MCP servers don't automatically bypass enforcement.
+fn is_dangerous_mcp_tool(tool_name: &str) -> bool {
+    // Extract the method suffix (last segment after the final `__`)
+    let suffix = tool_name
+        .rsplit("__")
+        .next()
+        .unwrap_or(tool_name)
+        .to_lowercase();
+
+    // Explicitly safe suffixes — read-only operations
+    let safe_suffixes = [
+        "get", "list", "search", "read", "view", "show", "status", "info",
+        "check", "verify", "validate", "count", "stats", "whoami", "viewer", "describe",
+        "current_account", "list_accounts", "switch_account", "add_account",
+        "remove_account", "download", "fetch", "describe", "discover",
+        "screenshot", "pdf", "get_text", "is_visible", "wait",
+        "wait_for_selector", "wait_for_navigation", "get_tabs",
+        "list_instances", "mcp_restart_server", "sequentialthinking",
+    ];
+
+    // If the suffix starts with a safe prefix, allow it
+    let safe_prefixes = ["get_", "list_", "search_", "read_", "check_", "resolve_", "verify_"];
+
+    if safe_suffixes.contains(&suffix.as_str()) {
+        return false;
+    }
+
+    if safe_prefixes.iter().any(|p| suffix.starts_with(p)) {
+        return false;
+    }
+
+    // Everything else is dangerous (fail-closed)
+    true
+}
+
 /// Textual path check for all protected paths.
 /// Returns Some(reason) if blocked, None if allowed.
 fn check_protected_textual(normalized: &str) -> Option<&'static str> {
@@ -1063,6 +1125,23 @@ fn check_protected_textual(normalized: &str) -> Option<&'static str> {
     // sentinel binary with a no-op stub, disabling all enforcement.
     if normalized.contains("/sentinel-engine") || normalized.contains("/.cargo/bin/sentinel") {
         return Some("sentinel binary file");
+    }
+
+    // 7. Sentinel source repo + infrastructure repos
+    // **Attack #201 fix**: Protect the sentinel source code from modification during
+    // active workflows. An agent could edit enforcement logic, rebuild with `cargo build`,
+    // and the shadow binary system auto-swaps the weakened binary on next invocation.
+    let infra_repos = [
+        "/sentinel/crates/",
+        "/sentinel/Cargo",
+        "/sentinel/config/",
+        "/vulcan-mcp-sdk-rust/",
+        "/mcp-router/",
+    ];
+    for pattern in &infra_repos {
+        if normalized.contains(pattern) {
+            return Some("sentinel infrastructure source code");
+        }
     }
 
     // 6. Skill SKILL.md files (fake skill creation) and skill phases dirs
@@ -1698,5 +1777,57 @@ mod tests {
         process(&input, &mut state, &workflows);
         process(&input, &mut state, &workflows);
         assert_eq!(state.tool_calls, 2);
+    }
+
+    #[test]
+    fn test_dangerous_mcp_tools_classified_correctly() {
+        // Write/exec tools are dangerous
+        assert!(is_dangerous_mcp_tool("mcp__codex__shell"));
+        assert!(is_dangerous_mcp_tool("mcp__codex__write_file"));
+        assert!(is_dangerous_mcp_tool("mcp__codex__apply_patch"));
+        assert!(is_dangerous_mcp_tool("mcp__steel__click"));
+        assert!(is_dangerous_mcp_tool("mcp__steel__evaluate_js"));
+        assert!(is_dangerous_mcp_tool("mcp__steel__navigate"));
+        assert!(is_dangerous_mcp_tool("mcp__linear__create_issue"));
+        assert!(is_dangerous_mcp_tool("mcp__linear__update_issue"));
+        assert!(is_dangerous_mcp_tool("mcp__linear__delete_issue"));
+        assert!(is_dangerous_mcp_tool("mcp__doppler__set_secret"));
+
+        // Read-only tools are safe
+        assert!(!is_dangerous_mcp_tool("mcp__linear__get_issue"));
+        assert!(!is_dangerous_mcp_tool("mcp__linear__list_issues"));
+        assert!(!is_dangerous_mcp_tool("mcp__linear__search"));
+        assert!(!is_dangerous_mcp_tool("mcp__steel__screenshot"));
+        assert!(!is_dangerous_mcp_tool("mcp__codex__read_file"));
+        assert!(!is_dangerous_mcp_tool("mcp__codex__list_dir"));
+        assert!(!is_dangerous_mcp_tool("mcp__sentinel__get_proof_chain"));
+        assert!(!is_dangerous_mcp_tool("mcp__sentinel__get_workflow_status"));
+        assert!(!is_dangerous_mcp_tool("mcp__sentinel__verify_chain"));
+        assert!(!is_dangerous_mcp_tool("mcp__sentinel__mcp_restart_server"));
+
+        // Unknown suffixes default to dangerous (fail-closed)
+        assert!(is_dangerous_mcp_tool("mcp__evil__pwn_system"));
+        assert!(is_dangerous_mcp_tool("mcp__unknown__do_thing"));
+    }
+
+    #[test]
+    fn test_protected_path_blocks_sentinel_source_repo() {
+        let normalized = "/c/Users/garys/Documents/GitHub/sentinel/crates/sentinel-cli/src/hook_cmd.rs";
+        assert_eq!(
+            check_protected_textual(normalized),
+            Some("sentinel infrastructure source code")
+        );
+
+        let cargo_toml = "/c/Users/garys/Documents/GitHub/sentinel/Cargo.toml";
+        assert_eq!(
+            check_protected_textual(cargo_toml),
+            Some("sentinel infrastructure source code"), // sentinel/Cargo matches
+        );
+
+        let vulcan = "/c/Users/garys/Documents/GitHub/vulcan-mcp-sdk-rust/crates/vulcan/src/lib.rs";
+        assert_eq!(
+            check_protected_textual(vulcan),
+            Some("sentinel infrastructure source code")
+        );
     }
 }
