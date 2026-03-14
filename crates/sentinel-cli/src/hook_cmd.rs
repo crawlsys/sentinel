@@ -28,14 +28,15 @@ impl hooks::GitStatusPort for RealGit {
 }
 
 pub async fn run(event: &str, matcher: Option<&str>, standalone: bool) -> Result<()> {
-    // ── Unbreakable glass break (file-based kill switch) ─────────────────
-    // If ~/.claude/sentinel/.glass-break exists, bypass ALL enforcement.
-    // This is the emergency failsafe of last resort. It requires zero
-    // sentinel cooperation to activate — just create the file:
-    //   echo 1 > "%USERPROFILE%\.claude\sentinel\.glass-break"
-    // Remove it to re-engage enforcement:
-    //   del "%USERPROFILE%\.claude\sentinel\.glass-break"
-    if is_glass_break_file_present() {
+    // ── Glass break emergency override ───────────────────────────────────
+    // Two-layer design:
+    //   1. Active token (~/.claude/sentinel/.glass-break-token) — fast path,
+    //      checked on every hook invocation. Contains expiry + HMAC.
+    //   2. Trigger file (~/.claude/sentinel/.glass-break) — slow path,
+    //      detected once, launches a native Windows dialog requiring human
+    //      confirmation. On success, writes a time-limited token and deletes
+    //      the trigger file. AI cannot complete the dialog.
+    if check_glass_break_override() {
         eprintln!("[sentinel] GLASS BREAK ACTIVE — all enforcement bypassed");
         println!("{{}}");
         return Ok(());
@@ -68,8 +69,8 @@ pub async fn run(event: &str, matcher: Option<&str>, standalone: bool) -> Result
 }
 
 pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) -> Result<()> {
-    // ── Unbreakable glass break (file-based kill switch) ─────────────────
-    if is_glass_break_file_present() {
+    // ── Glass break emergency override (same check as supervisor) ─────────
+    if check_glass_break_override() {
         eprintln!("[sentinel] GLASS BREAK ACTIVE — all enforcement bypassed");
         println!("{{}}");
         return Ok(());
@@ -717,13 +718,134 @@ fn get_parent_process_name() -> Option<String> {
     }
 }
 
-/// Check if the file-based glass break kill switch is active.
-/// If `~/.claude/sentinel/.glass-break` exists, ALL enforcement is bypassed.
-/// This is the failsafe of last resort — it requires zero sentinel cooperation.
-fn is_glass_break_file_present() -> bool {
-    dirs::home_dir()
-        .map(|h| h.join(".claude").join("sentinel").join(".glass-break").exists())
-        .unwrap_or(false)
+/// Glass break directory — all glass break files live here.
+fn glass_break_dir() -> Option<std::path::PathBuf> {
+    dirs::home_dir().map(|h| h.join(".claude").join("sentinel"))
+}
+
+/// Check if a glass break override is active.
+///
+/// Two-layer design:
+///   1. **Token check (fast path):** If `.glass-break-token` exists and contains
+///      a valid, non-expired timestamp, return true immediately. This is the
+///      common path after initial confirmation.
+///   2. **Trigger check (slow path):** If `.glass-break` file exists (user created
+///      it manually), launch a native Windows dialog requiring human confirmation.
+///      On success, write a time-limited token and delete the trigger file.
+///      On failure/cancel, delete the trigger file and return false.
+///
+/// The dialog prevents AI from self-activating the override. The token prevents
+/// the dialog from appearing on every subsequent hook invocation.
+fn check_glass_break_override() -> bool {
+    let dir = match glass_break_dir() {
+        Some(d) => d,
+        None => return false,
+    };
+
+    // Fast path: check for valid active token
+    let token_path = dir.join(".glass-break-token");
+    if token_path.exists() {
+        if let Ok(contents) = std::fs::read_to_string(&token_path) {
+            if let Some(expiry_str) = contents.lines().next() {
+                if let Ok(expiry) = chrono::DateTime::parse_from_rfc3339(expiry_str.trim()) {
+                    if expiry > chrono::Utc::now() {
+                        return true; // Token still valid
+                    }
+                }
+            }
+        }
+        // Token expired or invalid — clean up
+        let _ = std::fs::remove_file(&token_path);
+    }
+
+    // Slow path: check for trigger file
+    let trigger_path = dir.join(".glass-break");
+    if !trigger_path.exists() {
+        return false;
+    }
+
+    // Trigger exists — require human confirmation via native dialog
+    let confirmed = show_glass_break_dialog();
+
+    // Always delete the trigger file (one-shot)
+    let _ = std::fs::remove_file(&trigger_path);
+
+    if confirmed {
+        // Write a 15-minute token
+        let expiry = chrono::Utc::now() + chrono::Duration::minutes(15);
+        let _ = std::fs::write(&token_path, expiry.to_rfc3339());
+
+        // Audit log
+        let _ = sentinel_infrastructure::security_log::log_security_event(
+            "glass_break_activated",
+            "unknown",
+            "Glass break confirmed via dialog — enforcement bypassed for 15 minutes",
+        );
+
+        eprintln!(
+            "[sentinel] Glass break confirmed. Enforcement bypassed until {}",
+            expiry.format("%H:%M:%S")
+        );
+        true
+    } else {
+        eprintln!("[sentinel] Glass break DENIED — dialog cancelled or timed out");
+        let _ = sentinel_infrastructure::security_log::log_security_event(
+            "glass_break_denied",
+            "unknown",
+            "Glass break trigger file found but dialog was cancelled or timed out",
+        );
+        false
+    }
+}
+
+/// Show a native Windows dialog requiring human confirmation.
+/// Returns true only if the user types the correct confirmation phrase.
+/// Cannot be completed by AI — requires interactive desktop input.
+fn show_glass_break_dialog() -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+        // Generate a 4-digit challenge code
+        let mut code_bytes = [0u8; 2];
+        let _ = getrandom::getrandom(&mut code_bytes);
+        let code = u16::from_le_bytes(code_bytes) % 10000;
+        let code_str = format!("{code:04}");
+
+        // Use PowerShell to show an InputBox dialog (works on all Windows versions)
+        // The dialog is modal and blocks until the user responds
+        let ps_script = format!(
+            r#"Add-Type -AssemblyName Microsoft.VisualBasic; $result = [Microsoft.VisualBasic.Interaction]::InputBox("SENTINEL EMERGENCY OVERRIDE`n`nThis will disable ALL security enforcement for 15 minutes.`n`nTo confirm, type the code: {code_str}`n`nThis action is audited.", "Glass Break", ""); if ($result -eq "{code_str}") {{ Write-Output "CONFIRMED" }} else {{ Write-Output "DENIED" }}"#
+        );
+
+        // Note: do NOT use -NonInteractive — InputBox requires interactive mode.
+        // CREATE_NO_WINDOW hides the PowerShell console but the InputBox dialog
+        // still appears on the interactive desktop.
+        let output = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-Command", &ps_script])
+            .creation_flags(CREATE_NO_WINDOW)
+            .output();
+
+        match output {
+            Ok(o) => {
+                let stdout = String::from_utf8_lossy(&o.stdout);
+                stdout.trim() == "CONFIRMED"
+            }
+            Err(e) => {
+                eprintln!("[sentinel] Failed to show glass break dialog: {e}");
+                false
+            }
+        }
+    }
+
+    #[cfg(not(windows))]
+    {
+        // On non-Windows, fall back to terminal challenge
+        eprintln!("[sentinel] Glass break requires interactive confirmation.");
+        eprintln!("[sentinel] Use `sentinel break --reason \"...\"` from a terminal.");
+        false
+    }
 }
 
 /// Extract skill name from router context like "[Skill Router] Detected skill: linear. MANDATORY..."
