@@ -66,6 +66,14 @@ pub fn check_rate_limit(session_id: &str) -> Result<()> {
 
     // Check rate limit
     if timestamps.len() >= MAX_INVOCATIONS_PER_WINDOW {
+        let _ = crate::security_log::log_security_event(
+            "rate_limited",
+            session_id,
+            &format!(
+                "Exceeded {} hook invocations in {}s — possible hook loop or abuse",
+                MAX_INVOCATIONS_PER_WINDOW, WINDOW_SECONDS,
+            ),
+        );
         anyhow::bail!(
             "[sentinel] Rate limited: session '{}' exceeded {} hook invocations in {} seconds. \
              This may indicate a hook loop or abuse.",

@@ -115,7 +115,16 @@ fn extract_bash_command(input: &HookInput) -> Option<&str> {
 
 /// Launch the native Fluent dialog for delete approval.
 /// Returns true if approved, false if denied or dialog unavailable.
+///
+/// In test mode (`SENTINEL_TEST=1`), always returns false without launching
+/// a GUI dialog — prevents tests from hanging on interactive input.
 fn show_delete_dialog(command: &str, directory: &str) -> bool {
+    // Skip dialog in test/CI environments to prevent hangs
+    if std::env::var("SENTINEL_TEST").is_ok() || std::env::var("CI").is_ok() {
+        tracing::debug!("Skipping delete dialog in test/CI mode");
+        return false;
+    }
+
     let dialog_path = dirs::home_dir()
         .map(|h| h.join(".claude/scripts/wrangler-guard-dialog.exe"))
         .unwrap_or_default();
@@ -259,11 +268,14 @@ mod tests {
 
     #[test]
     fn test_wrangler_rs_delete_blocked_without_dialog() {
-        // Dialog binary won't exist in test environment → deny by default
+        // Set SENTINEL_TEST to prevent show_delete_dialog from launching the
+        // real GUI dialog (which hangs waiting for user input in test env)
+        std::env::set_var("SENTINEL_TEST", "1");
         let output = process(&bash_input(
             "wrangler-rs delete --name hook-test-disposable",
         ));
         assert_eq!(output.blocked, Some(true));
+        std::env::remove_var("SENTINEL_TEST");
     }
 
     #[test]

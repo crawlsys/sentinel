@@ -36,7 +36,12 @@ pub async fn run(event: &str, matcher: Option<&str>, standalone: bool) -> Result
     debug!(event, ?matcher, standalone, "Processing hook event");
 
     let hook_event = parse_hook_event(event)?;
-    validate_caller();
+    if let Err(e) = validate_caller() {
+        // Caller validation failed — return safe empty JSON and exit early.
+        // The security event was already logged inside validate_caller().
+        debug!(error = %e, "Caller validation failed — returning safe response");
+        return write_safe_allow_response();
+    }
 
     let raw_input = sentinel_infrastructure::stdin::read_raw_stdin(Duration::from_secs(3))?;
     run_supervised(hook_event, event, matcher, raw_input).await?;
@@ -64,7 +69,11 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
     // caller (Claude Code / node process). This is defense-in-depth — not a hard
     // guarantee, but raises the bar from "any process on the system" to "a process
     // that can convincingly mimic Claude Code's invocation pattern".
-    validate_caller();
+    if let Err(e) = validate_caller() {
+        // Caller validation failed — return safe empty JSON and exit early.
+        debug!(error = %e, "Caller validation failed — returning safe response");
+        return write_safe_allow_response();
+    }
 
     // Read input from stdin
     let input = sentinel_infrastructure::stdin::read_hook_input()?;
@@ -551,29 +560,56 @@ fn write_safe_allow_response() -> Result<()> {
 
 /// Validate that the caller is plausibly Claude Code.
 ///
-/// Checks that stdin is piped (not a terminal) — hooks are always invoked via
-/// pipe from Claude Code's hook runner, never interactively. This blocks casual
-/// `echo '{}' | sentinel hook --event X` attacks from interactive shells while
-/// still allowing pipe-based invocation.
+/// Two checks:
+/// 1. **Stdin is piped** (not a terminal) — hooks are always invoked via pipe
+///    from Claude Code's hook runner, never interactively. Hard fail unless
+///    `SENTINEL_ALLOW_TERMINAL=1` is set.
+/// 2. **CLAUDE_CODE env marker** — Claude Code sets `CLAUDE_CODE_ENTRY_POINT`
+///    when spawning hook subprocesses. Its absence is suspicious.
+///
+/// If validation fails, a `caller_rejected` event is logged to the security
+/// audit log and the function returns `Err`, causing `run()` to output `{}`
+/// (safe allow) and exit early.
 ///
 /// This is defense-in-depth, not a security boundary. A determined attacker can
-/// still pipe crafted JSON, but they must:
+/// still set the env var and pipe crafted JSON, but they must:
 ///   1. Know the sentinel CLI exists and its arguments
-///   2. Construct valid HookInput JSON with a real session_id
-///   3. Pipe it correctly (not type interactively)
-fn validate_caller() {
+///   2. Set `CLAUDE_CODE_ENTRY_POINT` in their environment
+///   3. Construct valid HookInput JSON with a real session_id
+///   4. Pipe it correctly (not type interactively)
+fn validate_caller() -> Result<()> {
+    // Escape hatch for debugging / manual testing
+    if std::env::var("SENTINEL_ALLOW_TERMINAL").as_deref() == Ok("1") {
+        return Ok(());
+    }
+
     use std::io::IsTerminal;
     if std::io::stdin().is_terminal() {
         eprintln!(
-            "[sentinel] WARNING: Hook invoked from interactive terminal. \
-             Hooks should only be called by Claude Code via pipe. \
-             If this is intentional (debugging), set SENTINEL_ALLOW_TERMINAL=1."
+            "[sentinel] BLOCKED: Hook invoked from interactive terminal. \
+             Hooks must be called by Claude Code via pipe. \
+             Set SENTINEL_ALLOW_TERMINAL=1 to override for debugging."
         );
-        if std::env::var("SENTINEL_ALLOW_TERMINAL").as_deref() != Ok("1") {
-            // Don't hard-fail — just warn. This preserves debuggability while
-            // making accidental/casual abuse visible in logs.
-        }
+        let _ = sentinel_infrastructure::security_log::log_security_event(
+            "caller_rejected",
+            "unknown",
+            "Hook invoked from interactive terminal (stdin is TTY)",
+        );
+        anyhow::bail!("Caller validation failed: stdin is a terminal");
     }
+
+    // Check for Claude Code environment marker.
+    // Claude Code sets CLAUDE_CODE_ENTRY_POINT (e.g. "cli", "sdk").
+    // Absence is not definitive proof of abuse (could be an older version),
+    // so we only warn — the stdin pipe check above is the hard gate.
+    if std::env::var("CLAUDE_CODE_ENTRY_POINT").is_err() {
+        eprintln!(
+            "[sentinel] WARNING: CLAUDE_CODE_ENTRY_POINT not set. \
+             This hook may not have been invoked by Claude Code."
+        );
+    }
+
+    Ok(())
 }
 
 /// Extract skill name from router context like "[Skill Router] Detected skill: linear. MANDATORY..."

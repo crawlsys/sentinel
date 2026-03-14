@@ -14,6 +14,7 @@ pub mod proof_store;
 pub mod rate_limit;
 pub mod rig_classifier;
 pub mod rig_judge;
+pub mod security_log;
 pub mod state_store;
 pub mod stdin;
 pub mod stdout;

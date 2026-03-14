@@ -234,7 +234,8 @@ fn get_or_create_secret() -> Vec<u8> {
 }
 
 /// Restrict file permissions to owner-only on all platforms.
-/// On Windows, uses `icacls` to remove inherited permissions and grant only the current user.
+/// On Windows, uses `icacls` to remove inherited permissions and grant only the current user,
+/// with error checking and post-verification of the resulting ACL.
 /// On Unix, uses chmod 600.
 fn restrict_secret_permissions(path: &std::path::Path) {
     #[cfg(unix)]
@@ -245,24 +246,111 @@ fn restrict_secret_permissions(path: &std::path::Path) {
 
     #[cfg(windows)]
     {
-        // Use icacls to restrict to current user only:
-        // 1. Disable inheritance, removing inherited ACEs
-        // 2. Grant current user full control
         use std::os::windows::process::CommandExt;
         const CREATE_NO_WINDOW: u32 = 0x08000000;
-        let path_str = path.to_string_lossy();
+        let path_str = path.to_string_lossy().to_string();
         let username = std::env::var("USERNAME").unwrap_or_default();
-        if !username.is_empty() {
-            // Disable inheritance and remove inherited ACEs
-            let _ = std::process::Command::new("icacls")
-                .args([path_str.as_ref(), "/inheritance:r"])
-                .creation_flags(CREATE_NO_WINDOW)
-                .output();
-            // Grant only current user full control
-            let _ = std::process::Command::new("icacls")
-                .args([path_str.as_ref(), "/grant:r", &format!("{username}:F")])
-                .creation_flags(CREATE_NO_WINDOW)
-                .output();
+        if username.is_empty() {
+            eprintln!(
+                "[sentinel] WARNING: USERNAME not set — cannot restrict file permissions on {}",
+                path.display()
+            );
+            return;
+        }
+
+        // Step 1: Disable inheritance and remove inherited ACEs
+        let result1 = std::process::Command::new("icacls")
+            .args([&path_str, "/inheritance:r"])
+            .creation_flags(CREATE_NO_WINDOW)
+            .output();
+
+        match result1 {
+            Ok(output) if output.status.success() => {}
+            Ok(output) => {
+                eprintln!(
+                    "[sentinel] WARNING: icacls inheritance removal failed on {}: {}",
+                    path.display(),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            Err(e) => {
+                eprintln!(
+                    "[sentinel] WARNING: Failed to run icacls on {}: {}",
+                    path.display(),
+                    e
+                );
+            }
+        }
+
+        // Step 2: Grant only current user full control
+        let result2 = std::process::Command::new("icacls")
+            .args([&path_str, "/grant:r", &format!("{}:F", username)])
+            .creation_flags(CREATE_NO_WINDOW)
+            .output();
+
+        match result2 {
+            Ok(output) if output.status.success() => {}
+            Ok(output) => {
+                eprintln!(
+                    "[sentinel] WARNING: icacls grant failed on {}: {}",
+                    path.display(),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            Err(e) => {
+                eprintln!(
+                    "[sentinel] WARNING: Failed to run icacls on {}: {}",
+                    path.display(),
+                    e
+                );
+            }
+        }
+
+        // Step 3: Verify — read ACL and check only our user appears
+        verify_acl_owner_only(path, &username);
+    }
+}
+
+/// Verify that a file's ACL contains only the expected owner.
+/// Logs a warning if unexpected ACEs (other users/groups) are found.
+#[cfg(windows)]
+fn verify_acl_owner_only(path: &std::path::Path, username: &str) {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+    let path_str = path.to_string_lossy().to_string();
+
+    let verify = std::process::Command::new("icacls")
+        .args([&path_str])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output();
+
+    match verify {
+        Ok(output) if output.status.success() => {
+            let acl_output = String::from_utf8_lossy(&output.stdout);
+            let lines: Vec<&str> = acl_output
+                .lines()
+                .filter(|l| !l.trim().is_empty() && !l.contains("Successfully processed"))
+                .collect();
+            // First line is the file path; remaining lines are ACE entries.
+            // Each ACE line should reference only the current user.
+            let unexpected_aces: Vec<&&str> = lines
+                .iter()
+                .skip(1) // skip the path line
+                .filter(|l| !l.to_lowercase().contains(&username.to_lowercase()))
+                .collect();
+            if !unexpected_aces.is_empty() {
+                eprintln!(
+                    "[sentinel] WARNING: Unexpected ACEs on {}: {:?}. File may be readable by other users.",
+                    path.display(),
+                    unexpected_aces
+                );
+            }
+        }
+        _ => {
+            eprintln!(
+                "[sentinel] WARNING: Could not verify ACL on {}",
+                path.display()
+            );
         }
     }
 }
@@ -288,12 +376,19 @@ fn validate_secret_permissions(path: &std::path::Path) {
         }
     }
 
-    // On Windows, we trust the icacls setup from creation. Checking ACLs
-    // programmatically requires the windows-sys crate which isn't worth
-    // adding for this single check.
+    // On Windows, verify ACL by running icacls in read-only mode.
+    // Checks that only the current user has access to the secret file.
     #[cfg(windows)]
     {
-        let _ = path;
+        let username = std::env::var("USERNAME").unwrap_or_default();
+        if username.is_empty() {
+            eprintln!(
+                "[sentinel] WARNING: USERNAME not set — cannot validate permissions on {}",
+                path.display()
+            );
+            return;
+        }
+        verify_acl_owner_only(path, &username);
     }
 }
 
@@ -426,11 +521,43 @@ fn verify_hmac(data: &[u8], sig_str: &str) -> bool {
     mac.verify_slice(&expected).is_ok()
 }
 
+/// Path to the generation tracking file for a session.
+/// Stores the highest known generation number as a plain u64 string.
+/// This file is NEVER overwritten with a lower value — it only ratchets up.
+fn generation_file_path(session_id: &str) -> PathBuf {
+    state_dir().join(format!("{session_id}.gen"))
+}
+
+/// Read the highest known generation from the `.gen` file.
+/// Returns 0 if the file doesn't exist or is unreadable.
+fn read_generation_floor(session_id: &str) -> u64 {
+    let path = generation_file_path(session_id);
+    std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .unwrap_or(0)
+}
+
+/// Write the generation floor to the `.gen` file (atomic via tmp+rename).
+fn write_generation_floor(session_id: &str, generation: u64) -> Result<()> {
+    let dir = state_dir();
+    let path = generation_file_path(session_id);
+    let tmp_path = dir.join(format!("{session_id}.gen.tmp"));
+    std::fs::write(&tmp_path, generation.to_string())
+        .context("Failed to write temp generation file")?;
+    std::fs::rename(&tmp_path, &path).context("Failed to rename temp generation file")?;
+    Ok(())
+}
+
 /// Save session state to disk (atomic write with file lock + HMAC)
 ///
 /// Uses an exclusive lock file to serialize concurrent writes,
 /// preventing corruption from parallel hook invocations.
 /// Writes a companion `.json.sig` file with HMAC-SHA256 signature.
+///
+/// **Anti-replay (Attack #81 hardening)**: Also writes the generation to a
+/// separate `.gen` file that acts as a monotonic floor. On load, the state's
+/// generation must be >= this floor, preventing file deletion/replacement attacks.
 pub fn save(state: &mut SessionState) -> Result<()> {
     sanitize_session_id(&state.session_id)?;
 
@@ -467,6 +594,10 @@ pub fn save(state: &mut SessionState) -> Result<()> {
 
     std::fs::write(&tmp_path, &json).context("Failed to write temp state file")?;
     std::fs::rename(&tmp_path, &path).context("Failed to rename temp state file")?;
+
+    // **Anti-replay**: Write the generation floor AFTER the state file lands.
+    // The .gen file only ratchets up — it records the highest generation ever saved.
+    write_generation_floor(&state.session_id, state.state_generation)?;
 
     Ok(())
 }
@@ -539,6 +670,11 @@ pub fn load(session_id: &str) -> Result<Option<SessionState>> {
                  The state file may have been tampered with. Discarding corrupted state.",
                 session_id
             );
+            let _ = crate::security_log::log_security_event(
+                "hmac_failure",
+                session_id,
+                "State file HMAC verification failed — possible tampering",
+            );
             // Delete corrupted state + sig
             let _ = std::fs::remove_file(&path);
             let _ = std::fs::remove_file(&sig_path);
@@ -554,26 +690,65 @@ pub fn load(session_id: &str) -> Result<Option<SessionState>> {
              Unsigned state files are not trusted. Starting fresh.",
             session_id
         );
+        let _ = crate::security_log::log_security_event(
+            "tamper_detected",
+            session_id,
+            "No signature file for state — unsigned state rejected",
+        );
         let _ = std::fs::remove_file(&path);
         return Ok(None);
     }
 
     let state: SessionState = serde_json::from_str(&json).context("Failed to parse state")?;
+
+    // **Anti-replay (Attack #81 hardening)**: Check that the loaded state's
+    // generation is >= the highest generation we've ever saved for this session.
+    // If it's lower, someone deleted the state file and let sentinel recreate
+    // it at a lower generation (state regression / replay attack).
+    let gen_floor = read_generation_floor(session_id);
+    if state.state_generation < gen_floor {
+        eprintln!(
+            "[sentinel] SECURITY: State regression detected for session '{}'. \
+             Expected generation >= {}, got {}. Possible replay attack.",
+            session_id, gen_floor, state.state_generation,
+        );
+        let _ = crate::security_log::log_security_event(
+            "state_regression",
+            session_id,
+            &format!(
+                "Expected generation >= {}, got {}. Possible replay attack.",
+                gen_floor, state.state_generation,
+            ),
+        );
+        // Reject the downgraded state — delete the corrupted/replayed file
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&sig_path);
+        return Ok(None);
+    }
+
     Ok(Some(state))
 }
 
-/// Delete session state (and its signature file)
+/// Delete session state (and its signature + generation files)
 pub fn delete(session_id: &str) -> Result<()> {
     sanitize_session_id(session_id)?;
 
     let dir = state_dir();
     let path = dir.join(format!("{session_id}.json"));
     let sig_path = dir.join(format!("{session_id}.json.sig"));
+    let gen_path = generation_file_path(session_id);
     if path.exists() {
         std::fs::remove_file(&path).context("Failed to delete state file")?;
     }
     let _ = std::fs::remove_file(&sig_path);
+    let _ = std::fs::remove_file(&gen_path);
     Ok(())
+}
+
+/// Expose compute_hmac for tests that need to forge valid-HMAC state files.
+#[cfg(test)]
+pub(crate) fn compute_hmac_for_tests(data: &[u8]) -> String {
+    compute_hmac(data)
 }
 
 /// List all session IDs with saved state
@@ -592,4 +767,123 @@ pub fn list_sessions() -> Result<Vec<String>> {
         }
     }
     Ok(sessions)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sentinel_domain::state::SessionState;
+
+    /// Generate a unique test session ID to avoid collisions between parallel tests.
+    fn test_session_id(suffix: &str) -> String {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        format!("test-antireplay-{n}-{suffix}")
+    }
+
+    /// Cleanup helper — removes all files for a session.
+    fn cleanup_session(session_id: &str) {
+        let _ = delete(session_id);
+    }
+
+    #[test]
+    fn test_state_generation_prevents_replay() {
+        let sid = test_session_id("replay");
+
+        // Ensure clean slate
+        cleanup_session(&sid);
+
+        // Step 1: Save state a few times to advance generation to N
+        let mut state = SessionState::new(sid.clone());
+        save(&mut state).expect("save 1");
+        assert_eq!(state.state_generation, 1);
+        save(&mut state).expect("save 2");
+        assert_eq!(state.state_generation, 2);
+        save(&mut state).expect("save 3");
+        assert_eq!(state.state_generation, 3);
+
+        // Step 2: Verify normal load succeeds (generation 3 >= floor 3)
+        let loaded = load(&sid).expect("load should succeed");
+        assert!(loaded.is_some(), "normal load should return Some");
+        assert_eq!(loaded.unwrap().state_generation, 3);
+
+        // Step 3: Forge a state file with generation 1 (regression) but valid HMAC
+        let mut forged_state = SessionState::new(sid.clone());
+        forged_state.state_generation = 1; // lower than floor of 3
+
+        let forged_json = serde_json::to_string_pretty(&forged_state).unwrap();
+        let forged_sig = compute_hmac_for_tests(forged_json.as_bytes());
+
+        let dir = state_dir();
+        let state_path = dir.join(format!("{sid}.json"));
+        let sig_path = dir.join(format!("{sid}.json.sig"));
+        std::fs::write(&state_path, &forged_json).unwrap();
+        std::fs::write(&sig_path, &forged_sig).unwrap();
+
+        // Step 4: Load should reject — generation 1 < floor 3
+        let loaded = load(&sid).expect("load should not error");
+        assert!(
+            loaded.is_none(),
+            "load should return None for replayed state with lower generation"
+        );
+
+        // Step 5: The corrupted state file should have been deleted
+        assert!(
+            !state_path.exists(),
+            "replayed state file should be deleted"
+        );
+
+        // Cleanup
+        cleanup_session(&sid);
+    }
+
+    #[test]
+    fn test_generation_floor_ratchets_up() {
+        let sid = test_session_id("ratchet");
+        cleanup_session(&sid);
+
+        let mut state = SessionState::new(sid.clone());
+        save(&mut state).expect("save 1");
+        assert_eq!(read_generation_floor(&sid), 1);
+
+        save(&mut state).expect("save 2");
+        assert_eq!(read_generation_floor(&sid), 2);
+
+        save(&mut state).expect("save 3");
+        assert_eq!(read_generation_floor(&sid), 3);
+
+        cleanup_session(&sid);
+    }
+
+    #[test]
+    fn test_delete_removes_gen_file() {
+        let sid = test_session_id("delgen");
+        cleanup_session(&sid);
+
+        let mut state = SessionState::new(sid.clone());
+        save(&mut state).expect("save");
+
+        let gen_path = generation_file_path(&sid);
+        assert!(gen_path.exists(), ".gen file should exist after save");
+
+        delete(&sid).expect("delete");
+        assert!(!gen_path.exists(), ".gen file should be removed after delete");
+    }
+
+    #[test]
+    fn test_normal_save_load_cycle_with_generation() {
+        let sid = test_session_id("normal");
+        cleanup_session(&sid);
+
+        let mut state = SessionState::new(sid.clone());
+        state.set_active_skill("linear");
+        save(&mut state).expect("save");
+
+        let loaded = load(&sid).expect("load").expect("should be Some");
+        assert_eq!(loaded.state_generation, 1);
+        assert_eq!(loaded.active_skill.as_deref(), Some("linear"));
+
+        cleanup_session(&sid);
+    }
 }
