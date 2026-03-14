@@ -609,7 +609,84 @@ fn validate_caller() -> Result<()> {
         );
     }
 
+    // Process attestation — verify parent process is a known Claude Code runtime.
+    // Runs asynchronously via background thread to avoid blocking the hook pipeline
+    // (wmic/tasklist can take 200ms+ on cold start). Results are logged to the
+    // security audit log for forensic review but don't block execution.
+    #[cfg(windows)]
+    {
+        std::thread::spawn(|| {
+            if let Some(parent) = get_parent_process_name() {
+                let valid_parents = [
+                    "node.exe", "bun.exe", "claude.exe", "cmd.exe",
+                    "powershell.exe", "pwsh.exe", "sentinel-engine.exe", "sentinel.exe",
+                ];
+                if !valid_parents.iter().any(|v| parent.contains(v)) {
+                    eprintln!(
+                        "[sentinel] WARNING: Parent process '{}' is not a known Claude Code runtime.",
+                        parent
+                    );
+                    let _ = sentinel_infrastructure::security_log::log_security_event(
+                        "caller_rejected",
+                        "unknown",
+                        &format!("Parent process '{}' is not a known Claude Code runtime", parent),
+                    );
+                }
+            }
+        });
+    }
+
     Ok(())
+}
+
+/// Get the parent process name on Windows using tasklist + wmic.
+///
+/// Strategy: Use `wmic process where ProcessId=<PID> get ParentProcessId` to find
+/// the parent PID, then `tasklist /FI "PID eq <PPID>"` to get its name.
+/// Both are native Windows tools that start in ~30ms (vs PowerShell ~2s).
+///
+/// Returns None if the check fails for any reason (fail-open for resilience).
+#[cfg(windows)]
+fn get_parent_process_name() -> Option<String> {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+    let pid = std::process::id();
+
+    // Step 1: Get parent PID via wmic (~30ms)
+    let output = std::process::Command::new("wmic")
+        .args(["process", "where", &format!("ProcessId={pid}"), "get", "ParentProcessId", "/VALUE"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .ok()?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parent_pid: u32 = stdout.lines()
+        .find(|l| l.starts_with("ParentProcessId="))
+        .and_then(|l| l.strip_prefix("ParentProcessId="))
+        .and_then(|s| s.trim().parse().ok())?;
+
+    // Step 2: Get parent process name via tasklist (~30ms)
+    let output = std::process::Command::new("tasklist")
+        .args(["/FI", &format!("PID eq {parent_pid}"), "/FO", "CSV", "/NH"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .ok()?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // CSV format: "Image Name","PID","Session Name","Session#","Mem Usage"
+    let name = stdout.lines()
+        .next()?
+        .split(',')
+        .next()?
+        .trim_matches('"')
+        .to_lowercase();
+
+    if name.is_empty() || name.contains("no tasks") {
+        None
+    } else {
+        Some(name)
+    }
 }
 
 /// Extract skill name from router context like "[Skill Router] Detected skill: linear. MANDATORY..."

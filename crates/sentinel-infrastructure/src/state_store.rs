@@ -5,20 +5,32 @@
 //!
 //! Uses file locking to prevent race conditions from concurrent writes.
 //!
-//! **Integrity protection (Attack #42)**: Each state file is paired with an
-//! HMAC-SHA256 signature file (`.json.sig`). The HMAC key is derived from the
-//! machine hostname + username + a sentinel-specific salt. This prevents:
-//!   - Bash `echo '{}' > state.json` — tampered JSON won't have a valid sig
-//!   - Manual editing of state files to forge workflow progress
-//!   - Cross-session state injection (different session_id = different file)
+//! **Encryption at rest**: State files are encrypted with ChaCha20-Poly1305
+//! authenticated encryption. The AEAD tag provides both confidentiality AND
+//! integrity, replacing the separate HMAC `.sig` files used in earlier versions.
+//! An attacker with file read access cannot observe workflow progress, session
+//! IDs, or timing data without the encryption key.
 //!
-//! The HMAC is NOT cryptographically unbreakable (the key is on the same
-//! machine), but it raises the bar from "trivial Bash one-liner" to "must
-//! reverse-engineer the sentinel binary to extract the key derivation".
+//! **Backward compatibility**: On load, the format is auto-detected by checking
+//! the first byte: `0x01` = encrypted (v1), `{` = legacy plaintext JSON with
+//! HMAC `.sig` file. Legacy files are still verified via HMAC but new saves
+//! always use encrypted format.
+//!
+//! **Key derivation**: The encryption key is derived from the same HMAC key
+//! material (machine hostname + username + random secret file) via a second
+//! SHA-256 pass with domain separation (`sentinel-encryption-v1`). This ensures
+//! the encryption key is independent of the HMAC signing key.
+//!
+//! **Legacy integrity protection (Attack #42)**: Retained for backward compat.
+//! Each legacy state file is paired with an HMAC-SHA256 signature file
+//! (`.json.sig`). The HMAC key is derived from the machine hostname + username
+//! + a sentinel-specific salt.
 
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
+use chacha20poly1305::aead::Aead;
+use chacha20poly1305::{AeadCore, ChaCha20Poly1305, KeyInit};
 use fs2::FileExt;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
@@ -433,13 +445,80 @@ pub fn verify_hmac_for_proofs(data: &[u8], sig_str: &str) -> bool {
     verify_hmac(data, sig_str)
 }
 
+/// Derive a 256-bit encryption key from the HMAC key material.
+/// Uses a second SHA-256 pass with a domain-separation salt so the
+/// encryption key is independent of the HMAC signing key, even though
+/// both derive from the same root secret.
+fn derive_encryption_key() -> [u8; 32] {
+    use sha2::Digest;
+    let hmac_key = derive_hmac_key();
+    let mut hasher = Sha256::new();
+    hasher.update(&hmac_key);
+    hasher.update(b"sentinel-encryption-v1"); // domain separation
+    let result = hasher.finalize();
+    let mut key = [0u8; 32];
+    key.copy_from_slice(&result);
+    key
+}
+
+/// Encrypt plaintext using ChaCha20-Poly1305 authenticated encryption.
+///
+/// Output format: `version_byte (0x01) || nonce (12 bytes) || ciphertext+tag`.
+/// The AEAD tag provides both integrity AND confidentiality, replacing the
+/// separate HMAC `.sig` file for encrypted state files.
+fn encrypt_state(plaintext: &[u8]) -> Result<Vec<u8>> {
+    let key_bytes = derive_encryption_key();
+    let key = chacha20poly1305::Key::from_slice(&key_bytes);
+    let cipher = ChaCha20Poly1305::new(key);
+    let nonce = ChaCha20Poly1305::generate_nonce(&mut chacha20poly1305::aead::OsRng);
+
+    let ciphertext = cipher
+        .encrypt(&nonce, plaintext)
+        .map_err(|e| anyhow::anyhow!("Encryption failed: {e}"))?;
+
+    // Format: version_byte || nonce (12 bytes) || ciphertext
+    let mut output = Vec::with_capacity(1 + 12 + ciphertext.len());
+    output.push(0x01); // version 1
+    output.extend_from_slice(&nonce);
+    output.extend_from_slice(&ciphertext);
+    Ok(output)
+}
+
+/// Decrypt state data encrypted by `encrypt_state`.
+///
+/// Validates the version byte, extracts the nonce, and uses ChaCha20-Poly1305
+/// to decrypt + authenticate. Any tampering (bit flip, truncation, nonce reuse
+/// with different ciphertext) causes the AEAD tag check to fail.
+fn decrypt_state(data: &[u8]) -> Result<Vec<u8>> {
+    // Minimum size: 1 (version) + 12 (nonce) + 16 (AEAD tag, no plaintext)
+    if data.len() < 1 + 12 + 16 {
+        anyhow::bail!("Encrypted state too short");
+    }
+
+    let version = data[0];
+    if version != 0x01 {
+        anyhow::bail!("Unknown encryption version: {version}");
+    }
+
+    let nonce = chacha20poly1305::Nonce::from_slice(&data[1..13]);
+    let ciphertext = &data[13..];
+
+    let key_bytes = derive_encryption_key();
+    let key = chacha20poly1305::Key::from_slice(&key_bytes);
+    let cipher = ChaCha20Poly1305::new(key);
+
+    cipher
+        .decrypt(nonce, ciphertext)
+        .map_err(|e| anyhow::anyhow!("Decryption failed (possible tampering): {e}"))
+}
+
 /// Compute HMAC-SHA256 of the given data using the current (latest) key.
 /// Returns a versioned signature string: `v{N}:{hex}`.
 fn compute_hmac(data: &[u8]) -> String {
     let version = current_key_version();
     let key = derive_hmac_key();
-    let mut mac = HmacSha256::new_from_slice(&key).expect("HMAC accepts any key size");
-    mac.update(data);
+    let mut mac = <HmacSha256 as Mac>::new_from_slice(&key).expect("HMAC accepts any key size");
+    Mac::update(&mut mac, data);
     let result = mac.finalize();
     let hex = to_hex(&result.into_bytes());
     format!("v{version}:{hex}")
@@ -513,11 +592,11 @@ fn verify_hmac(data: &[u8], sig_str: &str) -> bool {
         derive_hmac_key()
     };
 
-    let mut mac = match HmacSha256::new_from_slice(&key) {
+    let mut mac: HmacSha256 = match <HmacSha256 as Mac>::new_from_slice(&key) {
         Ok(m) => m,
         Err(_) => return false,
     };
-    mac.update(data);
+    Mac::update(&mut mac, data);
     mac.verify_slice(&expected).is_ok()
 }
 
@@ -549,11 +628,11 @@ fn write_generation_floor(session_id: &str, generation: u64) -> Result<()> {
     Ok(())
 }
 
-/// Save session state to disk (atomic write with file lock + HMAC)
+/// Save session state to disk (atomic write with file lock + encryption)
 ///
 /// Uses an exclusive lock file to serialize concurrent writes,
 /// preventing corruption from parallel hook invocations.
-/// Writes a companion `.json.sig` file with HMAC-SHA256 signature.
+/// Encrypts state with ChaCha20-Poly1305 AEAD (authenticated encryption).
 ///
 /// **Anti-replay (Attack #81 hardening)**: Also writes the generation to a
 /// separate `.gen` file that acts as a monotonic floor. On load, the state's
@@ -580,20 +659,18 @@ pub fn save(state: &mut SessionState) -> Result<()> {
 
     let json = serde_json::to_string_pretty(state)?;
 
-    // Compute HMAC before writing
-    let sig = compute_hmac(json.as_bytes());
+    // Encrypt the JSON — ChaCha20-Poly1305 AEAD provides both confidentiality
+    // and integrity, replacing the separate HMAC `.sig` file.
+    let encrypted = encrypt_state(json.as_bytes())?;
 
-    // **Attack #53 fix**: Write sig BEFORE the atomic rename of JSON.
-    // If we crash between writing JSON and sig, the next load() sees JSON
-    // without a sig → treats it as unsigned → rejects. By writing sig first,
-    // a stale sig for non-existent JSON is harmless, and once JSON lands
-    // the sig is guaranteed present.
-    let tmp_sig_path = dir.join(format!("{}.json.sig.tmp", state.session_id));
-    std::fs::write(&tmp_sig_path, &sig).context("Failed to write temp state signature")?;
-    std::fs::rename(&tmp_sig_path, &sig_path).context("Failed to rename temp sig file")?;
-
-    std::fs::write(&tmp_path, &json).context("Failed to write temp state file")?;
+    // Write encrypted data (binary, not text) via atomic tmp+rename.
+    // No `.sig` file needed — the AEAD tag embedded in the ciphertext
+    // provides authenticated integrity.
+    std::fs::write(&tmp_path, &encrypted).context("Failed to write temp state file")?;
     std::fs::rename(&tmp_path, &path).context("Failed to rename temp state file")?;
+
+    // Clean up legacy `.sig` file if it exists (from pre-encryption saves).
+    let _ = std::fs::remove_file(&sig_path);
 
     // **Anti-replay**: Write the generation floor AFTER the state file lands.
     // The .gen file only ratchets up — it records the highest generation ever saved.
@@ -628,6 +705,14 @@ pub fn acquire_session_lock(session_id: &str) -> Result<std::fs::File> {
     // If a previous sentinel process hung (e.g., on stdin), its lock may still
     // be held. Blocking indefinitely here would cascade the hang to all
     // subsequent hook invocations for this session.
+    //
+    // **Note on lock enforcement**: fs2's `try_lock_exclusive()` uses:
+    //   - Windows: `LockFileEx` with `LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY`
+    //     This IS a mandatory lock enforced by the OS kernel. Other processes cannot
+    //     read/write the locked region without also calling LockFileEx and waiting.
+    //   - Unix: `flock(LOCK_EX | LOCK_NB)` — advisory only. A malicious process
+    //     can bypass it by not calling flock. Acceptable for our threat model since
+    //     Unix users can chmod the state directory to prevent other-user access.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
     loop {
         match lock_file.try_lock_exclusive() {
@@ -658,46 +743,67 @@ pub fn load(session_id: &str) -> Result<Option<SessionState>> {
         return Ok(None);
     }
 
-    let json = std::fs::read_to_string(&path).context("Failed to read state file")?;
+    let raw = std::fs::read(&path).context("Failed to read state file")?;
 
-    // Verify HMAC integrity
-    let sig_path = state_dir().join(format!("{session_id}.json.sig"));
-    if sig_path.exists() {
-        let sig = std::fs::read_to_string(&sig_path).context("Failed to read state signature")?;
-        if !verify_hmac(json.as_bytes(), sig.trim()) {
+    let json = if raw.first() == Some(&0x01) {
+        // ── Encrypted format (v1) ──────────────────────────────────────────
+        // The AEAD tag provides integrity — no separate .sig file needed.
+        let decrypted = decrypt_state(&raw).map_err(|e| {
             eprintln!(
-                "[sentinel] SECURITY: State file integrity check FAILED for session '{}'. \
-                 The state file may have been tampered with. Discarding corrupted state.",
-                session_id
+                "[sentinel] SECURITY: State decryption failed for session '{session_id}': {e}. \
+                 Possible tampering. Discarding."
             );
             let _ = crate::security_log::log_security_event(
-                "hmac_failure",
+                "decrypt_failure",
                 session_id,
-                "State file HMAC verification failed — possible tampering",
+                &format!("State decryption failed: {e}"),
             );
-            // Delete corrupted state + sig
+            // Delete corrupted state
             let _ = std::fs::remove_file(&path);
-            let _ = std::fs::remove_file(&sig_path);
+            e
+        })?;
+        String::from_utf8(decrypted).context("Decrypted state is not valid UTF-8")?
+    } else {
+        // ── Legacy plaintext format — verify HMAC ──────────────────────────
+        let json = String::from_utf8(raw).context("State file is not valid UTF-8")?;
+        let sig_path = state_dir().join(format!("{session_id}.json.sig"));
+        if sig_path.exists() {
+            let sig =
+                std::fs::read_to_string(&sig_path).context("Failed to read state signature")?;
+            if !verify_hmac(json.as_bytes(), sig.trim()) {
+                eprintln!(
+                    "[sentinel] SECURITY: State file integrity check FAILED for session '{session_id}'. \
+                     The state file may have been tampered with. Discarding corrupted state."
+                );
+                let _ = crate::security_log::log_security_event(
+                    "hmac_failure",
+                    session_id,
+                    "State file HMAC verification failed — possible tampering",
+                );
+                // Delete corrupted state + sig
+                let _ = std::fs::remove_file(&path);
+                let _ = std::fs::remove_file(&sig_path);
+                return Ok(None);
+            }
+        } else {
+            // No signature file — state is unsigned.
+            // **Attack #45**: Accepting unsigned files as a "migration path" creates
+            // a permanent bypass: delete the .sig and inject forged JSON.
+            // Now we reject unsigned files — they're treated as corrupted.
+            eprintln!(
+                "[sentinel] SECURITY: No signature file for session '{session_id}'. \
+                 Unsigned state files are not trusted. Starting fresh."
+            );
+            let _ = crate::security_log::log_security_event(
+                "tamper_detected",
+                session_id,
+                "No signature file for state — unsigned state rejected",
+            );
+            let _ = std::fs::remove_file(&path);
             return Ok(None);
         }
-    } else {
-        // No signature file — state is unsigned.
-        // **Attack #45**: Accepting unsigned files as a "migration path" creates
-        // a permanent bypass: delete the .sig and inject forged JSON.
-        // Now we reject unsigned files — they're treated as corrupted.
-        eprintln!(
-            "[sentinel] SECURITY: No signature file for session '{}'. \
-             Unsigned state files are not trusted. Starting fresh.",
-            session_id
-        );
-        let _ = crate::security_log::log_security_event(
-            "tamper_detected",
-            session_id,
-            "No signature file for state — unsigned state rejected",
-        );
-        let _ = std::fs::remove_file(&path);
-        return Ok(None);
-    }
+        json
+    };
 
     let state: SessionState = serde_json::from_str(&json).context("Failed to parse state")?;
 
@@ -722,6 +828,8 @@ pub fn load(session_id: &str) -> Result<Option<SessionState>> {
         );
         // Reject the downgraded state — delete the corrupted/replayed file
         let _ = std::fs::remove_file(&path);
+        // Also clean up legacy .sig file if present
+        let sig_path = state_dir().join(format!("{session_id}.json.sig"));
         let _ = std::fs::remove_file(&sig_path);
         return Ok(None);
     }
@@ -745,10 +853,17 @@ pub fn delete(session_id: &str) -> Result<()> {
     Ok(())
 }
 
-/// Expose compute_hmac for tests that need to forge valid-HMAC state files.
+/// Expose compute_hmac for tests that need to forge valid-HMAC state files (legacy format).
 #[cfg(test)]
+#[allow(dead_code)]
 pub(crate) fn compute_hmac_for_tests(data: &[u8]) -> String {
     compute_hmac(data)
+}
+
+/// Expose encrypt_state for tests that need to forge encrypted state files.
+#[cfg(test)]
+pub(crate) fn encrypt_state_for_tests(plaintext: &[u8]) -> Result<Vec<u8>> {
+    encrypt_state(plaintext)
 }
 
 /// List all session IDs with saved state
@@ -808,18 +923,16 @@ mod tests {
         assert!(loaded.is_some(), "normal load should return Some");
         assert_eq!(loaded.unwrap().state_generation, 3);
 
-        // Step 3: Forge a state file with generation 1 (regression) but valid HMAC
+        // Step 3: Forge an encrypted state file with generation 1 (regression)
         let mut forged_state = SessionState::new(sid.clone());
         forged_state.state_generation = 1; // lower than floor of 3
 
         let forged_json = serde_json::to_string_pretty(&forged_state).unwrap();
-        let forged_sig = compute_hmac_for_tests(forged_json.as_bytes());
+        let forged_encrypted = encrypt_state_for_tests(forged_json.as_bytes()).unwrap();
 
         let dir = state_dir();
         let state_path = dir.join(format!("{sid}.json"));
-        let sig_path = dir.join(format!("{sid}.json.sig"));
-        std::fs::write(&state_path, &forged_json).unwrap();
-        std::fs::write(&sig_path, &forged_sig).unwrap();
+        std::fs::write(&state_path, &forged_encrypted).unwrap();
 
         // Step 4: Load should reject — generation 1 < floor 3
         let loaded = load(&sid).expect("load should not error");
