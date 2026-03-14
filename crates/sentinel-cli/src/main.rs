@@ -12,6 +12,7 @@ use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
 mod api;
+mod break_cmd;
 mod daemon_cmd;
 mod hook_cmd;
 mod init_cmd;
@@ -149,6 +150,37 @@ enum Commands {
         #[arg(long)]
         dir: Option<String>,
     },
+
+    /// Glass break — emergency workflow override (interactive terminal only)
+    Break {
+        /// Reason for the break (required for initiation)
+        #[arg(long)]
+        reason: Option<String>,
+
+        /// Duration in minutes (default: 5, max: 30)
+        #[arg(long)]
+        duration: Option<u32>,
+
+        /// Specific workflow to break (default: all)
+        #[arg(long)]
+        workflow: Option<String>,
+
+        /// Show active break status
+        #[arg(long)]
+        status: bool,
+
+        /// Cancel active break (re-engage enforcement)
+        #[arg(long)]
+        cancel: bool,
+
+        /// Show break history (last 30 days)
+        #[arg(long)]
+        history: bool,
+
+        /// Output history as JSON (use with --history)
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -216,5 +248,14 @@ async fn main() -> anyhow::Result<()> {
             all,
             dir,
         } => init_cmd::run(dry_run, force, all, dir).await,
+        Commands::Break {
+            reason,
+            duration,
+            workflow,
+            status,
+            cancel,
+            history,
+            json,
+        } => break_cmd::run(reason, duration, workflow, status, cancel, history, json).await,
     }
 }
