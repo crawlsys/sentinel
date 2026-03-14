@@ -28,6 +28,19 @@ impl hooks::GitStatusPort for RealGit {
 }
 
 pub async fn run(event: &str, matcher: Option<&str>, standalone: bool) -> Result<()> {
+    // ── Unbreakable glass break (file-based kill switch) ─────────────────
+    // If ~/.claude/sentinel/.glass-break exists, bypass ALL enforcement.
+    // This is the emergency failsafe of last resort. It requires zero
+    // sentinel cooperation to activate — just create the file:
+    //   echo 1 > "%USERPROFILE%\.claude\sentinel\.glass-break"
+    // Remove it to re-engage enforcement:
+    //   del "%USERPROFILE%\.claude\sentinel\.glass-break"
+    if is_glass_break_file_present() {
+        eprintln!("[sentinel] GLASS BREAK ACTIVE — all enforcement bypassed");
+        println!("{{}}");
+        return Ok(());
+    }
+
     if standalone {
         return run_internal(event, matcher, standalone).await;
     }
@@ -55,6 +68,13 @@ pub async fn run(event: &str, matcher: Option<&str>, standalone: bool) -> Result
 }
 
 pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) -> Result<()> {
+    // ── Unbreakable glass break (file-based kill switch) ─────────────────
+    if is_glass_break_file_present() {
+        eprintln!("[sentinel] GLASS BREAK ACTIVE — all enforcement bypassed");
+        println!("{{}}");
+        return Ok(());
+    }
+
     let start_time = std::time::Instant::now();
     debug!(event, ?matcher, standalone, "Processing hook event");
 
@@ -695,6 +715,15 @@ fn get_parent_process_name() -> Option<String> {
     } else {
         Some(name)
     }
+}
+
+/// Check if the file-based glass break kill switch is active.
+/// If `~/.claude/sentinel/.glass-break` exists, ALL enforcement is bypassed.
+/// This is the failsafe of last resort — it requires zero sentinel cooperation.
+fn is_glass_break_file_present() -> bool {
+    dirs::home_dir()
+        .map(|h| h.join(".claude").join("sentinel").join(".glass-break").exists())
+        .unwrap_or(false)
 }
 
 /// Extract skill name from router context like "[Skill Router] Detected skill: linear. MANDATORY..."
