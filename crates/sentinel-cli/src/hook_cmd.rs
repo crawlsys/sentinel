@@ -179,24 +179,37 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
             if let Some(ref ctx) = router_output.hook_specific_output {
                 if let Some(ref ac) = ctx.additional_context {
                     if let Some(skill) = extract_skill_name(ac) {
-                        // **Attack #58 fix**: Only accept skill names that exist in the
-                        // loaded workflows map. Accepting arbitrary names lets an attacker
-                        // inject a fake skill with no phases, creating a workflow entry
-                        // that has zero enforcement gates.
-                        if workflows.contains_key(&skill) {
-                            state.set_active_skill(&skill);
-                        } else {
-                            // **Attack #80 fix**: Do NOT set active_skill for non-workflow skills.
-                            // Setting active_skill to a skill with no workflow definition creates
-                            // a state where gate.rs sees an active skill, checks for its workflow
-                            // (finds None), and falls through to Allow — bypassing any incomplete
-                            // workflow that should still be enforced. Instead, leave active_skill
-                            // unchanged so find_incomplete_workflow() continues enforcing.
+                        // Set active_skill for context injection (SKILL.md loading),
+                        // but ONLY register workflow-bearing skills when explicitly
+                        // invoked via slash command. The skill router's regex matching
+                        // is too aggressive — it matches casual phrases like "do it"
+                        // to "execute", "deploy this" to "deploy", etc. This registers
+                        // a workflow with mandatory phases that blocks ALL tool calls
+                        // until the user reads phase files they never intended to use.
+                        //
+                        // Slash commands set the prompt to exactly "/<skill>" which the
+                        // router detects. Casual matches come from normal conversation.
+                        let is_slash_command = input.prompt.as_deref()
+                            .map(|p: &str| p.trim().starts_with('/'))
+                            .unwrap_or(false);
+
+                        if workflows.contains_key(&skill) && !is_slash_command {
+                            // Skill has a workflow but was NOT explicitly invoked.
+                            // Set active_skill for context injection (so SKILL.md loads)
+                            // but do NOT call set_active_skill() which would register
+                            // the workflow and trigger the phase gate.
+                            state.active_skill = Some(skill.clone());
                             eprintln!(
-                                "[sentinel] Skill '{}' has no workflow definition — not setting as active_skill \
-                                 to preserve existing gate enforcement.",
+                                "[sentinel] Skill '{}' detected via regex (not slash command) — \
+                                 setting context only, NOT registering workflow.",
                                 skill
                             );
+                        } else if workflows.contains_key(&skill) {
+                            // Explicit slash command — register the workflow
+                            state.set_active_skill(&skill);
+                        } else {
+                            // No workflow definition — just set for context
+                            state.active_skill = Some(skill.clone());
                         }
                     } else if ac.contains("No skill matched") {
                         state.active_skill = None;
