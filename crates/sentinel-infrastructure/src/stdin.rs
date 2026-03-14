@@ -9,13 +9,12 @@ use anyhow::{Context, Result};
 
 use sentinel_domain::events::HookInput;
 
-/// Read and parse hook input from stdin with a timeout.
+/// Read and parse hook input from stdin.
 ///
-/// Claude Code pipes JSON to stdin, but on Windows the pipe may not close
-/// promptly (or at all), causing `read_to_string` to block indefinitely.
-/// We spawn a blocking read on a separate thread and wait up to 3 seconds.
-/// If it times out, return a default empty HookInput so the hook pipeline
-/// can still proceed (just without input-specific context).
+/// Claude Code sends hook payloads as a single JSON line on stdin. Reading to
+/// EOF is fragile on Windows because the shell may keep the pipe open longer
+/// than the payload itself. We therefore read a single line instead of waiting
+/// for the entire stream to close.
 pub fn read_hook_input() -> Result<HookInput> {
     let buffer = read_raw_stdin(Duration::from_secs(3))?;
     if buffer.is_empty() {
@@ -25,35 +24,25 @@ pub fn read_hook_input() -> Result<HookInput> {
     }
 }
 
-/// Read raw stdin with a timeout.
+/// Read raw stdin as a single logical JSON line.
 ///
-/// Returns an empty string on timeout so callers can decide whether to
-/// continue with an empty/default payload or treat the absence of input as
-/// an error. This keeps the low-level stdin behavior reusable for the hook
-/// supervisor and the internal hook worker.
-pub fn read_raw_stdin(timeout: Duration) -> Result<String> {
-    use std::sync::mpsc;
+/// The `_timeout` parameter is retained to avoid churn in callers, but the
+/// implementation no longer spawns a detached reader thread. That timeout path
+/// caused hook processes to remain alive after returning, which wedged Claude's
+/// REPL while it waited for the hook command to exit.
+pub fn read_raw_stdin(_timeout: Duration) -> Result<String> {
+    let stdin = std::io::stdin();
+    let mut reader = stdin.lock();
+    read_raw_from_reader(&mut reader)
+}
 
-    let (tx, rx) = mpsc::channel();
-
-    std::thread::spawn(move || {
-        let mut buffer = String::new();
-        let result =
-            std::io::Read::read_to_string(&mut std::io::stdin(), &mut buffer).map(|_| buffer);
-        let _ = tx.send(result);
-    });
-
-    match rx.recv_timeout(timeout) {
-        Ok(Ok(buffer)) => Ok(buffer),
-        Ok(Err(e)) => {
+fn read_raw_from_reader<R: std::io::BufRead>(reader: &mut R) -> Result<String> {
+    let mut buffer = String::new();
+    match reader.read_line(&mut buffer) {
+        Ok(0) => Ok(String::new()),
+        Ok(_) => Ok(buffer.trim_end_matches(['\r', '\n']).to_string()),
+        Err(e) => {
             tracing::warn!(error = %e, "Failed to read stdin — using empty input");
-            Ok(String::new())
-        }
-        Err(_timeout) => {
-            tracing::warn!(
-                timeout_ms = timeout.as_millis() as u64,
-                "Stdin read timed out — using empty input"
-            );
             Ok(String::new())
         }
     }
@@ -91,6 +80,7 @@ pub fn parse_hook_input(raw: &str) -> Result<HookInput> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Cursor;
 
     #[test]
     fn test_parse_minimal() {
@@ -105,5 +95,19 @@ mod tests {
         let json = "{}";
         let input = parse_hook_input(json).unwrap();
         assert!(input.session_id.is_none());
+    }
+
+    #[test]
+    fn test_read_raw_from_reader_reads_single_line() {
+        let mut cursor = Cursor::new(b"{\"session_id\":\"abc\"}\nignored");
+        let raw = read_raw_from_reader(&mut cursor).unwrap();
+        assert_eq!(raw, "{\"session_id\":\"abc\"}");
+    }
+
+    #[test]
+    fn test_read_raw_from_reader_accepts_eof_without_newline() {
+        let mut cursor = Cursor::new(b"{\"session_id\":\"abc\"}");
+        let raw = read_raw_from_reader(&mut cursor).unwrap();
+        assert_eq!(raw, "{\"session_id\":\"abc\"}");
     }
 }

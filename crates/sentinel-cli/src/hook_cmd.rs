@@ -609,31 +609,39 @@ fn validate_caller() -> Result<()> {
         );
     }
 
-    // Process attestation — verify parent process is a known Claude Code runtime.
-    // Runs asynchronously via background thread to avoid blocking the hook pipeline
-    // (wmic/tasklist can take 200ms+ on cold start). Results are logged to the
-    // security audit log for forensic review but don't block execution.
+    // Optional parent-process attestation.
+    //
+    // This was introduced as defense-in-depth, but the Windows `wmic`/`tasklist`
+    // probe can outlive the hook's JSON response and keep the process alive long
+    // enough for Claude Code to appear wedged after pressing Enter. Keep the
+    // simpler stdin/env checks on by default and make the heavier attestation
+    // opt-in for debugging or forensics.
     #[cfg(windows)]
-    {
-        std::thread::spawn(|| {
-            if let Some(parent) = get_parent_process_name() {
-                let valid_parents = [
-                    "node.exe", "bun.exe", "claude.exe", "cmd.exe",
-                    "powershell.exe", "pwsh.exe", "sentinel-engine.exe", "sentinel.exe",
-                ];
-                if !valid_parents.iter().any(|v| parent.contains(v)) {
-                    eprintln!(
-                        "[sentinel] WARNING: Parent process '{}' is not a known Claude Code runtime.",
-                        parent
-                    );
-                    let _ = sentinel_infrastructure::security_log::log_security_event(
-                        "caller_rejected",
-                        "unknown",
-                        &format!("Parent process '{}' is not a known Claude Code runtime", parent),
-                    );
-                }
+    if std::env::var("SENTINEL_ENABLE_PARENT_ATTESTATION").as_deref() == Ok("1") {
+        if let Some(parent) = get_parent_process_name() {
+            let valid_parents = [
+                "node.exe",
+                "bun.exe",
+                "claude.exe",
+                "cmd.exe",
+                "powershell.exe",
+                "pwsh.exe",
+                "bash.exe",
+                "sentinel-engine.exe",
+                "sentinel.exe",
+            ];
+            if !valid_parents.iter().any(|v| parent.contains(v)) {
+                eprintln!(
+                    "[sentinel] WARNING: Parent process '{}' is not a known Claude Code runtime.",
+                    parent
+                );
+                let _ = sentinel_infrastructure::security_log::log_security_event(
+                    "caller_rejected",
+                    "unknown",
+                    &format!("Parent process '{}' is not a known Claude Code runtime", parent),
+                );
             }
-        });
+        }
     }
 
     Ok(())
