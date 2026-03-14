@@ -797,4 +797,87 @@ mod tests {
 
         assert!(output.is_none());
     }
+
+    /// Regression: hook process must exit within 3s (no lingering threads).
+    #[tokio::test]
+    async fn test_hook_internal_exits_within_timeout() {
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        let engine = std::path::Path::new(manifest_dir)
+            .parent().unwrap()
+            .parent().unwrap()
+            .join("target").join("release").join("sentinel-engine.exe");
+
+        if !engine.exists() {
+            eprintln!("Skipping: sentinel-engine.exe not found at {:?}", engine);
+            return;
+        }
+
+        let mut child = tokio::process::Command::new(&engine)
+            .args(["hook-internal", "--event", "UserPromptSubmit"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .env("SENTINEL_ALLOW_TERMINAL", "1")
+            .kill_on_drop(true)
+            .spawn()
+            .expect("failed to spawn sentinel-engine");
+
+        if let Some(mut stdin) = child.stdin.take() {
+            use tokio::io::AsyncWriteExt;
+            stdin.write_all(b"{\"session_id\":\"regression-exit-test\"}\n").await.unwrap();
+            stdin.shutdown().await.unwrap();
+        }
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            child.wait(),
+        ).await;
+
+        assert!(result.is_ok(), "sentinel-engine did not exit within 3s — possible hang");
+    }
+
+    /// Regression: stdout must be valid JSON (no tracing leaks).
+    #[tokio::test]
+    async fn test_hook_stdout_is_valid_json() {
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        let engine = std::path::Path::new(manifest_dir)
+            .parent().unwrap()
+            .parent().unwrap()
+            .join("target").join("release").join("sentinel-engine.exe");
+
+        if !engine.exists() {
+            eprintln!("Skipping: sentinel-engine.exe not found at {:?}", engine);
+            return;
+        }
+
+        let mut child = tokio::process::Command::new(&engine)
+            .args(["hook-internal", "--event", "UserPromptSubmit"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .env("SENTINEL_ALLOW_TERMINAL", "1")
+            .kill_on_drop(true)
+            .spawn()
+            .expect("failed to spawn");
+
+        if let Some(mut stdin) = child.stdin.take() {
+            use tokio::io::AsyncWriteExt;
+            stdin.write_all(b"{\"session_id\":\"regression-json-test\"}\n").await.unwrap();
+            stdin.shutdown().await.unwrap();
+        }
+
+        let output = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            child.wait_with_output(),
+        ).await.expect("timed out").expect("wait failed");
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(!stdout.is_empty(), "stdout should not be empty");
+
+        let parsed: Result<serde_json::Value, _> = serde_json::from_str(stdout.trim());
+        assert!(parsed.is_ok(), "stdout is not valid JSON: {}", stdout);
+
+        assert!(!stdout.contains("[2m"), "stdout contains ANSI escape (tracing leak)");
+        assert!(!stdout.contains("WARN"), "stdout contains WARN (tracing leak)");
+    }
 }

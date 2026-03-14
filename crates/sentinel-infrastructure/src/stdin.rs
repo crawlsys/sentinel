@@ -110,4 +110,31 @@ mod tests {
         let raw = read_raw_from_reader(&mut cursor).unwrap();
         assert_eq!(raw, "{\"session_id\":\"abc\"}");
     }
+
+    /// Regression: stdin read must not block waiting for EOF.
+    #[test]
+    fn test_read_raw_from_reader_does_not_wait_for_eof() {
+        let data = b"{\"session_id\":\"abc\"}\n{\"extra\":\"should not be read\"}";
+        let mut cursor = Cursor::new(data);
+        let start = std::time::Instant::now();
+        let raw = read_raw_from_reader(&mut cursor).unwrap();
+        let elapsed = start.elapsed();
+        assert_eq!(raw, "{\"session_id\":\"abc\"}");
+        assert!(
+            elapsed.as_millis() < 100,
+            "should return immediately, took {}ms",
+            elapsed.as_millis()
+        );
+    }
+
+    /// Regression: only the first line is consumed, not the full stream.
+    #[test]
+    fn test_read_raw_from_reader_does_not_consume_trailing_data() {
+        let data = b"{\"session_id\":\"first\"}\n{\"session_id\":\"second\"}\n";
+        let mut cursor = Cursor::new(data);
+        let first = read_raw_from_reader(&mut cursor).unwrap();
+        assert_eq!(first, "{\"session_id\":\"first\"}");
+        let second = read_raw_from_reader(&mut cursor).unwrap();
+        assert_eq!(second, "{\"session_id\":\"second\"}");
+    }
 }

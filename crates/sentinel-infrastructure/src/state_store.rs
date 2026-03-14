@@ -999,4 +999,32 @@ mod tests {
 
         cleanup_session(&sid);
     }
+
+    /// Regression: save() must not deadlock when session lock is already held.
+    /// The bug: save() acquired its own exclusive lock on the same file that
+    /// acquire_session_lock() already held. On Windows (per-handle, non-reentrant
+    /// locks), this deadlocked every UserPromptSubmit invocation.
+    #[test]
+    fn test_save_does_not_deadlock_under_session_lock() {
+        let sid = test_session_id("nodeadlock");
+        cleanup_session(&sid);
+
+        let _lock = acquire_session_lock(&sid).expect("should acquire lock");
+
+        let mut state = SessionState::new(sid.clone());
+        let start = std::time::Instant::now();
+        save(&mut state).expect("save should succeed while session lock is held");
+        let elapsed = start.elapsed();
+
+        assert!(
+            elapsed.as_millis() < 1000,
+            "save() took {}ms — possible deadlock",
+            elapsed.as_millis()
+        );
+
+        let loaded = load(&sid).expect("load").expect("should be Some");
+        assert_eq!(loaded.state_generation, 1);
+
+        cleanup_session(&sid);
+    }
 }
