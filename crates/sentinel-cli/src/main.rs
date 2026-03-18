@@ -121,7 +121,7 @@ enum Commands {
 
     /// Stage a new sentinel-engine binary with integrity verification
     Stage {
-        /// Path to the new binary (default: target/release/sentinel-engine.exe)
+        /// Path to the new binary (default: target/release/sentinel-engine)
         #[arg(long)]
         binary: Option<String>,
     },

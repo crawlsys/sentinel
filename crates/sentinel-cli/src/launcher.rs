@@ -1,13 +1,13 @@
-//! Sentinel Launcher — Lightweight binary that delegates to sentinel-engine.exe
+//! Sentinel Launcher — Lightweight binary that delegates to sentinel-engine.
 //!
-//! This is the stable entry point (`sentinel.exe`). It:
-//! 1. Checks for a staged binary (`sentinel-engine.exe.staged`)
+//! This is the stable entry point (`sentinel`). It:
+//! 1. Checks for a staged binary (`sentinel-engine.staged`)
 //! 2. If found, verifies SHA-256 integrity against `.staged.sha256`
-//! 3. Atomically swaps it into `sentinel-engine.exe`
-//! 4. Execs `sentinel-engine.exe` with all original arguments
+//! 3. Atomically swaps it into `sentinel-engine`
+//! 4. Execs `sentinel-engine` with all original arguments
 //!
 //! The launcher itself is tiny (~200KB stripped) and never needs updating.
-//! All sentinel logic lives in sentinel-engine.exe, which can be hot-swapped
+//! All sentinel logic lives in sentinel-engine, which can be hot-swapped
 //! via `sentinel stage` without restarting Claude Code.
 //!
 //! **Security**: The launcher verifies the staged binary's SHA-256 hash before
@@ -18,11 +18,17 @@
 use std::path::PathBuf;
 use std::process::{Command, ExitCode};
 
+/// Engine binary name — includes `.exe` on Windows, bare on Unix.
+#[cfg(windows)]
+const ENGINE_NAME: &str = "sentinel-engine.exe";
+#[cfg(not(windows))]
+const ENGINE_NAME: &str = "sentinel-engine";
+
 fn main() -> ExitCode {
     let cargo_bin = cargo_bin_dir();
-    let engine_path = cargo_bin.join("sentinel-engine.exe");
-    let staged_path = cargo_bin.join("sentinel-engine.exe.staged");
-    let staged_hash_path = cargo_bin.join("sentinel-engine.exe.staged.sha256");
+    let engine_path = cargo_bin.join(ENGINE_NAME);
+    let staged_path = cargo_bin.join(format!("{ENGINE_NAME}.staged"));
+    let staged_hash_path = cargo_bin.join(format!("{ENGINE_NAME}.staged.sha256"));
 
     // Check for staged binary and consume it
     if staged_path.exists() {
@@ -40,7 +46,8 @@ fn main() -> ExitCode {
     // Exec sentinel-engine with all args
     if !engine_path.exists() {
         eprintln!(
-            "[sentinel-launcher] FATAL: sentinel-engine.exe not found at {}",
+            "[sentinel-launcher] FATAL: {} not found at {}",
+            ENGINE_NAME,
             engine_path.display()
         );
         return ExitCode::from(1);

@@ -5,12 +5,12 @@
 //! could replace the `.staged` file with a malicious binary.
 //!
 //! This command:
-//! 1. Copies the new binary to `sentinel-engine.exe.staged`
-//! 2. Computes SHA-256 hash and writes to `sentinel-engine.exe.staged.sha256`
+//! 1. Copies the new binary to `sentinel-engine.staged`
+//! 2. Computes SHA-256 hash and writes to `sentinel-engine.staged.sha256`
 //! 3. The hash file can be verified before consuming the staged binary
 //!
 //! Usage:
-//!   sentinel stage                          # Uses target/release/sentinel-engine.exe
+//!   sentinel stage                          # Uses target/release/sentinel-engine
 //!   sentinel stage --binary path/to/binary  # Custom binary path
 //!   sentinel verify-staged                  # Verify .staged integrity (called by launcher)
 
@@ -18,9 +18,15 @@ use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 
+/// Engine binary name — includes `.exe` on Windows, bare on Unix.
+#[cfg(windows)]
+const ENGINE_NAME: &str = "sentinel-engine.exe";
+#[cfg(not(windows))]
+const ENGINE_NAME: &str = "sentinel-engine";
+
 /// Default binary location (relative to cwd, typically the sentinel repo root)
 fn default_binary_path() -> PathBuf {
-    PathBuf::from("target/release/sentinel-engine.exe")
+    PathBuf::from(format!("target/release/{ENGINE_NAME}"))
 }
 
 /// Path to the staged binary in ~/.cargo/bin/
@@ -29,7 +35,7 @@ fn staged_path() -> Result<PathBuf> {
     Ok(home
         .join(".cargo")
         .join("bin")
-        .join("sentinel-engine.exe.staged"))
+        .join(format!("{ENGINE_NAME}.staged")))
 }
 
 /// Path to the staged binary's SHA-256 hash file
@@ -38,7 +44,7 @@ fn staged_hash_path() -> Result<PathBuf> {
     Ok(home
         .join(".cargo")
         .join("bin")
-        .join("sentinel-engine.exe.staged.sha256"))
+        .join(format!("{ENGINE_NAME}.staged.sha256")))
 }
 
 /// Compute SHA-256 hash of a file

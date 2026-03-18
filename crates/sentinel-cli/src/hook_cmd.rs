@@ -653,6 +653,7 @@ fn validate_caller() -> Result<()> {
     #[cfg(windows)]
     if std::env::var("SENTINEL_ENABLE_PARENT_ATTESTATION").as_deref() == Ok("1") {
         if let Some(parent) = get_parent_process_name() {
+            #[cfg(windows)]
             let valid_parents = [
                 "node.exe",
                 "bun.exe",
@@ -663,6 +664,17 @@ fn validate_caller() -> Result<()> {
                 "bash.exe",
                 "sentinel-engine.exe",
                 "sentinel.exe",
+            ];
+            #[cfg(not(windows))]
+            let valid_parents = [
+                "node",
+                "bun",
+                "claude",
+                "bash",
+                "zsh",
+                "sh",
+                "sentinel-engine",
+                "sentinel",
             ];
             if !valid_parents.iter().any(|v| parent.contains(v)) {
                 eprintln!(
@@ -969,10 +981,10 @@ mod tests {
         let engine = std::path::Path::new(manifest_dir)
             .parent().unwrap()
             .parent().unwrap()
-            .join("target").join("release").join("sentinel-engine.exe");
+            .join("target").join("release").join(if cfg!(windows) { "sentinel-engine.exe" } else { "sentinel-engine" });
 
         if !engine.exists() {
-            eprintln!("Skipping: sentinel-engine.exe not found at {:?}", engine);
+            eprintln!("Skipping: sentinel-engine not found at {:?}", engine);
             return;
         }
 
@@ -1007,10 +1019,10 @@ mod tests {
         let engine = std::path::Path::new(manifest_dir)
             .parent().unwrap()
             .parent().unwrap()
-            .join("target").join("release").join("sentinel-engine.exe");
+            .join("target").join("release").join(if cfg!(windows) { "sentinel-engine.exe" } else { "sentinel-engine" });
 
         if !engine.exists() {
-            eprintln!("Skipping: sentinel-engine.exe not found at {:?}", engine);
+            eprintln!("Skipping: sentinel-engine not found at {:?}", engine);
             return;
         }
 

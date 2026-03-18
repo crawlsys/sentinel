@@ -594,23 +594,23 @@ Dev workflow:
 - `mcp__sentinel__edit_claude_md_template` — Find-and-replace on the generator template source, then auto-regenerates. Changes persist across all future sessions
 - `mcp__sentinel__restart_all_mcps` — Reads ~/.claude.json, touches all mcp-router watched binaries to trigger mass restart of every MCP server at once
 
-### Sentinel Shadow Binary System (Windows)
+### Sentinel Shadow Binary System
 
-On Windows, `sentinel.exe` cannot be overwritten while Claude Code is running (file lock). The shadow binary system solves this:
+The launcher/engine split allows hot-swapping without restarting Claude Code:
 
-- `~/.cargo/bin/sentinel.exe` — Tiny launcher (207KB, never changes)
-- `~/.cargo/bin/sentinel-engine.exe` — Actual engine (hot-swappable)
-- `~/.cargo/bin/sentinel-engine.exe.staged` — Pending build (auto-consumed)
+- `~/.cargo/bin/sentinel` — Tiny launcher (207KB, never changes)
+- `~/.cargo/bin/sentinel-engine` — Actual engine (hot-swappable)
+- `~/.cargo/bin/sentinel-engine.staged` — Pending build (auto-consumed)
 
 **Dev workflow:**
 ```bash
-cd ~/Documents/GitHub/sentinel
-cargo build --release -p sentinel       # Builds sentinel-engine.exe
-cp target/release/sentinel-engine.exe ~/.cargo/bin/sentinel-engine.exe.staged
+cd ~/repos/claude-plugins/sentinel
+cargo build --release -p sentinel       # Builds sentinel-engine
+sentinel stage                          # Stage with integrity verification
 # Next hook invocation: launcher detects .staged file, swaps it in
 ```
 
-The launcher checks for `.staged` on every invocation. If found, it replaces `sentinel-engine.exe` and runs the new version. Zero downtime, no session restart.
+The launcher checks for `.staged` on every invocation. If found, it replaces `sentinel-engine` and runs the new version. Zero downtime, no session restart.
 
 ### Conventions
 
