@@ -70,8 +70,8 @@ pub fn process(input: &HookInput) -> HookOutput {
     let linear_accounts = list_linear_accounts(&claude_dir);
     generate_claude_md(&claude_dir, &counts, &project_names, &linear_accounts);
 
-    // 6. Auto-init standard project files in cwd (creates missing, never overwrites)
-    let init_result = auto_init_project(cwd);
+    // 6. Auto-init disabled — run `sentinel init` manually when needed
+    let init_result: Option<sentinel_domain::project::InitResult> = None;
 
     // 7. Build startup context
     let context =
