@@ -6,9 +6,37 @@
 
 use sentinel_domain::events::{HookEvent, HookInput, HookOutput};
 
+/// Extract a Linear issue ID from a task subject containing `@linear:{ID}`.
+///
+/// Returns `Some("PREFIX-123")` if found, `None` otherwise.
+fn extract_linear_id(subject: &str) -> Option<&str> {
+    let marker = "@linear:";
+    let start = subject.find(marker)?;
+    let after = &subject[start + marker.len()..];
+    // Linear IDs are PREFIX-NUMBER (e.g. FIR-123, SYN-42)
+    let end = after
+        .find(|c: char| c.is_whitespace())
+        .unwrap_or(after.len());
+    let id = &after[..end];
+    // Validate shape: at least one letter, a hyphen, at least one digit
+    if let Some(hyphen) = id.find('-') {
+        let prefix = &id[..hyphen];
+        let number = &id[hyphen + 1..];
+        if !prefix.is_empty()
+            && prefix.chars().all(|c| c.is_ascii_alphanumeric())
+            && !number.is_empty()
+            && number.chars().all(|c| c.is_ascii_digit())
+        {
+            return Some(id);
+        }
+    }
+    None
+}
+
 /// Process TaskCompleted event
 ///
 /// Injects context reminding the teammate to verify before marking complete.
+/// If the task subject contains `@linear:{ID}`, also injects Linear sync instructions.
 pub fn process(input: &HookInput) -> HookOutput {
     let task_subject = input
         .extra
@@ -34,8 +62,8 @@ pub fn process(input: &HookInput) -> HookOutput {
         .and_then(|v| v.as_str())
         .unwrap_or("?");
 
-    // Inject verification reminder
-    let context = format!(
+    // Base verification reminder
+    let mut context = format!(
         "[Task Completion Gate] Teammate '{}' (team: {}) is completing task #{}: '{}'\n\
          \n\
          BEFORE marking this task complete, verify:\n\
@@ -46,6 +74,20 @@ pub fn process(input: &HookInput) -> HookOutput {
          5. Report what was done via SendMessage to the team lead",
         teammate_name, team_name, task_id, task_subject
     );
+
+    // If task is bound to a Linear issue, append sync instructions
+    if let Some(linear_id) = extract_linear_id(task_subject) {
+        context.push_str(&format!(
+            "\n\n\
+             [Linear Sync] Task is bound to Linear issue {}.\n\
+             After verifying the task is complete:\n\
+             1. Post a progress comment on {} via mcp__linear__create_comment\n\
+             2. Check if ALL tasks with @linear:{} are now completed (use TaskList)\n\
+             3. If all tasks done → transition the Linear issue to the next workflow state\n\
+             4. If tasks remain → note progress in the comment (e.g., \"3/5 tasks complete\")",
+            linear_id, linear_id, linear_id
+        ));
+    }
 
     HookOutput::inject_context(HookEvent::TaskCompleted, &context)
 }
@@ -90,5 +132,52 @@ mod tests {
         let ctx = output.hook_specific_output.unwrap().additional_context;
         let ctx = ctx.as_deref().unwrap();
         assert!(ctx.contains("unknown task"));
+    }
+
+    #[test]
+    fn test_extract_linear_id_valid() {
+        assert_eq!(
+            extract_linear_id("[P1] Implement auth #feature @linear:FIR-123"),
+            Some("FIR-123")
+        );
+    }
+
+    #[test]
+    fn test_extract_linear_id_end_of_string() {
+        assert_eq!(
+            extract_linear_id("Task @linear:SYN-42"),
+            Some("SYN-42")
+        );
+    }
+
+    #[test]
+    fn test_extract_linear_id_missing() {
+        assert_eq!(extract_linear_id("[P0] Fix bug #security"), None);
+    }
+
+    #[test]
+    fn test_task_completed_with_linear_tag() {
+        let mut input = HookInput::default();
+        input.extra.insert(
+            "task_subject".to_string(),
+            serde_json::json!("[P1] Implement auth @linear:FIR-123"),
+        );
+        input.extra.insert(
+            "teammate_name".to_string(),
+            serde_json::json!("backend-dev"),
+        );
+        input
+            .extra
+            .insert("team_name".to_string(), serde_json::json!("fir-team"));
+        input
+            .extra
+            .insert("task_id".to_string(), serde_json::json!("7"));
+
+        let output = process(&input);
+        let ctx = output.hook_specific_output.unwrap().additional_context;
+        let ctx = ctx.as_deref().unwrap();
+        assert!(ctx.contains("[Linear Sync]"));
+        assert!(ctx.contains("FIR-123"));
+        assert!(ctx.contains("mcp__linear__create_comment"));
     }
 }
