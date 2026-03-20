@@ -10,7 +10,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{debug, warn};
 
 use sentinel_application::hooks;
-use sentinel_domain::events::{HookEvent, HookOutput};
+use sentinel_domain::events::{HookEvent, HookOutput, HookSpecificOutput};
 use sentinel_domain::state::SessionState;
 use sentinel_domain::workflow::{SkillSteps, SkillWorkflow};
 
@@ -425,6 +425,37 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
         _ => {
             // Strip hookSpecificOutput for events Claude Code doesn't support
             output.hook_specific_output = None;
+        }
+    }
+
+    // Inject project context from CLAUDE_PROJECT env var
+    if let Ok(project) = std::env::var("CLAUDE_PROJECT") {
+        if !project.is_empty() {
+            let project_header = format!("[Project Context] Active project: {}", project);
+            if let Some(ref mut hso) = output.hook_specific_output {
+                match &hso.additional_context {
+                    Some(existing) => {
+                        hso.additional_context =
+                            Some(format!("{}\n\n{}", project_header, existing));
+                    }
+                    None => {
+                        hso.additional_context = Some(project_header);
+                    }
+                }
+            }
+            // If no hook_specific_output at all, create one with project context
+            else if matches!(
+                hook_event,
+                HookEvent::UserPromptSubmit | HookEvent::PostToolUse | HookEvent::PreToolUse
+            ) {
+                output.hook_specific_output = Some(HookSpecificOutput {
+                    hook_event_name: hook_event.to_string(),
+                    permission_decision: None,
+                    permission_decision_reason: None,
+                    updated_input: None,
+                    additional_context: Some(project_header),
+                });
+            }
         }
     }
 
