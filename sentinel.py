@@ -28,8 +28,7 @@ log = logging.getLogger("sentinel")
 LOKI_URL = os.environ.get("LOKI_URL", "http://loki.loki.svc.cluster.local:3100")
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://ollama.ollama.svc.cluster.local:11434")
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen2.5:7b")
-PUSHOVER_TOKEN = os.environ.get("PUSHOVER_APP_TOKEN", "")
-PUSHOVER_USER = os.environ.get("PUSHOVER_USER_KEY", "")
+ALERTMANAGER_URL = os.environ.get("ALERTMANAGER_URL", "http://kube-prometheus-stack-alertmanager.monitoring.svc.cluster.local:9093")
 POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL", "60"))
 MAX_LINES_PER_QUERY = int(os.environ.get("MAX_LINES_PER_QUERY", "200"))
 COOLDOWN_SECONDS = int(os.environ.get("COOLDOWN_SECONDS", "300"))
@@ -67,7 +66,7 @@ OLLAMA_DURATION = Histogram(
 )
 LOKI_ERRORS = Counter("sentinel_loki_errors_total", "Loki query failures")
 OLLAMA_ERRORS = Counter("sentinel_ollama_errors_total", "Ollama inference failures")
-PUSHOVER_ERRORS = Counter("sentinel_pushover_errors_total", "Pushover send failures")
+ALERT_SEND_ERRORS = Counter("sentinel_alert_send_errors_total", "Alert send failures")
 POLL_CYCLE_DURATION = Histogram(
     "sentinel_poll_cycle_duration_seconds", "Full poll cycle duration",
     buckets=[5, 10, 30, 60, 120, 300],
@@ -317,30 +316,32 @@ def analyze_with_ollama(name: str, priority: str, context: str, lines: list[str]
         return "ERROR", str(e)
 
 
-def send_pushover(title: str, message: str, priority: int = 0):
-    """Send a Pushover notification."""
-    if not PUSHOVER_TOKEN or not PUSHOVER_USER:
-        log.warning("Pushover not configured: %s", title)
-        return
-
+def send_to_alertmanager(source: str, verdict: str, message: str, severity: str = "warning"):
+    """Push an alert to Alertmanager via its HTTP API."""
     try:
-        resp = requests.post(
-            "https://api.pushover.net/1/messages.json",
-            data={
-                "token": PUSHOVER_TOKEN,
-                "user": PUSHOVER_USER,
-                "title": title,
-                "message": message[:1024],
-                "priority": priority,
-                "sound": "siren" if priority >= 1 else "pushover",
+        alert = {
+            "labels": {
+                "alertname": f"Sentinel{verdict.title()}",
+                "source": source,
+                "verdict": verdict.lower(),
+                "severity": severity,
+                "job": "sentinel",
             },
+            "annotations": {
+                "summary": f"[{verdict}] {source}",
+                "description": message[:2048],
+            },
+        }
+        resp = requests.post(
+            f"{ALERTMANAGER_URL}/api/v2/alerts",
+            json=[alert],
             timeout=15,
         )
         resp.raise_for_status()
-        log.info("Pushover alert sent: %s", title)
+        log.info("Alert sent to Alertmanager: [%s] %s", verdict, source)
     except Exception as e:
-        log.error("Pushover failed: %s", e)
-        PUSHOVER_ERRORS.inc()
+        log.error("Alertmanager push failed: %s", e)
+        ALERT_SEND_ERRORS.inc()
 
 
 def check_nextdns():
@@ -376,7 +377,7 @@ def check_nextdns():
                 resp.raise_for_status()
                 top_domains = [d["domain"] for d in resp.json().get("data", [])]
                 
-                send_pushover("[SUSPICIOUS] dns-bypass", f"{blocked_10m} blocks in 10m\nTop: {', '.join(top_domains)}", priority=0)
+                send_to_alertmanager("dns-bypass", "SUSPICIOUS", f"{blocked_10m} blocks in 10m\nTop: {', '.join(top_domains)}")
                 ALERTS_SENT.labels(source="dns-bypass", verdict="SUSPICIOUS").inc()
                 last_alert["dns-bypass"] = time.time()
         else:
@@ -436,9 +437,9 @@ def poll_cycle():
             if check_cooldown(name) and verdict != "OPERATIONAL": # Persistent alerts handle their own cooldown
                 ALERTS_SUPPRESSED.labels(source=name).inc()
             else:
-                title = f"[{verdict}] {name}"
+                severity = "critical" if verdict == "CRITICAL" else "warning"
                 body = f"{explanation}\n\n({len(lines)} log entries in last {POLL_INTERVAL * 2}s)"
-                send_pushover(title, body, priority=pushover_priority)
+                send_to_alertmanager(name, verdict, body, severity=severity)
                 ALERTS_SENT.labels(source=name, verdict=verdict).inc()
                 last_alert[name] = time.time()
 
