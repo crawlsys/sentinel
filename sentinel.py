@@ -376,12 +376,33 @@ def check_nextdns():
                 resp = requests.get(f"{base}/analytics/domains?from=-10m&status=blocked&limit=5", headers=headers, timeout=15)
                 resp.raise_for_status()
                 top_domains = [d["domain"] for d in resp.json().get("data", [])]
-                
+
                 send_to_alertmanager("dns-bypass", "SUSPICIOUS", f"{blocked_10m} blocks in 10m\nTop: {', '.join(top_domains)}")
                 ALERTS_SENT.labels(source="dns-bypass", verdict="SUSPICIOUS").inc()
                 last_alert["dns-bypass"] = time.time()
         else:
             log.info("[dns-bypass] %d blocks in 10m (threshold: %d)", blocked_10m, DNS_BLOCK_THRESHOLD)
+
+        # Check for adult/porn content blocks
+        ADULT_REASONS = {"parental-control:porn", "parental-control:dating", "category:porn", "category:adult"}
+        resp = requests.get(f"{base}/logs?status=blocked&limit=50", headers=headers, timeout=15)
+        resp.raise_for_status()
+        for entry in resp.json().get("data", []):
+            reasons = {r.get("id", "") for r in entry.get("reasons", [])}
+            if reasons & ADULT_REASONS:
+                device = entry.get("device", {})
+                device_name = device.get("name", "unknown")
+                domain = entry.get("domain", "unknown")
+                cooldown_key = f"adult-{device_name}"
+                if not check_cooldown(cooldown_key):
+                    send_to_alertmanager(
+                        "parental-alert", "CRITICAL",
+                        f"Adult content DNS query blocked\nDevice: {device_name} ({device.get('localIp', '?')})\nDomain: {domain}",
+                        severity="critical",
+                    )
+                    ALERTS_SENT.labels(source="parental-alert", verdict="CRITICAL").inc()
+                    last_alert[cooldown_key] = time.time()
+                break  # one alert per cycle is enough
 
     except Exception as e:
         log.error("NextDNS check failed: %s", e)
