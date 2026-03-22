@@ -367,21 +367,21 @@ def check_nextdns():
             DNS_BLOCKED_BY_DEVICE.labels(device=dev.get("name") or dev.get("id", "unknown"), ip=dev.get("localIp", "unknown")).set(dev.get("queries", 0))
 
         # Check for bypass patterns: high blocked count
-        resp = requests.get(f"{base}/analytics/status?from=-10m", headers=headers, timeout=15)
+        resp = requests.get(f"{base}/analytics/status?from=-5m", headers=headers, timeout=15)
         resp.raise_for_status()
-        blocked_10m = sum(e["queries"] for e in resp.json().get("data", []) if e["status"] == "blocked")
+        blocked_5m = sum(e["queries"] for e in resp.json().get("data", []) if e["status"] == "blocked")
 
-        if blocked_10m > DNS_BLOCK_THRESHOLD:
+        if blocked_5m > DNS_BLOCK_THRESHOLD:
             if not check_cooldown("dns-bypass"):
-                resp = requests.get(f"{base}/analytics/domains?from=-10m&status=blocked&limit=5", headers=headers, timeout=15)
+                resp = requests.get(f"{base}/analytics/domains?from=-5m&status=blocked&limit=5", headers=headers, timeout=15)
                 resp.raise_for_status()
                 top_domains = [d["domain"] for d in resp.json().get("data", [])]
 
-                send_to_alertmanager("dns-bypass", "SUSPICIOUS", f"{blocked_10m} blocks in 10m\nTop: {', '.join(top_domains)}")
+                send_to_alertmanager("dns-bypass", "SUSPICIOUS", f"{blocked_5m} blocks in 5m\nTop: {', '.join(top_domains)}")
                 ALERTS_SENT.labels(source="dns-bypass", verdict="SUSPICIOUS").inc()
                 last_alert["dns-bypass"] = time.time()
         else:
-            log.info("[dns-bypass] %d blocks in 10m (threshold: %d)", blocked_10m, DNS_BLOCK_THRESHOLD)
+            log.info("[dns-bypass] %d blocks in 5m (threshold: %d)", blocked_5m, DNS_BLOCK_THRESHOLD)
 
         # Check for adult/porn content blocks
         ADULT_REASONS = {"parental-control:porn", "parental-control:dating", "category:porn", "category:adult"}
