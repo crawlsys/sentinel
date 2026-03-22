@@ -87,9 +87,9 @@ QUERIES = [
     },
     {
         "name": "kube-security",
-        "query": '{namespace="kube-system"} |~ "(?i)(forbidden|unauthorized|denied|401|403|failed.*auth|invalid.*token|certificate.*error)" !~ "(?i)(nodePublishSecretRef|bws-token|reconcile spc)"',
+        "query": '{namespace="kube-system"} |~ "(?i)(forbidden|unauthorized|denied|401|403|failed.*auth|invalid.*token|certificate.*error)" !~ "(?i)(nodePublishSecretRef|bws-token|reconcile spc|429|Too Many Requests|rate.limit|ghcr-login-secret)"',
         "context": "Kubernetes control plane. Watch for: API auth failures, RBAC denials, "
-                   "invalid tokens, certificate issues. Ignore routine CSI reconciliation errors.",
+                   "invalid tokens, certificate issues. Ignore routine CSI reconciliation errors and BWS rate limits.",
         "priority": "critical",
     },
     {
