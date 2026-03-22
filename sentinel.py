@@ -27,11 +27,11 @@ log = logging.getLogger("sentinel")
 
 LOKI_URL = os.environ.get("LOKI_URL", "http://loki.loki.svc.cluster.local:3100")
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://ollama.ollama.svc.cluster.local:11434")
-OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen2.5:7b")
+OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen3:32b-q4_K_M")
 ALERTMANAGER_URL = os.environ.get("ALERTMANAGER_URL", "http://kube-prometheus-stack-alertmanager.monitoring.svc.cluster.local:9093")
 POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL", "60"))
 MAX_LINES_PER_QUERY = int(os.environ.get("MAX_LINES_PER_QUERY", "200"))
-COOLDOWN_SECONDS = int(os.environ.get("COOLDOWN_SECONDS", "300"))
+COOLDOWN_SECONDS = int(os.environ.get("COOLDOWN_SECONDS", "900"))
 METRICS_PORT = int(os.environ.get("METRICS_PORT", "9090"))
 NEXTDNS_API_KEY = os.environ.get("NEXTDNS_API_KEY", "")
 NEXTDNS_PROFILE = os.environ.get("NEXTDNS_PROFILE", "65ef2e")
@@ -40,7 +40,11 @@ DNS_BLOCK_THRESHOLD = int(os.environ.get("DNS_BLOCK_THRESHOLD", "500")) # Tuned 
 # How long to keep history for pattern detection (in seconds)
 HISTORY_WINDOW = 120 * 60  # 120 minutes
 # Number of consecutive OPERATIONAL verdicts before alerting
-OPERATIONAL_ALERT_THRESHOLD = 5 
+OPERATIONAL_ALERT_THRESHOLD = 5
+# Number of consecutive SUSPICIOUS verdicts before alerting (avoid single-cycle false positives)
+SUSPICIOUS_ALERT_THRESHOLD = int(os.environ.get("SUSPICIOUS_ALERT_THRESHOLD", "2"))
+# Minimum log lines to bother classifying (skip transient single-line noise)
+MIN_LINES_THRESHOLD = int(os.environ.get("MIN_LINES_THRESHOLD", "3"))
 
 # --- Prometheus Metrics ---
 POLL_CYCLES = Counter("sentinel_poll_cycles_total", "Total poll cycles completed")
@@ -152,20 +156,29 @@ VERDICTS:
 - CRITICAL: Definite security breach, unauthorized access, or active attack.
 
 KNOWN NOISE (always SAFE):
-- CSI secrets-store "nodePublishSecretRef not found" / "bws-token" not found
+- CSI secrets-store "nodePublishSecretRef not found" / "bws-token" not found / "Secret not found"
 - ArgoCD routine operations (sync, manifest cache, etc.)
 - Routine connection timeouts or DNS resolution failures (transient)
 - MyApp crawler getting 403s from news sites
+- Bitwarden CSI driver rate limits (429 / "Too Many Requests")
+- Secret rotation or mount errors during pod startup / rollout
+- RBAC denials from known service accounts performing expected operations
 
 OPERATIONAL ISSUES (flag as OPERATIONAL):
 - Persistent database connection failures (e.g. "no such host", "connection refused")
 - Application panics or fatal errors that are self-contained
 - Service-to-service communication failures
+- Pod scheduling or image pull failures
 
 SUSPICIOUS/CRITICAL (flag as SUSPICIOUS or CRITICAL):
-- Auth failures from unknown IPs
-- Unexpected ArgoCD app creation/deletion
-- Unauthorized API access (real 401/403s)
+- Auth failures from unknown/external IPs (not internal service accounts)
+- Unexpected ArgoCD app creation/deletion by unknown users
+- Unauthorized API access (real 401/403s from external sources, NOT internal RBAC)
+- Certificate issuance for unexpected domains
+- Multiple failed login attempts in short succession from the same source
+
+IMPORTANT: Err on the side of SAFE/OPERATIONAL. Most errors in a homelab are misconfigurations,
+not attacks. Only flag SUSPICIOUS if there is genuine evidence of malicious intent or external threats.
 
 Respond in EXACTLY this format:
 VERDICT: SAFE|OPERATIONAL|SUSPICIOUS|CRITICAL
@@ -211,6 +224,13 @@ class MemorySubsystem:
         if len(recent) < threshold:
             return False
         return all(d["verdict"] == "OPERATIONAL" for d in recent)
+
+    def is_persistent_suspicious(self, source: str, threshold: int) -> bool:
+        """Check if we have consecutive SUSPICIOUS verdicts (avoid single-cycle false positives)."""
+        recent = self.get_recent(source, threshold)
+        if len(recent) < threshold:
+            return False
+        return all(d["verdict"] in ("SUSPICIOUS", "CRITICAL") for d in recent)
 
 
 # Global state
@@ -428,20 +448,32 @@ def poll_cycle():
         if not lines:
             continue
 
+        # Skip classification for very low line counts (transient noise)
+        if len(lines) < MIN_LINES_THRESHOLD:
+            log.info("[%s] Only %d lines (threshold: %d), skipping classification", name, len(lines), MIN_LINES_THRESHOLD)
+            continue
+
         LINES_COLLECTED.labels(source=name).inc(len(lines))
         verdict, explanation = analyze_with_ollama(name, q["priority"], q["context"], lines, POLL_INTERVAL * 2)
 
         VERDICTS.labels(source=name, verdict=verdict).inc()
         memory.add(name, verdict, explanation)
-        
+
         log.info("[%s] verdict=%s: %s", name, verdict, explanation[:100])
 
         should_alert = False
         pushover_priority = 0
 
-        if verdict in ("SUSPICIOUS", "CRITICAL"):
+        if verdict == "CRITICAL":
+            # CRITICAL always alerts immediately (still subject to cooldown)
             should_alert = True
-            pushover_priority = 1 if verdict == "CRITICAL" else 0
+            pushover_priority = 1
+        elif verdict == "SUSPICIOUS":
+            # SUSPICIOUS requires persistence — must see it N consecutive times
+            if memory.is_persistent_suspicious(name, SUSPICIOUS_ALERT_THRESHOLD):
+                should_alert = True
+            else:
+                log.info("[%s] Transient SUSPICIOUS, monitoring for persistence...", name)
         elif verdict == "OPERATIONAL":
             # Alert only if it's persistent
             if memory.is_persistent_operational(name, OPERATIONAL_ALERT_THRESHOLD):
