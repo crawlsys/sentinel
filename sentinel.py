@@ -37,6 +37,9 @@ NEXTDNS_API_KEY = os.environ.get("NEXTDNS_API_KEY", "")
 NEXTDNS_PROFILE = os.environ.get("NEXTDNS_PROFILE", "65ef2e")
 DNS_BLOCK_THRESHOLD = int(os.environ.get("DNS_BLOCK_THRESHOLD", "500")) # Tuned up from 50
 
+# IP prefixes to ignore for parental alerts (cluster nodes, pods, services)
+PARENTAL_IGNORE_IPS = os.environ.get("PARENTAL_IGNORE_IPS", "10.42.,10.43.,172.16.100.").split(",")
+
 # How long to keep history for pattern detection (in seconds)
 HISTORY_WINDOW = 120 * 60  # 120 minutes
 # Number of consecutive OPERATIONAL verdicts before alerting
@@ -412,7 +415,14 @@ def check_nextdns():
             if reasons & ADULT_REASONS:
                 device = entry.get("device", {})
                 device_name = device.get("name", "unknown")
+                device_ip = device.get("localIp", "")
                 domain = entry.get("domain", "unknown")
+
+                # Skip cluster IPs (pods, nodes, services making DNS queries)
+                if any(device_ip.startswith(prefix) for prefix in PARENTAL_IGNORE_IPS):
+                    log.debug("[parental] Skipping cluster IP %s (%s) for %s", device_ip, device_name, domain)
+                    continue
+
                 cooldown_key = f"adult-{device_name}"
                 if not check_cooldown(cooldown_key):
                     send_to_alertmanager(
