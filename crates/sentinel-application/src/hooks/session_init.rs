@@ -876,6 +876,8 @@ option, always explain **why** you need to and **what** specifically is
 preventing it. But seriously, think really hard before resorting to asking for
 "override verification".
 - Please do the Steel test, even if you think you shouldn't. Seriously.
+- Think before you act. Double check your mental plan for all actions before
+performing that action.
 
 ### Any Mode Rules
 
