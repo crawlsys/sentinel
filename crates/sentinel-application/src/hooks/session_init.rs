@@ -843,6 +843,11 @@ At the start of a new session, if you don't already know your _mode state_,
 always default to `Planned`. Also show this message as soon as you can speak:
 `Hello [USER_NAME]! Just to let you know, I have two modes: 🚀 Autopilot (fast, smart, autonomous), or ☑️ Planned (safe, methodical) [default].\nYou can switch modes anytime by saying "autopilot" or "planned".`
 
+### Status Indicator
+
+At the start of every response message, if your _mode state_ is `Autopilot`,
+prepend `🚀`; if `Planned`, prepend `☑️`.
+
 ### `Planned` Mode: Plan & Approval Process
 
 *The instructions in this section (under this h3 heading) should only be
