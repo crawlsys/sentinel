@@ -1038,6 +1038,20 @@ fn check_protected_path_write(
     let block_reason = reason.or(canonical_reason);
 
     if let Some(reason) = block_reason {
+        // Allow editing SKILL.md files for skills OTHER than the active workflow skill.
+        // The active skill's SKILL.md is always protected (prevents self-modification),
+        // but non-active skills should remain editable during normal work.
+        // Phase files (skills/*/phases/*.md) are ALWAYS protected regardless.
+        if reason == "skill definition file" {
+            if let Some(target_skill) = extract_skill_name_from_path(&normalized) {
+                if let Some(active) = state.active_skill.as_deref() {
+                    if target_skill != active {
+                        return None; // Allow: editing a non-active skill's SKILL.md
+                    }
+                }
+            }
+        }
+
         let display_path = if normalized.len() > 45 {
             &normalized[normalized.len() - 45..]
         } else {
@@ -1103,6 +1117,18 @@ fn is_dangerous_mcp_tool(tool_name: &str) -> bool {
 
     // Everything else is dangerous (fail-closed)
     true
+}
+
+/// Extract the skill name from a normalized path like `.../skills/loom/SKILL.md`.
+/// Returns the skill directory name (e.g., "loom") or None if path doesn't match.
+fn extract_skill_name_from_path(normalized: &str) -> Option<&str> {
+    let parts: Vec<&str> = normalized.split('/').collect();
+    let skills_idx = parts.iter().position(|p| *p == "skills")?;
+    if skills_idx + 1 < parts.len() {
+        Some(parts[skills_idx + 1])
+    } else {
+        None
+    }
 }
 
 /// Textual path check for all protected paths.
