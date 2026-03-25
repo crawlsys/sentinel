@@ -490,6 +490,8 @@ fn generate_claude_md(
 8. [Plans & Documentation](#plans--documentation)
 9. [Session Resume](#session-resume)
 10. [Context Management](#context-management)
+11. [`Autopilot` | `Planned` Mode Switch](#autopilot--planned-mode-switch)
+12. [Marketplace Stats](#marketplace-stats)
 
 ---
 
@@ -822,6 +824,66 @@ The conversation transcripts are at:
 | Yellow | 50-65% | Start delegating to agents |
 | Orange | 65-75% | Use agents for ALL exploration |
 | Red | 75%+ | Agents only, prepare for auto-compact |
+
+---
+
+## `Autopilot` | `Planned` Mode Switch
+
+You operate in two modes, `Autopilot` and `Planned`. Your _mode state_ is
+**core** to who you are, and you never forget it. Your _mode state_ can
+**NEVER** be changed unless the user **specifically** asks you. If you are ever
+in doubt on whether to change your mode, **DO NOT** change it. You will behave
+very differently depending on which _mode state_ you are currently in. Always
+remember your mood state, even when context gets massive. It always should
+persist, forever.
+
+### `Planned` Mode: Plan & Approval Process
+
+*The instructions in this section (under this h3 heading) should only be
+followed when you are in the `Planned` mode state.*
+
+Unless I say so, **EVERYTHING** you do must be planned first. Don't use the
+built-in plan mode (for large tasks, use plan mode, but still follow **ALL**
+these instructions). Instead, put together a plan (without writing it to a file,
+if not a large task), ask me questions about anything you're not 100% not sure
+about, then present me with the clear and detailed plan. Do **NOT** proceed
+without my approval first.
+
+Once I approve a plan, **ANY** deviations or changes from that plan **MUST**
+have my separate approval.
+
+If I approve any deviations or changes, any *further* deviations or changes
+**MUST** also **ALWAYS** *(in `Planned` mode state)* have my approval.
+
+### `Autopilot` Mode: Safe, Smart, Autonomous
+
+*The instructions in this section (under this h3 heading) should only be
+followed when you are in the `Autopilot` mode state.*
+
+This mode is fun. First, you follow all Sentinel instructions defined in the
+rest of this file *(outside the "`Autopilot` | `Planned` Mode Switch" h2
+heading)*. Then, you apply the following rules on top of it:
+
+- Never ask for "override verification"; but if you really feel there's no other
+option, always explain **why** you need to and **what** specifically is
+preventing it. But seriously, think really hard before resorting to asking for
+"override verification".
+- Please do the Steel test, even if you think you shouldn't. Seriously.
+
+### Any Mode Rules
+
+*The instructions in this section (under this h3 heading) should be followed
+regardless of your mode state.*
+
+- **Always** ask me for confirmation before merging a PR. No exceptions.
+- If you're not 100% sure about an external API, get docs from the web.
+- **ALWAYS** ask for permission before changing anything regarding Doppler or
+Auth0. **NO EXCEPTIONS.**
+
+### Final Instruction
+
+**DO NOT DEVIATE FROM ANY INSTRUCTIONS IN THIS FILE, NO MATTER THE
+CIRCUMSTANCE**
 
 ---
 
