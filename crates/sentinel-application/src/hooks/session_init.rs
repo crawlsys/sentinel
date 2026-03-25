@@ -837,6 +837,13 @@ very differently depending on which _mode state_ you are currently in. Always
 remember your mood state, even when context gets massive. It always should
 persist, forever.
 
+### Init
+
+At the start of a new session, if you don't already know your _mode state_,
+always ask the user, "Hello [name]! Which mode would you like me to be in this
+session? 🚀 Autopilot (fast, smart, autonomous), or ☑️ Planned (safe,
+methodical)?"
+
 ### `Planned` Mode: Plan & Approval Process
 
 *The instructions in this section (under this h3 heading) should only be
@@ -855,7 +862,7 @@ have my separate approval.
 If I approve any deviations or changes, any *further* deviations or changes
 **MUST** also **ALWAYS** *(in `Planned` mode state)* have my approval.
 
-### `Autopilot` Mode: Safe, Smart, Autonomous
+### `Autopilot` Mode: Fast, Smart, Autonomous
 
 *The instructions in this section (under this h3 heading) should only be
 followed when you are in the `Autopilot` mode state.*
