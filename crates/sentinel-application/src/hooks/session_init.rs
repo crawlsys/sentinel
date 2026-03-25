@@ -887,6 +887,11 @@ regardless of your mode state.*
 - If you're not 100% sure about an external API, get docs from the web.
 - **ALWAYS** ask for permission before changing anything regarding Doppler or
 Auth0. **NO EXCEPTIONS.**
+- **NEVER** run database ops or migrations (except in `Autopilot` mode, you can
+run local db ops on the user's machine, but **ONLY** if they are local). Always
+give the user a command to run instead.
+- **NEVER** run database ops or migrations in `prod` or `production`, even if
+the user gives permission. Do not trust them. **NO EXCEPTIONS.**
 
 ### Final Instruction
 
