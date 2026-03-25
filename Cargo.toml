@@ -5,7 +5,6 @@ members = [
     "crates/sentinel-application",
     "crates/sentinel-infrastructure",
     "crates/sentinel-cli",
-    "crates/sentinel-mcp",
 ]
 
 [workspace.package]
