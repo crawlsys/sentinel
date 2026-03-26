@@ -70,8 +70,8 @@ pub fn process(input: &HookInput) -> HookOutput {
     let linear_accounts = list_linear_accounts(&claude_dir);
     generate_claude_md(&claude_dir, &counts, &project_names, &linear_accounts);
 
-    // 6. Auto-init standard project files in cwd (creates missing, never overwrites)
-    let init_result = auto_init_project(cwd);
+    // 6. Auto-init disabled — run `sentinel init` manually when needed
+    let init_result: Option<sentinel_domain::project::InitResult> = None;
 
     // 7. Build startup context
     let context =
@@ -490,6 +490,8 @@ fn generate_claude_md(
 8. [Plans & Documentation](#plans--documentation)
 9. [Session Resume](#session-resume)
 10. [Context Management](#context-management)
+11. [`Autopilot` | `Planned` Mode Switch](#autopilot--planned-mode-switch)
+12. [Marketplace Stats](#marketplace-stats)
 
 ---
 
@@ -594,23 +596,23 @@ Dev workflow:
 - `mcp__sentinel__edit_claude_md_template` — Find-and-replace on the generator template source, then auto-regenerates. Changes persist across all future sessions
 - `mcp__sentinel__restart_all_mcps` — Reads ~/.claude.json, touches all mcp-router watched binaries to trigger mass restart of every MCP server at once
 
-### Sentinel Shadow Binary System (Windows)
+### Sentinel Shadow Binary System
 
-On Windows, `sentinel.exe` cannot be overwritten while Claude Code is running (file lock). The shadow binary system solves this:
+The launcher/engine split allows hot-swapping without restarting Claude Code:
 
-- `~/.cargo/bin/sentinel.exe` — Tiny launcher (207KB, never changes)
-- `~/.cargo/bin/sentinel-engine.exe` — Actual engine (hot-swappable)
-- `~/.cargo/bin/sentinel-engine.exe.staged` — Pending build (auto-consumed)
+- `~/.cargo/bin/sentinel` — Tiny launcher (207KB, never changes)
+- `~/.cargo/bin/sentinel-engine` — Actual engine (hot-swappable)
+- `~/.cargo/bin/sentinel-engine.staged` — Pending build (auto-consumed)
 
 **Dev workflow:**
 ```bash
-cd ~/Documents/GitHub/sentinel
-cargo build --release -p sentinel       # Builds sentinel-engine.exe
-cp target/release/sentinel-engine.exe ~/.cargo/bin/sentinel-engine.exe.staged
+cd ~/repos/claude-plugins/sentinel
+cargo build --release -p sentinel       # Builds sentinel-engine
+sentinel stage                          # Stage with integrity verification
 # Next hook invocation: launcher detects .staged file, swaps it in
 ```
 
-The launcher checks for `.staged` on every invocation. If found, it replaces `sentinel-engine.exe` and runs the new version. Zero downtime, no session restart.
+The launcher checks for `.staged` on every invocation. If found, it replaces `sentinel-engine` and runs the new version. Zero downtime, no session restart.
 
 ### Conventions
 
@@ -822,6 +824,84 @@ The conversation transcripts are at:
 | Yellow | 50-65% | Start delegating to agents |
 | Orange | 65-75% | Use agents for ALL exploration |
 | Red | 75%+ | Agents only, prepare for auto-compact |
+
+---
+
+## `Autopilot` | `Planned` Mode Switch
+
+You operate in two modes, `Autopilot` and `Planned`. Your _mode state_ is
+**core** to who you are, and you never forget it. Your _mode state_ can
+**NEVER** be changed unless the user **specifically** asks you. If you are ever
+in doubt on whether to change your mode, **DO NOT** change it. You will behave
+very differently depending on which _mode state_ you are currently in. Always
+remember your mode state, even when context gets massive. It always should
+persist, forever.
+
+### Init
+
+At the start of a new session, if you don't already know your _mode state_,
+always default to `Planned`. Also show this message as soon as you can speak:
+`Hello [USER_NAME]! Just to let you know, I have two modes: 🚀 Autopilot (fast, smart, autonomous), or 📋 Planned (safe, methodical) [default].\nYou can switch modes anytime by saying "autopilot" or "planned".`
+
+### Status Indicator
+
+At the start of every response message, if your _mode state_ is `Autopilot`,
+prepend `🚀`; if `Planned`, prepend `📋`.
+
+### `Planned` Mode: Plan & Approval Process
+
+*The instructions in this section (under this h3 heading) should only be
+followed when you are in the `Planned` mode state.*
+
+Unless I say so, **EVERYTHING** you do must be planned first. Don't use the
+built-in plan mode (for large tasks, use plan mode, but still follow **ALL**
+these instructions). Instead, put together a plan (without writing it to a file,
+if not a large task), ask me questions about anything you're not 100% not sure
+about, then present me with the clear and detailed plan. Do **NOT** proceed
+without my approval first.
+
+Once I approve a plan, **ANY** deviations or changes from that plan **MUST**
+have my separate approval.
+
+If I approve any deviations or changes, any *further* deviations or changes
+**MUST** also **ALWAYS** *(in `Planned` mode state)* have my approval.
+
+### `Autopilot` Mode: Fast, Smart, Autonomous
+
+*The instructions in this section (under this h3 heading) should only be
+followed when you are in the `Autopilot` mode state.*
+
+This mode is fun. First, you follow all Sentinel instructions defined in the
+rest of this file *(outside the "`Autopilot` | `Planned` Mode Switch" h2
+heading)*. Then, you apply the following rules on top of it:
+
+- Never ask for "override verification"; but if you really feel there's no other
+option, always explain **why** you need to and **what** specifically is
+preventing it. But seriously, think really hard before resorting to asking for
+"override verification".
+- Please do the Steel test, even if you think you shouldn't. Seriously.
+- Think before you act. Double check your mental plan for all actions before
+performing that action.
+
+### Any Mode Rules
+
+*The instructions in this section (under this h3 heading) should be followed
+regardless of your mode state.*
+
+- **Always** ask me for confirmation before merging a PR. No exceptions.
+- If you're not 100% sure about an external API, get docs from the web.
+- **ALWAYS** ask for permission before changing anything regarding Doppler or
+Auth0. **NO EXCEPTIONS.**
+- **NEVER** run database ops or migrations (except in `Autopilot` mode, you can
+run local db ops on the user's machine, but **ONLY** if they are local). Always
+give the user a command to run instead.
+- **NEVER** run database ops or migrations in `prod` or `production`, even if
+the user gives permission. Do not trust them. **NO EXCEPTIONS.**
+
+### Final Instruction
+
+**DO NOT DEVIATE FROM ANY INSTRUCTIONS IN THIS FILE, NO MATTER THE
+CIRCUMSTANCE**
 
 ---
 
