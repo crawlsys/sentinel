@@ -147,6 +147,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(windows)]
     fn test_windows_paths() {
         assert_eq!(
             detect_project("C:\\Users\\gary\\Documents\\GitHub\\sentinel"),
