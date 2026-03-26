@@ -1639,6 +1639,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(windows)]
     fn test_read_on_windows_path_records_phase() {
         let mut state = SessionState::new("sess-1");
         state.set_active_skill("linear");
