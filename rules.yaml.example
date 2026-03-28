@@ -1,0 +1,46 @@
+# Sentinel query rules configuration
+# Mount this file into the container and set SENTINEL_RULES_FILE=/app/rules.yaml
+#
+# Each rule requires:
+#   name:     Unique identifier for the log source
+#   query:    LogQL query for Loki
+#   context:  Description of what this source does and what threats look like
+#   priority: critical | high | medium | low
+
+rules:
+  - name: argo-security
+    query: '{namespace="argo-system"} |~ "(?i)(denied|unauthorized|forbidden|unknown.user|deleted.*app|created.*app)" !~ "(?i)(helm template|manifest.*cache|SSH_AUTH_SOCK|trigger.*not configured|unknown field|Reconciliation completed|finished call|created.*resource|Synced|Succeeded|ComparedTo|sync completed|Sync operation to)"'
+    context: >-
+      ArgoCD GitOps controller. Can deploy arbitrary workloads to the cluster.
+      Watch for: unauthorized access, unexpected app creation/deletion, sync failures
+      from unknown sources, RBAC violations.
+    priority: critical
+
+  - name: kube-security
+    query: '{namespace="kube-system"} |~ "(?i)(forbidden|unauthorized|denied|401|403|failed.*auth|invalid.*token|certificate.*error)" !~ "(?i)(nodePublishSecretRef|bws-token|reconcile spc|429|Too Many Requests|rate.limit)"'
+    context: >-
+      Kubernetes control plane. Watch for: API auth failures, RBAC denials,
+      invalid tokens, certificate issues.
+    priority: critical
+
+  - name: cert-manager
+    query: '{namespace="cert-manager"} |~ "(?i)(error|fail|denied|invalid|expired|issued|ready)"'
+    context: >-
+      TLS certificate manager. Unexpected certificate issuance could indicate
+      domain hijacking or MitM. Watch for: certs issued for unknown domains, failures, expiry.
+    priority: high
+
+  - name: cloudflared
+    query: '{namespace="cloudflared"} |~ "(?i)(error|fail|disconnect|unauthorized|tunnel|reconnect)" !~ "(?i)(Unable to reach the origin service|connection refused|connect: connection refused|ERR  error=)"'
+    context: >-
+      Cloudflare tunnel - single ingress point for all public services.
+      Watch for: tunnel disconnections, auth failures, connection anomalies.
+    priority: critical
+
+  # Add your application-specific rules below:
+  #
+  # - name: my-app
+  #   query: '{namespace="my-app"} |~ "(?i)(error|unauthorized|panic)"'
+  #   context: >-
+  #     My application. Watch for: auth failures, panics, unexpected errors.
+  #   priority: high

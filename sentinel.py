@@ -7,7 +7,10 @@ import os
 import time
 from collections import deque
 from datetime import datetime, timezone
+from pathlib import Path
 from threading import Thread
+
+import yaml
 
 import requests
 from prometheus_client import (
@@ -84,7 +87,12 @@ DNS_BLOCKED = Gauge("sentinel_dns_blocked_total", "DNS queries blocked by NextDN
 DNS_BLOCKED_BY_DEVICE = Gauge("sentinel_dns_blocked_by_device", "DNS blocked queries per device", ["device", "ip"])
 DNS_TOTAL = Gauge("sentinel_dns_queries_total", "Total DNS queries (rolling window)")
 
-QUERIES = [
+SENTINEL_RULES_FILE = os.environ.get("SENTINEL_RULES_FILE", "")
+SENTINEL_RULES = os.environ.get("SENTINEL_RULES", "")
+
+# Built-in rules covering common Kubernetes infrastructure.
+# Override entirely by providing SENTINEL_RULES_FILE (YAML/JSON) or SENTINEL_RULES (JSON env var).
+DEFAULT_RULES = [
     {
         "name": "argo-security",
         "query": '{namespace="argo-system"} |~ "(?i)(denied|unauthorized|forbidden|unknown.user|deleted.*app|created.*app)" !~ "(?i)(helm template|manifest.*cache|SSH_AUTH_SOCK|trigger.*not configured|unknown field|Reconciliation completed|finished call|created.*resource|Synced|Succeeded|ComparedTo|sync completed|Sync operation to)"',
@@ -96,7 +104,7 @@ QUERIES = [
         "name": "kube-security",
         "query": '{namespace="kube-system"} |~ "(?i)(forbidden|unauthorized|denied|401|403|failed.*auth|invalid.*token|certificate.*error)" !~ "(?i)(nodePublishSecretRef|bws-token|reconcile spc|429|Too Many Requests|rate.limit|ghcr-login-secret)"',
         "context": "Kubernetes control plane. Watch for: API auth failures, RBAC denials, "
-                   "invalid tokens, certificate issues. Ignore routine CSI reconciliation errors and BWS rate limits.",
+                   "invalid tokens, certificate issues. Ignore routine CSI reconciliation errors.",
         "priority": "critical",
     },
     {
@@ -107,48 +115,52 @@ QUERIES = [
         "priority": "high",
     },
     {
-        "name": "arc-runners",
-        "query": '{namespace="actions-runner-system"} |~ "(?i)(error|warn|fail|register|unauthorized|denied)"',
-        "context": "GitHub Actions self-hosted runner controller. Executes CI/CD workloads with cluster access. "
-                   "Watch for: unauthorized runner registration, auth failures, unexpected errors.",
-        "priority": "high",
-    },
-    {
-        "name": "myapp",
-        "query": '{namespace=~"myapp.*", container!~".*postgres.*|.*rabbitmq.*"} |~ "(?i)(unauthorized|forbidden|panic|fatal|injection|xss|csrf)" !~ "(?i)(relation.*does not exist|connection refused|timeout)"',
-        "context": "MyApp public web application (prod + dev). Watch for: auth bypass attempts, "
-                   "elevated error rates, panics, database connection failures, suspicious request patterns.",
-        "priority": "high",
-    },
-    {
-        "name": "myapp",
-        "query": '{namespace="myapp", container!="crawler"} |~ "(?i)(unauthorized|forbidden|panic|fatal)" !~ "(?i)(pyroscope|session.*send|connection refused|timeout|Failed to send session|fetch failed: HTTP 403 Forbidden)"',
-        "context": "MyApp search engine (public-facing). Excludes crawler noise. Watch for: "
-                   "API errors, auth issues, injection attempts, database failures.",
-        "priority": "high",
-    },
-    {
         "name": "cloudflared",
         "query": '{namespace="cloudflared"} |~ "(?i)(error|fail|disconnect|unauthorized|tunnel|reconnect)" !~ "(?i)(Unable to reach the origin service|connection refused|connect: connection refused|ERR  error=)"',
         "context": "Cloudflare tunnel - single ingress point for all public services. "
                    "Watch for: tunnel disconnections, auth failures, connection anomalies.",
         "priority": "critical",
     },
-    {
-        "name": "myapp-rabbitmq",
-        "query": '{namespace=~"myapp.*", container=~".*rabbitmq.*"} |~ "(?i)(error|fail|refused|auth|denied)"',
-        "context": "RabbitMQ message broker for MyApp. Watch for: auth failures, "
-                   "connection refused, queue errors that could indicate compromise of the message bus.",
-        "priority": "medium",
-    },
-    {
-        "name": "myapp-postgres",
-        "query": '{namespace=~"myapp.*", container=~".*postgres.*"} |~ "(?i)(FATAL|panic|auth.*fail|denied|password)" !~ "(?i)(relation.*does not exist|no pg_hba.conf entry)"',
-        "context": "PostgreSQL database for MyApp. Watch for: auth failures, "
-                   "connection storms, replication issues, data corruption indicators.",
-        "priority": "high",
-    },
 ]
+
+
+def load_rules() -> list[dict]:
+    """Load query rules from file, env var, or fall back to defaults.
+
+    Priority:
+      1. SENTINEL_RULES_FILE (path to YAML or JSON file)
+      2. SENTINEL_RULES (inline JSON env var)
+      3. DEFAULT_RULES (built-in generic rules)
+    """
+    if SENTINEL_RULES_FILE:
+        path = Path(SENTINEL_RULES_FILE)
+        if not path.exists():
+            log.error("Rules file not found: %s — falling back to defaults", path)
+            return DEFAULT_RULES
+        text = path.read_text()
+        log.info("Loading rules from file: %s", path)
+        if path.suffix in (".yaml", ".yml"):
+            rules = yaml.safe_load(text)
+        else:
+            rules = json.loads(text)
+        if isinstance(rules, dict) and "rules" in rules:
+            rules = rules["rules"]
+        log.info("Loaded %d rules from %s", len(rules), path)
+        return rules
+
+    if SENTINEL_RULES:
+        log.info("Loading rules from SENTINEL_RULES env var")
+        rules = json.loads(SENTINEL_RULES)
+        if isinstance(rules, dict) and "rules" in rules:
+            rules = rules["rules"]
+        log.info("Loaded %d rules from env", len(rules))
+        return rules
+
+    log.info("Using %d built-in default rules", len(DEFAULT_RULES))
+    return DEFAULT_RULES
+
+
+QUERIES = load_rules()
 
 SYSTEM_PROMPT = """You are a security analyst for a Kubernetes homelab. Classify log batches.
 
@@ -162,7 +174,7 @@ KNOWN NOISE (always SAFE):
 - CSI secrets-store "nodePublishSecretRef not found" / "bws-token" not found / "Secret not found"
 - ArgoCD routine operations (sync, manifest cache, etc.)
 - Routine connection timeouts or DNS resolution failures (transient)
-- MyApp crawler getting 403s from news sites
+- Web crawlers getting 403s from external sites
 - Bitwarden CSI driver rate limits (429 / "Too Many Requests")
 - Secret rotation or mount errors during pod startup / rollout
 - RBAC denials from known service accounts performing expected operations
