@@ -318,7 +318,7 @@ def analyze_with_ollama(name: str, priority: str, context: str, lines: list[str]
                         {"role": "user", "content": user_prompt},
                     ],
                     "stream": False,
-                    "options": {"temperature": 0.1, "num_predict": 200},
+                    "options": {"temperature": 0.1, "num_predict": 400, "think": False},
                 },
                 timeout=120,
             )
