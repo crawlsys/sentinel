@@ -1,0 +1,1 @@
+cargo:rustc-env=MIME_TYPES_GENERATED_PATH=C:\Users\garys\Documents\GitHub\sentinel\target-shadow\release\build\mime_guess-f6ec584d0b39718d\out\mime_types_generated.rs

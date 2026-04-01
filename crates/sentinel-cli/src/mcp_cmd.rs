@@ -170,7 +170,7 @@ fn server_info() -> serde_json::Value {
     serde_json::json!({
         "protocolVersion": "2024-11-05",
         "capabilities": {
-            "tools": {}
+            "tools": {"listChanged": true}
         },
         "serverInfo": {
             "name": "sentinel",

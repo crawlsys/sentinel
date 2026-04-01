@@ -1,0 +1,14 @@
+C:\Users\garys\Documents\GitHub\sentinel\target-shadow\release\deps\ref_cast-d890b3865f1bbc15.d: C:\Users\garys\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\ref-cast-1.0.25\src\lib.rs C:\Users\garys\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\ref-cast-1.0.25\src\custom.rs C:\Users\garys\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\ref-cast-1.0.25\src\layout.rs C:\Users\garys\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\ref-cast-1.0.25\src\trivial.rs C:\Users\garys\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\ref-cast-1.0.25\src\private.rs C:\Users\garys\Documents\GitHub\sentinel\target-shadow\release\build\ref-cast-a2bca6bc44d469e5\out/private.rs
+
+C:\Users\garys\Documents\GitHub\sentinel\target-shadow\release\deps\libref_cast-d890b3865f1bbc15.rlib: C:\Users\garys\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\ref-cast-1.0.25\src\lib.rs C:\Users\garys\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\ref-cast-1.0.25\src\custom.rs C:\Users\garys\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\ref-cast-1.0.25\src\layout.rs C:\Users\garys\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\ref-cast-1.0.25\src\trivial.rs C:\Users\garys\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\ref-cast-1.0.25\src\private.rs C:\Users\garys\Documents\GitHub\sentinel\target-shadow\release\build\ref-cast-a2bca6bc44d469e5\out/private.rs
+
+C:\Users\garys\Documents\GitHub\sentinel\target-shadow\release\deps\libref_cast-d890b3865f1bbc15.rmeta: C:\Users\garys\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\ref-cast-1.0.25\src\lib.rs C:\Users\garys\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\ref-cast-1.0.25\src\custom.rs C:\Users\garys\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\ref-cast-1.0.25\src\layout.rs C:\Users\garys\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\ref-cast-1.0.25\src\trivial.rs C:\Users\garys\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\ref-cast-1.0.25\src\private.rs C:\Users\garys\Documents\GitHub\sentinel\target-shadow\release\build\ref-cast-a2bca6bc44d469e5\out/private.rs
+
+C:\Users\garys\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\ref-cast-1.0.25\src\lib.rs:
+C:\Users\garys\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\ref-cast-1.0.25\src\custom.rs:
+C:\Users\garys\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\ref-cast-1.0.25\src\layout.rs:
+C:\Users\garys\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\ref-cast-1.0.25\src\trivial.rs:
+C:\Users\garys\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\ref-cast-1.0.25\src\private.rs:
+C:\Users\garys\Documents\GitHub\sentinel\target-shadow\release\build\ref-cast-a2bca6bc44d469e5\out/private.rs:
+
+# env-dep:OUT_DIR=C:\\Users\\garys\\Documents\\GitHub\\sentinel\\target-shadow\\release\\build\\ref-cast-a2bca6bc44d469e5\\out

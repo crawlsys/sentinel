@@ -167,9 +167,11 @@ pub struct HookOutput {
     pub system_message: Option<String>,
 }
 
-/// Claude Code's hookSpecificOutput schema.
+/// Claude Code's hookSpecificOutput schema (v2.1.88).
 /// For PreToolUse: permissionDecision, permissionDecisionReason, updatedInput, additionalContext
-/// For UserPromptSubmit/PostToolUse: additionalContext only
+/// For UserPromptSubmit/PostToolUse/SubagentStart/Setup: additionalContext
+/// For SessionStart: additionalContext, initialUserMessage, watchPaths
+/// For PermissionDenied: retry
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HookSpecificOutput {
     #[serde(rename = "hookEventName")]
@@ -178,6 +180,14 @@ pub struct HookSpecificOutput {
     /// Permission decision for PreToolUse (deny > ask > allow)
     #[serde(skip_serializing_if = "Option::is_none", rename = "permissionDecision")]
     pub permission_decision: Option<PermissionDecision>,
+
+    /// String injected as if the user typed it (SessionStart only)
+    #[serde(skip_serializing_if = "Option::is_none", rename = "initialUserMessage")]
+    pub initial_user_message: Option<String>,
+
+    /// File paths to monitor for FileChanged events (SessionStart only)
+    #[serde(skip_serializing_if = "Option::is_none", rename = "watchPaths")]
+    pub watch_paths: Option<Vec<String>>,
 
     /// Reason for the permission decision
     #[serde(
@@ -225,6 +235,8 @@ impl HookOutput {
                 hook_event_name: "PreToolUse".to_string(),
                 permission_decision: Some(PermissionDecision::Deny),
                 permission_decision_reason: Some(reason.into()),
+                initial_user_message: None,
+                watch_paths: None,
                 updated_input: None,
                 additional_context: None,
             }),
@@ -242,6 +254,8 @@ impl HookOutput {
                 hook_event_name: "PreToolUse".to_string(),
                 permission_decision: Some(PermissionDecision::Ask),
                 permission_decision_reason: Some(reason.into()),
+                initial_user_message: None,
+                watch_paths: None,
                 updated_input: None,
                 additional_context: None,
             }),
@@ -259,6 +273,8 @@ impl HookOutput {
                 hook_event_name: "PreToolUse".to_string(),
                 permission_decision: Some(PermissionDecision::Allow),
                 permission_decision_reason: None,
+                initial_user_message: None,
+                watch_paths: None,
                 updated_input: Some(updated),
                 additional_context: None,
             }),
@@ -276,6 +292,8 @@ impl HookOutput {
                 hook_event_name: event.to_string(),
                 permission_decision: None,
                 permission_decision_reason: None,
+                initial_user_message: None,
+                watch_paths: None,
                 updated_input: None,
                 additional_context: Some(context.into()),
             }),
@@ -311,6 +329,8 @@ impl HookOutput {
                 hook_event_name: "PreToolUse".to_string(),
                 permission_decision: Some(PermissionDecision::Deny),
                 permission_decision_reason: reason,
+                initial_user_message: None,
+                watch_paths: None,
                 updated_input: None,
                 additional_context: existing_context,
             });

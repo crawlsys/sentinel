@@ -377,7 +377,7 @@ pub fn process(input: &HookInput) -> HookOutput {
 +============================================================+"
         .to_string();
 
-    HookOutput::block(message)
+    HookOutput::block(super::block_context::append_block_context(message, input))
 }
 
 #[cfg(test)]

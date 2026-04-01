@@ -17,6 +17,14 @@ use sentinel_domain::state::SessionState;
 use sentinel_domain::workflow::SkillWorkflow;
 use std::collections::HashMap;
 
+fn block_with_context(input: &HookInput, reason: impl Into<String>) -> HookOutput {
+    HookOutput::block(super::block_context::append_block_context(reason, input))
+}
+
+fn deny_with_context(input: &HookInput, reason: impl Into<String>) -> HookOutput {
+    HookOutput::deny(super::block_context::append_block_context(reason, input))
+}
+
 /// Extracted phase file info from a Read() tool_input path.
 #[derive(Debug, Clone)]
 struct PhaseFileInfo {
@@ -197,7 +205,9 @@ pub fn process(
         if let Some(ref mut gb) = state.glass_break {
             gb.tools_used.push(sentinel_domain::state::BreakToolUse {
                 tool: tool_name.to_string(),
-                detail: input.tool_input.as_ref()
+                detail: input
+                    .tool_input
+                    .as_ref()
                     .and_then(|v| v.get("command").or(v.get("file_path")))
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
@@ -305,8 +315,10 @@ pub fn process(
                     let canonical_key = format!("{}/{}", info.skill, info.file);
                     if let Err(tamper_msg) = state.record_phase_file_hash(&canonical_key, &hash) {
                         eprintln!("[sentinel] SECURITY: {}", tamper_msg);
-                        return HookOutput::block(format!(
-                            "+============================================================+\n\
+                        return block_with_context(
+                            input,
+                            format!(
+                                "+============================================================+\n\
                              |  BLOCKED: Phase File Tampering Detected                    |\n\
                              +============================================================+\n\
                              |  {:<57}|\n\
@@ -317,8 +329,9 @@ pub fn process(
                              |                                                            |\n\
                              |  Session must be restarted to proceed.                     |\n\
                              +============================================================+",
-                            canonical_key
-                        ));
+                                canonical_key
+                            ),
+                        );
                     }
                 }
 
@@ -412,7 +425,7 @@ pub fn process(
             // Additional post-merge skip detection:
             // If review.md is read but qa-handoff.md is not, and we're past
             // the review phase, block non-safe tools
-            if let Some(block) = check_post_merge_skip(state, workflows, tool_name) {
+            if let Some(block) = check_post_merge_skip(state, workflows, input, tool_name) {
                 return block;
             }
             HookOutput::allow()
@@ -440,7 +453,7 @@ pub fn process(
                 completed,
                 total,
             );
-            HookOutput::deny(message)
+            deny_with_context(input, message)
         }
     }
 }
@@ -475,7 +488,7 @@ fn check_blocked_bash_patterns(
     // are protected but `echo '{}' > ~/.claude/sentinel/state/sess.json`
     // can tamper with state files directly (Attack #37).
     if !state.workflows.is_empty() || state.active_skill.is_some() {
-        if let Some(block) = check_bash_redirect_to_protected(cmd) {
+        if let Some(block) = check_bash_redirect_to_protected(cmd, input) {
             return Some(block);
         }
     }
@@ -582,8 +595,10 @@ fn check_blocked_bash_patterns(
 
     for (desc, re) in OBFUSCATION_PATTERNS.iter() {
         if re.is_match(cmd) {
-            return Some(HookOutput::deny(format!(
-                "+============================================================+\n\
+            return Some(deny_with_context(
+                input,
+                format!(
+                    "+============================================================+\n\
                  |  BLOCKED: Shell Obfuscation Detected                       |\n\
                  +============================================================+\n\
                  |  Pattern: {:<48}|\n\
@@ -592,8 +607,9 @@ fn check_blocked_bash_patterns(
                  |  hex escapes, variable construction) are blocked when       |\n\
                  |  workflow enforcement is active.                           |\n\
                  +============================================================+",
-                desc,
-            )));
+                    desc,
+                ),
+            ));
         }
     }
 
@@ -658,8 +674,10 @@ fn check_blocked_bash_patterns(
                     } else {
                         segment
                     };
-                    return Some(HookOutput::deny(format!(
-                        "+============================================================+\n\
+                    return Some(deny_with_context(
+                        input,
+                        format!(
+                            "+============================================================+\n\
                          |  BLOCKED: Command Substitution in Allowlisted Context      |\n\
                          +============================================================+\n\
                          |  Segment: {:<48}|\n\
@@ -668,8 +686,9 @@ fn check_blocked_bash_patterns(
                          |  blocked because the inner command escapes allowlist        |\n\
                          |  enforcement. Only $(cat <<EOF ...) heredocs are allowed.   |\n\
                          +============================================================+",
-                        seg_display,
-                    )));
+                            seg_display,
+                        ),
+                    ));
                 }
             }
 
@@ -711,8 +730,10 @@ fn check_blocked_bash_patterns(
                 } else {
                     segment
                 };
-                return Some(HookOutput::deny(format!(
-                    "+============================================================+\n\
+                return Some(deny_with_context(
+                    input,
+                    format!(
+                        "+============================================================+\n\
                      |  BLOCKED: Command Segment Not in Bash Allowlist            |\n\
                      +============================================================+\n\
                      |  Segment: {:<48}|\n\
@@ -721,8 +742,9 @@ fn check_blocked_bash_patterns(
                      |  only. Each chained segment (&&, ||, ;, |, \\n) must        |\n\
                      |  individually match the allowlist.                          |\n\
                      +============================================================+",
-                    seg_display,
-                )));
+                        seg_display,
+                    ),
+                ));
             }
         }
     }
@@ -812,8 +834,10 @@ fn check_blocked_bash_patterns(
         for target in &targets {
             if re.is_match(target) {
                 let cmd_display = if cmd.len() > 48 { &cmd[..48] } else { cmd };
-                return Some(HookOutput::deny(format!(
-                    "+============================================================+\n\
+                return Some(deny_with_context(
+                    input,
+                    format!(
+                        "+============================================================+\n\
                      |  BLOCKED: Bash Command Matches Blocked Pattern             |\n\
                      +============================================================+\n\
                      |  Skill: {:<50}|\n\
@@ -824,8 +848,9 @@ fn check_blocked_bash_patterns(
                      |  workflow's phase-gated tool enforcement.                   |\n\
                      |  Use the workflow's native MCP tools instead.              |\n\
                      +============================================================+",
-                    skill_name, pattern, cmd_display,
-                )));
+                        skill_name, pattern, cmd_display,
+                    ),
+                ));
             }
         }
     }
@@ -894,7 +919,7 @@ fn normalize_shell_quoting(cmd: &str) -> String {
 ///
 /// Catches: `> path`, `>> path`, `tee path`, `tee -a path`, `cp src path`.
 /// Uses the same textual check as Write/Edit protection.
-fn check_bash_redirect_to_protected(cmd: &str) -> Option<HookOutput> {
+fn check_bash_redirect_to_protected(cmd: &str, input: &HookInput) -> Option<HookOutput> {
     // Extract all potential file targets from redirects and tee commands.
     // Pattern: anything followed by > or >> followed by a path
     // **Attack #70 fix**: Extended to catch mv, ln, install, dd of=, curl -o, wget -O
@@ -924,8 +949,10 @@ fn check_bash_redirect_to_protected(cmd: &str) -> Option<HookOutput> {
                 normalized
             };
             if let Some(reason) = check_protected_textual(&expanded) {
-                return Some(HookOutput::deny(format!(
-                    "+============================================================+\n\
+                return Some(deny_with_context(
+                    input,
+                    format!(
+                        "+============================================================+\n\
                      |  BLOCKED: Bash Redirect to Protected Path                  |\n\
                      +============================================================+\n\
                      |  Target: {:<49}|\n\
@@ -934,13 +961,14 @@ fn check_bash_redirect_to_protected(cmd: &str) -> Option<HookOutput> {
                      |  Shell redirects (>, >>, tee, cp) to sentinel               |\n\
                      |  infrastructure paths are blocked during active workflows.  |\n\
                      +============================================================+",
-                    if path.len() > 49 {
-                        &path[path.len() - 49..]
-                    } else {
-                        path
-                    },
-                    reason,
-                )));
+                        if path.len() > 49 {
+                            &path[path.len() - 49..]
+                        } else {
+                            path
+                        },
+                        reason,
+                    ),
+                ));
             }
         }
     }
@@ -964,20 +992,23 @@ fn check_bash_redirect_to_protected(cmd: &str) -> Option<HookOutput> {
                 normalized
             };
             if let Some(reason) = check_protected_textual(&expanded) {
-                return Some(HookOutput::deny(format!(
-                    "+============================================================+\n\
+                return Some(deny_with_context(
+                    input,
+                    format!(
+                        "+============================================================+\n\
                      |  BLOCKED: Bash Write to Protected Path (dd)                |\n\
                      +============================================================+\n\
                      |  Target: {:<49}|\n\
                      |  Reason: {:<49}|\n\
                      +============================================================+",
-                    if path.len() > 49 {
-                        &path[path.len() - 49..]
-                    } else {
-                        path
-                    },
-                    reason,
-                )));
+                        if path.len() > 49 {
+                            &path[path.len() - 49..]
+                        } else {
+                            path
+                        },
+                        reason,
+                    ),
+                ));
             }
         }
     }
@@ -1071,7 +1102,7 @@ fn check_protected_path_write(
              +============================================================+",
             tool_name, display_path, reason,
         );
-        return Some(HookOutput::deny(message));
+        return Some(deny_with_context(input, message));
     }
 
     None
@@ -1095,17 +1126,48 @@ fn is_dangerous_mcp_tool(tool_name: &str) -> bool {
 
     // Explicitly safe suffixes — read-only operations
     let safe_suffixes = [
-        "get", "list", "search", "read", "view", "show", "status", "info",
-        "check", "verify", "validate", "count", "stats", "whoami", "viewer", "describe",
-        "current_account", "list_accounts", "switch_account", "add_account",
-        "remove_account", "download", "fetch", "describe", "discover",
-        "screenshot", "pdf", "get_text", "is_visible", "wait",
-        "wait_for_selector", "wait_for_navigation", "get_tabs",
-        "list_instances", "mcp_restart_server", "sequentialthinking",
+        "get",
+        "list",
+        "search",
+        "read",
+        "view",
+        "show",
+        "status",
+        "info",
+        "check",
+        "verify",
+        "validate",
+        "count",
+        "stats",
+        "whoami",
+        "viewer",
+        "describe",
+        "current_account",
+        "list_accounts",
+        "switch_account",
+        "add_account",
+        "remove_account",
+        "download",
+        "fetch",
+        "describe",
+        "discover",
+        "screenshot",
+        "pdf",
+        "get_text",
+        "is_visible",
+        "wait",
+        "wait_for_selector",
+        "wait_for_navigation",
+        "get_tabs",
+        "list_instances",
+        "mcp_restart_server",
+        "sequentialthinking",
     ];
 
     // If the suffix starts with a safe prefix, allow it
-    let safe_prefixes = ["get_", "list_", "search_", "read_", "check_", "resolve_", "verify_"];
+    let safe_prefixes = [
+        "get_", "list_", "search_", "read_", "check_", "resolve_", "verify_",
+    ];
 
     if safe_suffixes.contains(&suffix.as_str()) {
         return false;
@@ -1175,13 +1237,13 @@ fn check_protected_textual(normalized: &str) -> Option<&'static str> {
 
     // 7. Sentinel source repo + infrastructure repos
     // **Attack #201 fix**: Protect the sentinel source code from modification during
-    // active workflows. An agent could edit enforcement logic, rebuild with `cargo build`,
-    // and the shadow binary system auto-swaps the weakened binary on next invocation.
+    // active workflows. Only repos whose binaries auto-swap via the shadow binary
+    // system are protected. vulcan-mcp-sdk-rust removed: it is a dependency, not enforcement.
+
     let infra_repos = [
         "/sentinel/crates/",
         "/sentinel/Cargo",
         "/sentinel/config/",
-        "/vulcan-mcp-sdk-rust/",
         "/mcp-router/",
     ];
     for pattern in &infra_repos {
@@ -1285,6 +1347,7 @@ fn check_protected_canonical(
 fn check_post_merge_skip(
     state: &SessionState,
     workflows: &HashMap<String, SkillWorkflow>,
+    input: &HookInput,
     tool_name: &str,
 ) -> Option<HookOutput> {
     // Only check safe-tool-exempt tools
@@ -1364,7 +1427,7 @@ fn check_post_merge_skip(
 +============================================================+",
             skill
         );
-        return Some(HookOutput::deny(message));
+        return Some(deny_with_context(input, message));
     }
 
     None
@@ -1859,7 +1922,8 @@ mod tests {
 
     #[test]
     fn test_protected_path_blocks_sentinel_source_repo() {
-        let normalized = "/c/Users/garys/Documents/GitHub/sentinel/crates/sentinel-cli/src/hook_cmd.rs";
+        let normalized =
+            "/c/Users/garys/Documents/GitHub/sentinel/crates/sentinel-cli/src/hook_cmd.rs";
         assert_eq!(
             check_protected_textual(normalized),
             Some("sentinel infrastructure source code")

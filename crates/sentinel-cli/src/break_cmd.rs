@@ -59,8 +59,7 @@ fn breaks_log_path() -> PathBuf {
 /// Generate a 6-digit challenge code using getrandom
 fn generate_challenge_code() -> Result<String> {
     let mut bytes = [0u8; 4];
-    getrandom::getrandom(&mut bytes)
-        .map_err(|e| anyhow::anyhow!("CSPRNG failed: {e}"))?;
+    getrandom::getrandom(&mut bytes).map_err(|e| anyhow::anyhow!("CSPRNG failed: {e}"))?;
     let num = u32::from_le_bytes(bytes) % 1_000_000;
     Ok(format!("BREAK-{num:06}"))
 }
@@ -72,8 +71,7 @@ fn count_recent_breaks() -> Result<usize> {
         return Ok(0);
     }
 
-    let content = std::fs::read_to_string(&path)
-        .context("Failed to read breaks.jsonl")?;
+    let content = std::fs::read_to_string(&path).context("Failed to read breaks.jsonl")?;
 
     let one_hour_ago = Utc::now() - chrono::Duration::hours(1);
     let mut count = 0;
@@ -177,9 +175,8 @@ pub async fn run(
     }
 
     // Initiate a new break
-    let reason = reason.context(
-        "Missing --reason flag. Usage: sentinel break --reason \"why you need this\"",
-    )?;
+    let reason = reason
+        .context("Missing --reason flag. Usage: sentinel break --reason \"why you need this\"")?;
 
     initiate_break(&reason, duration, workflow).await
 }
@@ -226,7 +223,8 @@ async fn initiate_break(
     eprintln!("  |  GLASS BREAK — Emergency Workflow Override                  |");
     eprintln!("  +============================================================+");
     eprintln!("  |  Reason: {:<51}|", reason);
-    eprintln!("  |  Duration: {} minutes{:<44}|",
+    eprintln!(
+        "  |  Duration: {} minutes{:<44}|",
         duration_minutes,
         if workflow.is_some() {
             format!(" (workflow: {})", workflow.as_deref().unwrap_or(""))
@@ -242,7 +240,9 @@ async fn initiate_break(
     eprintln!("  |                                                            |");
     eprintln!("  |    >>> {:<53}|", &challenge_code);
     eprintln!("  |                                                            |");
-    eprintln!("  |  You have {CHALLENGE_TIMEOUT_SECS} seconds to respond.                         |");
+    eprintln!(
+        "  |  You have {CHALLENGE_TIMEOUT_SECS} seconds to respond.                         |"
+    );
     eprintln!("  +============================================================+");
     eprintln!();
     eprint!("  Enter challenge code: ");
@@ -254,9 +254,8 @@ async fn initiate_break(
 
     // Use a blocking read with a timeout check
     // Since we verified stdin is a terminal, we can read directly
-    let read_result = tokio::task::spawn_blocking(move || {
-        std::io::stdin().read_line(&mut input).map(|_| input)
-    });
+    let read_result =
+        tokio::task::spawn_blocking(move || std::io::stdin().read_line(&mut input).map(|_| input));
 
     let timeout = Duration::from_secs(CHALLENGE_TIMEOUT_SECS);
     let user_input = match tokio::time::timeout(timeout, read_result).await {
@@ -277,13 +276,19 @@ async fn initiate_break(
 
     let elapsed = start.elapsed();
     if elapsed > Duration::from_secs(CHALLENGE_TIMEOUT_SECS) {
-        eprintln!("  [sentinel] Challenge timed out ({:.1}s > {CHALLENGE_TIMEOUT_SECS}s).", elapsed.as_secs_f64());
+        eprintln!(
+            "  [sentinel] Challenge timed out ({:.1}s > {CHALLENGE_TIMEOUT_SECS}s).",
+            elapsed.as_secs_f64()
+        );
         anyhow::bail!("Challenge timed out");
     }
 
     // Verify challenge
     if user_input != challenge_code {
-        eprintln!("  [sentinel] Challenge FAILED. Expected '{}', got '{}'.", challenge_code, user_input);
+        eprintln!(
+            "  [sentinel] Challenge FAILED. Expected '{}', got '{}'.",
+            challenge_code, user_input
+        );
         anyhow::bail!("Challenge verification failed");
     }
 
@@ -366,8 +371,10 @@ async fn show_status() -> Result<()> {
                             eprintln!("      - {} {} ({})", tu.tool, tu.detail, tu.ts);
                         }
                     } else {
-                        eprintln!("  No active glass break (last break expired at {})",
-                            gb.expires_at.format("%H:%M:%S UTC"));
+                        eprintln!(
+                            "  No active glass break (last break expired at {})",
+                            gb.expires_at.format("%H:%M:%S UTC")
+                        );
                     }
                 }
                 None => {
@@ -400,18 +407,27 @@ async fn cancel_break() -> Result<()> {
                         workflow: gb.workflow.clone(),
                         duration_minutes: gb.duration_minutes,
                         challenge_code: gb.challenge_code.clone(),
-                        tools_used_during_break: gb.tools_used.iter().map(|tu| BreakToolUseLog {
-                            tool: tu.tool.clone(),
-                            detail: tu.detail.clone(),
-                            ts: tu.ts.clone(),
-                        }).collect(),
+                        tools_used_during_break: gb
+                            .tools_used
+                            .iter()
+                            .map(|tu| BreakToolUseLog {
+                                tool: tu.tool.clone(),
+                                detail: tu.detail.clone(),
+                                ts: tu.ts.clone(),
+                            })
+                            .collect(),
                         auto_reengaged: false,
                     };
                     append_break_log(&entry)?;
 
                     sentinel_infrastructure::state_store::save(&mut state)?;
-                    eprintln!("  [sentinel] Glass break CANCELLED. Workflow enforcement re-engaged.");
-                    eprintln!("    {} tool calls were made during the break.", gb.tools_used.len());
+                    eprintln!(
+                        "  [sentinel] Glass break CANCELLED. Workflow enforcement re-engaged."
+                    );
+                    eprintln!(
+                        "    {} tool calls were made during the break.",
+                        gb.tools_used.len()
+                    );
                 }
                 None => {
                     eprintln!("  [sentinel] No active glass break to cancel.");
@@ -437,8 +453,7 @@ async fn show_history(json_output: bool) -> Result<()> {
         return Ok(());
     }
 
-    let content = std::fs::read_to_string(&path)
-        .context("Failed to read breaks.jsonl")?;
+    let content = std::fs::read_to_string(&path).context("Failed to read breaks.jsonl")?;
 
     let thirty_days_ago = Utc::now() - chrono::Duration::days(30);
     let mut entries: Vec<BreakLogEntry> = Vec::new();
@@ -496,7 +511,7 @@ mod tests {
         let code = generate_challenge_code().unwrap();
         assert!(code.starts_with("BREAK-"));
         assert_eq!(code.len(), 12); // "BREAK-" (6) + 6 digits
-        // Verify the numeric part is valid
+                                    // Verify the numeric part is valid
         let num_part = &code[6..];
         assert!(num_part.chars().all(|c| c.is_ascii_digit()));
     }
@@ -517,13 +532,11 @@ mod tests {
             workflow: Some("steel".to_string()),
             duration_minutes: 5,
             challenge_code: "BREAK-123456".to_string(),
-            tools_used_during_break: vec![
-                BreakToolUseLog {
-                    tool: "Bash".to_string(),
-                    detail: "git status".to_string(),
-                    ts: "2026-03-14T05:03:10Z".to_string(),
-                },
-            ],
+            tools_used_during_break: vec![BreakToolUseLog {
+                tool: "Bash".to_string(),
+                detail: "git status".to_string(),
+                ts: "2026-03-14T05:03:10Z".to_string(),
+            }],
             auto_reengaged: true,
         };
 

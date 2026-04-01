@@ -524,6 +524,8 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
                     hook_event_name: hook_event.to_string(),
                     permission_decision: None,
                     permission_decision_reason: None,
+                    initial_user_message: None,
+                    watch_paths: None,
                     updated_input: None,
                     additional_context: Some(project_header),
                 });

@@ -20,6 +20,7 @@ const TEST_COMMAND_PATTERNS: &[&str] = &[
     r"\byarn\s+test\b",
     r"\bpnpm\s+test\b",
     r"\bcargo\s+test\b",
+    r"\bcargo\s+build\b",
     r"\bpytest\b",
     r"\bgo\s+test\b",
     r"\bnpm\s+run\s+(test|build|lint|check|typecheck)\b",
@@ -27,7 +28,11 @@ const TEST_COMMAND_PATTERNS: &[&str] = &[
     r"\bvitest\b",
     r"\bjest\b",
     r"\bmake\s+test\b",
+    r"\bmake\s+build\b",
     r"\bnpm\s+run\s+build\b",
+    r"\bdocker\s+build\b",
+    r"\bdepot\s+build\b",
+    r"\bdepot\s+list\s+builds\b",
 ];
 
 /// Test output patterns that confirm tests ran
@@ -214,7 +219,7 @@ fn process_with_override(
 +============================================================+"
     );
 
-    HookOutput::block(message)
+    HookOutput::block(super::block_context::append_block_context(message, input))
 }
 
 #[cfg(test)]

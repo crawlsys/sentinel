@@ -80,6 +80,7 @@ pub fn process(input: &HookInput) -> HookOutput {
             "firefly-pro-routing/osm-service",
             "firefly-pro-routing/rust/engine-service",
             "firefly-pro-routing",
+            "firefly-pro-hyperswitch",
         ];
 
         // Match if CWD ends with a known suffix (but not a partial match)
@@ -101,7 +102,8 @@ pub fn process(input: &HookInput) -> HookOutput {
                API:        firefly-pro-routing/\n  \
                OSM:        firefly-pro-routing/osm-service/\n  \
                AI:         firefly-pro-routing/rust/langgraph-service/\n  \
-               Engine:     firefly-pro-routing/rust/engine-service/",
+               Engine:     firefly-pro-routing/rust/engine-service/
+  \n               Hyperswitch: firefly-pro-hyperswitch/",
         );
     }
 

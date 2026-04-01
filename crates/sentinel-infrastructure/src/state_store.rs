@@ -258,8 +258,6 @@ fn restrict_secret_permissions(path: &std::path::Path) {
 
     #[cfg(windows)]
     {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x08000000;
         let path_str = path.to_string_lossy().to_string();
         let username = std::env::var("USERNAME").unwrap_or_default();
         if username.is_empty() {
@@ -270,63 +268,23 @@ fn restrict_secret_permissions(path: &std::path::Path) {
             return;
         }
 
-        // Step 1: Disable inheritance and remove inherited ACEs
-        let result1 = std::process::Command::new("icacls")
-            .args([&path_str, "/inheritance:r"])
-            .creation_flags(CREATE_NO_WINDOW)
-            .output();
-
-        match result1 {
-            Ok(output) if output.status.success() => {}
-            Ok(output) => {
-                eprintln!(
-                    "[sentinel] WARNING: icacls inheritance removal failed on {}: {}",
-                    path.display(),
-                    String::from_utf8_lossy(&output.stderr)
-                );
-            }
-            Err(e) => {
-                eprintln!(
-                    "[sentinel] WARNING: Failed to run icacls on {}: {}",
-                    path.display(),
-                    e
-                );
-            }
+        if let Err(e) = apply_windows_owner_only_acl(&path_str, &username) {
+            eprintln!(
+                "[sentinel] WARNING: Failed to restrict file permissions on {}: {}",
+                path.display(),
+                e
+            );
         }
 
-        // Step 2: Grant only current user full control
-        let result2 = std::process::Command::new("icacls")
-            .args([&path_str, "/grant:r", &format!("{}:F", username)])
-            .creation_flags(CREATE_NO_WINDOW)
-            .output();
-
-        match result2 {
-            Ok(output) if output.status.success() => {}
-            Ok(output) => {
-                eprintln!(
-                    "[sentinel] WARNING: icacls grant failed on {}: {}",
-                    path.display(),
-                    String::from_utf8_lossy(&output.stderr)
-                );
-            }
-            Err(e) => {
-                eprintln!(
-                    "[sentinel] WARNING: Failed to run icacls on {}: {}",
-                    path.display(),
-                    e
-                );
-            }
-        }
-
-        // Step 3: Verify — read ACL and check only our user appears
-        verify_acl_owner_only(path, &username);
+        // Verify — read ACL and check only our user appears
+        verify_acl_owner_only(path, &username, true);
     }
 }
 
 /// Verify that a file's ACL contains only the expected owner.
 /// Logs a warning if unexpected ACEs (other users/groups) are found.
 #[cfg(windows)]
-fn verify_acl_owner_only(path: &std::path::Path, username: &str) {
+fn verify_acl_owner_only(path: &std::path::Path, username: &str, log_warning: bool) -> bool {
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x08000000;
     let path_str = path.to_string_lossy().to_string();
@@ -351,19 +309,76 @@ fn verify_acl_owner_only(path: &std::path::Path, username: &str) {
                 .filter(|l| !l.to_lowercase().contains(&username.to_lowercase()))
                 .collect();
             if !unexpected_aces.is_empty() {
-                eprintln!(
-                    "[sentinel] WARNING: Unexpected ACEs on {}: {:?}. File may be readable by other users.",
-                    path.display(),
-                    unexpected_aces
-                );
+                if log_warning {
+                    eprintln!(
+                        "[sentinel] WARNING: Unexpected ACEs on {}: {:?}. File may be readable by other users.",
+                        path.display(),
+                        unexpected_aces
+                    );
+                }
+                return false;
             }
+            true
         }
         _ => {
-            eprintln!(
-                "[sentinel] WARNING: Could not verify ACL on {}",
-                path.display()
-            );
+            if log_warning {
+                eprintln!(
+                    "[sentinel] WARNING: Could not verify ACL on {}",
+                    path.display()
+                );
+            }
+            false
         }
+    }
+}
+
+#[cfg(windows)]
+fn apply_windows_owner_only_acl(path: &str, username: &str) -> Result<()> {
+    use std::os::windows::process::CommandExt;
+
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+    let principal = if let Ok(domain) = std::env::var("USERDOMAIN") {
+        if domain.is_empty() {
+            username.to_string()
+        } else {
+            format!(r"{domain}\{username}")
+        }
+    } else {
+        username.to_string()
+    };
+
+    let escaped_path = path.replace('\'', "''");
+    let escaped_principal = principal.replace('\'', "''");
+    let script = format!(
+        "$ErrorActionPreference='Stop'; \
+         $path='{escaped_path}'; \
+         $principal='{escaped_principal}'; \
+         $acl=Get-Acl -LiteralPath $path; \
+         $acl.SetAccessRuleProtection($true, $false); \
+         foreach ($rule in @($acl.Access)) {{ [void]$acl.RemoveAccessRuleAll($rule) }}; \
+         $newRule=New-Object System.Security.AccessControl.FileSystemAccessRule($principal, 'FullControl', 'Allow'); \
+         $acl.AddAccessRule($newRule); \
+         Set-Acl -LiteralPath $path -AclObject $acl"
+    );
+
+    let output = std::process::Command::new("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .with_context(|| format!("Failed to run PowerShell ACL repair on {path}"))?;
+
+    if output.status.success() {
+        Ok(())
+    } else {
+        anyhow::bail!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stderr).trim(),
+            if output.stdout.is_empty() {
+                String::new()
+            } else {
+                format!(" {}", String::from_utf8_lossy(&output.stdout).trim())
+            }
+        );
     }
 }
 
@@ -400,7 +415,9 @@ fn validate_secret_permissions(path: &std::path::Path) {
             );
             return;
         }
-        verify_acl_owner_only(path, &username);
+        if !verify_acl_owner_only(path, &username, false) {
+            restrict_secret_permissions(path);
+        }
     }
 }
 
@@ -981,7 +998,10 @@ mod tests {
         assert!(gen_path.exists(), ".gen file should exist after save");
 
         delete(&sid).expect("delete");
-        assert!(!gen_path.exists(), ".gen file should be removed after delete");
+        assert!(
+            !gen_path.exists(),
+            ".gen file should be removed after delete"
+        );
     }
 
     #[test]

@@ -144,10 +144,7 @@ mod tests {
 
     #[test]
     fn test_extract_linear_id_end_of_string() {
-        assert_eq!(
-            extract_linear_id("Task @linear:SYN-42"),
-            Some("SYN-42")
-        );
+        assert_eq!(extract_linear_id("Task @linear:SYN-42"), Some("SYN-42"));
     }
 
     #[test]

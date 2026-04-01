@@ -1,0 +1,14 @@
+C:\Users\garys\Documents\GitHub\sentinel\target-shadow\release\deps\thiserror-f1066779fd41dd2a.d: C:\Users\garys\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-2.0.18\src\lib.rs C:\Users\garys\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-2.0.18\src\aserror.rs C:\Users\garys\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-2.0.18\src\display.rs C:\Users\garys\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-2.0.18\src\var.rs C:\Users\garys\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-2.0.18\src\private.rs C:\Users\garys\Documents\GitHub\sentinel\target-shadow\release\build\thiserror-e434bd0d15380ba0\out/private.rs
+
+C:\Users\garys\Documents\GitHub\sentinel\target-shadow\release\deps\libthiserror-f1066779fd41dd2a.rlib: C:\Users\garys\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-2.0.18\src\lib.rs C:\Users\garys\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-2.0.18\src\aserror.rs C:\Users\garys\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-2.0.18\src\display.rs C:\Users\garys\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-2.0.18\src\var.rs C:\Users\garys\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-2.0.18\src\private.rs C:\Users\garys\Documents\GitHub\sentinel\target-shadow\release\build\thiserror-e434bd0d15380ba0\out/private.rs
+
+C:\Users\garys\Documents\GitHub\sentinel\target-shadow\release\deps\libthiserror-f1066779fd41dd2a.rmeta: C:\Users\garys\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-2.0.18\src\lib.rs C:\Users\garys\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-2.0.18\src\aserror.rs C:\Users\garys\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-2.0.18\src\display.rs C:\Users\garys\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-2.0.18\src\var.rs C:\Users\garys\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-2.0.18\src\private.rs C:\Users\garys\Documents\GitHub\sentinel\target-shadow\release\build\thiserror-e434bd0d15380ba0\out/private.rs
+
+C:\Users\garys\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-2.0.18\src\lib.rs:
+C:\Users\garys\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-2.0.18\src\aserror.rs:
+C:\Users\garys\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-2.0.18\src\display.rs:
+C:\Users\garys\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-2.0.18\src\var.rs:
+C:\Users\garys\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-2.0.18\src\private.rs:
+C:\Users\garys\Documents\GitHub\sentinel\target-shadow\release\build\thiserror-e434bd0d15380ba0\out/private.rs:
+
+# env-dep:OUT_DIR=C:\\Users\\garys\\Documents\\GitHub\\sentinel\\target-shadow\\release\\build\\thiserror-e434bd0d15380ba0\\out
