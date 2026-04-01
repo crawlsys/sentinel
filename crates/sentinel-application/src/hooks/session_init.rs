@@ -677,15 +677,27 @@ The skill router auto-detects the active project from issue prefixes (e.g. `FIR-
 | Event | When | Key Hooks |
 |-------|------|-----------|
 | **SessionStart** | New session opens | Marketplace sync, CLAUDE.md gen, project auto-init, Linear key cache |
+| **SessionEnd** | Session closes | Session cleanup, metrics flush (1.5s timeout) |
 | **UserPromptSubmit** | Every user message | Skill router, phase validator, error reporter, todo loader, doc drift*, commit hygiene*, context monitor*, verification gate* |
 | **PreToolUse** | Before Claude uses a tool | Phase gate (blocks tools until phase loaded), git hygiene (Edit/Write), commit validator (Bash), pre-push Steel test (Bash), wrangler guard (Bash) |
 | **PostToolUse** | After Claude uses a tool | MCP health check, todo interceptor, evidence collector, plan organizer (ExitPlanMode) |
+| **PostToolUseFailure** | After tool execution fails | Pass-through (logged) |
 | **Stop** | Claude finishes responding | Execution log, skill telemetry, context monitor*, commit hygiene*, doc drift*, verification gate* |
+| **StopFailure** | Turn ends due to API error | Error logging to metrics/errors.jsonl |
 | **PreCompact** | Before context compression | Session snapshot (preserves critical context) |
+| **PostCompact** | After context compression | Restore active skill context, reload phase files |
+| **Setup** | Repo init/maintenance | Project initialization |
+| **SubagentStart** | Subagent spawned | Inject active skill context into agent |
+| **SubagentStop** | Subagent concludes | Telemetry logging |
 | **TeammateIdle** | Agent about to go idle | Quality gate — reminds to check TaskList before stopping |
+| **TaskCreated** | Task being created | Telemetry logging |
 | **TaskCompleted** | Agent marks task done | Verification gate — ensures work is verified before marking complete |
+| **PermissionDenied** | Auto-mode denies tool | Diagnostics logging |
+| **CwdChanged** | Working directory changes | Project context re-detection |
 
 \\* Two-phase hooks: Stop detects state and writes to disk, UserPromptSubmit reads state and injects instructions.
+
+**Context injection**: Plain stdout is injected into model context ONLY for SessionStart and UserPromptSubmit. Structured `hookSpecificOutput.additionalContext` works for PreToolUse, PostToolUse, PostToolUseFailure, UserPromptSubmit, SessionStart, Setup, and SubagentStart.
 
 ---
 
