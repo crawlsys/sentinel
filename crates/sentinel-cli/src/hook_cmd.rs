@@ -189,7 +189,9 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
                         //
                         // Slash commands set the prompt to exactly "/<skill>" which the
                         // router detects. Casual matches come from normal conversation.
-                        let is_slash_command = input.prompt.as_deref()
+                        let is_slash_command = input
+                            .prompt
+                            .as_deref()
                             .map(|p: &str| p.trim().starts_with('/'))
                             .unwrap_or(false);
 
@@ -402,6 +404,66 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
             let completed_output = hooks::task_completed::process(&input);
             output.merge(&completed_output);
         }
+
+        // ── New events added from Claude Code v2.1.88 source analysis ──
+
+        HookEvent::SessionEnd => {
+            // Session cleanup — flush state, log session end (1.5s timeout!)
+            let end_output = hooks::session_end::process(&input);
+            output.merge(&end_output);
+        }
+
+        HookEvent::PostCompact => {
+            // Restore critical state after context compaction
+            let compact_output = hooks::post_compact::process(&input);
+            output.merge(&compact_output);
+        }
+
+        HookEvent::SubagentStart => {
+            // Inject skill context into spawned agents
+            let subagent_output = hooks::subagent_start::process(&input);
+            output.merge(&subagent_output);
+        }
+
+        HookEvent::SubagentStop => {
+            // Log agent completion for telemetry
+            let subagent_output = hooks::subagent_stop::process(&input);
+            output.merge(&subagent_output);
+        }
+
+        HookEvent::TaskCreated => {
+            // Log task creation for telemetry
+            let task_output = hooks::task_created::process(&input);
+            output.merge(&task_output);
+        }
+
+        HookEvent::Setup => {
+            // Repo init/maintenance
+            let setup_output = hooks::setup::process(&input);
+            output.merge(&setup_output);
+        }
+
+        HookEvent::CwdChanged => {
+            // Working directory changed — re-detect project context
+            let cwd_output = hooks::cwd_changed::process(&input);
+            output.merge(&cwd_output);
+        }
+
+        HookEvent::StopFailure => {
+            // API error at end of turn — log for diagnostics
+            let failure_output = hooks::stop_failure::process(&input);
+            output.merge(&failure_output);
+        }
+
+        HookEvent::PermissionDenied => {
+            // Auto-mode denied a tool call — log for diagnostics
+            let denied_output = hooks::permission_denied::process(&input);
+            output.merge(&denied_output);
+        }
+
+        HookEvent::PostToolUseFailure => {
+            // Tool execution failed — no custom processing yet, pass through
+        }
     }
 
     // Record hook invocation with actual elapsed time
@@ -419,11 +481,16 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
             // Transform legacy blocked/reason → proper hookSpecificOutput with permissionDecision
             output = output.into_pretool_output();
         }
-        HookEvent::UserPromptSubmit | HookEvent::PostToolUse => {
-            // These events support hookSpecificOutput natively — no transform needed
+        HookEvent::UserPromptSubmit
+        | HookEvent::PostToolUse
+        | HookEvent::PostToolUseFailure
+        | HookEvent::SessionStart
+        | HookEvent::Setup
+        | HookEvent::SubagentStart => {
+            // These events support hookSpecificOutput.additionalContext natively
         }
         _ => {
-            // Strip hookSpecificOutput for events Claude Code doesn't support
+            // Strip hookSpecificOutput for events Claude Code doesn't process
             output.hook_specific_output = None;
         }
     }
@@ -446,7 +513,12 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
             // If no hook_specific_output at all, create one with project context
             else if matches!(
                 hook_event,
-                HookEvent::UserPromptSubmit | HookEvent::PostToolUse | HookEvent::PreToolUse
+                HookEvent::UserPromptSubmit
+                    | HookEvent::PostToolUse
+                    | HookEvent::PostToolUseFailure
+                    | HookEvent::PreToolUse
+                    | HookEvent::SubagentStart
+                    | HookEvent::Setup
             ) {
                 output.hook_specific_output = Some(HookSpecificOutput {
                     hook_event_name: hook_event.to_string(),
@@ -471,8 +543,10 @@ fn parse_hook_event(event: &str) -> Result<HookEvent> {
         None => {
             eprintln!(
                 "[sentinel] ERROR: Unknown hook event type '{}'. \
-                 Valid events: SessionStart, UserPromptSubmit, PreToolUse, PostToolUse, \
-                 Stop, PreCompact, TeammateIdle, TaskCompleted",
+                 Valid events: SessionStart, SessionEnd, UserPromptSubmit, PreToolUse, \
+                 PostToolUse, PostToolUseFailure, Stop, StopFailure, PreCompact, PostCompact, \
+                 Setup, SubagentStart, SubagentStop, TeammateIdle, TaskCreated, TaskCompleted, \
+                 PermissionDenied, CwdChanged",
                 event
             );
             anyhow::bail!("Unknown hook event type: '{}'", event);
@@ -482,7 +556,9 @@ fn parse_hook_event(event: &str) -> Result<HookEvent> {
 
 fn hook_timeout(hook_event: HookEvent) -> Duration {
     match hook_event {
-        HookEvent::SessionStart | HookEvent::Stop | HookEvent::PreCompact => Duration::from_secs(8),
+        HookEvent::SessionStart | HookEvent::Stop | HookEvent::PreCompact | HookEvent::PostCompact => Duration::from_secs(8),
+        // SessionEnd has a 1.5s timeout in Claude Code — be fast
+        HookEvent::SessionEnd => Duration::from_secs(1),
         _ => Duration::from_secs(5),
     }
 }
@@ -715,7 +791,10 @@ fn validate_caller() -> Result<()> {
                 let _ = sentinel_infrastructure::security_log::log_security_event(
                     "caller_rejected",
                     "unknown",
-                    &format!("Parent process '{}' is not a known Claude Code runtime", parent),
+                    &format!(
+                        "Parent process '{}' is not a known Claude Code runtime",
+                        parent
+                    ),
                 );
             }
         }
@@ -740,13 +819,21 @@ fn get_parent_process_name() -> Option<String> {
 
     // Step 1: Get parent PID via wmic (~30ms)
     let output = std::process::Command::new("wmic")
-        .args(["process", "where", &format!("ProcessId={pid}"), "get", "ParentProcessId", "/VALUE"])
+        .args([
+            "process",
+            "where",
+            &format!("ProcessId={pid}"),
+            "get",
+            "ParentProcessId",
+            "/VALUE",
+        ])
         .creation_flags(CREATE_NO_WINDOW)
         .output()
         .ok()?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let parent_pid: u32 = stdout.lines()
+    let parent_pid: u32 = stdout
+        .lines()
         .find(|l| l.starts_with("ParentProcessId="))
         .and_then(|l| l.strip_prefix("ParentProcessId="))
         .and_then(|s| s.trim().parse().ok())?;
@@ -760,7 +847,8 @@ fn get_parent_process_name() -> Option<String> {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     // CSV format: "Image Name","PID","Session Name","Session#","Mem Usage"
-    let name = stdout.lines()
+    let name = stdout
+        .lines()
         .next()?
         .split(',')
         .next()?
@@ -1031,16 +1119,19 @@ mod tests {
 
         if let Some(mut stdin) = child.stdin.take() {
             use tokio::io::AsyncWriteExt;
-            stdin.write_all(b"{\"session_id\":\"regression-exit-test\"}\n").await.unwrap();
+            stdin
+                .write_all(b"{\"session_id\":\"regression-exit-test\"}\n")
+                .await
+                .unwrap();
             stdin.shutdown().await.unwrap();
         }
 
-        let result = tokio::time::timeout(
-            std::time::Duration::from_secs(3),
-            child.wait(),
-        ).await;
+        let result = tokio::time::timeout(std::time::Duration::from_secs(3), child.wait()).await;
 
-        assert!(result.is_ok(), "sentinel-engine did not exit within 3s — possible hang");
+        assert!(
+            result.is_ok(),
+            "sentinel-engine did not exit within 3s — possible hang"
+        );
     }
 
     /// Regression: stdout must be valid JSON (no tracing leaks).
@@ -1069,14 +1160,18 @@ mod tests {
 
         if let Some(mut stdin) = child.stdin.take() {
             use tokio::io::AsyncWriteExt;
-            stdin.write_all(b"{\"session_id\":\"regression-json-test\"}\n").await.unwrap();
+            stdin
+                .write_all(b"{\"session_id\":\"regression-json-test\"}\n")
+                .await
+                .unwrap();
             stdin.shutdown().await.unwrap();
         }
 
-        let output = tokio::time::timeout(
-            std::time::Duration::from_secs(3),
-            child.wait_with_output(),
-        ).await.expect("timed out").expect("wait failed");
+        let output =
+            tokio::time::timeout(std::time::Duration::from_secs(3), child.wait_with_output())
+                .await
+                .expect("timed out")
+                .expect("wait failed");
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(!stdout.is_empty(), "stdout should not be empty");
@@ -1084,7 +1179,13 @@ mod tests {
         let parsed: Result<serde_json::Value, _> = serde_json::from_str(stdout.trim());
         assert!(parsed.is_ok(), "stdout is not valid JSON: {}", stdout);
 
-        assert!(!stdout.contains("[2m"), "stdout contains ANSI escape (tracing leak)");
-        assert!(!stdout.contains("WARN"), "stdout contains WARN (tracing leak)");
+        assert!(
+            !stdout.contains("[2m"),
+            "stdout contains ANSI escape (tracing leak)"
+        );
+        assert!(
+            !stdout.contains("WARN"),
+            "stdout contains WARN (tracing leak)"
+        );
     }
 }

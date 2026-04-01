@@ -1,8 +1,9 @@
 //! Hook lifecycle events
 //!
-//! Maps to Claude Code's 8 hook lifecycle events.
+//! Maps to Claude Code's 27 hook lifecycle events (as of v2.1.88).
+//! Sentinel handles 16 of these; remaining events are passed through.
 //! Outputs conform to Claude Code's actual Zod-validated JSON schema
-//! (discovered via source deobfuscation of CLI v2.1.50).
+//! (discovered via source deobfuscation of CLI v2.1.50, updated v2.1.88).
 
 use serde::{Deserialize, Serialize};
 
@@ -11,13 +12,23 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "PascalCase")]
 pub enum HookEvent {
     SessionStart,
+    SessionEnd,
     UserPromptSubmit,
     PreToolUse,
     PostToolUse,
+    PostToolUseFailure,
     Stop,
+    StopFailure,
     PreCompact,
+    PostCompact,
+    Setup,
+    SubagentStart,
+    SubagentStop,
     TeammateIdle,
+    TaskCreated,
     TaskCompleted,
+    PermissionDenied,
+    CwdChanged,
 }
 
 /// PreToolUse permission decision — maps to Claude Code's permissionDecision field.
@@ -36,13 +47,23 @@ impl HookEvent {
     pub fn from_arg(s: &str) -> Option<Self> {
         match s {
             "SessionStart" => Some(Self::SessionStart),
+            "SessionEnd" => Some(Self::SessionEnd),
             "UserPromptSubmit" => Some(Self::UserPromptSubmit),
             "PreToolUse" => Some(Self::PreToolUse),
             "PostToolUse" => Some(Self::PostToolUse),
+            "PostToolUseFailure" => Some(Self::PostToolUseFailure),
             "Stop" => Some(Self::Stop),
+            "StopFailure" => Some(Self::StopFailure),
             "PreCompact" => Some(Self::PreCompact),
+            "PostCompact" => Some(Self::PostCompact),
+            "Setup" => Some(Self::Setup),
+            "SubagentStart" => Some(Self::SubagentStart),
+            "SubagentStop" => Some(Self::SubagentStop),
             "TeammateIdle" => Some(Self::TeammateIdle),
+            "TaskCreated" => Some(Self::TaskCreated),
             "TaskCompleted" => Some(Self::TaskCompleted),
+            "PermissionDenied" => Some(Self::PermissionDenied),
+            "CwdChanged" => Some(Self::CwdChanged),
             _ => None,
         }
     }
@@ -52,13 +73,23 @@ impl std::fmt::Display for HookEvent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::SessionStart => write!(f, "SessionStart"),
+            Self::SessionEnd => write!(f, "SessionEnd"),
             Self::UserPromptSubmit => write!(f, "UserPromptSubmit"),
             Self::PreToolUse => write!(f, "PreToolUse"),
             Self::PostToolUse => write!(f, "PostToolUse"),
+            Self::PostToolUseFailure => write!(f, "PostToolUseFailure"),
             Self::Stop => write!(f, "Stop"),
+            Self::StopFailure => write!(f, "StopFailure"),
             Self::PreCompact => write!(f, "PreCompact"),
+            Self::PostCompact => write!(f, "PostCompact"),
+            Self::Setup => write!(f, "Setup"),
+            Self::SubagentStart => write!(f, "SubagentStart"),
+            Self::SubagentStop => write!(f, "SubagentStop"),
             Self::TeammateIdle => write!(f, "TeammateIdle"),
+            Self::TaskCreated => write!(f, "TaskCreated"),
             Self::TaskCompleted => write!(f, "TaskCompleted"),
+            Self::PermissionDenied => write!(f, "PermissionDenied"),
+            Self::CwdChanged => write!(f, "CwdChanged"),
         }
     }
 }

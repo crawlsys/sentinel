@@ -5,9 +5,11 @@
 //! update HOOK_NAMES to keep the count accurate.
 
 pub mod activity_tracker;
+mod block_context;
 pub mod commit_hygiene;
 pub mod commit_message_validator;
 pub mod context_monitor;
+pub mod cwd_changed;
 pub mod doc_cleanup;
 pub mod doc_drift;
 pub mod error_reporter;
@@ -16,16 +18,24 @@ pub mod execution_log;
 pub mod git_hygiene;
 pub mod hygiene_override;
 pub mod mcp_health;
+pub mod permission_denied;
 pub mod phase_gate;
 pub mod phase_validator;
 pub mod plan_organizer;
+pub mod post_compact;
 pub mod pre_commit_verification;
 pub mod pre_compact;
 pub mod pre_push_steel_test;
+pub mod session_end;
 pub mod session_init;
+pub mod setup;
 pub mod skill_router;
 pub mod skill_telemetry;
+pub mod stop_failure;
+pub mod subagent_start;
+pub mod subagent_stop;
 pub mod task_completed;
+pub mod task_created;
 pub mod teammate_idle;
 pub mod todo_interceptor;
 pub mod todo_loader;
@@ -39,6 +49,7 @@ pub const HOOK_NAMES: &[&str] = &[
     "commit_hygiene",
     "commit_message_validator",
     "context_monitor",
+    "cwd_changed",
     "doc_cleanup",
     "doc_drift",
     "error_reporter",
@@ -47,16 +58,24 @@ pub const HOOK_NAMES: &[&str] = &[
     "git_hygiene",
     "hygiene_override",
     "mcp_health",
+    "permission_denied",
     "phase_gate",
     "phase_validator",
     "plan_organizer",
+    "post_compact",
     "pre_commit_verification",
     "pre_compact",
     "pre_push_steel_test",
+    "session_end",
     "session_init",
+    "setup",
     "skill_router",
     "skill_telemetry",
+    "stop_failure",
+    "subagent_start",
+    "subagent_stop",
     "task_completed",
+    "task_created",
     "teammate_idle",
     "todo_interceptor",
     "todo_loader",
