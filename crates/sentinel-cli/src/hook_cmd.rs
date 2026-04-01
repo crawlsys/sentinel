@@ -462,7 +462,31 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
         }
 
         HookEvent::PostToolUseFailure => {
-            // Tool execution failed — no custom processing yet, pass through
+            // Tool execution failed — log for diagnostics
+            let tool_name = input.tool_name.as_deref().unwrap_or("unknown");
+            let is_timeout = input.extra.get("is_timeout").and_then(|v| v.as_bool()).unwrap_or(false);
+            let error = input.extra.get("error").and_then(|v| v.as_str()).unwrap_or("");
+            tracing::debug!(tool_name, is_timeout, error, "Tool execution failed");
+
+            if let Some(home) = dirs::home_dir() {
+                let metrics_dir = home.join(".claude").join("metrics");
+                let entry = serde_json::json!({
+                    "event": "tool_failure",
+                    "tool_name": tool_name,
+                    "is_timeout": is_timeout,
+                    "error": error,
+                    "session_id": input.session_id,
+                    "ts": chrono::Utc::now().to_rfc3339(),
+                });
+                if let Ok(mut file) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(metrics_dir.join("errors.jsonl"))
+                {
+                    use std::io::Write;
+                    let _ = writeln!(file, "{}", entry);
+                }
+            }
         }
     }
 

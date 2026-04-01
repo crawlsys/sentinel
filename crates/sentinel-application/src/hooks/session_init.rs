@@ -77,7 +77,47 @@ pub fn process(input: &HookInput) -> HookOutput {
     let context =
         build_startup_context(&sync_result, &validation, &counts, session_id, &init_result);
 
-    HookOutput::inject_context(HookEvent::SessionStart, context)
+    // 8. Build watch paths for FileChanged monitoring
+    let claude_md_path = claude_dir.join("CLAUDE.md");
+    let settings_path = claude_dir.join("settings.json");
+    let watch_paths: Vec<String> = [&claude_md_path, &settings_path]
+        .iter()
+        .filter(|p| p.exists())
+        .map(|p| p.to_string_lossy().to_string())
+        .collect();
+
+    // 9. Check if this is a session resume — auto-inject session-resume prompt
+    let source = input
+        .extra
+        .get("source")
+        .and_then(|v| v.as_str())
+        .unwrap_or("startup");
+
+    let initial_message = if source == "resume" {
+        Some("What was I working on? Give me a brief summary.".to_string())
+    } else {
+        None
+    };
+
+    use sentinel_domain::events::HookSpecificOutput;
+    HookOutput {
+        blocked: None,
+        reason: None,
+        hook_specific_output: Some(HookSpecificOutput {
+            hook_event_name: "SessionStart".to_string(),
+            permission_decision: None,
+            permission_decision_reason: None,
+            initial_user_message: initial_message,
+            watch_paths: if watch_paths.is_empty() {
+                None
+            } else {
+                Some(watch_paths)
+            },
+            updated_input: None,
+            additional_context: Some(context),
+        }),
+        system_message: None,
+    }
 }
 
 // ---------------------------------------------------------------------------
