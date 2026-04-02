@@ -149,6 +149,10 @@ pub struct HookInput {
     #[serde(default)]
     pub tool_input: Option<serde_json::Value>,
 
+    /// Absolute file path for Write/Edit/Read tools (PreToolUse/PostToolUse, added 2.1.89)
+    #[serde(default)]
+    pub file_path: Option<String>,
+
     /// Tool result (PostToolUse)
     #[serde(default)]
     pub tool_result: Option<serde_json::Value>,
