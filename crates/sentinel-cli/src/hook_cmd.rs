@@ -552,6 +552,8 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
                     watch_paths: None,
                     updated_input: None,
                     additional_context: Some(project_header),
+                    updated_mcp_tool_output: None,
+                    retry: None,
                 });
             }
         }

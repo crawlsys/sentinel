@@ -203,6 +203,17 @@ pub struct HookSpecificOutput {
     /// Additional context injected into the conversation
     #[serde(skip_serializing_if = "Option::is_none", rename = "additionalContext")]
     pub additional_context: Option<String>,
+
+    /// Modified MCP tool output (PostToolUse only — replaces the original result)
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        rename = "updatedMCPToolOutput"
+    )]
+    pub updated_mcp_tool_output: Option<serde_json::Value>,
+
+    /// Allow the model to retry a denied tool call (PermissionDenied only)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retry: Option<bool>,
 }
 
 impl HookOutput {
@@ -239,6 +250,8 @@ impl HookOutput {
                 watch_paths: None,
                 updated_input: None,
                 additional_context: None,
+                updated_mcp_tool_output: None,
+                retry: None,
             }),
             system_message: None,
         }
@@ -258,6 +271,8 @@ impl HookOutput {
                 watch_paths: None,
                 updated_input: None,
                 additional_context: None,
+                updated_mcp_tool_output: None,
+                retry: None,
             }),
             system_message: None,
         }
@@ -277,6 +292,8 @@ impl HookOutput {
                 watch_paths: None,
                 updated_input: Some(updated),
                 additional_context: None,
+                updated_mcp_tool_output: None,
+                retry: None,
             }),
             system_message: None,
         }
@@ -296,6 +313,29 @@ impl HookOutput {
                 watch_paths: None,
                 updated_input: None,
                 additional_context: Some(context.into()),
+                updated_mcp_tool_output: None,
+                retry: None,
+            }),
+            system_message: None,
+        }
+    }
+
+    /// Allow the model to retry a denied tool call (PermissionDenied only).
+    #[must_use]
+    pub fn retry_denied() -> Self {
+        Self {
+            blocked: None,
+            reason: None,
+            hook_specific_output: Some(HookSpecificOutput {
+                hook_event_name: "PermissionDenied".to_string(),
+                permission_decision: None,
+                permission_decision_reason: None,
+                initial_user_message: None,
+                watch_paths: None,
+                updated_input: None,
+                additional_context: None,
+                updated_mcp_tool_output: None,
+                retry: Some(true),
             }),
             system_message: None,
         }
@@ -333,6 +373,8 @@ impl HookOutput {
                 watch_paths: None,
                 updated_input: None,
                 additional_context: existing_context,
+                updated_mcp_tool_output: None,
+                retry: None,
             });
         }
 

@@ -86,7 +86,26 @@ pub fn process(input: &HookInput) -> HookOutput {
         .map(|p| p.to_string_lossy().to_string())
         .collect();
 
-    // 9. Check if this is a session resume — auto-inject session-resume prompt
+    // 9. Write env vars to CLAUDE_ENV_FILE (injected into Bash commands)
+    if let Ok(env_file) = std::env::var("CLAUDE_ENV_FILE") {
+        let mut lines = Vec::new();
+        // Detect project from cwd path
+        let project = detect_project_from_cwd(cwd);
+        if let Some(ref proj) = project {
+            lines.push(format!("CLAUDE_PROJECT={}", proj));
+        }
+        lines.push(format!("SENTINEL_SESSION_ID={}", session_id));
+
+        if !lines.is_empty() {
+            if let Err(e) = std::fs::write(&env_file, lines.join("\n") + "\n") {
+                tracing::warn!(error = %e, "Failed to write CLAUDE_ENV_FILE");
+            } else {
+                tracing::debug!(env_file, "Wrote {} env vars to CLAUDE_ENV_FILE", lines.len());
+            }
+        }
+    }
+
+    // 10. Check if this is a session resume — auto-inject session-resume prompt
     let source = input
         .extra
         .get("source")
@@ -115,6 +134,8 @@ pub fn process(input: &HookInput) -> HookOutput {
             },
             updated_input: None,
             additional_context: Some(context),
+            updated_mcp_tool_output: None,
+            retry: None,
         }),
         system_message: None,
     }
@@ -1195,6 +1216,20 @@ fn cache_linear_team_keys(claude_dir: &Path) {
 /// Auto-generate missing standard project files in the cwd.
 /// Only runs if the directory looks like a git repo.
 /// Never overwrites existing files (force=false).
+/// Detect project name from cwd for CLAUDE_ENV_FILE injection.
+fn detect_project_from_cwd(cwd: &str) -> Option<String> {
+    let dir_name = Path::new(cwd).file_name()?.to_str()?;
+    let project = match dir_name {
+        "claude-code-marketplace" => "marketplace",
+        "firefly-pro-crm" | "firefly-pro-web-app" | "firefly-pro-auth"
+        | "firefly-pro-routing" | "firefly-pro-technician-mobile-app"
+        | "firefly-pro-marketing" | "firefly-pro-hyperswitch" => "firefly-pro",
+        "sentinel" | "sentinel-launcher" => "sentinel",
+        _ => dir_name,
+    };
+    Some(project.to_string())
+}
+
 fn auto_init_project(cwd: &str) -> Option<sentinel_domain::project::InitResult> {
     let cwd_path = Path::new(cwd);
 
