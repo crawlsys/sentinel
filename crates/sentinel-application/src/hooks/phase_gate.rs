@@ -1935,10 +1935,9 @@ mod tests {
             Some("sentinel infrastructure source code"), // sentinel/Cargo matches
         );
 
+        // vulcan-mcp-sdk-rust is no longer protected (removed from infra_repos —
+        // it is a dependency, not enforcement infrastructure)
         let vulcan = "/c/Users/garys/Documents/GitHub/vulcan-mcp-sdk-rust/crates/vulcan/src/lib.rs";
-        assert_eq!(
-            check_protected_textual(vulcan),
-            Some("sentinel infrastructure source code")
-        );
+        assert_eq!(check_protected_textual(vulcan), None);
     }
 }
