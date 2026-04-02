@@ -291,9 +291,6 @@ pub struct HookSpecificOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<serde_json::Value>,
 
-    /// PermissionRequest decision
-    #[serde(skip_serializing_if = "Option::is_none", rename = "permissionRequestDecision")]
-    pub permission_request_decision: Option<serde_json::Value>,
 
     /// WorktreeCreate output path
     #[serde(skip_serializing_if = "Option::is_none", rename = "worktreePath")]

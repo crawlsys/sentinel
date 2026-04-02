@@ -558,6 +558,7 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
         | HookEvent::SubagentStart
         | HookEvent::Notification
         | HookEvent::PermissionRequest
+        | HookEvent::PermissionDenied
         | HookEvent::Elicitation
         | HookEvent::ElicitationResult
         | HookEvent::CwdChanged
