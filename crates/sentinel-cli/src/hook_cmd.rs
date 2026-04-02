@@ -488,6 +488,51 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
                 }
             }
         }
+
+        HookEvent::PermissionRequest => {
+            // Auto-approve/deny tool permissions — pass through for now
+            tracing::debug!("PermissionRequest received — pass through");
+        }
+
+        HookEvent::Elicitation => {
+            // MCP server requesting user input — pass through for now
+            tracing::debug!("Elicitation received — pass through");
+        }
+
+        HookEvent::ElicitationResult => {
+            // Post-elicitation response — pass through for now
+            tracing::debug!("ElicitationResult received — pass through");
+        }
+
+        HookEvent::ConfigChange => {
+            // Settings/skill file changed — pass through for now
+            tracing::debug!("ConfigChange received — pass through");
+        }
+
+        HookEvent::InstructionsLoaded => {
+            // CLAUDE.md file loaded — pass through for now
+            tracing::debug!("InstructionsLoaded received — pass through");
+        }
+
+        HookEvent::FileChanged => {
+            // Watched file changed — pass through for now
+            tracing::debug!("FileChanged received — pass through");
+        }
+
+        HookEvent::WorktreeCreate => {
+            // Git worktree created — pass through for now
+            tracing::debug!("WorktreeCreate received — pass through");
+        }
+
+        HookEvent::WorktreeRemove => {
+            // Git worktree removed — pass through for now
+            tracing::debug!("WorktreeRemove received — pass through");
+        }
+
+        HookEvent::Notification => {
+            // Internal notification — pass through for now
+            tracing::debug!("Notification received — pass through");
+        }
     }
 
     // Record hook invocation with actual elapsed time
@@ -510,8 +555,15 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
         | HookEvent::PostToolUseFailure
         | HookEvent::SessionStart
         | HookEvent::Setup
-        | HookEvent::SubagentStart => {
-            // These events support hookSpecificOutput.additionalContext natively
+        | HookEvent::SubagentStart
+        | HookEvent::Notification
+        | HookEvent::PermissionRequest
+        | HookEvent::Elicitation
+        | HookEvent::ElicitationResult
+        | HookEvent::CwdChanged
+        | HookEvent::FileChanged
+        | HookEvent::WorktreeCreate => {
+            // These events support hookSpecificOutput natively
         }
         _ => {
             // Strip hookSpecificOutput for events Claude Code doesn't process
@@ -546,14 +598,8 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
             ) {
                 output.hook_specific_output = Some(HookSpecificOutput {
                     hook_event_name: hook_event.to_string(),
-                    permission_decision: None,
-                    permission_decision_reason: None,
-                    initial_user_message: None,
-                    watch_paths: None,
-                    updated_input: None,
                     additional_context: Some(project_header),
-                    updated_mcp_tool_output: None,
-                    retry: None,
+                    ..HookSpecificOutput::default()
                 });
             }
         }

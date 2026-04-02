@@ -120,24 +120,18 @@ pub fn process(input: &HookInput) -> HookOutput {
 
     use sentinel_domain::events::HookSpecificOutput;
     HookOutput {
-        blocked: None,
-        reason: None,
         hook_specific_output: Some(HookSpecificOutput {
             hook_event_name: "SessionStart".to_string(),
-            permission_decision: None,
-            permission_decision_reason: None,
             initial_user_message: initial_message,
             watch_paths: if watch_paths.is_empty() {
                 None
             } else {
                 Some(watch_paths)
             },
-            updated_input: None,
             additional_context: Some(context),
-            updated_mcp_tool_output: None,
-            retry: None,
+            ..HookSpecificOutput::default()
         }),
-        system_message: None,
+        ..HookOutput::default()
     }
 }
 

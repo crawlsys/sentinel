@@ -29,6 +29,15 @@ pub enum HookEvent {
     TaskCompleted,
     PermissionDenied,
     CwdChanged,
+    PermissionRequest,
+    Elicitation,
+    ElicitationResult,
+    ConfigChange,
+    InstructionsLoaded,
+    FileChanged,
+    WorktreeCreate,
+    WorktreeRemove,
+    Notification,
 }
 
 /// PreToolUse permission decision — maps to Claude Code's permissionDecision field.
@@ -64,6 +73,15 @@ impl HookEvent {
             "TaskCompleted" => Some(Self::TaskCompleted),
             "PermissionDenied" => Some(Self::PermissionDenied),
             "CwdChanged" => Some(Self::CwdChanged),
+            "PermissionRequest" => Some(Self::PermissionRequest),
+            "Elicitation" => Some(Self::Elicitation),
+            "ElicitationResult" => Some(Self::ElicitationResult),
+            "ConfigChange" => Some(Self::ConfigChange),
+            "InstructionsLoaded" => Some(Self::InstructionsLoaded),
+            "FileChanged" => Some(Self::FileChanged),
+            "WorktreeCreate" => Some(Self::WorktreeCreate),
+            "WorktreeRemove" => Some(Self::WorktreeRemove),
+            "Notification" => Some(Self::Notification),
             _ => None,
         }
     }
@@ -90,6 +108,15 @@ impl std::fmt::Display for HookEvent {
             Self::TaskCompleted => write!(f, "TaskCompleted"),
             Self::PermissionDenied => write!(f, "PermissionDenied"),
             Self::CwdChanged => write!(f, "CwdChanged"),
+            Self::PermissionRequest => write!(f, "PermissionRequest"),
+            Self::Elicitation => write!(f, "Elicitation"),
+            Self::ElicitationResult => write!(f, "ElicitationResult"),
+            Self::ConfigChange => write!(f, "ConfigChange"),
+            Self::InstructionsLoaded => write!(f, "InstructionsLoaded"),
+            Self::FileChanged => write!(f, "FileChanged"),
+            Self::WorktreeCreate => write!(f, "WorktreeCreate"),
+            Self::WorktreeRemove => write!(f, "WorktreeRemove"),
+            Self::Notification => write!(f, "Notification"),
         }
     }
 }
@@ -137,6 +164,22 @@ pub struct HookInput {
     #[serde(default)]
     pub context_window: Option<serde_json::Value>,
 
+    /// Last assistant message text (Stop/SubagentStop)
+    #[serde(default)]
+    pub last_assistant_message: Option<String>,
+
+    /// Agent transcript path (SubagentStop)
+    #[serde(default)]
+    pub agent_transcript_path: Option<String>,
+
+    /// Compact summary text (PostCompact)
+    #[serde(default)]
+    pub compact_summary: Option<String>,
+
+    /// Permission suggestions (PermissionRequest)
+    #[serde(default)]
+    pub permission_suggestions: Option<Vec<serde_json::Value>>,
+
     /// Catch-all for unknown fields — absorbs new Claude Code fields without
     /// breaking deserialization. **Attack #124 note**: Values here are untrusted
     /// and unvalidated. Hooks that read from `extra` MUST treat values as
@@ -165,6 +208,22 @@ pub struct HookOutput {
     /// Used for banners and notifications that the user should see directly.
     #[serde(skip_serializing_if = "Option::is_none", rename = "systemMessage")]
     pub system_message: Option<String>,
+
+    /// If false, prevents the model from continuing (used by Stop hooks)
+    #[serde(skip_serializing_if = "Option::is_none", rename = "continue")]
+    pub continue_: Option<bool>,
+
+    /// Suppress hook output display
+    #[serde(skip_serializing_if = "Option::is_none", rename = "suppressOutput")]
+    pub suppress_output: Option<bool>,
+
+    /// Custom reason when preventing continuation
+    #[serde(skip_serializing_if = "Option::is_none", rename = "stopReason")]
+    pub stop_reason: Option<String>,
+
+    /// Simplified permission shorthand --- "approve" or "block"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decision: Option<String>,
 }
 
 /// Claude Code's hookSpecificOutput schema (v2.1.88).
@@ -172,7 +231,7 @@ pub struct HookOutput {
 /// For UserPromptSubmit/PostToolUse/SubagentStart/Setup: additionalContext
 /// For SessionStart: additionalContext, initialUserMessage, watchPaths
 /// For PermissionDenied: retry
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct HookSpecificOutput {
     #[serde(rename = "hookEventName")]
     pub hook_event_name: String,
@@ -214,6 +273,22 @@ pub struct HookSpecificOutput {
     /// Allow the model to retry a denied tool call (PermissionDenied only)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub retry: Option<bool>,
+
+    /// Elicitation/ElicitationResult action ("accept"/"decline"/"cancel")
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub action: Option<String>,
+
+    /// Elicitation/ElicitationResult content
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<serde_json::Value>,
+
+    /// PermissionRequest decision
+    #[serde(skip_serializing_if = "Option::is_none", rename = "permissionRequestDecision")]
+    pub permission_request_decision: Option<serde_json::Value>,
+
+    /// WorktreeCreate output path
+    #[serde(skip_serializing_if = "Option::is_none", rename = "worktreePath")]
+    pub worktree_path: Option<String>,
 }
 
 impl HookOutput {
@@ -230,8 +305,7 @@ impl HookOutput {
         Self {
             blocked: Some(true),
             reason: Some(reason.into()),
-            hook_specific_output: None,
-            system_message: None,
+            ..Self::default()
         }
     }
 
@@ -241,19 +315,13 @@ impl HookOutput {
     pub fn deny(reason: impl Into<String>) -> Self {
         Self {
             blocked: Some(true), // keep for internal merge logic
-            reason: None,
             hook_specific_output: Some(HookSpecificOutput {
                 hook_event_name: "PreToolUse".to_string(),
                 permission_decision: Some(PermissionDecision::Deny),
                 permission_decision_reason: Some(reason.into()),
-                initial_user_message: None,
-                watch_paths: None,
-                updated_input: None,
-                additional_context: None,
-                updated_mcp_tool_output: None,
-                retry: None,
+                ..HookSpecificOutput::default()
             }),
-            system_message: None,
+            ..Self::default()
         }
     }
 
@@ -261,20 +329,13 @@ impl HookOutput {
     #[must_use]
     pub fn ask(reason: impl Into<String>) -> Self {
         Self {
-            blocked: None,
-            reason: None,
             hook_specific_output: Some(HookSpecificOutput {
                 hook_event_name: "PreToolUse".to_string(),
                 permission_decision: Some(PermissionDecision::Ask),
                 permission_decision_reason: Some(reason.into()),
-                initial_user_message: None,
-                watch_paths: None,
-                updated_input: None,
-                additional_context: None,
-                updated_mcp_tool_output: None,
-                retry: None,
+                ..HookSpecificOutput::default()
             }),
-            system_message: None,
+            ..Self::default()
         }
     }
 
@@ -282,20 +343,13 @@ impl HookOutput {
     #[must_use]
     pub fn rewrite_input(updated: serde_json::Value) -> Self {
         Self {
-            blocked: None,
-            reason: None,
             hook_specific_output: Some(HookSpecificOutput {
                 hook_event_name: "PreToolUse".to_string(),
                 permission_decision: Some(PermissionDecision::Allow),
-                permission_decision_reason: None,
-                initial_user_message: None,
-                watch_paths: None,
                 updated_input: Some(updated),
-                additional_context: None,
-                updated_mcp_tool_output: None,
-                retry: None,
+                ..HookSpecificOutput::default()
             }),
-            system_message: None,
+            ..Self::default()
         }
     }
 
@@ -303,20 +357,12 @@ impl HookOutput {
     #[must_use]
     pub fn inject_context(event: HookEvent, context: impl Into<String>) -> Self {
         Self {
-            blocked: None,
-            reason: None,
             hook_specific_output: Some(HookSpecificOutput {
                 hook_event_name: event.to_string(),
-                permission_decision: None,
-                permission_decision_reason: None,
-                initial_user_message: None,
-                watch_paths: None,
-                updated_input: None,
                 additional_context: Some(context.into()),
-                updated_mcp_tool_output: None,
-                retry: None,
+                ..HookSpecificOutput::default()
             }),
-            system_message: None,
+            ..Self::default()
         }
     }
 
@@ -324,20 +370,22 @@ impl HookOutput {
     #[must_use]
     pub fn retry_denied() -> Self {
         Self {
-            blocked: None,
-            reason: None,
             hook_specific_output: Some(HookSpecificOutput {
                 hook_event_name: "PermissionDenied".to_string(),
-                permission_decision: None,
-                permission_decision_reason: None,
-                initial_user_message: None,
-                watch_paths: None,
-                updated_input: None,
-                additional_context: None,
-                updated_mcp_tool_output: None,
                 retry: Some(true),
+                ..HookSpecificOutput::default()
             }),
-            system_message: None,
+            ..Self::default()
+        }
+    }
+
+    /// Prevent the model from continuing (Stop hooks)
+    #[must_use]
+    pub fn stop_continuation(reason: impl Into<String>) -> Self {
+        Self {
+            continue_: Some(false),
+            stop_reason: Some(reason.into()),
+            ..Self::default()
         }
     }
 
@@ -369,12 +417,8 @@ impl HookOutput {
                 hook_event_name: "PreToolUse".to_string(),
                 permission_decision: Some(PermissionDecision::Deny),
                 permission_decision_reason: reason,
-                initial_user_message: None,
-                watch_paths: None,
-                updated_input: None,
                 additional_context: existing_context,
-                updated_mcp_tool_output: None,
-                retry: None,
+                ..HookSpecificOutput::default()
             });
         }
 
@@ -480,6 +524,37 @@ impl HookOutput {
                     self.system_message = Some(b.clone());
                 }
             }
+            _ => {}
+        }
+
+        // Merge continue_: false wins over true/None
+        match (self.continue_, other.continue_) {
+            (_, Some(false)) => self.continue_ = Some(false),
+            (None, Some(true)) => self.continue_ = Some(true),
+            _ => {}
+        }
+
+        // Merge suppress_output: true wins
+        if other.suppress_output == Some(true) {
+            self.suppress_output = Some(true);
+        }
+
+        // Merge stop_reason: append
+        if let Some(ref reason) = other.stop_reason {
+            match &self.stop_reason {
+                Some(existing) => {
+                    self.stop_reason = Some(format!("{existing}; {reason}"));
+                }
+                None => {
+                    self.stop_reason = Some(reason.clone());
+                }
+            }
+        }
+
+        // Merge decision: "block" wins over "approve"
+        match (&self.decision, &other.decision) {
+            (_, Some(d)) if d == "block" => self.decision = Some("block".to_string()),
+            (None, Some(d)) => self.decision = Some(d.clone()),
             _ => {}
         }
     }
