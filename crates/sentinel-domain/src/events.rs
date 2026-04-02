@@ -41,13 +41,14 @@ pub enum HookEvent {
 }
 
 /// PreToolUse permission decision — maps to Claude Code's permissionDecision field.
-/// Priority: Deny > Ask > Allow (when merging multiple hook outputs).
+/// Priority: Deny > Ask > Defer > Allow (when merging multiple hook outputs).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum PermissionDecision {
     Allow,
     Deny,
     Ask,
+    Defer,
 }
 
 impl HookEvent {
@@ -179,6 +180,14 @@ pub struct HookInput {
     /// Permission suggestions (PermissionRequest)
     #[serde(default)]
     pub permission_suggestions: Option<Vec<serde_json::Value>>,
+
+    /// Agent ID (present when hook fires from within a subagent)
+    #[serde(default)]
+    pub agent_id: Option<String>,
+
+    /// Agent type name (e.g., "general-purpose", "code-reviewer")
+    #[serde(default)]
+    pub agent_type: Option<String>,
 
     /// Catch-all for unknown fields — absorbs new Claude Code fields without
     /// breaking deserialization. **Attack #124 note**: Values here are untrusted
@@ -445,13 +454,15 @@ impl HookOutput {
         if let Some(ref other_hso) = other.hook_specific_output {
             match &mut self.hook_specific_output {
                 Some(ref mut self_hso) => {
-                    // Permission decision priority: deny > ask > allow
+                    // Permission decision priority: deny > ask > defer > allow
                     if let Some(other_pd) = other_hso.permission_decision {
                         let dominated = match (self_hso.permission_decision, other_pd) {
                             (_, PermissionDecision::Deny) => true,
                             (Some(PermissionDecision::Deny), _) => false,
                             (_, PermissionDecision::Ask) => true,
                             (Some(PermissionDecision::Ask), _) => false,
+                            (_, PermissionDecision::Defer) => true,
+                            (Some(PermissionDecision::Defer), _) => false,
                             _ => true,
                         };
                         if dominated {
