@@ -385,6 +385,13 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
             // Session init — log session, sync marketplace repo, inject startup context
             let init_output = hooks::session_init::process(&input);
             output.merge(&init_output);
+
+            // Version drift check — runs once per session with 24h cooldown.
+            // Checks npm registry for latest Claude Code version and caches result.
+            if let Some(drift_msg) = check_version_drift() {
+                let drift_output = HookOutput::inject_context(HookEvent::SessionStart, drift_msg);
+                output.merge(&drift_output);
+            }
         }
 
         HookEvent::PreCompact => {
@@ -490,13 +497,22 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
         }
 
         HookEvent::PermissionRequest => {
-            // Auto-approve/deny tool permissions — pass through for now
-            tracing::debug!("PermissionRequest received — pass through");
+            // Log permission request details for future auto-approve rules.
+            // Currently pass-through — no auto-decisions. The value of this hook
+            // will come when we add specific auto-approve rules for trusted tools
+            // in certain contexts (e.g., auto-allow Edit in a known project dir).
+            let tool = input.tool_name.as_deref().unwrap_or("unknown");
+            let has_suggestions = input.permission_suggestions.as_ref().map(|s| s.len()).unwrap_or(0);
+            tracing::debug!(tool, has_suggestions, "PermissionRequest — pass through (no auto-decisions yet)");
         }
 
         HookEvent::Elicitation => {
-            // MCP server requesting user input — pass through for now
-            tracing::debug!("Elicitation received — pass through");
+            // MCP server requesting user input — log details, pass through.
+            // Auto-responding to elicitation without understanding the context is risky.
+            // Future: auto-accept known servers (e.g., sentinel, codex) for trusted prompts.
+            let server = input.extra.get("mcp_server_name").and_then(|v| v.as_str()).unwrap_or("unknown");
+            let message = input.extra.get("message").and_then(|v| v.as_str()).unwrap_or("");
+            tracing::debug!(server, message, "Elicitation request from MCP server — pass through");
         }
 
         HookEvent::ElicitationResult => {
@@ -505,18 +521,60 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
         }
 
         HookEvent::ConfigChange => {
-            // Settings/skill file changed — pass through for now
-            tracing::debug!("ConfigChange received — pass through");
+            // Settings or skill file changed — validate and warn on dangerous changes.
+            let source = input.extra.get("source").and_then(|v| v.as_str()).unwrap_or("unknown");
+            let file_path = input.extra.get("file_path").and_then(|v| v.as_str()).unwrap_or("");
+            tracing::debug!(source, file_path, "ConfigChange detected");
+
+            // Warn if disableAllHooks is set (kill-switch that disables all enforcement)
+            if source == "user_settings" || source == "project_settings" || source == "local_settings" {
+                if !file_path.is_empty() {
+                    if let Ok(settings_content) = std::fs::read_to_string(file_path) {
+                        if settings_content.contains("\"disableAllHooks\"") && settings_content.contains("true") {
+                            output.system_message = Some(
+                                "[sentinel] WARNING: disableAllHooks detected in settings — all hook enforcement will be disabled!".to_string()
+                            );
+                        }
+                    }
+                }
+            }
+
+            // Log skill file changes for telemetry
+            if source == "skills" {
+                tracing::info!(file_path, "Skill file changed");
+            }
         }
 
         HookEvent::InstructionsLoaded => {
-            // CLAUDE.md file loaded — pass through for now
-            tracing::debug!("InstructionsLoaded received — pass through");
+            // CLAUDE.md or other instruction file loaded — log details.
+            let file_path = input.extra.get("file_path").and_then(|v| v.as_str()).unwrap_or("");
+            let memory_type = input.extra.get("memory_type").and_then(|v| v.as_str()).unwrap_or("");
+            let load_reason = input.extra.get("load_reason").and_then(|v| v.as_str()).unwrap_or("");
+            tracing::debug!(file_path, memory_type, load_reason, "Instructions loaded");
+
+            // Log managed/enterprise overrides — these can silently change behavior
+            if memory_type == "Managed" {
+                tracing::info!(file_path, "Managed (enterprise) instructions loaded — may override user settings");
+            }
         }
 
         HookEvent::FileChanged => {
-            // Watched file changed — pass through for now
-            tracing::debug!("FileChanged received — pass through");
+            // Watched file changed — log and inject context for important files.
+            let file_path = input.file_path.as_deref()
+                .or_else(|| input.extra.get("file_path").and_then(|v| v.as_str()))
+                .unwrap_or("");
+            let event_type = input.extra.get("event").and_then(|v| v.as_str()).unwrap_or("change");
+            tracing::info!(file_path, event_type, "Watched file changed");
+
+            if file_path.ends_with("CLAUDE.md") {
+                output.system_message = Some(
+                    "[sentinel] CLAUDE.md changed — context may need refresh".to_string()
+                );
+            } else if file_path.ends_with("settings.json") {
+                output.system_message = Some(
+                    "[sentinel] settings.json changed — hook configuration may have been updated".to_string()
+                );
+            }
         }
 
         HookEvent::WorktreeCreate => {
@@ -1064,6 +1122,92 @@ fn show_glass_break_dialog() -> bool {
         eprintln!("[sentinel] Glass break requires interactive confirmation.");
         eprintln!("[sentinel] Use `sentinel break --reason \"...\"` from a terminal.");
         false
+    }
+}
+
+/// Check if a newer Claude Code version is available (24h cooldown).
+///
+/// Queries the npm registry for the latest `@anthropic-ai/claude-code` version
+/// and caches the result to `~/.claude/sentinel/state/version-drift.json`.
+/// Returns a context message if a newer version was detected, None otherwise.
+fn check_version_drift() -> Option<String> {
+    let state_dir = dirs::home_dir()?.join(".claude").join("sentinel").join("state");
+    let drift_file = state_dir.join("version-drift.json");
+
+    // Check cooldown (24 hours)
+    if drift_file.exists() {
+        if let Ok(metadata) = std::fs::metadata(&drift_file) {
+            if let Ok(modified) = metadata.modified() {
+                if modified.elapsed().unwrap_or_default() < std::time::Duration::from_secs(86400) {
+                    // Read cached result
+                    if let Ok(content) = std::fs::read_to_string(&drift_file) {
+                        if let Ok(cached) = serde_json::from_str::<serde_json::Value>(&content) {
+                            if let Some(msg) = cached.get("message").and_then(|v| v.as_str()) {
+                                if !msg.is_empty() {
+                                    return Some(msg.to_string());
+                                }
+                            }
+                        }
+                    }
+                    return None; // Within cooldown, no drift found last check
+                }
+            }
+        }
+    }
+
+    // Run npm view to check latest version (synchronous, ~200ms typically)
+    let result = std::process::Command::new("npm")
+        .args(["view", "@anthropic-ai/claude-code", "version"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+
+    if !result.status.success() {
+        return None; // npm not available or offline
+    }
+
+    let latest = String::from_utf8_lossy(&result.stdout).trim().to_string();
+    if latest.is_empty() {
+        return None;
+    }
+
+    // Get current version from Claude Code env var (set since ~v2.1)
+    let current = std::env::var("CLAUDE_CODE_VERSION").ok();
+    let message = match &current {
+        Some(cur) if cur != &latest => {
+            format!(
+                "[sentinel] Claude Code version drift detected: installed {} → latest {}. \
+                 Run `npm update -g @anthropic-ai/claude-code` to update.",
+                cur, latest
+            )
+        }
+        _ => String::new(), // Same version or can't determine current
+    };
+
+    let entry = serde_json::json!({
+        "latest": latest,
+        "current": current,
+        "checked": chrono::Utc::now().to_rfc3339(),
+        "message": message,
+    });
+
+    let _ = std::fs::create_dir_all(&state_dir);
+    let _ = std::fs::write(
+        &drift_file,
+        serde_json::to_string_pretty(&entry).unwrap_or_default(),
+    );
+
+    tracing::debug!(
+        latest_npm = %latest,
+        current = ?current,
+        "Version drift check completed"
+    );
+
+    if message.is_empty() {
+        None
+    } else {
+        Some(message)
     }
 }
 
