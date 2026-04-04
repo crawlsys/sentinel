@@ -48,29 +48,77 @@ fn project_hash(cwd: &str) -> String {
     result[..4].iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// Search Qdrant synchronously (blocking in a tokio runtime).
-/// Returns formatted memory results for context injection.
-fn search_qdrant(config: &QdrantConfig, query: &str, project_hash: &str) -> Option<String> {
-    // Build the search request
+/// A merged search result from either collection.
+struct SearchHit {
+    score: f64,
+    name: String,
+    source: String, // "memory" or "session"
+    project: String,
+    content: String,
+}
+
+/// Search a single Qdrant collection and return hits.
+async fn search_collection(
+    client: &reqwest::Client,
+    config: &QdrantConfig,
+    collection: &str,
+    query: &str,
+    limit: u32,
+    min_score: f64,
+) -> Vec<SearchHit> {
     let body = serde_json::json!({
-        "query": {
-            "text": query,
-            "model": config.model
-        },
+        "query": { "text": query, "model": config.model },
         "using": "text-dense",
-        "limit": 5,
+        "limit": limit,
         "with_payload": true,
-        "params": {
-            "hnsw_ef": 64
-        }
+        "params": { "hnsw_ef": 64 }
     });
 
-    let url = format!(
-        "{}/collections/{}/points/query",
-        config.cluster_url, config.collection
-    );
+    let url = format!("{}/collections/{}/points/query", config.cluster_url, collection);
 
-    // Use a short-lived tokio runtime for the async HTTP call
+    let resp = match client
+        .post(&url)
+        .header("api-key", &config.api_key)
+        .json(&body)
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(_) => return vec![],
+    };
+
+    let json: serde_json::Value = match resp.json().await {
+        Ok(j) => j,
+        Err(_) => return vec![],
+    };
+
+    let points = json
+        .get("result")
+        .and_then(|r| r.get("points"))
+        .and_then(|p| p.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    let source = if collection == "claude-sessions" { "session" } else { "memory" };
+
+    points
+        .iter()
+        .filter_map(|p| {
+            let score = p.get("score")?.as_f64()?;
+            if score < min_score {
+                return None;
+            }
+            let payload = p.get("payload")?;
+            let name = payload.get("name").and_then(|v| v.as_str()).unwrap_or("unnamed").to_string();
+            let project = payload.get("project").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let content = payload.get("content").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            Some(SearchHit { score, name, source: source.to_string(), project, content })
+        })
+        .collect()
+}
+
+/// Search both Qdrant collections and return merged formatted results.
+fn search_qdrant(config: &QdrantConfig, query: &str, _project_hash: &str) -> Option<String> {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -82,59 +130,41 @@ fn search_qdrant(config: &QdrantConfig, query: &str, project_hash: &str) -> Opti
             .build()
             .ok()?;
 
-        let resp = client
-            .post(&url)
-            .header("api-key", &config.api_key)
-            .header("Content-Type", "application/json")
-            .json(&body)
-            .send()
-            .await
-            .ok()?;
+        // Search both collections in parallel
+        let (memories, sessions) = tokio::join!(
+            search_collection(&client, config, &config.collection, query, 3, 0.30),
+            search_collection(&client, config, "claude-sessions", query, 3, 0.35),
+        );
 
-        let json: serde_json::Value = resp.json().await.ok()?;
-        let points = json
-            .get("result")?
-            .get("points")?
-            .as_array()?;
+        // Merge and sort by score
+        let mut all: Vec<SearchHit> = memories.into_iter().chain(sessions).collect();
+        all.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
 
-        if points.is_empty() {
+        // Cap at 5 total
+        all.truncate(5);
+
+        if all.is_empty() {
             return None;
         }
 
-        // Filter: only include results with score > 0.25 (meaningful similarity)
-        let relevant: Vec<&serde_json::Value> = points
-            .iter()
-            .filter(|p| {
-                p.get("score")
-                    .and_then(|s| s.as_f64())
-                    .map_or(false, |s| s > 0.25)
-            })
-            .collect();
+        let mem_count = all.iter().filter(|h| h.source == "memory").count();
+        let ses_count = all.iter().filter(|h| h.source == "session").count();
+        let mut output = format!(
+            "[Qdrant Memory] {} relevant hit(s) ({} memories, {} sessions):\n",
+            all.len(), mem_count, ses_count
+        );
 
-        if relevant.is_empty() {
-            return None;
-        }
-
-        let mut output = format!("[Qdrant Memory] {} relevant memor(ies) for this context:\n", relevant.len());
-
-        for point in &relevant {
-            let score = point.get("score").and_then(|s| s.as_f64()).unwrap_or(0.0);
-            let payload = point.get("payload")?;
-            let name = payload.get("name").and_then(|v| v.as_str()).unwrap_or("unnamed");
-            let mem_type = payload.get("memory_type").and_then(|v| v.as_str()).unwrap_or("unknown");
-            let project = payload.get("project").and_then(|v| v.as_str()).unwrap_or("");
-            let content = payload.get("content").and_then(|v| v.as_str()).unwrap_or("");
-
-            // Truncate content for context injection (save tokens)
-            let truncated = if content.len() > 300 {
-                format!("{}...", &content[..297])
+        for hit in &all {
+            let truncated = if hit.content.len() > 300 {
+                format!("{}...", &hit.content[..297])
             } else {
-                content.to_string()
+                hit.content.clone()
             };
 
+            let icon = if hit.source == "session" { "Session" } else { "Memory" };
             output.push_str(&format!(
-                "\n- [{:.2}] **{}** ({}, {}):\n  {}\n",
-                score, name, mem_type, project, truncated
+                "\n- [{:.2}] [{}] **{}** ({}):\n  {}\n",
+                hit.score, icon, hit.name, hit.project, truncated
             ));
         }
 
