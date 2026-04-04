@@ -126,6 +126,11 @@ pub fn process(input: &HookInput) -> HookOutput {
         .map(|m| relative_time(&m.updated_at))
         .unwrap_or_else(|| "unknown".to_string());
 
+    // Detect whether any task has blocking relationships
+    let has_blocking = incomplete
+        .iter()
+        .any(|t| !t.blocks.is_empty() || !t.blocked_by.is_empty());
+
     // Build context injection
     let mut context = format!(
         "[Persistent Tasks] {} incomplete task(s) from previous session (updated {time_str}):\n",
@@ -141,20 +146,20 @@ pub fn process(input: &HookInput) -> HookOutput {
             "\n#{} [{status_icon}] {} ({})",
             task.id, task.subject, task.status
         ));
-        if !task.blocked_by.is_empty() {
-            context.push_str(&format!(" [blocked by: {}]", task.blocked_by.join(", ")));
-        }
         if !task.blocks.is_empty() {
             context.push_str(&format!(" [blocks: {}]", task.blocks.join(", ")));
         }
+        if !task.blocked_by.is_empty() {
+            context.push_str(&format!(" [blocked by: {}]", task.blocked_by.join(", ")));
+        }
         if !task.description.is_empty() {
             // Truncate long descriptions
-            let desc = if task.description.len() > 120 {
-                format!("{}...", &task.description[..117])
+            let desc = if task.description.len() > 200 {
+                format!("{}...", &task.description[..197])
             } else {
                 task.description.clone()
             };
-            context.push_str(&format!("\n   {desc}"));
+            context.push_str(&format!("\n  {desc}"));
         }
     }
 
@@ -164,7 +169,19 @@ pub fn process(input: &HookInput) -> HookOutput {
         ));
     }
 
-    context.push_str("\n\nTo continue this work, use TaskCreate to recreate these tasks (with blocking dependencies) or start fresh.");
+    // Add actionable instruction — explicit TaskCreate recreation with blocking chains
+    if has_blocking {
+        context.push_str(
+            "\n\nINSTRUCTION: Recreate these as live tasks using TaskCreate + TaskUpdate(addBlockedBy).\n\
+             Use exact subjects and descriptions. Wire blocking chains exactly as shown.\n\
+             Then mark the first in_progress task as in_progress to resume work.",
+        );
+    } else {
+        context.push_str(
+            "\n\nINSTRUCTION: Recreate these as live tasks using TaskCreate with the exact subjects and descriptions shown above.\n\
+             Then mark any in_progress task as in_progress to resume work.",
+        );
+    }
 
     HookOutput::inject_context(HookEvent::SessionStart, &context)
 }
