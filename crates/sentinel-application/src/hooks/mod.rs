@@ -22,6 +22,7 @@ pub mod mcp_health;
 pub mod memory_extract;
 pub mod memory_feedback;
 pub mod memory_inject;
+pub mod memory_verify;
 pub mod permission_denied;
 pub mod phase_gate;
 pub mod phase_validator;
@@ -69,6 +70,7 @@ pub const HOOK_NAMES: &[&str] = &[
     "memory_extract",
     "memory_feedback",
     "memory_inject",
+    "memory_verify",
     "permission_denied",
     "phase_gate",
     "phase_validator",

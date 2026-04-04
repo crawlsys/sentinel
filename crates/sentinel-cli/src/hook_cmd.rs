@@ -414,6 +414,10 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
             let rehydrate_output = hooks::task_rehydrate::process(&input);
             output.merge(&rehydrate_output);
 
+            // Memory verify — verify stale memories against ground truth (24h cooldown)
+            let verify_output = hooks::memory_verify::process(&input);
+            output.merge(&verify_output);
+
             // Version drift check — runs once per session with 24h cooldown.
             // Checks npm registry for latest Claude Code version and caches result.
             if let Some(drift_msg) = check_version_drift() {

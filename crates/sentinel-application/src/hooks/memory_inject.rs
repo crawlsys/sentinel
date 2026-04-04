@@ -198,6 +198,9 @@ struct SearchHit {
     created_at: Option<String>,
     access_count: Option<u64>,
     memory_type: Option<String>,
+    #[allow(dead_code)]
+    verified: Option<bool>,
+    stale_reason: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -502,6 +505,14 @@ async fn search_collection(
                 .get("memory_type")
                 .and_then(|v| v.as_str())
                 .map(String::from);
+            let verified = payload
+                .get("verified")
+                .and_then(|v| v.as_bool());
+            let stale_reason = payload
+                .get("stale_reason")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(String::from);
             Some(SearchHit {
                 id,
                 score,
@@ -512,6 +523,8 @@ async fn search_collection(
                 created_at,
                 access_count,
                 memory_type,
+                verified,
+                stale_reason,
             })
         })
         .collect()
@@ -575,6 +588,8 @@ fn search_qdrant(config: &QdrantConfig, query: &str, _project_hash: &str, cwd: &
                     created_at: None,
                     access_count: None,
                     memory_type: None,
+                    verified: None,
+                    stale_reason: None,
                 };
                 let hit = std::mem::replace(&mut all[idx], placeholder);
                 (fs, hit)
@@ -606,9 +621,13 @@ fn search_qdrant(config: &QdrantConfig, query: &str, _project_hash: &str, cwd: &
                 n if n >= 3 => " [trusted]",
                 _ => "",
             };
+            let stale_tag = match &hit.stale_reason {
+                Some(reason) => format!(" [STALE: {}]", reason),
+                None => String::new(),
+            };
             output.push_str(&format!(
-                "\n- [{:.2}] [{}]{}{} **{}** ({}):\n  {}\n",
-                final_score, icon, recency, trust, hit.name, hit.project, truncated
+                "\n- [{:.2}] [{}]{}{}{} **{}** ({}):\n  {}\n",
+                final_score, icon, recency, trust, stale_tag, hit.name, hit.project, truncated
             ));
         }
 
@@ -785,6 +804,8 @@ fn precompute_search(config: &QdrantConfig, query: &str, cwd: &str) {
                     created_at: None,
                     access_count: None,
                     memory_type: None,
+                    verified: None,
+                    stale_reason: None,
                 };
                 let hit = std::mem::replace(&mut all[idx], placeholder);
                 (fs, hit)

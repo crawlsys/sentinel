@@ -12,6 +12,13 @@ description = "Initialize session state, generate CLAUDE.md"
 depends_on = []
 has_api_call = false
 
+[[hooks]]
+id = "memory-verify"
+event = "SessionStart"
+description = "Verify stale memories against ground truth (24h cooldown)"
+depends_on = ["session-init"]
+has_api_call = true
+
 # === UserPromptSubmit ===
 
 [[hooks]]
