@@ -30,6 +30,7 @@ pub mod pre_commit_verification;
 pub mod pre_compact;
 pub mod pre_push_steel_test;
 pub mod session_end;
+pub mod session_index;
 pub mod session_init;
 pub mod setup;
 pub mod skill_router;
@@ -75,6 +76,7 @@ pub const HOOK_NAMES: &[&str] = &[
     "pre_compact",
     "pre_push_steel_test",
     "session_end",
+    "session_index",
     "session_init",
     "setup",
     "skill_router",

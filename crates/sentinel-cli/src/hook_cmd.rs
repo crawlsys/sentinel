@@ -418,6 +418,10 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
             // Pre-compact snapshot — save session state before context compaction
             let compact_output = hooks::pre_compact::process(&input);
             output.merge(&compact_output);
+
+            // Session index — upsert transcript exchanges to Qdrant for search
+            let index_output = hooks::session_index::process(&input);
+            output.merge(&index_output);
         }
 
         HookEvent::TeammateIdle => {
