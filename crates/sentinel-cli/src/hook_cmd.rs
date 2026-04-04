@@ -260,6 +260,10 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
             // Activity tracker — inject session activity summary when context is elevated
             let activity_prompt_output = hooks::activity_tracker::process_prompt(&input);
             output.merge(&activity_prompt_output);
+
+            // Memory inject — search Qdrant for semantically relevant memories
+            let memory_output = hooks::memory_inject::process(&input);
+            output.merge(&memory_output);
         }
 
         HookEvent::PreToolUse => {
@@ -371,6 +375,10 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
             // Task persist — final snapshot catches any TaskUpdate calls mid-turn
             let task_persist_output = hooks::task_persist::process(&input);
             output.merge(&task_persist_output);
+
+            // Memory extract — sync recently modified memory files to Qdrant
+            let memory_extract_output = hooks::memory_extract::process(&input);
+            output.merge(&memory_extract_output);
         }
 
         HookEvent::SessionStart => {
