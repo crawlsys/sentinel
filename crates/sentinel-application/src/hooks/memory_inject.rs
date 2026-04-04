@@ -62,6 +62,7 @@ fn project_hash(cwd: &str) -> String {
 
 /// A merged search result from either collection.
 struct SearchHit {
+    id: String, // Qdrant point ID (UUID)
     score: f64,
     name: String,
     source: String, // "memory" or "session"
@@ -70,6 +71,53 @@ struct SearchHit {
     created_at: Option<String>,
     access_count: Option<u64>,
     memory_type: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// State file for feedback loop (Phase 4)
+// ---------------------------------------------------------------------------
+
+/// Written to `~/.claude/sentinel/state/last-injected-memories.json` after each
+/// injection so the `memory_feedback` hook can detect usage and corrections.
+#[derive(serde::Serialize)]
+struct InjectedState {
+    memories: Vec<InjectedMemoryEntry>,
+    timestamp: String,
+    user_prompt: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+struct InjectedMemoryEntry {
+    id: String,
+    name: String,
+    score: f64,
+}
+
+/// Write the list of injected memories to the state file for the feedback hook.
+fn write_injected_state(entries: &[(f64, &SearchHit)], user_prompt: Option<&str>) {
+    let state_dir = match dirs::home_dir() {
+        Some(h) => h.join(".claude").join("sentinel").join("state"),
+        None => return,
+    };
+    let _ = std::fs::create_dir_all(&state_dir);
+
+    let state = InjectedState {
+        memories: entries
+            .iter()
+            .map(|(final_score, hit)| InjectedMemoryEntry {
+                id: hit.id.clone(),
+                name: hit.name.clone(),
+                score: *final_score,
+            })
+            .collect(),
+        timestamp: Utc::now().to_rfc3339(),
+        user_prompt: user_prompt.map(String::from),
+    };
+
+    let path = state_dir.join("last-injected-memories.json");
+    if let Ok(json) = serde_json::to_string_pretty(&state) {
+        let _ = std::fs::write(&path, json);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -304,6 +352,14 @@ async fn search_collection(
             if score < min_score {
                 return None;
             }
+            // Extract point ID (Qdrant returns as string UUID or integer)
+            let id = p
+                .get("id")
+                .map(|v| match v {
+                    serde_json::Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                })
+                .unwrap_or_default();
             let payload = p.get("payload")?;
             let name = payload.get("name").and_then(|v| v.as_str()).unwrap_or("unnamed").to_string();
             let project = payload.get("project").and_then(|v| v.as_str()).unwrap_or("").to_string();
@@ -320,6 +376,7 @@ async fn search_collection(
                 .and_then(|v| v.as_str())
                 .map(String::from);
             Some(SearchHit {
+                id,
                 score,
                 name,
                 source: source.to_string(),
@@ -334,7 +391,7 @@ async fn search_collection(
 }
 
 /// Search both Qdrant collections and return merged formatted results.
-fn search_qdrant(config: &QdrantConfig, query: &str, _project_hash: &str, cwd: &str) -> Option<String> {
+fn search_qdrant(config: &QdrantConfig, query: &str, _project_hash: &str, cwd: &str, user_prompt: Option<&str>) -> Option<String> {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -382,6 +439,7 @@ fn search_qdrant(config: &QdrantConfig, query: &str, _project_hash: &str, cwd: &
             .map(|(fs, idx)| {
                 // We need to take ownership; build a placeholder to swap out
                 let placeholder = SearchHit {
+                    id: String::new(),
                     score: 0.0,
                     name: String::new(),
                     source: String::new(),
@@ -422,6 +480,13 @@ fn search_qdrant(config: &QdrantConfig, query: &str, _project_hash: &str, cwd: &
             ));
         }
 
+        // Phase 4: Write injected state for the feedback hook
+        let state_entries: Vec<(f64, &SearchHit)> = reordered
+            .iter()
+            .map(|(fs, hit)| (*fs, hit))
+            .collect();
+        write_injected_state(&state_entries, user_prompt);
+
         Some(output)
     });
 
@@ -454,7 +519,7 @@ pub fn process(input: &HookInput) -> HookOutput {
     let proj_hash = project_hash(cwd);
 
     // Search Qdrant
-    match search_qdrant(&config, prompt, &proj_hash, cwd) {
+    match search_qdrant(&config, prompt, &proj_hash, cwd, Some(prompt)) {
         Some(context) => {
             debug!(memories = context.lines().count(), "Injecting Qdrant memories");
             HookOutput::inject_context(HookEvent::UserPromptSubmit, &context)
@@ -520,6 +585,7 @@ mod tests {
         access_count: Option<u64>,
     ) -> SearchHit {
         SearchHit {
+            id: "test-id".to_string(),
             score,
             name: "test".to_string(),
             source: source.to_string(),

@@ -20,6 +20,7 @@ pub mod git_hygiene;
 pub mod hygiene_override;
 pub mod mcp_health;
 pub mod memory_extract;
+pub mod memory_feedback;
 pub mod memory_inject;
 pub mod permission_denied;
 pub mod phase_gate;
@@ -66,6 +67,7 @@ pub const HOOK_NAMES: &[&str] = &[
     "hygiene_override",
     "mcp_health",
     "memory_extract",
+    "memory_feedback",
     "memory_inject",
     "permission_denied",
     "phase_gate",

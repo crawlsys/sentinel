@@ -379,6 +379,10 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
             // Memory extract — sync recently modified memory files to Qdrant
             let memory_extract_output = hooks::memory_extract::process(&input);
             output.merge(&memory_extract_output);
+
+            // Memory feedback — boost used memories, flag corrections
+            let memory_feedback_output = hooks::memory_feedback::process(&input);
+            output.merge(&memory_feedback_output);
         }
 
         HookEvent::SessionStart => {
