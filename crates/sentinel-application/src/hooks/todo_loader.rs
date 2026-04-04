@@ -91,10 +91,7 @@ pub fn process(input: &HookInput) -> HookOutput {
     if session_id != "unknown" {
         let marker = session_marker(session_id);
         if marker.exists() {
-            return HookOutput::inject_context(
-                HookEvent::UserPromptSubmit,
-                "[Todos] Already loaded this session".to_string(),
-            );
+            return HookOutput::allow();
         }
     }
 
@@ -103,10 +100,7 @@ pub fn process(input: &HookInput) -> HookOutput {
 
     if all_todos.is_empty() {
         write_session_marker(session_id);
-        return HookOutput::inject_context(
-            HookEvent::UserPromptSubmit,
-            "[Todos] No persistent todos".to_string(),
-        );
+        return HookOutput::allow();
     }
 
     let project_todos = filter_project_todos(&all_todos, cwd);
@@ -114,10 +108,7 @@ pub fn process(input: &HookInput) -> HookOutput {
 
     if project_todos.is_empty() {
         write_session_marker(session_id);
-        return HookOutput::inject_context(
-            HookEvent::UserPromptSubmit,
-            "[Todos] No todos for this project".to_string(),
-        );
+        return HookOutput::allow();
     }
 
     // Count by status
@@ -132,10 +123,7 @@ pub fn process(input: &HookInput) -> HookOutput {
 
     if pending_count == 0 && in_progress_count == 0 {
         write_session_marker(session_id);
-        return HookOutput::inject_context(
-            HookEvent::UserPromptSubmit,
-            "[Todos] No active todos".to_string(),
-        );
+        return HookOutput::allow();
     }
 
     // Count by priority (active only)

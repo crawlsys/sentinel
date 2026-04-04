@@ -167,7 +167,7 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
             {
                 Ok(output) => output,
                 Err(_) => {
-                    tracing::warn!("Skill router timed out (5s) — falling back to regex-only");
+                    debug!("Skill router timed out (5s) — falling back to regex-only");
                     hooks::skill_router::process(&input, &router)
                 }
             };
@@ -201,10 +201,9 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
                             // but do NOT call set_active_skill() which would register
                             // the workflow and trigger the phase gate.
                             state.active_skill = Some(skill.clone());
-                            eprintln!(
-                                "[sentinel] Skill '{}' detected via regex (not slash command) — \
-                                 setting context only, NOT registering workflow.",
-                                skill
+                            debug!(
+                                skill = %skill,
+                                "Skill detected via regex without slash command — setting context only"
                             );
                         } else if workflows.contains_key(&skill) {
                             // Explicit slash command — register the workflow
@@ -368,6 +367,10 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
             // Activity tracker — build session summary from activity log
             let activity_stop_output = hooks::activity_tracker::process_stop(&input);
             output.merge(&activity_stop_output);
+
+            // Task persist — final snapshot catches any TaskUpdate calls mid-turn
+            let task_persist_output = hooks::task_persist::process(&input);
+            output.merge(&task_persist_output);
         }
 
         HookEvent::SessionStart => {
@@ -379,16 +382,21 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
                 // Genuinely new session — use fresh state (already created above)
                 state = SessionState::new(session_id);
             } else {
-                eprintln!(
-                    "[sentinel] SessionStart received for active session '{}' — preserving existing state \
-                     ({} tool calls, {} workflows). This may indicate a mid-session reset attempt.",
-                    session_id, state.tool_calls, state.workflows.len()
+                debug!(
+                    session_id,
+                    tool_calls = state.tool_calls,
+                    workflows = state.workflows.len(),
+                    "SessionStart received for active session — preserving existing state"
                 );
             }
 
             // Session init — log session, sync marketplace repo, inject startup context
             let init_output = hooks::session_init::process(&input);
             output.merge(&init_output);
+
+            // Task rehydrate — inject persistent tasks from previous sessions
+            let rehydrate_output = hooks::task_rehydrate::process(&input);
+            output.merge(&rehydrate_output);
 
             // Version drift check — runs once per session with 24h cooldown.
             // Checks npm registry for latest Claude Code version and caches result.
@@ -414,6 +422,10 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
             // Task verification gate — verify work before marking complete
             let completed_output = hooks::task_completed::process(&input);
             output.merge(&completed_output);
+
+            // Task persist — snapshot task list to persistent markdown + JSON
+            let persist_output = hooks::task_persist::process(&input);
+            output.merge(&persist_output);
         }
 
         // ── New events added from Claude Code v2.1.88 source analysis ──
@@ -446,6 +458,10 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
             // Log task creation for telemetry
             let task_output = hooks::task_created::process(&input);
             output.merge(&task_output);
+
+            // Task persist — snapshot task list to persistent markdown + JSON
+            let persist_output = hooks::task_persist::process(&input);
+            output.merge(&persist_output);
         }
 
         HookEvent::Setup => {
@@ -634,36 +650,30 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
         }
     }
 
-    // Inject project context from CLAUDE_PROJECT env var
-    if let Ok(project) = std::env::var("CLAUDE_PROJECT") {
-        if !project.is_empty() {
-            let project_header = format!("[Project Context] Active project: {}", project);
-            if let Some(ref mut hso) = output.hook_specific_output {
-                match &hso.additional_context {
-                    Some(existing) => {
-                        hso.additional_context =
-                            Some(format!("{}\n\n{}", project_header, existing));
+    // Inject project context only for prompt-scoped events. Adding it to every
+    // tool hook bloats the transcript during tool-heavy sessions and drives
+    // premature compaction.
+    if should_attach_project_context(hook_event) {
+        if let Ok(project) = std::env::var("CLAUDE_PROJECT") {
+            if !project.is_empty() {
+                let project_header = format!("[Project Context] Active project: {}", project);
+                if let Some(ref mut hso) = output.hook_specific_output {
+                    match &hso.additional_context {
+                        Some(existing) => {
+                            hso.additional_context =
+                                Some(format!("{}\n\n{}", project_header, existing));
+                        }
+                        None => {
+                            hso.additional_context = Some(project_header);
+                        }
                     }
-                    None => {
-                        hso.additional_context = Some(project_header);
-                    }
+                } else {
+                    output.hook_specific_output = Some(HookSpecificOutput {
+                        hook_event_name: hook_event.to_string(),
+                        additional_context: Some(project_header),
+                        ..HookSpecificOutput::default()
+                    });
                 }
-            }
-            // If no hook_specific_output at all, create one with project context
-            else if matches!(
-                hook_event,
-                HookEvent::UserPromptSubmit
-                    | HookEvent::PostToolUse
-                    | HookEvent::PostToolUseFailure
-                    | HookEvent::PreToolUse
-                    | HookEvent::SubagentStart
-                    | HookEvent::Setup
-            ) {
-                output.hook_specific_output = Some(HookSpecificOutput {
-                    hook_event_name: hook_event.to_string(),
-                    additional_context: Some(project_header),
-                    ..HookSpecificOutput::default()
-                });
             }
         }
     }
@@ -689,6 +699,16 @@ fn parse_hook_event(event: &str) -> Result<HookEvent> {
             anyhow::bail!("Unknown hook event type: '{}'", event);
         }
     }
+}
+
+fn should_attach_project_context(hook_event: HookEvent) -> bool {
+    matches!(
+        hook_event,
+        HookEvent::SessionStart
+            | HookEvent::UserPromptSubmit
+            | HookEvent::SubagentStart
+            | HookEvent::Setup
+    )
 }
 
 fn hook_timeout(hook_event: HookEvent) -> Duration {
@@ -879,12 +899,10 @@ fn validate_caller() -> Result<()> {
     // Check for Claude Code environment marker.
     // Claude Code sets CLAUDE_CODE_ENTRY_POINT (e.g. "cli", "sdk").
     // Absence is not definitive proof of abuse (could be an older version),
-    // so we only warn — the stdin pipe check above is the hard gate.
+    // so keep it as a debug-only signal instead of stderr noise. Claude treats
+    // stderr from hooks as a non-blocking hook error banner.
     if std::env::var("CLAUDE_CODE_ENTRY_POINT").is_err() {
-        eprintln!(
-            "[sentinel] WARNING: CLAUDE_CODE_ENTRY_POINT not set. \
-             This hook may not have been invoked by Claude Code."
-        );
+        debug!("CLAUDE_CODE_ENTRY_POINT not set for hook invocation");
     }
 
     // Optional parent-process attestation.
@@ -1282,6 +1300,18 @@ mod tests {
         );
         assert_eq!(hook_timeout(HookEvent::PreToolUse), Duration::from_secs(5));
         assert_eq!(hook_timeout(HookEvent::Stop), Duration::from_secs(8));
+    }
+
+    #[test]
+    fn test_project_context_only_attaches_to_prompt_scoped_events() {
+        assert!(should_attach_project_context(HookEvent::SessionStart));
+        assert!(should_attach_project_context(HookEvent::UserPromptSubmit));
+        assert!(should_attach_project_context(HookEvent::SubagentStart));
+        assert!(should_attach_project_context(HookEvent::Setup));
+        assert!(!should_attach_project_context(HookEvent::PreToolUse));
+        assert!(!should_attach_project_context(HookEvent::PostToolUse));
+        assert!(!should_attach_project_context(HookEvent::PostToolUseFailure));
+        assert!(!should_attach_project_context(HookEvent::PostCompact));
     }
 
     #[tokio::test]

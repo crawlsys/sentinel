@@ -46,7 +46,7 @@ impl RigClassifier {
             return Some(classifier);
         }
 
-        warn!("No AI classifier available — falling back to regex-only routing");
+        debug!("No AI classifier available — falling back to regex-only routing");
         None
     }
 

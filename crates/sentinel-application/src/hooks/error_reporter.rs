@@ -12,6 +12,7 @@ use sentinel_domain::events::{HookEvent, HookInput, HookOutput};
 
 /// Cooldown between error reports (10 minutes)
 const COOLDOWN_MS: u64 = 10 * 60 * 1000;
+const MAX_ERRORS_IN_CONTEXT: usize = 3;
 
 /// Linear workspace config for auto-filing — loaded from config file at runtime
 #[derive(Debug, serde::Deserialize)]
@@ -106,7 +107,25 @@ fn read_unresolved_errors(path: &PathBuf) -> Vec<ErrorEntry> {
         .filter(|l| !l.trim().is_empty())
         .filter_map(|line| serde_json::from_str::<ErrorEntry>(line).ok())
         .filter(|entry| entry.resolved.is_none())
+        .filter(|entry| is_actionable_error(entry))
         .collect()
+}
+
+fn is_actionable_error(entry: &ErrorEntry) -> bool {
+    if entry.id.trim().is_empty()
+        || entry.component.trim().is_empty()
+        || entry.severity.trim().is_empty()
+        || entry.error.trim().is_empty()
+    {
+        return false;
+    }
+
+    // These are common runtime/session conditions and prompt-size failures, not
+    // durable infrastructure defects worth injecting into every prompt.
+    !matches!(
+        entry.error.as_str(),
+        "rate_limit" | "auth_error" | "invalid_request"
+    ) && !entry.error.contains("prompt is too long")
 }
 
 /// Check if cooldown has expired
@@ -151,12 +170,14 @@ pub fn process(input: &HookInput) -> HookOutput {
         return HookOutput::allow();
     }
 
-    // Build error lines
+    // Build a compact summary for the newest actionable errors only. Prompt
+    // hooks should stay small; the full error details remain in errors.jsonl.
     let error_lines: Vec<String> = errors
         .iter()
+        .take(MAX_ERRORS_IN_CONTEXT)
         .map(|e| {
             format!(
-                "- [{}] {}/{}: {} (severity: {}, detected: {})",
+                "- [{}] {}/{}: {} ({}, {})",
                 e.id, e.component, e.error_type, e.error, e.severity, e.ts
             )
         })
@@ -170,39 +191,23 @@ pub fn process(input: &HookInput) -> HookOutput {
         .to_string_lossy()
         .replace('\\', "/");
 
+    let extra = errors.len().saturating_sub(error_lines.len());
     let context = format!(
-        "[Error Reporter] {} infrastructure failure(s) detected.\n\
-         \n\
-         MANDATORY: Create Linear issues for these failures in Gary's personal workspace.\n\
-         \n\
-         Steps:\n\
-         1. Switch to personal account: mcp__linear__switch_account(account_name: \"{}\")\n\
-         2. For EACH error below, search first: mcp__linear__search(query: \"[Auto] {{component}}: {{brief description}}\")\n\
-         3. If NO existing open issue matches, create one:\n\
-            - team_id: \"{}\"\n\
-            - title: \"[Auto] {{component}}/{{type}}: {{brief error description}}\"\n\
-            - description: \"Auto-filed by error-reporter hook.\\n\\nError: {{full error message}}\\nSeverity: {{severity}}\\nTimestamp: {{ts}}\\nError ID: {{id}}\"\n\
-            - state_id: \"{}\"\n\
-            - assignee_id: \"{}\"\n\
-            - label_ids: [\"{}\", \"{}\", \"{}\"]\n\
-            - priority: {{use severity mapping: critical=1, warning=2, info=3}}\n\
-         4. After creating ALL issues, write a resolution file:\n\
-            echo '{{\"errorId1\":\"GS-123\"}}' > \"{}\"\n\
-         5. Switch back to default account: mcp__linear__switch_account(account_name: \"default\")\n\
-         6. Confirm to Gary: \"Filed {{N}} infrastructure issues to Linear.\"\n\
-         \n\
-         Errors to file:\n\
+        "[Error Reporter] {} actionable infrastructure issue(s) pending.\n\
+         Use Linear account \"{}\" and team \"{}\" if you are triaging infra health.\n\
+         Resolution file: {}\n\
+         {}\n\
          {}",
         errors.len(),
         linear_config.account,
         linear_config.team_id,
-        linear_config.state_id,
-        linear_config.assignee_id,
-        linear_config.label_bug,
-        linear_config.label_infrastructure,
-        linear_config.label_auto_filed,
         resolutions_path,
         error_lines.join("\n"),
+        if extra > 0 {
+            format!("(+{} more in errors.jsonl)", extra)
+        } else {
+            String::new()
+        }
     );
 
     // Write cooldown marker

@@ -37,6 +37,8 @@ pub mod subagent_start;
 pub mod subagent_stop;
 pub mod task_completed;
 pub mod task_created;
+pub mod task_persist;
+pub mod task_rehydrate;
 pub mod teammate_idle;
 pub mod todo_interceptor;
 pub mod todo_loader;
@@ -78,6 +80,8 @@ pub const HOOK_NAMES: &[&str] = &[
     "subagent_stop",
     "task_completed",
     "task_created",
+    "task_persist",
+    "task_rehydrate",
     "teammate_idle",
     "todo_interceptor",
     "todo_loader",
