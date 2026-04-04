@@ -383,6 +383,10 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
             // Memory feedback — boost used memories, flag corrections
             let memory_feedback_output = hooks::memory_feedback::process(&input);
             output.merge(&memory_feedback_output);
+
+            // Memory inject (Stop phase) — pre-compute Qdrant search for next turn
+            let memory_precompute_output = hooks::memory_inject::process_stop(&input);
+            output.merge(&memory_precompute_output);
         }
 
         HookEvent::SessionStart => {

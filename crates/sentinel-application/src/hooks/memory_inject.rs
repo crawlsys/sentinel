@@ -1,10 +1,15 @@
 //! Memory Inject Hook — search Qdrant on every prompt and inject relevant memories
 //!
-//! Fires on UserPromptSubmit. Takes the user's prompt, queries Qdrant Cloud
-//! for semantically similar memories, and injects the top results into context.
+//! **Non-blocking strategy (Phase 6):**
+//! - On **Stop**: pre-compute Qdrant search results for the NEXT turn using the
+//!   last user prompt. Write results to `precomputed-memories.json`.
+//! - On **UserPromptSubmit**: read precomputed results if fresh (<5 min). Only
+//!   fall back to a live Qdrant search if stale or missing.
+//!
+//! This means the first prompt of a session still does a live search (no
+//! precomputed file yet), but every subsequent prompt is near-instant.
 //!
 //! Uses raw reqwest (not MCP tools — hooks can't call MCP tools).
-//! Must be fast (<500ms) — uses aggressive timeout.
 //!
 //! **Temporal Intelligence (Phase 3):** After retrieval, results are re-ranked
 //! using time-decay + frequency boosting so recent/active memories outrank stale
@@ -13,7 +18,7 @@
 //! ```text
 //! final_score = similarity * recency_boost * frequency_boost
 //! recency_boost = exp(-lambda * days_since_created)
-//! frequency_boost = 1.0 + 0.1 * ln(1 + access_count)
+//! frequency_boost = 1.0 + 0.3 * ln(1 + access_count)
 //! ```
 
 use chrono::Utc;
@@ -22,6 +27,128 @@ use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::path::PathBuf;
 use tracing::debug;
+
+// ---------------------------------------------------------------------------
+// Precomputed memories (non-blocking strategy — Phase 6)
+// ---------------------------------------------------------------------------
+
+/// Precomputed search results written during Stop, read during UserPromptSubmit.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct PrecomputedMemories {
+    results: Vec<PrecomputedHit>,
+    timestamp: String,
+    query: String,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct PrecomputedHit {
+    name: String,
+    score: f64,
+    content: String,
+    source: String,
+    created_at: Option<String>,
+    access_count: u64,
+    memory_type: Option<String>,
+}
+
+/// Maximum age of precomputed results before they are considered stale (5 minutes).
+const PRECOMPUTED_MAX_AGE_SECS: i64 = 300;
+
+fn precomputed_path() -> Option<PathBuf> {
+    dirs::home_dir().map(|h| {
+        h.join(".claude")
+            .join("sentinel")
+            .join("state")
+            .join("precomputed-memories.json")
+    })
+}
+
+/// Read precomputed memories if the file exists and is fresh (<5 min old).
+fn read_precomputed() -> Option<PrecomputedMemories> {
+    let path = precomputed_path()?;
+    let content = std::fs::read_to_string(&path).ok()?;
+    let data: PrecomputedMemories = serde_json::from_str(&content).ok()?;
+
+    // Check freshness
+    let ts = chrono::DateTime::parse_from_rfc3339(&data.timestamp).ok()?;
+    let age_secs = (Utc::now() - ts.with_timezone(&Utc)).num_seconds();
+    if age_secs > PRECOMPUTED_MAX_AGE_SECS {
+        debug!(age_secs, "Precomputed memories stale — will fall back to live search");
+        return None;
+    }
+
+    Some(data)
+}
+
+/// Format precomputed results into the same output format as live search.
+fn format_precomputed(data: &PrecomputedMemories) -> Option<String> {
+    if data.results.is_empty() {
+        return None;
+    }
+
+    let mem_count = data.results.iter().filter(|h| h.source == "memory").count();
+    let ses_count = data.results.iter().filter(|h| h.source == "session").count();
+    let mut output = format!(
+        "[Qdrant Memory] {} relevant hit(s) ({} memories, {} sessions) [precomputed]:\n",
+        data.results.len(),
+        mem_count,
+        ses_count
+    );
+
+    for hit in &data.results {
+        let truncated = if hit.content.len() > 300 {
+            format!("{}...", &hit.content[..297])
+        } else {
+            hit.content.clone()
+        };
+
+        let icon = if hit.source == "session" { "Session" } else { "Memory" };
+        let recency = recency_label(hit.created_at.as_deref());
+        let trust = match hit.access_count {
+            n if n >= 10 => " [highly trusted]",
+            n if n >= 3 => " [trusted]",
+            _ => "",
+        };
+        output.push_str(&format!(
+            "\n- [{:.2}] [{}]{}{} **{}**:\n  {}\n",
+            hit.score, icon, recency, trust, hit.name, truncated
+        ));
+    }
+
+    Some(output)
+}
+
+/// Write precomputed search results for the next turn.
+fn write_precomputed(hits: &[(f64, &SearchHit)], query: &str) {
+    let path = match precomputed_path() {
+        Some(p) => p,
+        None => return,
+    };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+
+    let data = PrecomputedMemories {
+        results: hits
+            .iter()
+            .map(|(score, hit)| PrecomputedHit {
+                name: hit.name.clone(),
+                score: *score,
+                content: hit.content.clone(),
+                source: hit.source.clone(),
+                created_at: hit.created_at.clone(),
+                access_count: hit.access_count.unwrap_or(0),
+                memory_type: hit.memory_type.clone(),
+            })
+            .collect(),
+        timestamp: Utc::now().to_rfc3339(),
+        query: query.to_string(),
+    };
+
+    if let Ok(json) = serde_json::to_string_pretty(&data) {
+        let _ = std::fs::write(&path, json);
+    }
+}
 
 /// Qdrant config (mirrors qdrant-adapters/config.rs)
 #[derive(serde::Deserialize)]
@@ -157,9 +284,9 @@ fn temporal_score(hit: &SearchHit) -> f64 {
         })
         .unwrap_or(1.0); // no timestamp → no penalty
 
-    // Frequency boost: 1.0 + 0.1 * ln(1 + access_count)
+    // Frequency boost: 1.0 + 0.3 * ln(1 + access_count)
     let access = hit.access_count.unwrap_or(0) as f64;
-    let frequency_boost = 1.0 + 0.1 * (1.0 + access).ln();
+    let frequency_boost = 1.0 + 0.3 * (1.0 + access).ln();
 
     hit.score * recency_boost * frequency_boost
 }
@@ -474,9 +601,14 @@ fn search_qdrant(config: &QdrantConfig, query: &str, _project_hash: &str, cwd: &
 
             let icon = if hit.source == "session" { "Session" } else { "Memory" };
             let recency = recency_label(hit.created_at.as_deref());
+            let trust = match hit.access_count.unwrap_or(0) {
+                n if n >= 10 => " [highly trusted]",
+                n if n >= 3 => " [trusted]",
+                _ => "",
+            };
             output.push_str(&format!(
-                "\n- [{:.2}] [{}]{} **{}** ({}):\n  {}\n",
-                final_score, icon, recency, hit.name, hit.project, truncated
+                "\n- [{:.2}] [{}]{}{} **{}** ({}):\n  {}\n",
+                final_score, icon, recency, trust, hit.name, hit.project, truncated
             ));
         }
 
@@ -493,7 +625,7 @@ fn search_qdrant(config: &QdrantConfig, query: &str, _project_hash: &str, cwd: &
     result
 }
 
-/// Process UserPromptSubmit — search Qdrant and inject relevant memories.
+/// Process UserPromptSubmit — inject relevant memories (precomputed or live fallback).
 pub fn process(input: &HookInput) -> HookOutput {
     // Skip if no prompt or prompt is too short
     let prompt = match input.prompt.as_deref() {
@@ -505,6 +637,20 @@ pub fn process(input: &HookInput) -> HookOutput {
     if prompt.trim().starts_with('/') {
         return HookOutput::allow();
     }
+
+    // Phase 6: Try precomputed results first (near-instant)
+    if let Some(precomputed) = read_precomputed() {
+        debug!("Using precomputed memories from Stop phase");
+        if let Some(context) = format_precomputed(&precomputed) {
+            return HookOutput::inject_context(HookEvent::UserPromptSubmit, &context);
+        }
+        // Precomputed file existed but had no results — skip live search too
+        debug!("Precomputed file had no relevant results");
+        return HookOutput::allow();
+    }
+
+    // Fallback: live Qdrant search (first prompt of session, or stale precomputed)
+    debug!("No fresh precomputed memories — falling back to live Qdrant search");
 
     // Load Qdrant config
     let config = match load_config() {
@@ -521,7 +667,7 @@ pub fn process(input: &HookInput) -> HookOutput {
     // Search Qdrant
     match search_qdrant(&config, prompt, &proj_hash, cwd, Some(prompt)) {
         Some(context) => {
-            debug!(memories = context.lines().count(), "Injecting Qdrant memories");
+            debug!(memories = context.lines().count(), "Injecting Qdrant memories (live)");
             HookOutput::inject_context(HookEvent::UserPromptSubmit, &context)
         }
         None => {
@@ -529,6 +675,132 @@ pub fn process(input: &HookInput) -> HookOutput {
             HookOutput::allow()
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Stop phase: pre-compute search results for the NEXT turn
+// ---------------------------------------------------------------------------
+
+/// Process Stop — pre-compute Qdrant search results for the next UserPromptSubmit.
+///
+/// Reads the last user prompt from `last-injected-memories.json` (written by the
+/// previous UserPromptSubmit), searches Qdrant, and writes results to
+/// `precomputed-memories.json` for the next turn to read instantly.
+pub fn process_stop(input: &HookInput) -> HookOutput {
+    // Read the last user prompt from the injected state file
+    let state_dir = match dirs::home_dir() {
+        Some(h) => h.join(".claude").join("sentinel").join("state"),
+        None => return HookOutput::allow(),
+    };
+
+    let state_path = state_dir.join("last-injected-memories.json");
+    let last_prompt = match std::fs::read_to_string(&state_path) {
+        Ok(content) => {
+            let val: serde_json::Value = match serde_json::from_str(&content) {
+                Ok(v) => v,
+                Err(_) => return HookOutput::allow(),
+            };
+            val.get("user_prompt")
+                .and_then(|v| v.as_str())
+                .map(String::from)
+        }
+        Err(_) => None,
+    };
+
+    // Also try the prompt from the current input (Stop events can carry it)
+    let query = last_prompt
+        .or_else(|| input.prompt.clone())
+        .unwrap_or_default();
+
+    if query.len() <= 10 {
+        debug!("No usable prompt for precompute — skipping");
+        return HookOutput::allow();
+    }
+
+    // Load Qdrant config
+    let config = match load_config() {
+        Some(c) => c,
+        None => return HookOutput::allow(),
+    };
+
+    let cwd = input.cwd.as_deref().unwrap_or(".");
+
+    // Run search and write precomputed results
+    precompute_search(&config, &query, cwd);
+
+    HookOutput::allow()
+}
+
+/// Run Qdrant search and write results to `precomputed-memories.json`.
+fn precompute_search(config: &QdrantConfig, query: &str, cwd: &str) {
+    let rt = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(_) => return,
+    };
+
+    rt.block_on(async {
+        let client = match reqwest::Client::builder()
+            .timeout(std::time::Duration::from_millis(1500))
+            .build()
+        {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+
+        // Search both collections in parallel
+        let (memories, sessions) = tokio::join!(
+            search_collection(&client, config, &config.collection, query, 3, 0.30),
+            search_collection(&client, config, "claude-sessions", query, 3, 0.35),
+        );
+
+        let mut all: Vec<SearchHit> = memories.into_iter().chain(sessions).collect();
+
+        // Phase 5: Context-aware dedup
+        let existing_ctx = load_existing_context(cwd);
+        let ctx_shingles = build_shingles(&existing_ctx);
+        all.retain(|hit| !is_duplicate(&hit.content, &ctx_shingles));
+
+        // Phase 3: Temporal re-ranking
+        let mut scored: Vec<(f64, usize)> = all
+            .iter()
+            .enumerate()
+            .map(|(i, hit)| (temporal_score(hit), i))
+            .collect();
+        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+
+        let reordered: Vec<(f64, SearchHit)> = scored
+            .into_iter()
+            .take(5)
+            .map(|(fs, idx)| {
+                let placeholder = SearchHit {
+                    id: String::new(),
+                    score: 0.0,
+                    name: String::new(),
+                    source: String::new(),
+                    project: String::new(),
+                    content: String::new(),
+                    created_at: None,
+                    access_count: None,
+                    memory_type: None,
+                };
+                let hit = std::mem::replace(&mut all[idx], placeholder);
+                (fs, hit)
+            })
+            .collect();
+
+        // Write precomputed results (even if empty — signals "no results" to next turn)
+        let refs: Vec<(f64, &SearchHit)> = reordered.iter().map(|(s, h)| (*s, h)).collect();
+        write_precomputed(&refs, query);
+
+        debug!(
+            hits = reordered.len(),
+            query_len = query.len(),
+            "Precomputed memory search results for next turn"
+        );
+    });
 }
 
 #[cfg(test)]
@@ -830,5 +1102,94 @@ mod tests {
         let cwd = ".";
         let ctx = load_existing_context(cwd);
         assert!(ctx.len() <= DEDUP_CONTEXT_CAP);
+    }
+
+    // -------------------------------------------------------------------
+    // Phase 6: Precomputed memories tests
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_format_precomputed_empty() {
+        let data = PrecomputedMemories {
+            results: vec![],
+            timestamp: Utc::now().to_rfc3339(),
+            query: "test".to_string(),
+        };
+        assert!(format_precomputed(&data).is_none());
+    }
+
+    #[test]
+    fn test_format_precomputed_with_results() {
+        let data = PrecomputedMemories {
+            results: vec![
+                PrecomputedHit {
+                    name: "Test Memory".to_string(),
+                    score: 0.85,
+                    content: "Some test content here".to_string(),
+                    source: "memory".to_string(),
+                    created_at: Some(Utc::now().to_rfc3339()),
+                    access_count: 5,
+                    memory_type: Some("project".to_string()),
+                },
+                PrecomputedHit {
+                    name: "Session Chunk".to_string(),
+                    score: 0.72,
+                    content: "Session data here".to_string(),
+                    source: "session".to_string(),
+                    created_at: None,
+                    access_count: 0,
+                    memory_type: None,
+                },
+            ],
+            timestamp: Utc::now().to_rfc3339(),
+            query: "test query".to_string(),
+        };
+        let output = format_precomputed(&data).unwrap();
+        assert!(output.contains("[precomputed]"));
+        assert!(output.contains("1 memories"));
+        assert!(output.contains("1 sessions"));
+        assert!(output.contains("Test Memory"));
+        assert!(output.contains("Session Chunk"));
+        assert!(output.contains("[trusted]")); // access_count=5 >= 3
+    }
+
+    #[test]
+    fn test_precomputed_staleness() {
+        // A timestamp from 10 minutes ago should be stale (>5 min)
+        let old_ts = (Utc::now() - chrono::Duration::minutes(10)).to_rfc3339();
+        let data = PrecomputedMemories {
+            results: vec![],
+            timestamp: old_ts,
+            query: "test".to_string(),
+        };
+        // Manually check freshness logic
+        let ts = chrono::DateTime::parse_from_rfc3339(&data.timestamp).unwrap();
+        let age_secs = (Utc::now() - ts.with_timezone(&Utc)).num_seconds();
+        assert!(age_secs > PRECOMPUTED_MAX_AGE_SECS);
+    }
+
+    #[test]
+    fn test_precomputed_freshness() {
+        // A timestamp from 1 minute ago should be fresh (<5 min)
+        let recent_ts = (Utc::now() - chrono::Duration::minutes(1)).to_rfc3339();
+        let data = PrecomputedMemories {
+            results: vec![],
+            timestamp: recent_ts,
+            query: "test".to_string(),
+        };
+        let ts = chrono::DateTime::parse_from_rfc3339(&data.timestamp).unwrap();
+        let age_secs = (Utc::now() - ts.with_timezone(&Utc)).num_seconds();
+        assert!(age_secs <= PRECOMPUTED_MAX_AGE_SECS);
+    }
+
+    #[test]
+    fn test_process_stop_no_state() {
+        // Stop with no prior state file — should just allow
+        let input = HookInput {
+            cwd: Some("/nonexistent".to_string()),
+            ..Default::default()
+        };
+        let output = process_stop(&input);
+        assert!(output.blocked.is_none());
     }
 }

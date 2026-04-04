@@ -1,14 +1,14 @@
 //! Memory Feedback Hook — track which injected memories were useful vs wrong
 //!
-//! Fires on Stop. Reads the state file written by `memory_inject` to find out
-//! which memories were injected this turn, then checks the assistant's response
+//! Fires on Stop. Reads the state file written by `memory_inject` to find
+//! which memories were injected this turn, then checks the assistant response
 //! and the user's recent prompt for signals:
 //!
-//! - **Usage signal**: Memory name appears in assistant response -> boost access_count
+//! - **Usage signal**: Memory name appears in assistant response -> boost `access_count`
 //! - **Correction signal**: User prompt contains "no", "that's wrong", "actually",
 //!   etc. after memories were injected -> flag for manual review
 //!
-//! Boost: increments `access_count` and updates `accessed_at` via Qdrant set_payload.
+//! Boost: increments `access_count` and updates `accessed_at` via Qdrant `set_payload`.
 //! Corrections: appended to `~/.claude/sentinel/state/memory-corrections.jsonl`.
 
 use chrono::Utc;
@@ -50,7 +50,7 @@ struct InjectedMemory {
     score: f64,
 }
 
-/// The full state file written by memory_inject on each UserPromptSubmit.
+/// The full state file written by `memory_inject` on each `UserPromptSubmit`.
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 struct InjectedState {
     memories: Vec<InjectedMemory>,
