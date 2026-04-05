@@ -8,8 +8,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use sha2::{Digest, Sha256};
-
 use sentinel_domain::events::{HookEvent, HookInput, HookOutput};
 
 /// A single todo entry from active.jsonl
@@ -23,18 +21,6 @@ struct TodoEntry {
     priority: Option<u8>,
     #[serde(default)]
     project: Option<String>,
-}
-
-/// Compute a short project hash (first 8 hex chars of SHA-256 of the path)
-fn project_hash(cwd: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(cwd.as_bytes());
-    let result = hasher.finalize();
-    hex_encode(&result[..4])
-}
-
-fn hex_encode(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 fn todos_file() -> PathBuf {
@@ -104,7 +90,6 @@ pub fn process(input: &HookInput) -> HookOutput {
     }
 
     let project_todos = filter_project_todos(&all_todos, cwd);
-    let _hash = project_hash(cwd);
 
     if project_todos.is_empty() {
         write_session_marker(session_id);
@@ -195,21 +180,6 @@ mod tests {
     }
 
     #[test]
-    fn test_project_hash_deterministic() {
-        let h1 = project_hash("/home/user/project");
-        let h2 = project_hash("/home/user/project");
-        assert_eq!(h1, h2);
-        assert_eq!(h1.len(), 8);
-    }
-
-    #[test]
-    fn test_project_hash_different_paths() {
-        let h1 = project_hash("/home/user/project-a");
-        let h2 = project_hash("/home/user/project-b");
-        assert_ne!(h1, h2);
-    }
-
-    #[test]
     fn test_read_todos_empty() {
         let dir = TempDir::new().unwrap();
         let path = setup_todos_file(&dir, &[]);
@@ -283,12 +253,6 @@ mod tests {
         let output = process(&input);
         // Should not block, should inject some context
         assert!(output.blocked.is_none());
-    }
-
-    #[test]
-    fn test_hex_encode() {
-        assert_eq!(hex_encode(&[0xab, 0xcd, 0x12, 0x34]), "abcd1234");
-        assert_eq!(hex_encode(&[0x00, 0xff]), "00ff");
     }
 
     #[test]

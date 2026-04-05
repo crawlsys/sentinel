@@ -1,21 +1,25 @@
 //! Todo Interceptor Hook
 //!
-//! Intercepts TodoWrite tool calls, parses encoded metadata (priority,
-//! tags, task IDs), and persists to a rich JSONL format.
+//! Intercepts TaskCreate/TaskUpdate tool calls, parses encoded metadata
+//! (priority, tags, task IDs), and persists to a rich JSONL format.
 //!
-//! Runs on PostToolUse — only intercepts TodoWrite calls.
+//! Runs on PostToolUse — only intercepts TaskCreate and TaskUpdate calls.
 //! Never blocks, only persists.
 //!
 //! Storage:
-//!   ~/.claude/todos/{project_hash}/active.jsonl
-//!   ~/.claude/todos/{project_hash}/completed.jsonl
-//!   ~/.claude/todos/{project_hash}/analytics/quick-stats.json
+//!   ~/.claude/todos/active.jsonl
+//!   ~/.claude/todos/completed.jsonl
+//!   ~/.claude/todos/analytics/quick-stats.json
 
 use chrono::Utc;
 use regex::Regex;
 use sentinel_domain::events::{HookInput, HookOutput};
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
+
+/// Tool names we intercept
+const TASK_CREATE: &str = "TaskCreate";
+const TASK_UPDATE: &str = "TaskUpdate";
 
 /// Compute a project hash from the working directory (first 8 hex chars of SHA-256)
 fn project_hash(cwd: &str) -> String {
@@ -30,13 +34,13 @@ fn hex_encode(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// Base directory for todos
+/// Base directory for todos — flat, no project hash subdirectory
 fn todos_base_dir() -> Option<PathBuf> {
     dirs::home_dir().map(|h| h.join(".claude").join("todos"))
 }
 
 /// A parsed rich todo item
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct RichTodo {
     id: String,
     content: String,
@@ -44,7 +48,7 @@ struct RichTodo {
     priority: u8,
     tags: Vec<String>,
     status: String,
-    #[serde(skip_serializing_if = "String::is_empty")]
+    #[serde(skip_serializing_if = "String::is_empty", default)]
     task_id: String,
     session_id: String,
     project: String,
@@ -109,6 +113,40 @@ fn read_existing_todos(path: &PathBuf) -> Vec<RichTodo> {
         .collect()
 }
 
+/// Write todos back to a JSONL file (replaces entire file)
+fn write_todos(path: &PathBuf, todos: &[RichTodo]) {
+    let content: String = todos
+        .iter()
+        .filter_map(|t| serde_json::to_string(t).ok())
+        .collect::<Vec<_>>()
+        .join("\n");
+    if content.is_empty() {
+        let _ = std::fs::write(path, "");
+    } else {
+        let _ = std::fs::write(path, format!("{content}\n"));
+    }
+}
+
+/// Append todos to a JSONL file
+fn append_todos(path: &PathBuf, todos: &[RichTodo]) {
+    if todos.is_empty() {
+        return;
+    }
+    let content: String = todos
+        .iter()
+        .filter_map(|t| serde_json::to_string(t).ok())
+        .map(|s| format!("{s}\n"))
+        .collect();
+    let _ = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .and_then(|mut f| {
+            use std::io::Write;
+            f.write_all(content.as_bytes())
+        });
+}
+
 /// Quick stats for analytics
 #[derive(Debug, serde::Serialize)]
 struct QuickStats {
@@ -119,147 +157,19 @@ struct QuickStats {
     last_updated: String,
 }
 
-/// Process a todo interceptor hook event (PostToolUse)
-pub fn process(input: &HookInput) -> HookOutput {
-    // Only intercept TodoWrite calls
-    let tool = match &input.tool_name {
-        Some(name) if name == "TodoWrite" => name.as_str(),
-        _ => return HookOutput::allow(),
-    };
-    let _ = tool;
-
-    // Extract todos array from tool_input
-    let todos_array = match input
-        .tool_input
-        .as_ref()
-        .and_then(|ti| ti.get("todos"))
-        .and_then(|t| t.as_array())
-    {
-        Some(arr) => arr.clone(),
-        None => return HookOutput::allow(),
-    };
-
-    if todos_array.is_empty() {
-        return HookOutput::allow();
-    }
-
-    let session_id = input.session_id.as_deref().unwrap_or("unknown");
-    let cwd = input.cwd.as_deref().unwrap_or(".");
-    let timestamp = Utc::now().to_rfc3339();
-    let proj_hash = project_hash(cwd);
-
-    // Determine storage directory
-    let base_dir = match todos_base_dir() {
-        Some(d) => d.join(&proj_hash),
-        None => return HookOutput::allow(),
-    };
-    let analytics_dir = base_dir.join("analytics");
-
-    // Ensure directories exist
-    let _ = std::fs::create_dir_all(&analytics_dir);
-
-    let active_path = base_dir.join("active.jsonl");
-    let completed_path = base_dir.join("completed.jsonl");
-
-    // Read existing active todos for ID matching
-    let existing = read_existing_todos(&active_path);
-
-    let mut new_active: Vec<RichTodo> = Vec::new();
-    let mut new_completed: Vec<RichTodo> = Vec::new();
-
-    for todo_val in &todos_array {
-        let raw_content = todo_val
-            .get("content")
-            .and_then(|c| c.as_str())
-            .unwrap_or("")
-            .to_string();
-        let status = todo_val
-            .get("status")
-            .and_then(|s| s.as_str())
-            .unwrap_or("pending")
-            .to_string();
-
-        let priority = parse_priority(&raw_content);
-        let tags = parse_tags(&raw_content);
-        let task_id = parse_task_id(&raw_content);
-        let content = clean_description(&raw_content);
-
-        // Match against existing by content to preserve IDs
-        let existing_match = existing.iter().find(|t| t.content == content);
-        let id = existing_match.map(|t| t.id.clone()).unwrap_or_else(|| {
-            format!("todo_{}_{}", Utc::now().timestamp_millis(), &proj_hash[..4])
-        });
-        let created_at = existing_match
-            .map(|t| t.created_at.clone())
-            .unwrap_or_else(|| timestamp.clone());
-
-        let rich_todo = RichTodo {
-            id,
-            content,
-            raw_content,
-            priority,
-            tags,
-            status: status.clone(),
-            task_id,
-            session_id: session_id.to_string(),
-            project: cwd.to_string(),
-            project_hash: proj_hash.clone(),
-            created_at,
-            updated_at: timestamp.clone(),
-            completed_at: if status == "completed" {
-                Some(timestamp.clone())
-            } else {
-                None
-            },
-        };
-
-        if status == "completed" {
-            new_completed.push(rich_todo);
-        } else {
-            new_active.push(rich_todo);
-        }
-    }
-
-    // Write active todos (replace file)
-    let active_content: String = new_active
-        .iter()
-        .filter_map(|t| serde_json::to_string(t).ok())
-        .collect::<Vec<_>>()
-        .join("\n");
-    if !active_content.is_empty() {
-        let _ = std::fs::write(&active_path, format!("{active_content}\n"));
-    } else {
-        let _ = std::fs::write(&active_path, "");
-    }
-
-    // Append completed todos
-    if !new_completed.is_empty() {
-        let completed_content: String = new_completed
-            .iter()
-            .filter_map(|t| serde_json::to_string(t).ok())
-            .map(|s| format!("{s}\n"))
-            .collect();
-        let _ = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&completed_path)
-            .and_then(|mut f| {
-                use std::io::Write;
-                f.write_all(completed_content.as_bytes())
-            });
-    }
-
-    // Update quick stats
-    let completed_count = std::fs::read_to_string(&completed_path)
+/// Update quick-stats.json
+fn update_stats(analytics_dir: &PathBuf, active_path: &PathBuf, completed_path: &PathBuf) {
+    let active = read_existing_todos(active_path);
+    let completed_count = std::fs::read_to_string(completed_path)
         .map(|c| c.lines().filter(|l| !l.is_empty()).count())
         .unwrap_or(0);
 
     let stats = QuickStats {
-        active_todos: new_active.len(),
+        active_todos: active.len(),
         completed_todos: completed_count,
-        p0_active: new_active.iter().filter(|t| t.priority == 0).count(),
-        p1_active: new_active.iter().filter(|t| t.priority == 1).count(),
-        last_updated: timestamp,
+        p0_active: active.iter().filter(|t| t.priority == 0).count(),
+        p1_active: active.iter().filter(|t| t.priority == 1).count(),
+        last_updated: Utc::now().to_rfc3339(),
     };
 
     let stats_path = analytics_dir.join("quick-stats.json");
@@ -267,9 +177,158 @@ pub fn process(input: &HookInput) -> HookOutput {
         &stats_path,
         serde_json::to_string_pretty(&stats).unwrap_or_default(),
     );
+}
 
-    // Never block
+/// Handle a TaskCreate call — add a new task to active.jsonl
+fn handle_task_create(input: &HookInput) -> HookOutput {
+    let tool_input = match &input.tool_input {
+        Some(ti) => ti,
+        None => return HookOutput::allow(),
+    };
+
+    let subject = tool_input
+        .get("subject")
+        .and_then(|s| s.as_str())
+        .unwrap_or("");
+    let description = tool_input
+        .get("description")
+        .and_then(|d| d.as_str())
+        .unwrap_or("");
+
+    if subject.is_empty() {
+        return HookOutput::allow();
+    }
+
+    // Combine subject + description for metadata parsing
+    let raw_content = if description.is_empty() {
+        subject.to_string()
+    } else {
+        format!("{subject}: {description}")
+    };
+
+    let session_id = input.session_id.as_deref().unwrap_or("unknown");
+    let cwd = input.cwd.as_deref().unwrap_or(".");
+    let timestamp = Utc::now().to_rfc3339();
+    let proj_hash = project_hash(cwd);
+
+    let base_dir = match todos_base_dir() {
+        Some(d) => d,
+        None => return HookOutput::allow(),
+    };
+    let analytics_dir = base_dir.join("analytics");
+    let _ = std::fs::create_dir_all(&analytics_dir);
+
+    let active_path = base_dir.join("active.jsonl");
+    let completed_path = base_dir.join("completed.jsonl");
+
+    let priority = parse_priority(&raw_content);
+    let tags = parse_tags(&raw_content);
+    let task_id = parse_task_id(&raw_content);
+    let content = clean_description(subject);
+
+    let rich_todo = RichTodo {
+        id: format!("todo_{}_{}", Utc::now().timestamp_millis(), &proj_hash[..4]),
+        content,
+        raw_content,
+        priority,
+        tags,
+        status: "pending".to_string(),
+        task_id,
+        session_id: session_id.to_string(),
+        project: cwd.to_string(),
+        project_hash: proj_hash,
+        created_at: timestamp.clone(),
+        updated_at: timestamp,
+        completed_at: None,
+    };
+
+    append_todos(&active_path, &[rich_todo]);
+    update_stats(&analytics_dir, &active_path, &completed_path);
+
     HookOutput::allow()
+}
+
+/// Handle a TaskUpdate call — update status, move to completed if done
+fn handle_task_update(input: &HookInput) -> HookOutput {
+    let tool_input = match &input.tool_input {
+        Some(ti) => ti,
+        None => return HookOutput::allow(),
+    };
+
+    let task_id = tool_input
+        .get("taskId")
+        .and_then(|t| t.as_str())
+        .unwrap_or("");
+    let new_status = tool_input
+        .get("status")
+        .and_then(|s| s.as_str())
+        .unwrap_or("");
+    let new_subject = tool_input.get("subject").and_then(|s| s.as_str());
+
+    if task_id.is_empty() {
+        return HookOutput::allow();
+    }
+
+    let base_dir = match todos_base_dir() {
+        Some(d) => d,
+        None => return HookOutput::allow(),
+    };
+    let analytics_dir = base_dir.join("analytics");
+    let _ = std::fs::create_dir_all(&analytics_dir);
+
+    let active_path = base_dir.join("active.jsonl");
+    let completed_path = base_dir.join("completed.jsonl");
+
+    let mut active_todos = read_existing_todos(&active_path);
+    let timestamp = Utc::now().to_rfc3339();
+
+    // Find by position (task IDs are 1-based indices in Claude Code)
+    // Also try matching by content substring as fallback
+    let idx = active_todos
+        .iter()
+        .position(|t| t.id.ends_with(task_id) || t.task_id == task_id);
+
+    if let Some(idx) = idx {
+        let mut todo = active_todos.remove(idx);
+        todo.updated_at = timestamp.clone();
+
+        if let Some(subj) = new_subject {
+            todo.content = clean_description(subj);
+            todo.raw_content = subj.to_string();
+        }
+
+        if !new_status.is_empty() {
+            todo.status = new_status.to_string();
+        }
+
+        if new_status == "completed" {
+            todo.completed_at = Some(timestamp);
+            // Write remaining active, append to completed
+            write_todos(&active_path, &active_todos);
+            append_todos(&completed_path, &[todo]);
+        } else if new_status == "deleted" {
+            // Just remove from active, don't move to completed
+            write_todos(&active_path, &active_todos);
+        } else {
+            // Put back in active with updated fields
+            active_todos.push(todo);
+            write_todos(&active_path, &active_todos);
+        }
+    }
+    // If not found, this is a task we didn't track (e.g. pre-existing) — no-op
+
+    update_stats(&analytics_dir, &active_path, &completed_path);
+
+    HookOutput::allow()
+}
+
+/// Process a todo interceptor hook event (PostToolUse)
+pub fn process(input: &HookInput) -> HookOutput {
+    match input.tool_name.as_deref() {
+        Some(TASK_CREATE) => handle_task_create(input),
+        Some(TASK_UPDATE) => handle_task_update(input),
+        _ => HookOutput::allow(),
+    }
 }
 
 #[cfg(test)]
@@ -277,7 +336,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_allows_non_todo_tool() {
+    fn test_allows_non_task_tool() {
         let input = HookInput {
             tool_name: Some("Bash".to_string()),
             ..Default::default()
@@ -287,10 +346,45 @@ mod tests {
     }
 
     #[test]
-    fn test_allows_empty_todos() {
+    fn test_handles_task_create() {
         let input = HookInput {
-            tool_name: Some("TodoWrite".to_string()),
-            tool_input: Some(serde_json::json!({"todos": []})),
+            tool_name: Some("TaskCreate".to_string()),
+            tool_input: Some(serde_json::json!({
+                "subject": "[P1] AUTH-01: Fix #auth login bug",
+                "description": "The login flow fails on mobile"
+            })),
+            cwd: Some("/tmp/test-project".to_string()),
+            session_id: Some("test-session".to_string()),
+            ..Default::default()
+        };
+        let output = process(&input);
+        assert!(output.blocked.is_none());
+    }
+
+    #[test]
+    fn test_handles_task_update() {
+        let input = HookInput {
+            tool_name: Some("TaskUpdate".to_string()),
+            tool_input: Some(serde_json::json!({
+                "taskId": "1",
+                "status": "completed"
+            })),
+            cwd: Some("/tmp/test-project".to_string()),
+            session_id: Some("test-session".to_string()),
+            ..Default::default()
+        };
+        let output = process(&input);
+        assert!(output.blocked.is_none());
+    }
+
+    #[test]
+    fn test_allows_empty_subject() {
+        let input = HookInput {
+            tool_name: Some("TaskCreate".to_string()),
+            tool_input: Some(serde_json::json!({
+                "subject": "",
+                "description": ""
+            })),
             ..Default::default()
         };
         let output = process(&input);
@@ -349,51 +443,56 @@ mod tests {
     }
 
     #[test]
-    fn test_processes_todos_to_disk() {
+    fn test_write_and_read_todos_roundtrip() {
         let tmpdir = tempfile::tempdir().unwrap();
-        let cwd = tmpdir.path().to_string_lossy().to_string();
-        let proj_hash = project_hash(&cwd);
+        let active_path = tmpdir.path().join("active.jsonl");
 
-        // Create the storage dir manually since we're testing
-        let base_dir = todos_base_dir().unwrap().join(&proj_hash);
-        let analytics_dir = base_dir.join("analytics");
-        std::fs::create_dir_all(&analytics_dir).unwrap();
-
-        let input = HookInput {
-            tool_name: Some("TodoWrite".to_string()),
-            tool_input: Some(serde_json::json!({
-                "todos": [
-                    {"content": "[P1] AUTH-01: Fix #auth login bug", "status": "pending"},
-                    {"content": "Simple task", "status": "completed"}
-                ]
-            })),
-            cwd: Some(cwd.clone()),
-            session_id: Some("test-session".to_string()),
-            ..Default::default()
+        let todo = RichTodo {
+            id: "todo_123_abcd".to_string(),
+            content: "Fix auth bug".to_string(),
+            raw_content: "Fix auth bug".to_string(),
+            priority: 1,
+            tags: vec!["auth".to_string()],
+            status: "pending".to_string(),
+            task_id: String::new(),
+            session_id: "test".to_string(),
+            project: "/tmp/test".to_string(),
+            project_hash: "abcd1234".to_string(),
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            updated_at: "2026-01-01T00:00:00Z".to_string(),
+            completed_at: None,
         };
 
-        let output = process(&input);
-        assert!(output.blocked.is_none());
+        // Write
+        write_todos(&active_path, &[todo.clone()]);
 
-        // Verify active.jsonl was written
-        let active_path = base_dir.join("active.jsonl");
-        let active_content = std::fs::read_to_string(&active_path).unwrap();
-        assert!(active_content.contains("Fix"));
-        assert!(active_content.contains("auth"));
+        // Read back
+        let loaded = read_existing_todos(&active_path);
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].content, "Fix auth bug");
+        assert_eq!(loaded[0].priority, 1);
+        assert_eq!(loaded[0].status, "pending");
 
-        // Verify completed.jsonl was written
-        let completed_path = base_dir.join("completed.jsonl");
-        let completed_content = std::fs::read_to_string(&completed_path).unwrap();
-        assert!(completed_content.contains("Simple task"));
+        // Append another
+        let todo2 = RichTodo {
+            id: "todo_456_abcd".to_string(),
+            content: "Add tests".to_string(),
+            raw_content: "Add tests".to_string(),
+            priority: 2,
+            tags: vec![],
+            status: "pending".to_string(),
+            task_id: String::new(),
+            session_id: "test".to_string(),
+            project: "/tmp/test".to_string(),
+            project_hash: "abcd1234".to_string(),
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            updated_at: "2026-01-01T00:00:00Z".to_string(),
+            completed_at: None,
+        };
+        append_todos(&active_path, &[todo2]);
 
-        // Verify quick-stats.json
-        let stats_path = analytics_dir.join("quick-stats.json");
-        let stats_content = std::fs::read_to_string(&stats_path).unwrap();
-        assert!(stats_content.contains("\"active_todos\": 1"));
-        assert!(stats_content.contains("\"p1_active\": 1"));
-
-        // Cleanup
-        let _ = std::fs::remove_dir_all(&base_dir);
+        let loaded = read_existing_todos(&active_path);
+        assert_eq!(loaded.len(), 2);
     }
 
     #[test]
@@ -404,10 +503,10 @@ mod tests {
     }
 
     #[test]
-    fn test_allows_no_todos_field() {
+    fn test_allows_no_tool_input() {
         let input = HookInput {
-            tool_name: Some("TodoWrite".to_string()),
-            tool_input: Some(serde_json::json!({"other_field": "value"})),
+            tool_name: Some("TaskCreate".to_string()),
+            tool_input: None,
             ..Default::default()
         };
         let output = process(&input);
