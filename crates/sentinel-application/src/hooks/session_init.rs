@@ -13,8 +13,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use chrono::Timelike;
-use sentinel_domain::events::{HookEvent, HookInput, HookOutput};
+use sentinel_domain::events::{HookInput, HookOutput};
 
+#[cfg(test)]
 use crate::project_init;
 
 // ---------------------------------------------------------------------------
@@ -1295,6 +1296,7 @@ fn detect_project_from_cwd(cwd: &str) -> Option<String> {
     Some(project.to_string())
 }
 
+#[cfg(test)]
 fn auto_init_project(cwd: &str) -> Option<sentinel_domain::project::InitResult> {
     let cwd_path = Path::new(cwd);
 

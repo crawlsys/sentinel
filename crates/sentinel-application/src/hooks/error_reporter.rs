@@ -16,6 +16,7 @@ const MAX_ERRORS_IN_CONTEXT: usize = 3;
 
 /// Linear workspace config for auto-filing — loaded from config file at runtime
 #[derive(Debug, serde::Deserialize)]
+#[allow(dead_code)]
 struct LinearConfig {
     account: String,
     team_id: String,

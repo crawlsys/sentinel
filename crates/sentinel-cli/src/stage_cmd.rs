@@ -58,6 +58,7 @@ fn sha256_file(path: &std::path::Path) -> Result<String> {
 
 /// Verify the staged binary's integrity against its hash file.
 /// Returns Ok(hash) if valid, Err if tampered or missing.
+#[allow(dead_code)]
 pub fn verify_staged() -> Result<String> {
     let staged = staged_path()?;
     let hash_file = staged_hash_path()?;

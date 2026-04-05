@@ -25,7 +25,7 @@ use tracing::{debug, info, warn};
 
 /// Check if any memory files were modified in the last 30 seconds
 /// (indicating Claude's auto-memory just wrote something).
-fn recently_modified_memories(cwd: &str) -> Vec<PathBuf> {
+fn recently_modified_memories(_cwd: &str) -> Vec<PathBuf> {
     let home = match dirs::home_dir() {
         Some(h) => h,
         None => return vec![],
