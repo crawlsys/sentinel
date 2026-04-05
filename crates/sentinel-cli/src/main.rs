@@ -13,6 +13,7 @@ use tracing_subscriber::EnvFilter;
 
 mod api;
 mod break_cmd;
+mod config_cmd;
 mod daemon_cmd;
 mod hook_cmd;
 mod init_cmd;
@@ -151,6 +152,12 @@ enum Commands {
         dir: Option<String>,
     },
 
+    /// Manage user configuration (~/.claude/sentinel/user.toml)
+    Config {
+        #[command(subcommand)]
+        action: ConfigAction,
+    },
+
     /// Glass break — emergency workflow override (interactive terminal only)
     Break {
         /// Reason for the break (required for initiation)
@@ -181,6 +188,19 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+}
+
+#[derive(Subcommand)]
+enum ConfigAction {
+    /// Set a config value (e.g., `sentinel config set name "Gary"`)
+    Set {
+        /// Config key (currently: name)
+        key: String,
+        /// Value to set
+        value: String,
+    },
+    /// Show current configuration
+    Show,
 }
 
 #[derive(Subcommand)]
@@ -248,6 +268,10 @@ async fn main() -> anyhow::Result<()> {
             all,
             dir,
         } => init_cmd::run(dry_run, force, all, dir).await,
+        Commands::Config { action } => match action {
+            ConfigAction::Set { key, value } => config_cmd::set(&key, &value),
+            ConfigAction::Show => config_cmd::show(),
+        },
         Commands::Break {
             reason,
             duration,

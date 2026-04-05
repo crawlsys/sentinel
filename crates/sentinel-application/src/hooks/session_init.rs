@@ -16,6 +16,43 @@ use sentinel_domain::events::{HookEvent, HookInput, HookOutput};
 
 use crate::project_init;
 
+// ---------------------------------------------------------------------------
+// User configuration (~/.claude/sentinel/user.toml)
+// ---------------------------------------------------------------------------
+
+/// User-specific settings loaded from `~/.claude/sentinel/user.toml`.
+///
+/// Example file:
+/// ```toml
+/// name = "Gary"
+/// ```
+#[derive(serde::Deserialize, Default)]
+struct UserConfig {
+    /// Display name used in CLAUDE.md (e.g., "Always address the user as **{name}**")
+    name: Option<String>,
+}
+
+/// Load user config from `~/.claude/sentinel/user.toml`.
+/// Returns default config if the file doesn't exist or can't be parsed.
+fn load_user_config() -> UserConfig {
+    let path = dirs::home_dir()
+        .unwrap_or_default()
+        .join(".claude")
+        .join("sentinel")
+        .join("user.toml");
+    match fs::read_to_string(&path) {
+        Ok(content) => toml::from_str(&content).unwrap_or_default(),
+        Err(_) => UserConfig::default(),
+    }
+}
+
+/// Get the configured user name, or "there" as a neutral fallback.
+pub fn user_name() -> String {
+    load_user_config()
+        .name
+        .unwrap_or_else(|| "there".to_string())
+}
+
 /// Well-known marketplace repo locations to check
 const REPO_CANDIDATES: &[&str] = &[
     "Documents/GitHub/claude-code-marketplace",
@@ -500,6 +537,7 @@ fn generate_claude_md(
     let date_str = now.format("%A, %B %-d, %Y").to_string();
     let year = now.format("%Y").to_string();
     let month = now.format("%B").to_string();
+    let user_name = user_name();
 
     // Build dynamic sections
     let projects_section = if project_names.is_empty() {
@@ -552,7 +590,7 @@ fn generate_claude_md(
 
 ## User Preferences
 
-- Always address the user as **Gary**
+- Always address the user as **{user_name}**
 - On your FIRST message of each conversation, start with a robot emoji to confirm this file is being read
 - When working on code changes in any git repository, **always use git worktrees** (`EnterWorktree`) to isolate changes rather than editing directly on the current branch. This applies to all repos — sentinel, MCP servers, CLIs, everything.
 
@@ -909,7 +947,7 @@ persist, forever.
 
 At the start of a new session, if you don't already know your _mode state_,
 always default to `Planned`. Also show this message as soon as you can speak:
-`Hello [USER_NAME]! Just to let you know, I have two modes: 🚀 Autopilot (fast, smart, autonomous), or 📋 Planned (safe, methodical) [default].\nYou can switch modes anytime by saying "autopilot" or "planned".`
+`Hello {user_name}! Just to let you know, I have two modes: 🚀 Autopilot (fast, smart, autonomous), or 📋 Planned (safe, methodical) [default].\nYou can switch modes anytime by saying "autopilot" or "planned".`
 
 ### Status Indicator
 
