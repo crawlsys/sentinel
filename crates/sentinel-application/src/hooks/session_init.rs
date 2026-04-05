@@ -12,6 +12,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use chrono::Timelike;
 use sentinel_domain::events::{HookEvent, HookInput, HookOutput};
 
 use crate::project_init;
@@ -51,6 +52,16 @@ pub fn user_name() -> String {
     load_user_config()
         .name
         .unwrap_or_else(|| "there".to_string())
+}
+
+/// Return "Good morning", "Good afternoon", or "Good evening" based on local time.
+fn time_greeting() -> &'static str {
+    let hour = chrono::Local::now().hour();
+    match hour {
+        5..=11 => "Good morning",
+        12..=17 => "Good afternoon",
+        _ => "Good evening",
+    }
 }
 
 /// Well-known marketplace repo locations to check
@@ -538,6 +549,7 @@ fn generate_claude_md(
     let year = now.format("%Y").to_string();
     let month = now.format("%B").to_string();
     let user_name = user_name();
+    let greeting = time_greeting();
 
     // Build dynamic sections
     let projects_section = if project_names.is_empty() {
@@ -947,7 +959,7 @@ persist, forever.
 
 At the start of a new session, if you don't already know your _mode state_,
 always default to `Planned`. Also show this message as soon as you can speak:
-`Hello {user_name}! Just to let you know, I have two modes: 🚀 Autopilot (fast, smart, autonomous), or 📋 Planned (safe, methodical) [default].\nYou can switch modes anytime by saying "autopilot" or "planned".`
+`{greeting}, {user_name}! Just to let you know, I have two modes: 🚀 Autopilot (fast, smart, autonomous), or 📋 Planned (safe, methodical) [default].\nYou can switch modes anytime by saying "autopilot" or "planned".`
 
 ### Status Indicator
 
