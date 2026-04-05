@@ -152,9 +152,9 @@ RULES:
 4. Be precise — "fix the router" in a coding context means debug/refactor, NOT the "internet" skill
 5. "router" in software context (skill router, mcp-router, React Router) is NEVER the "internet" skill
 6. The "internet" skill is ONLY for physical network hardware (ATT gateway, Netgear router, port forwarding, DHCP)
-7. The "execute" skill is ONLY for explicit "do it" / "build it" / "implement this" commands, NOT for general affirmative responses like "yes", "lets do it", "go ahead"
-8. Slash commands (/commit, /test, /review, etc.) are already handled — you won't see them
-9. Short affirmative responses ("yes", "y", "ok", "sure", "do it", "keep going", "continue", "all", "lets go") are ALWAYS "none" — they continue the current conversation, not invoke a skill
+7. The "execute" skill is ONLY for explicit "do it" / "build it" / "implement this" commands, NOT for general affirmative responses
+8. Slash commands: /commit → commit, /test → test, /review → review, /plan → plan, /pr → pr, /debug → debug, /explore → explore, /session → session, /skills → skills. Handle typos: /commti → commit, /reveiw → review, /tset → test. Slash commands with args: "/memory search DDD" → memory
+9. Short affirmative responses ("yes", "y", "ok", "sure", "do it", "keep going", "continue", "all", "lets go", "keep rolling", "next") are ALWAYS "none"
 10. When ambiguous, prefer "none" over a wrong match
 
 SKILL CATALOG:

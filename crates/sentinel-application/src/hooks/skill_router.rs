@@ -403,40 +403,31 @@ pub fn process(input: &HookInput, router: &RegexRouter) -> HookOutput {
     }
 }
 
-/// Process a skill-router hook event with AI classification.
+/// Process a skill-router hook event — pure AI classification.
 ///
-/// Flow:
-/// 1. Slash commands (^/...) — regex for exact match (always unambiguous)
-/// 2. Everything else — Claude Opus 4.6 classifies against full skill catalog
-/// 3. Validate AI return against actual skill directories on disk
-/// 4. AI unavailable or returns "none" → no match
+/// ALL routing goes through Claude Opus 4.6 — slash commands, natural
+/// language, typos, everything. No regex. Opus understands "/commti"
+/// is a typo for "commit" and "/memory search DDD" means the memory skill.
 ///
-/// NO regex fallback for non-slash prompts. Opus handles all routing.
+/// Validates AI return against actual skill directories on disk.
 pub async fn process_with_ai(
     input: &HookInput,
-    router: &RegexRouter,
+    _router: &RegexRouter,
     classifier: Option<&dyn crate::classifier::AiClassifier>,
 ) -> HookOutput {
     let prompt = match &input.prompt {
-        Some(p) => p,
-        None => return HookOutput::allow(),
+        Some(p) if !p.trim().is_empty() => p,
+        _ => return HookOutput::allow(),
     };
 
-    // 1. Slash commands — regex handles these definitively
-    if prompt.trim().starts_with('/') {
-        return match router.route(prompt) {
-            Some(m) => build_match_output(&m.skill, input, prompt, "slash"),
-            None => build_no_match_output(),
-        };
-    }
-
-    // 2. AI classification — Opus classifies against full skill catalog
+    // AI classification — Opus classifies everything
     if let Some(ai) = classifier {
         match ai.classify(prompt, &[]).await {
             Ok(Some(skill)) => {
                 // Validate: skill directory must exist on disk
                 if is_valid_skill(&skill) {
-                    return build_match_output(&skill, input, prompt, "ai");
+                    let source = if prompt.trim().starts_with('/') { "ai-slash" } else { "ai" };
+                    return build_match_output(&skill, input, prompt, source);
                 }
                 tracing::warn!(
                     returned_skill = %skill,
@@ -444,14 +435,14 @@ pub async fn process_with_ai(
                 );
             }
             Ok(None) => {
-                // AI says no skill matches — this is the correct "none" path
+                // AI says no skill matches
             }
             Err(e) => {
                 tracing::warn!(error = %e, "AI classifier failed — no routing");
             }
         }
     } else {
-        tracing::debug!("No AI classifier available — no routing for non-slash prompts");
+        tracing::debug!("No AI classifier available — no routing");
     }
 
     build_no_match_output()
