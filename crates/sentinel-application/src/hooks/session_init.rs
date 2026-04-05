@@ -532,6 +532,26 @@ fn list_linear_accounts(claude_dir: &Path) -> Vec<String> {
         }
     }
 
+    // Read actual account names from Linear CLI token store
+    // This is the authoritative source — names like "gary.somerhalder@gmail.com (claude-code)"
+    let token_store = dirs::data_dir()
+        .or_else(|| dirs::home_dir().map(|h| h.join("AppData").join("Roaming")))
+        .map(|d| d.join("linear").join("linear-cli").join("data").join("tokens.json"));
+
+    if let Some(path) = token_store {
+        if let Ok(content) = fs::read_to_string(&path) {
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
+                if let Some(accts) = json.get("accounts").and_then(|a| a.as_object()) {
+                    // Replace accounts with the real names from token store
+                    accounts.clear();
+                    for name in accts.keys() {
+                        accounts.push(name.clone());
+                    }
+                }
+            }
+        }
+    }
+
     accounts.sort();
     accounts.dedup();
     accounts
