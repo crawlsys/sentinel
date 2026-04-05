@@ -48,6 +48,7 @@ pub mod teammate_idle;
 pub mod todo_interceptor;
 pub mod todo_loader;
 pub mod verification_gate;
+pub mod worktree_reminder;
 pub mod wrangler_guard;
 
 /// All hook module names — used for dynamic counting.
@@ -96,6 +97,7 @@ pub const HOOK_NAMES: &[&str] = &[
     "todo_interceptor",
     "todo_loader",
     "verification_gate",
+    "worktree_reminder",
     "wrangler_guard",
 ];
 

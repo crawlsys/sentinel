@@ -43,6 +43,13 @@ depends_on = ["skill-router"]
 has_api_call = true  # Uses Haiku for validation
 
 [[hooks]]
+id = "worktree-reminder"
+event = "UserPromptSubmit"
+description = "Remind to use git worktrees for code changes in repos"
+depends_on = []
+has_api_call = false
+
+[[hooks]]
 id = "hygiene-override"
 event = "UserPromptSubmit"
 description = "Override hygiene rules when appropriate"

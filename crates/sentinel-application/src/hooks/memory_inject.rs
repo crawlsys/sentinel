@@ -887,6 +887,8 @@ mod tests {
             created_at: created_at.map(String::from),
             access_count,
             memory_type: memory_type.map(String::from),
+            verified: None,
+            stale_reason: None,
         }
     }
 

@@ -231,6 +231,10 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
             let override_output = hooks::hygiene_override::process(&input);
             output.merge(&override_output);
 
+            // Worktree reminder — remind to use EnterWorktree in git repos
+            let worktree_output = hooks::worktree_reminder::process(&input);
+            output.merge(&worktree_output);
+
             // Todo loader — inject active todos into context
             let todo_output = hooks::todo_loader::process(&input);
             output.merge(&todo_output);

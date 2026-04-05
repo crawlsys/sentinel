@@ -554,6 +554,7 @@ fn generate_claude_md(
 
 - Always address the user as **Gary**
 - On your FIRST message of each conversation, start with a robot emoji to confirm this file is being read
+- When working on code changes in any git repository, **always use git worktrees** (`EnterWorktree`) to isolate changes rather than editing directly on the current branch. This applies to all repos — sentinel, MCP servers, CLIs, everything.
 
 ## Date Context
 
