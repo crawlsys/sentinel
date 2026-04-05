@@ -1,7 +1,7 @@
 //! AI Skill Classifier via Rig LLM framework
 //!
-//! Uses Cerebras (fastest, ~200ms) for intent classification.
-//! Falls back to OpenAI, then Anthropic if Cerebras is unavailable.
+//! Uses Claude Opus 4.6 (primary) for intent classification.
+//! Falls back to Cerebras, then OpenAI if Anthropic is unavailable.
 //! The classifier receives the user's message + a compact skill catalog
 //! and returns the best-matching skill name (or "none").
 
@@ -10,13 +10,16 @@ use futures::future::BoxFuture;
 use rig_core::agent::AgentBuilder;
 use rig_core::completion::Prompt;
 use rig_core::prelude::CompletionClient;
-use rig_core::providers::openai;
+use rig_core::providers::{anthropic, openai};
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 
-/// Cerebras is fastest (~200ms) — use zai-glm for classification
+/// Anthropic Claude Opus 4.6 — most powerful, best routing accuracy
+const ANTHROPIC_MODEL: &str = "claude-opus-4-6";
+
+/// Cerebras fallback — fastest (~200ms)
 const CEREBRAS_BASE_URL: &str = "https://api.cerebras.ai/v1";
-const CEREBRAS_MODEL: &str = "zai-glm-4.7";
+const CEREBRAS_MODEL: &str = "llama3.1-8b";
 
 /// OpenAI fallback
 const OPENAI_MODEL: &str = "gpt-4.1-mini";
@@ -31,10 +34,16 @@ pub struct RigClassifier {
 }
 
 impl RigClassifier {
-    /// Initialize from environment — tries Cerebras first, then OpenAI.
+    /// Initialize from environment — tries Anthropic first, then Cerebras, then OpenAI.
     /// Returns None if no API keys are configured.
     pub fn from_env() -> Option<Self> {
-        // Try Cerebras first (fastest)
+        // Try Anthropic first (most powerful, best accuracy)
+        if let Ok(classifier) = Self::anthropic() {
+            info!("AI classifier initialized: Anthropic (Claude Opus 4.6)");
+            return Some(classifier);
+        }
+
+        // Fallback to Cerebras (fastest)
         if let Ok(classifier) = Self::cerebras() {
             info!("AI classifier initialized: Cerebras");
             return Some(classifier);
@@ -46,8 +55,30 @@ impl RigClassifier {
             return Some(classifier);
         }
 
-        debug!("No AI classifier available — falling back to regex-only routing");
+        debug!("No AI classifier available — no API keys configured");
         None
+    }
+
+    fn anthropic() -> Result<Self> {
+        let key = std::env::var("ANTHROPIC_API_KEY").context("ANTHROPIC_API_KEY not set")?;
+        let client = anthropic::Client::builder().api_key(key).build()
+            .map_err(|e| anyhow::anyhow!("Failed to build Anthropic client: {e}"))?;
+        let client = Arc::new(client);
+        Ok(Self {
+            prompt_fn: Arc::new(move |system, user_msg| {
+                let client = client.clone();
+                Box::pin(async move {
+                    let agent = AgentBuilder::new(client.completion_model(ANTHROPIC_MODEL))
+                        .preamble(&system)
+                        .build();
+                    agent
+                        .prompt(user_msg)
+                        .await
+                        .map_err(|e| anyhow::anyhow!("Anthropic classifier: {e}"))
+                })
+            }),
+            provider_name: "anthropic",
+        })
     }
 
     fn cerebras() -> Result<Self> {
@@ -113,7 +144,7 @@ impl RigClassifier {
             format!("User message: {message}")
         } else {
             format!(
-                "User message: {message}\n\nRegex pre-match candidates: {}",
+                "User message: {message}\n\nPre-match candidates: {}",
                 candidates.join(", ")
             )
         };
@@ -141,19 +172,15 @@ impl RigClassifier {
     }
 }
 
-/// Maximum time to wait for AI classifier response before falling back to regex.
-/// 3 seconds is generous for Cerebras (~200ms typical) and OpenAI (~500ms typical).
-/// Without this timeout, a hung API connection blocks message submission indefinitely.
-const CLASSIFIER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+/// Maximum time to wait for AI classifier response.
+/// Opus is slower (~1-2s) than Cerebras (~200ms) so give it 5s.
+const CLASSIFIER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 #[async_trait::async_trait]
 impl sentinel_application::classifier::AiClassifier for RigClassifier {
     async fn classify(&self, message: &str, candidates: &[String]) -> Result<Option<String>> {
-        // Build catalog on each call (could be cached, but skills dir rarely changes)
         let catalog = build_skill_catalog();
 
-        // Wrap in timeout to prevent hung API calls from blocking message submission.
-        // This was the root cause of UserPromptSubmit hooks silently blocking input.
         match tokio::time::timeout(
             CLASSIFIER_TIMEOUT,
             self.classify(message, &catalog, candidates),
@@ -163,14 +190,14 @@ impl sentinel_application::classifier::AiClassifier for RigClassifier {
             Ok(Ok(skill)) if skill == "none" || skill.is_empty() => Ok(None),
             Ok(Ok(skill)) => Ok(Some(skill)),
             Ok(Err(e)) => {
-                warn!(error = %e, "AI classification failed, falling back to regex");
+                warn!(error = %e, "AI classification failed");
                 Ok(None)
             }
             Err(_) => {
                 warn!(
                     timeout_secs = CLASSIFIER_TIMEOUT.as_secs(),
                     provider = self.provider_name,
-                    "AI classifier timed out, falling back to regex"
+                    "AI classifier timed out"
                 );
                 Ok(None)
             }
@@ -192,7 +219,8 @@ RULES:
 6. The "internet" skill is ONLY for physical network hardware (ATT gateway, Netgear router, port forwarding, DHCP)
 7. The "execute" skill is ONLY for explicit "do it" / "build it" / "implement this" commands, NOT for general affirmative responses like "yes", "lets do it", "go ahead"
 8. Slash commands (/commit, /test, /review, etc.) are already handled — you won't see them
-9. When ambiguous, prefer "none" over a wrong match
+9. Short affirmative responses ("yes", "y", "ok", "sure", "do it", "keep going", "continue", "all", "lets go") are ALWAYS "none" — they continue the current conversation, not invoke a skill
+10. When ambiguous, prefer "none" over a wrong match
 
 SKILL CATALOG:
 {skill_catalog}"#
@@ -212,17 +240,11 @@ pub fn build_skill_catalog() -> String {
         let mut dirs: Vec<_> = read_dir
             .filter_map(|e| e.ok())
             .filter(|e| {
-                // **Attack #126 fix**: Use metadata() instead of file_type() to follow
-                // symlinks and verify the target exists. Reject symlinks that resolve
-                // outside ~/.claude/skills/ to prevent catalog injection via symlinks
-                // pointing to attacker-controlled directories.
                 let ft = match e.file_type() {
                     Ok(ft) => ft,
                     Err(_) => return false,
                 };
                 if ft.is_symlink() {
-                    // Follow the symlink and check if target is a real directory
-                    // under the skills dir
                     match e.path().canonicalize() {
                         Ok(real) => {
                             let skills_canonical = skills_dir
@@ -230,7 +252,7 @@ pub fn build_skill_catalog() -> String {
                                 .unwrap_or_else(|_| skills_dir.clone());
                             real.starts_with(&skills_canonical) && real.is_dir()
                         }
-                        Err(_) => false, // Dangling symlink
+                        Err(_) => false,
                     }
                 } else {
                     ft.is_dir()
@@ -267,7 +289,6 @@ pub fn build_skill_catalog() -> String {
 
 /// Extract description from SKILL.md frontmatter
 fn extract_description(content: &str) -> Option<String> {
-    // Find frontmatter boundaries
     if !content.starts_with("---") {
         return None;
     }
@@ -275,16 +296,14 @@ fn extract_description(content: &str) -> Option<String> {
     let end = after_first.find("---")?;
     let frontmatter = &after_first[..end];
 
-    // Find description field (may be multiline with >)
     let desc_start = frontmatter.find("description:")?;
     let after_desc = &frontmatter[desc_start + "description:".len()..];
     let trimmed = after_desc.trim_start();
 
     if trimmed.starts_with('>') {
-        // Multiline YAML — collect indented continuation lines after `>`
         let lines: Vec<&str> = trimmed[1..]
             .lines()
-            .skip_while(|l| l.trim().is_empty()) // skip blank line after >
+            .skip_while(|l| l.trim().is_empty())
             .map(str::trim)
             .take_while(|l| {
                 !l.is_empty()
@@ -295,20 +314,11 @@ fn extract_description(content: &str) -> Option<String> {
             })
             .collect();
         let desc = lines.join(" ").trim().to_string();
-        if desc.is_empty() {
-            None
-        } else {
-            Some(desc)
-        }
+        if desc.is_empty() { None } else { Some(desc) }
     } else {
-        // Single line
         let line = trimmed.lines().next()?;
         let desc = line.trim().trim_matches('"').to_string();
-        if desc.is_empty() {
-            None
-        } else {
-            Some(desc)
-        }
+        if desc.is_empty() { None } else { Some(desc) }
     }
 }
 
@@ -324,11 +334,7 @@ fn extract_keywords(content: &str) -> Option<String> {
     let kw_start = frontmatter.find("keywords:")?;
     let after_kw = &frontmatter[kw_start + "keywords:".len()..];
     let line = after_kw.lines().next()?.trim();
-    if line.is_empty() {
-        None
-    } else {
-        Some(line.to_string())
-    }
+    if line.is_empty() { None } else { Some(line.to_string()) }
 }
 
 #[cfg(test)]
@@ -382,6 +388,7 @@ version: 1.0.0
         assert!(prompt.contains("internet"));
         assert!(prompt.contains("execute"));
         assert!(prompt.contains("none"));
+        assert!(prompt.contains("Short affirmative"));
     }
 
     #[test]

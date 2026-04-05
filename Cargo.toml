@@ -44,7 +44,7 @@ chacha20poly1305 = "0.10"
 reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
 
 # LLM framework (multi-model AI judge — Cerebras, OpenAI, Anthropic)
-rig-core = { version = "0.30", package = "rig-core" }
+rig-core = { version = "0.34", package = "rig-core" }
 
 # HTTP server (dashboard API)
 axum = { version = "0.8", features = ["ws"] }
