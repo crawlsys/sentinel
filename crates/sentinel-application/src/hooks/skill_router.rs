@@ -403,13 +403,15 @@ pub fn process(input: &HookInput, router: &RegexRouter) -> HookOutput {
     }
 }
 
-/// Process a skill-router hook event with AI classification fallback.
+/// Process a skill-router hook event with AI classification.
 ///
 /// Flow:
-/// 1. Slash commands (^/...) — regex only, always strong → no AI needed
-/// 2. Strong regex match (priority >= 80) — use directly
-/// 3. Weak regex match or no match — ask AI classifier with candidates
-/// 4. AI unavailable or returns "none" — report no match
+/// 1. Slash commands (^/...) — regex for exact match (always unambiguous)
+/// 2. Everything else — Claude Opus 4.6 classifies against full skill catalog
+/// 3. Validate AI return against actual skill directories on disk
+/// 4. AI unavailable or returns "none" → no match
+///
+/// NO regex fallback for non-slash prompts. Opus handles all routing.
 pub async fn process_with_ai(
     input: &HookInput,
     router: &RegexRouter,
@@ -420,65 +422,48 @@ pub async fn process_with_ai(
         None => return HookOutput::allow(),
     };
 
-    // 1. Slash commands are always exact — regex handles them definitively
-    if prompt.starts_with('/') {
+    // 1. Slash commands — regex handles these definitively
+    if prompt.trim().starts_with('/') {
         return match router.route(prompt) {
-            Some(m) => build_match_output(&m.skill, input, prompt, "regex"),
+            Some(m) => build_match_output(&m.skill, input, prompt, "slash"),
             None => build_no_match_output(),
         };
     }
 
-    // 2. Try regex pre-match
-    let regex_match = router.route(prompt);
-
-    if let Some(ref m) = regex_match {
-        if m.strong {
-            // Strong regex match — but verify with AI if available to catch false positives
-            // For now, trust strong matches (priority >= 80) without AI verification
-            // TODO: optionally verify strong matches too, behind a flag
-            return build_match_output(&m.skill, input, prompt, "regex");
-        }
-    }
-
-    // 3. Weak match or no match — use AI classifier
+    // 2. AI classification — Opus classifies against full skill catalog
     if let Some(ai) = classifier {
-        let candidates: Vec<String> = router
-            .route_all(prompt)
-            .into_iter()
-            .map(|m| m.skill)
-            .collect();
-
-        match ai.classify(prompt, &candidates).await {
+        match ai.classify(prompt, &[]).await {
             Ok(Some(skill)) => {
-                // **Attack #60 fix**: Validate AI classifier return against the
-                // candidate list. A compromised or prompt-injected classifier could
-                // return arbitrary skill names to bypass routing.
-                if candidates.contains(&skill)
-                    || router.route_all(prompt).iter().any(|m| m.skill == skill)
-                {
+                // Validate: skill directory must exist on disk
+                if is_valid_skill(&skill) {
                     return build_match_output(&skill, input, prompt, "ai");
                 }
                 tracing::warn!(
                     returned_skill = %skill,
-                    "AI classifier returned unknown skill — ignoring"
+                    "AI returned skill that doesn't exist on disk — ignoring"
                 );
             }
             Ok(None) => {
-                // AI says no skill matches
+                // AI says no skill matches — this is the correct "none" path
             }
             Err(e) => {
-                tracing::warn!(error = %e, "AI classifier failed");
-                // Fall through to weak regex match or no match
+                tracing::warn!(error = %e, "AI classifier failed — no routing");
             }
         }
-    }
-
-    // 4. Fall back to weak regex match if AI is unavailable or said "none"
-    if let Some(m) = regex_match {
-        return build_match_output(&m.skill, input, prompt, "regex-weak");
+    } else {
+        tracing::debug!("No AI classifier available — no routing for non-slash prompts");
     }
 
     build_no_match_output()
+}
+
+/// Check if a skill name corresponds to an actual skill directory with SKILL.md
+fn is_valid_skill(skill: &str) -> bool {
+    let skills_dir = match dirs::home_dir() {
+        Some(h) => h.join(".claude").join("skills"),
+        None => return false,
+    };
+    skills_dir.join(skill).join("SKILL.md").exists()
 }
 
 /// Build output for a matched skill

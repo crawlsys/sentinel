@@ -10,19 +10,13 @@ use futures::future::BoxFuture;
 use rig_core::agent::AgentBuilder;
 use rig_core::completion::Prompt;
 use rig_core::prelude::CompletionClient;
-use rig_core::providers::{anthropic, openai};
+use rig_core::providers::anthropic;
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 
 /// Anthropic Claude Opus 4.6 — most powerful, best routing accuracy
 const ANTHROPIC_MODEL: &str = "claude-opus-4-6";
 
-/// Cerebras fallback — fastest (~200ms)
-const CEREBRAS_BASE_URL: &str = "https://api.cerebras.ai/v1";
-const CEREBRAS_MODEL: &str = "llama3.1-8b";
-
-/// OpenAI fallback
-const OPENAI_MODEL: &str = "gpt-4.1-mini";
 
 /// Type-erased prompt function
 type PromptFn = Arc<dyn Fn(String, String) -> BoxFuture<'static, Result<String>> + Send + Sync>;
@@ -34,29 +28,19 @@ pub struct RigClassifier {
 }
 
 impl RigClassifier {
-    /// Initialize from environment — tries Anthropic first, then Cerebras, then OpenAI.
-    /// Returns None if no API keys are configured.
+    /// Initialize from environment — Anthropic Claude Opus 4.6 only.
+    /// Returns None if ANTHROPIC_API_KEY is not set.
     pub fn from_env() -> Option<Self> {
-        // Try Anthropic first (most powerful, best accuracy)
-        if let Ok(classifier) = Self::anthropic() {
-            info!("AI classifier initialized: Anthropic (Claude Opus 4.6)");
-            return Some(classifier);
+        match Self::anthropic() {
+            Ok(classifier) => {
+                info!("AI classifier initialized: Claude Opus 4.6");
+                Some(classifier)
+            }
+            Err(e) => {
+                warn!(error = %e, "Failed to initialize Anthropic classifier — ANTHROPIC_API_KEY required");
+                None
+            }
         }
-
-        // Fallback to Cerebras (fastest)
-        if let Ok(classifier) = Self::cerebras() {
-            info!("AI classifier initialized: Cerebras");
-            return Some(classifier);
-        }
-
-        // Fallback to OpenAI
-        if let Ok(classifier) = Self::openai() {
-            info!("AI classifier initialized: OpenAI");
-            return Some(classifier);
-        }
-
-        debug!("No AI classifier available — no API keys configured");
-        None
     }
 
     fn anthropic() -> Result<Self> {
@@ -78,55 +62,6 @@ impl RigClassifier {
                 })
             }),
             provider_name: "anthropic",
-        })
-    }
-
-    fn cerebras() -> Result<Self> {
-        let key = std::env::var("CEREBRAS_API_KEY").context("CEREBRAS_API_KEY not set")?;
-        let client: openai::CompletionsClient = openai::CompletionsClient::builder()
-            .api_key(key)
-            .base_url(CEREBRAS_BASE_URL)
-            .build()
-            .map_err(|e| anyhow::anyhow!("Failed to build Cerebras client: {e}"))?;
-        let client = Arc::new(client);
-        Ok(Self {
-            prompt_fn: Arc::new(move |system, user_msg| {
-                let client = client.clone();
-                Box::pin(async move {
-                    let agent = AgentBuilder::new(client.completion_model(CEREBRAS_MODEL))
-                        .preamble(&system)
-                        .build();
-                    agent
-                        .prompt(user_msg)
-                        .await
-                        .map_err(|e| anyhow::anyhow!("Cerebras classifier: {e}"))
-                })
-            }),
-            provider_name: "cerebras",
-        })
-    }
-
-    fn openai() -> Result<Self> {
-        let key = std::env::var("OPENAI_API_KEY").context("OPENAI_API_KEY not set")?;
-        let client: openai::CompletionsClient = openai::CompletionsClient::builder()
-            .api_key(key)
-            .build()
-            .map_err(|e| anyhow::anyhow!("Failed to build OpenAI client: {e}"))?;
-        let client = Arc::new(client);
-        Ok(Self {
-            prompt_fn: Arc::new(move |system, user_msg| {
-                let client = client.clone();
-                Box::pin(async move {
-                    let agent = AgentBuilder::new(client.completion_model(OPENAI_MODEL))
-                        .preamble(&system)
-                        .build();
-                    agent
-                        .prompt(user_msg)
-                        .await
-                        .map_err(|e| anyhow::anyhow!("OpenAI classifier: {e}"))
-                })
-            }),
-            provider_name: "openai",
         })
     }
 
