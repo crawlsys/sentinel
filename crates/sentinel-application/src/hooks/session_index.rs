@@ -105,7 +105,23 @@ impl Exchange {
     }
 
     fn is_substantive(&self) -> bool {
-        self.combined_content().len() >= MIN_CHUNK_CHARS
+        let combined_len = self.combined_content().len();
+        if combined_len < MIN_CHUNK_CHARS {
+            return false;
+        }
+
+        // Skip exchanges where user input is trivial acknowledgement
+        let user_trimmed = self.user_text.trim().to_lowercase();
+        let trivial = [
+            "yes", "no", "ok", "okay", "done", "thanks", "thank you", "got it",
+            "sure", "y", "n", "yep", "nope", "continue", "go", "next", "fix it",
+            "all", "yee", "cool", "nice", "great", "perfect", "keep going",
+        ];
+        if trivial.contains(&user_trimmed.as_str()) && self.assistant_text.len() < 200 {
+            return false;
+        }
+
+        true
     }
 }
 
