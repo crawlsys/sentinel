@@ -293,7 +293,7 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
             output.merge(&activity_prompt_output);
 
             // Memory inject — search Qdrant for semantically relevant memories
-            let memory_output = hooks::memory_inject::process(&input, vector_store.as_deref());
+            let memory_output = hooks::memory_inject::process(&input, &ctx);
             output.merge(&memory_output);
         }
 
@@ -408,15 +408,15 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
             output.merge(&task_persist_output);
 
             // Memory extract — sync recently modified memory files to Qdrant
-            let memory_extract_output = hooks::memory_extract::process(&input, vector_store.as_deref());
+            let memory_extract_output = hooks::memory_extract::process(&input, &ctx);
             output.merge(&memory_extract_output);
 
             // Memory feedback — boost used memories, flag corrections
-            let memory_feedback_output = hooks::memory_feedback::process(&input, vector_store.as_deref());
+            let memory_feedback_output = hooks::memory_feedback::process(&input, &ctx);
             output.merge(&memory_feedback_output);
 
             // Memory inject (Stop phase) — pre-compute Qdrant search for next turn
-            let memory_precompute_output = hooks::memory_inject::process_stop(&input, vector_store.as_deref());
+            let memory_precompute_output = hooks::memory_inject::process_stop(&input, &ctx);
             output.merge(&memory_precompute_output);
         }
 
@@ -446,7 +446,7 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
             output.merge(&rehydrate_output);
 
             // Memory verify — verify stale memories against ground truth (24h cooldown)
-            let verify_output = hooks::memory_verify::process(&input, vector_store.as_deref());
+            let verify_output = hooks::memory_verify::process(&input, &ctx);
             output.merge(&verify_output);
 
             // Version drift check — runs once per session with 24h cooldown.
@@ -463,7 +463,7 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
             output.merge(&compact_output);
 
             // Session index — upsert transcript exchanges to Qdrant for search
-            let index_output = hooks::session_index::process(&input, vector_store.as_deref());
+            let index_output = hooks::session_index::process(&input, &ctx);
             output.merge(&index_output);
         }
 

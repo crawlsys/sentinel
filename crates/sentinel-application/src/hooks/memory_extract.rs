@@ -575,7 +575,7 @@ fn extract_text_content(val: &serde_json::Value) -> String {
 
 /// Process Stop — sync changed memory files to Qdrant,
 /// and periodically re-index the session transcript.
-pub fn process(input: &HookInput, _vector_store: Option<&dyn super::VectorStorePort>) -> HookOutput {
+pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
     let cwd = input.cwd.as_deref().unwrap_or(".");
 
     // --- Periodic session re-index ---
@@ -676,7 +676,7 @@ mod tests {
             cwd: Some("/nonexistent".to_string()),
             ..Default::default()
         };
-        let output = process(&input, None);
+        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
         assert!(output.blocked.is_none());
     }
 

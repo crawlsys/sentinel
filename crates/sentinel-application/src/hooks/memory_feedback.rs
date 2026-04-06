@@ -256,7 +256,7 @@ fn log_correction(memory: &InjectedMemory, signal: &str, user_prompt: &str) {
 // ---------------------------------------------------------------------------
 
 /// Process Stop — check if injected memories were used or corrected.
-pub fn process(input: &HookInput, _vector_store: Option<&dyn super::VectorStorePort>) -> HookOutput {
+pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
     // 1. Read the state file
     let state_path = match injected_state_path() {
         Some(p) if p.exists() => p,
@@ -443,7 +443,7 @@ mod tests {
             last_assistant_message: Some("response text".to_string()),
             ..Default::default()
         };
-        let output = process(&input, None);
+        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
         assert!(output.blocked.is_none());
     }
 
@@ -452,7 +452,7 @@ mod tests {
         let input = HookInput {
             ..Default::default()
         };
-        let output = process(&input, None);
+        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
         assert!(output.blocked.is_none());
     }
 

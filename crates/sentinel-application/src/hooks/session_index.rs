@@ -425,7 +425,7 @@ fn upsert_exchanges(
 // ---------------------------------------------------------------------------
 
 /// Process PreCompact — read transcript, chunk into exchanges, upsert to Qdrant.
-pub fn process(input: &HookInput, _vector_store: Option<&dyn super::VectorStorePort>) -> HookOutput {
+pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
     let session_id = match input.session_id.as_deref() {
         Some(id) if !id.is_empty() => id,
         _ => {
@@ -597,7 +597,7 @@ mod tests {
     #[test]
     fn test_process_no_session() {
         let input = HookInput::default();
-        let output = process(&input, None);
+        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
         assert!(output.blocked.is_none());
     }
 
@@ -608,7 +608,7 @@ mod tests {
             cwd: Some(".".to_string()),
             ..Default::default()
         };
-        let output = process(&input, None);
+        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
         assert!(output.blocked.is_none());
     }
 
@@ -620,7 +620,7 @@ mod tests {
             cwd: Some(".".to_string()),
             ..Default::default()
         };
-        let output = process(&input, None);
+        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
         assert!(output.blocked.is_none());
     }
 
