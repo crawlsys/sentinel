@@ -111,7 +111,7 @@ pub fn process_stop(input: &HookInput, git: &dyn GitStatusPort) -> HookOutput {
 // UserPromptSubmit phase: inject commit reminder
 // ---------------------------------------------------------------------------
 
-pub fn process_prompt(input: &HookInput) -> HookOutput {
+pub fn process_prompt(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
     let cwd = input.cwd.as_deref().unwrap_or(".");
 
     let path = match state_file() {
@@ -251,7 +251,7 @@ mod tests {
             cwd: Some("/nonexistent/test/path".to_string()),
             ..Default::default()
         };
-        let output = process_prompt(&input);
+        let ctx = crate::hooks::test_support::stub_ctx(); let output = process_prompt(&input, &ctx);
         assert!(output.hook_specific_output.is_none());
     }
 
@@ -278,7 +278,7 @@ mod tests {
             cwd: Some("/test/below".to_string()),
             ..Default::default()
         };
-        let output = process_prompt(&input);
+        let ctx = crate::hooks::test_support::stub_ctx(); let output = process_prompt(&input, &ctx);
         assert!(output.hook_specific_output.is_none());
 
         let _ = fs::remove_file(&tmp);

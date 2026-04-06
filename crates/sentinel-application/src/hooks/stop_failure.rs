@@ -213,7 +213,7 @@ fn parse_absolute_time_flexible(s: &str) -> Option<u64> {
 /// Logs the error, parses reset time from error_details, and injects
 /// a system message advising Claude to call account_rotate with the
 /// correct cooldown_minutes.
-pub fn process(input: &HookInput) -> HookOutput {
+pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
     let error = input
         .extra
         .get("error")
@@ -298,7 +298,7 @@ mod tests {
             .extra
             .insert("error".to_string(), serde_json::json!("auth_error"));
 
-        let output = process(&input);
+        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
         assert!(output.blocked.is_none());
         assert!(output.system_message.is_none());
     }
@@ -313,7 +313,7 @@ mod tests {
             .extra
             .insert("error_details".to_string(), serde_json::json!(""));
 
-        let output = process(&input);
+        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
         assert!(output.system_message.is_some());
         let msg = output.system_message.unwrap();
         assert!(msg.contains("account_rotate"));
@@ -331,7 +331,7 @@ mod tests {
             serde_json::json!("retry after 7200"),
         );
 
-        let output = process(&input);
+        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
         let msg = output.system_message.unwrap();
         assert!(msg.contains("cooldown_minutes: 120"));
     }
@@ -400,7 +400,7 @@ mod tests {
             serde_json::json!("You've hit your session limit · resets 4pm (CDT)"),
         );
 
-        let output = process(&input);
+        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
         assert!(output.system_message.is_some());
         let msg = output.system_message.unwrap();
         assert!(msg.contains("account_rotate"));

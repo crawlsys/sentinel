@@ -166,7 +166,7 @@ fn regenerate_summary(telemetry_path: &Path, summary_path: &Path) {
 }
 
 /// Process the skill-telemetry hook event (Stop).
-pub fn process(input: &HookInput) -> HookOutput {
+pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
     let current_skill = read_current_skill();
 
     let metrics = match metrics_dir() {
@@ -294,7 +294,7 @@ mod tests {
     fn test_process_no_metrics_dir_is_ok() {
         // Even if metrics dir creation fails, process should return allow
         let input = HookInput::default();
-        let output = process(&input);
+        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
         assert!(output.blocked.is_none());
     }
 

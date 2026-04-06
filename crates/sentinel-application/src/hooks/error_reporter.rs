@@ -148,7 +148,7 @@ fn write_cooldown(path: &PathBuf) {
 }
 
 /// Process the error-reporter hook event
-pub fn process(input: &HookInput) -> HookOutput {
+pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
     // Only meaningful on UserPromptSubmit, but we don't gate on that —
     // the engine routes events to the correct hooks.
     let _ = input;
@@ -288,7 +288,7 @@ mod tests {
     fn test_process_no_errors_returns_allow() {
         // With no errors.jsonl file, process should return allow
         let input = HookInput::default();
-        let output = process(&input);
+        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
         // We can't control the home dir in tests, but if there are no errors,
         // it should return allow (empty output)
         assert!(output.blocked.is_none());

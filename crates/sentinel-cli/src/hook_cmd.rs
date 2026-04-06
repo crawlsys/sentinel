@@ -251,7 +251,7 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
             output.merge(&validator_output);
 
             // Error reporter — inject Linear filing instructions for unresolved errors
-            let error_output = hooks::error_reporter::process(&input);
+            let error_output = hooks::error_reporter::process(&input, &ctx);
             output.merge(&error_output);
 
             // Hygiene override — detect override commands in prompt
@@ -277,15 +277,15 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
             output.merge(&cleanup_output);
 
             // Commit hygiene — remind about uncommitted changes
-            let commit_output = hooks::commit_hygiene::process_prompt(&input);
+            let commit_output = hooks::commit_hygiene::process_prompt(&input, &ctx);
             output.merge(&commit_output);
 
             // Context monitor — inject zone-specific strategy guidance
-            let ctx_prompt_output = hooks::context_monitor::process_prompt(&input);
+            let ctx_prompt_output = hooks::context_monitor::process_prompt(&input, &ctx);
             output.merge(&ctx_prompt_output);
 
             // Verification gate — remind to verify before claiming completion
-            let verify_prompt_output = hooks::verification_gate::process_prompt(&input);
+            let verify_prompt_output = hooks::verification_gate::process_prompt(&input, &ctx);
             output.merge(&verify_prompt_output);
 
             // Activity tracker — inject session activity summary when context is elevated
@@ -333,7 +333,7 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
 
         HookEvent::PostToolUse => {
             // MCP health — detect MCP server failures and log to errors.jsonl
-            let mcp_output = hooks::mcp_health::process(&input);
+            let mcp_output = hooks::mcp_health::process(&input, &ctx);
             output.merge(&mcp_output);
 
             // Todo interceptor — persist rich todos from TodoWrite calls
@@ -374,13 +374,13 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
             output.merge(&exec_output);
 
             // Skill telemetry — aggregate skill usage metrics
-            let telemetry_output = hooks::skill_telemetry::process(&input);
+            let telemetry_output = hooks::skill_telemetry::process(&input, &ctx);
             output.merge(&telemetry_output);
 
             // --- Two-phase hooks (detect state, write for UserPromptSubmit to read) ---
 
             // Context monitor — capture context window usage zone
-            let ctx_output = hooks::context_monitor::process_stop(&input);
+            let ctx_output = hooks::context_monitor::process_stop(&input, &ctx);
             output.merge(&ctx_output);
 
             // Commit hygiene — detect uncommitted changes
@@ -396,7 +396,7 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
             output.merge(&drift_output);
 
             // Verification gate — detect unverified completion claims
-            let verify_output = hooks::verification_gate::process_stop(&input);
+            let verify_output = hooks::verification_gate::process_stop(&input, &ctx);
             output.merge(&verify_output);
 
             // Activity tracker — build session summary from activity log
@@ -533,7 +533,7 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
 
         HookEvent::StopFailure => {
             // API error at end of turn — log for diagnostics
-            let failure_output = hooks::stop_failure::process(&input);
+            let failure_output = hooks::stop_failure::process(&input, &ctx);
             output.merge(&failure_output);
         }
 

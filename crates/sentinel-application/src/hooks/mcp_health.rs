@@ -134,7 +134,7 @@ fn log_mcp_error(tool_name: &str, server_name: &str, error_detail: &str, session
 }
 
 /// Process an MCP health check (PostToolUse)
-pub fn process(input: &HookInput) -> HookOutput {
+pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
     let tool_name = match &input.tool_name {
         Some(name) if name.starts_with("mcp__") => name.as_str(),
         _ => return HookOutput::allow(),
@@ -162,7 +162,7 @@ mod tests {
             tool_name: Some("Bash".to_string()),
             ..Default::default()
         };
-        let output = process(&input);
+        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
         assert!(output.blocked.is_none());
     }
 
@@ -173,7 +173,7 @@ mod tests {
             tool_result: Some(serde_json::json!({"id": "FIR-123", "title": "Test issue"})),
             ..Default::default()
         };
-        let output = process(&input);
+        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
         assert!(output.blocked.is_none());
     }
 
@@ -185,7 +185,7 @@ mod tests {
             session_id: Some("test-session".to_string()),
             ..Default::default()
         };
-        let output = process(&input);
+        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
         // Should still allow (never blocks) but would log
         assert!(output.blocked.is_none());
 
@@ -258,7 +258,7 @@ mod tests {
     #[test]
     fn test_allows_no_tool_name() {
         let input = HookInput::default();
-        let output = process(&input);
+        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
         assert!(output.blocked.is_none());
     }
 

@@ -194,7 +194,7 @@ fn parse_transcript(transcript_path: &str, session_id: &str) -> TranscriptData {
 // Stop phase: detect unverified claims and write state
 // ---------------------------------------------------------------------------
 
-pub fn process_stop(input: &HookInput) -> HookOutput {
+pub fn process_stop(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
     let session_id = input.session_id.as_deref().unwrap_or("unknown");
 
     let transcript_path = match &input.transcript_path {
@@ -270,7 +270,7 @@ pub fn process_stop(input: &HookInput) -> HookOutput {
 // UserPromptSubmit phase: inject verification reminder
 // ---------------------------------------------------------------------------
 
-pub fn process_prompt(input: &HookInput) -> HookOutput {
+pub fn process_prompt(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
     let path = match state_file() {
         Some(p) => p,
         None => return HookOutput::allow(),
@@ -358,7 +358,7 @@ mod tests {
     #[test]
     fn test_no_transcript() {
         let input = HookInput::default();
-        let output = process_stop(&input);
+        let ctx = crate::hooks::test_support::stub_ctx(); let output = process_stop(&input, &ctx);
         assert!(output.blocked.is_none());
     }
 
@@ -379,7 +379,7 @@ mod tests {
             session_id: Some("test-vg-noclaims".to_string()),
             ..Default::default()
         };
-        let output = process_stop(&input);
+        let ctx = crate::hooks::test_support::stub_ctx(); let output = process_stop(&input, &ctx);
         assert!(output.blocked.is_none());
     }
 
@@ -407,7 +407,7 @@ mod tests {
             session_id: Some("test-vg-evidence".to_string()),
             ..Default::default()
         };
-        let output = process_stop(&input);
+        let ctx = crate::hooks::test_support::stub_ctx(); let output = process_stop(&input, &ctx);
         assert!(output.blocked.is_none());
     }
 
@@ -433,7 +433,7 @@ mod tests {
             session_id: Some(session_id.clone()),
             ..Default::default()
         };
-        let output = process_stop(&input);
+        let ctx = crate::hooks::test_support::stub_ctx(); let output = process_stop(&input, &ctx);
         assert!(output.blocked.is_none());
 
         // State file should exist with claims
@@ -472,7 +472,7 @@ mod tests {
             session_id: Some("test-vg-inject".into()),
             ..Default::default()
         };
-        let output = process_prompt(&input);
+        let ctx = crate::hooks::test_support::stub_ctx(); let output = process_prompt(&input, &ctx);
         assert!(output.hook_specific_output.is_some());
 
         let ctx = output.hook_specific_output.unwrap().additional_context;
@@ -505,7 +505,7 @@ mod tests {
             session_id: Some("different-session".into()),
             ..Default::default()
         };
-        let output = process_prompt(&input);
+        let ctx = crate::hooks::test_support::stub_ctx(); let output = process_prompt(&input, &ctx);
         assert!(output.hook_specific_output.is_none());
 
         // Clean up

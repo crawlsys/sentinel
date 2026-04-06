@@ -120,7 +120,7 @@ fn extract_usage_pct(context: &serde_json::Value) -> Option<f64> {
 // Stop phase: capture context usage and write zone state
 // ---------------------------------------------------------------------------
 
-pub fn process_stop(input: &HookInput) -> HookOutput {
+pub fn process_stop(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
     let context = match &input.context_window {
         Some(ctx) => ctx,
         None => return HookOutput::allow(),
@@ -160,7 +160,7 @@ pub fn process_stop(input: &HookInput) -> HookOutput {
 // UserPromptSubmit phase: inject zone-specific strategy
 // ---------------------------------------------------------------------------
 
-pub fn process_prompt(input: &HookInput) -> HookOutput {
+pub fn process_prompt(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
     let path = match state_file() {
         Some(p) => p,
         None => return HookOutput::allow(),
@@ -242,7 +242,7 @@ mod tests {
     #[test]
     fn test_stop_no_context_window() {
         let input = HookInput::default();
-        let output = process_stop(&input);
+        let ctx = crate::hooks::test_support::stub_ctx(); let output = process_stop(&input, &ctx);
         assert!(output.blocked.is_none());
     }
 
@@ -253,7 +253,7 @@ mod tests {
             session_id: Some("test-ctx".into()),
             ..Default::default()
         };
-        let output = process_stop(&input);
+        let ctx = crate::hooks::test_support::stub_ctx(); let output = process_stop(&input, &ctx);
         assert!(output.blocked.is_none());
 
         if let Some(path) = state_file() {
@@ -282,7 +282,7 @@ mod tests {
             session_id: Some("test-green".into()),
             ..Default::default()
         };
-        let output = process_prompt(&input);
+        let ctx = crate::hooks::test_support::stub_ctx(); let output = process_prompt(&input, &ctx);
         assert!(output.hook_specific_output.is_none());
     }
 
