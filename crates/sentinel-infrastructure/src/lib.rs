@@ -5,6 +5,7 @@
 
 pub mod activity_log;
 pub mod filesystem;
+pub mod process;
 pub mod qdrant;
 pub mod anthropic;
 pub mod config;

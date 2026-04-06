@@ -230,6 +230,36 @@ pub trait FileSystemPort: Send + Sync {
     fn metadata(&self, path: &std::path::Path) -> anyhow::Result<std::fs::Metadata>;
 }
 
+/// Port for spawning external processes.
+///
+/// Abstracts std::process::Command calls for binary execution and
+/// fire-and-forget spawns. Used by session_init (qdrant sync, git),
+/// wrangler_guard (dialog binary), pre_push_steel_test (git).
+pub trait ProcessPort: Send + Sync {
+    /// Run a command and capture output. Returns (exit_success, stdout, stderr).
+    fn run(
+        &self,
+        command: &str,
+        args: &[&str],
+        cwd: Option<&str>,
+    ) -> anyhow::Result<ProcessOutput>;
+
+    /// Spawn a detached process (fire-and-forget). Returns immediately.
+    fn spawn_detached(
+        &self,
+        command: &str,
+        args: &[&str],
+    ) -> anyhow::Result<()>;
+}
+
+/// Output from a process execution.
+#[derive(Debug, Clone)]
+pub struct ProcessOutput {
+    pub success: bool,
+    pub stdout: String,
+    pub stderr: String,
+}
+
 // ---------------------------------------------------------------------------
 // HookContext — bundles all injected ports for hook functions
 // ---------------------------------------------------------------------------
@@ -247,6 +277,9 @@ pub struct HookContext<'a> {
 
     /// Filesystem operations. Always present.
     pub fs: &'a dyn FileSystemPort,
+
+    /// Process execution (run commands, spawn detached). Always present.
+    pub process: &'a dyn ProcessPort,
 }
 
 /// Test utilities for creating mock `HookContext`.
@@ -275,10 +308,19 @@ pub mod test_support {
         fn metadata(&self, _: &Path) -> anyhow::Result<std::fs::Metadata> { anyhow::bail!("no") }
     }
 
+    pub struct StubProcess;
+    impl ProcessPort for StubProcess {
+        fn run(&self, _: &str, _: &[&str], _: Option<&str>) -> anyhow::Result<ProcessOutput> {
+            Ok(ProcessOutput { success: true, stdout: String::new(), stderr: String::new() })
+        }
+        fn spawn_detached(&self, _: &str, _: &[&str]) -> anyhow::Result<()> { Ok(()) }
+    }
+
     /// Create a test `HookContext` with stub ports.
     pub fn stub_ctx() -> HookContext<'static> {
         let git: &'static StubGit = Box::leak(Box::new(StubGit));
         let fs: &'static StubFs = Box::leak(Box::new(StubFs));
-        HookContext { git, vector_store: None, fs }
+        let process: &'static StubProcess = Box::leak(Box::new(StubProcess));
+        HookContext { git, vector_store: None, fs, process }
     }
 }

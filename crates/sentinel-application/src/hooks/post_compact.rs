@@ -78,20 +78,9 @@ mod tests {
         fn is_worktree(&self, _: &str) -> bool { false }
     }
 
-    fn test_ctx() -> HookContext<'static> {
-        // Use leaked references for test lifetime
-        let git: &'static StubGit = Box::leak(Box::new(StubGit));
-        let fs: &'static MockFs = Box::leak(Box::new(MockFs));
-        HookContext {
-            git,
-            vector_store: None,
-            fs,
-        }
-    }
-
     #[test]
     fn test_post_compact_without_skill() {
-        let ctx = test_ctx();
+        let ctx = crate::hooks::test_support::stub_ctx();
         let input = HookInput::default();
         let output = process(&input, &ctx);
         assert!(output.blocked.is_none());
