@@ -122,6 +122,9 @@ pub fn process(input: &HookInput) -> HookOutput {
     // 6. Auto-init disabled — run `sentinel init` manually when needed
     let init_result: Option<sentinel_domain::project::InitResult> = None;
 
+    // 6.5. Background Qdrant memory sync — catches files missed between sessions
+    spawn_qdrant_sync();
+
     // 7. Build startup context
     let context =
         build_startup_context(&sync_result, &validation, &counts, session_id, &init_result);
@@ -240,6 +243,59 @@ fn find_marketplace_repo() -> Option<PathBuf> {
 /// Check if a directory is the marketplace git repo
 fn is_marketplace_repo(dir: &Path) -> bool {
     dir.join(".git").exists() && dir.join("skills").exists() && dir.join("install.js").exists()
+}
+
+/// Spawn a background Qdrant memory sync.
+/// Runs `qdrant sync` in a detached process so it doesn't block session startup.
+/// This catches any memory files written between sessions that the Stop hook missed.
+fn spawn_qdrant_sync() {
+    // Check if qdrant CLI exists
+    let qdrant_bin = which_qdrant();
+    let Some(bin) = qdrant_bin else {
+        tracing::debug!("qdrant CLI not found — skipping session-start sync");
+        return;
+    };
+
+    // Fire and forget — don't block startup
+    match std::process::Command::new(bin)
+        .arg("sync")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        Ok(_) => tracing::debug!("Spawned background qdrant sync"),
+        Err(e) => tracing::debug!(error = %e, "Failed to spawn qdrant sync"),
+    }
+}
+
+/// Find the qdrant CLI binary
+fn which_qdrant() -> Option<std::path::PathBuf> {
+    // Check ~/.cargo/bin first (common install location)
+    if let Some(home) = dirs::home_dir() {
+        let cargo_bin = home.join(".cargo").join("bin").join("qdrant.exe");
+        if cargo_bin.exists() {
+            return Some(cargo_bin);
+        }
+        // Unix variant
+        let cargo_bin_unix = home.join(".cargo").join("bin").join("qdrant");
+        if cargo_bin_unix.exists() {
+            return Some(cargo_bin_unix);
+        }
+    }
+    // Check release build
+    if let Some(home) = dirs::home_dir() {
+        let dev_bin = home
+            .join("Documents")
+            .join("GitHub")
+            .join("qdrant-cli-rust")
+            .join("target")
+            .join("release")
+            .join("qdrant.exe");
+        if dev_bin.exists() {
+            return Some(dev_bin);
+        }
+    }
+    None
 }
 
 /// Sync marketplace repo to ~/.claude/

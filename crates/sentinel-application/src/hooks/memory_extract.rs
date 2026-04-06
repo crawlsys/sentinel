@@ -1,49 +1,84 @@
-//! Memory Extract Hook — extract learnings from turns and store in Qdrant
+//! Memory Extract Hook — sync flat-file memories to Qdrant
 //!
-//! Fires on Stop. Analyzes the last assistant message for extractable facts:
-//! corrections, decisions, patterns discovered during the turn. If the turn
-//! was substantive (had tool calls, file edits, etc.), extracts key learnings
-//! and upserts them to Qdrant.
+//! Fires on Stop. Detects memory files that changed since the last sync
+//! (tracked via a state file, not a time window) and upserts them to Qdrant.
 //!
-//! IMPORTANT: This hook does NOT use AI classification to decide what to extract.
-//! It only extracts when Claude's built-in auto-memory system writes a file
-//! (detected by checking for recent writes to the memory directory). This keeps
-//! the hook lightweight and avoids double-extraction with Claude's own memory.
+//! Claude decides what to remember → writes .md file → this hook syncs to Qdrant.
 //!
-//! The primary role is to SYNC flat-file memories to Qdrant, not to independently
-//! decide what's worth remembering. Claude decides → writes file → this hook syncs.
-//!
-//! **Periodic session re-index (Phase 2):** Tracks tool call count via a state
-//! file. Every 50 tool calls, triggers a lightweight session index of the last
-//! ~10 exchanges to keep long-running sessions searchable without waiting for
-//! PreCompact.
+//! **Periodic session re-index:** Every 50 tool calls, indexes the last ~10
+//! substantive exchanges to keep long-running sessions searchable.
 
 use sentinel_domain::events::{HookInput, HookOutput};
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use tracing::{debug, info, warn};
 
-/// Check if any memory files were modified in the last 30 seconds
-/// (indicating Claude's auto-memory just wrote something).
-fn recently_modified_memories(_cwd: &str) -> Vec<PathBuf> {
+// ---------------------------------------------------------------------------
+// Last-synced state tracking (replaces 30s time window)
+// ---------------------------------------------------------------------------
+
+/// State file: maps file path -> last synced mtime (as unix timestamp)
+fn sync_state_path() -> Option<PathBuf> {
+    dirs::home_dir().map(|h| {
+        h.join(".claude")
+            .join("sentinel")
+            .join("state")
+            .join("memory-sync-state.json")
+    })
+}
+
+fn load_sync_state() -> HashMap<String, u64> {
+    let path = match sync_state_path() {
+        Some(p) => p,
+        None => return HashMap::new(),
+    };
+    let content = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(_) => return HashMap::new(),
+    };
+    serde_json::from_str(&content).unwrap_or_default()
+}
+
+fn save_sync_state(state: &HashMap<String, u64>) {
+    let path = match sync_state_path() {
+        Some(p) => p,
+        None => return,
+    };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(json) = serde_json::to_string(state) {
+        let _ = std::fs::write(&path, json);
+    }
+}
+
+/// Get mtime as unix timestamp for a file
+fn file_mtime(path: &std::path::Path) -> Option<u64> {
+    std::fs::metadata(path)
+        .ok()?
+        .modified()
+        .ok()?
+        .duration_since(std::time::SystemTime::UNIX_EPOCH)
+        .ok()
+        .map(|d| d.as_secs())
+}
+
+/// Find memory files that have changed since last sync
+fn find_unsynced_memories() -> Vec<PathBuf> {
     let home = match dirs::home_dir() {
         Some(h) => h,
         None => return vec![],
     };
 
-    // Scan the project-specific memory dir
     let projects_dir = home.join(".claude").join("projects");
     if !projects_dir.is_dir() {
         return vec![];
     }
 
-    let cutoff = std::time::SystemTime::now()
-        .checked_sub(std::time::Duration::from_secs(30))
-        .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+    let state = load_sync_state();
+    let mut unsynced = Vec::new();
 
-    let mut recent = Vec::new();
-
-    // Check all project memory directories
     if let Ok(entries) = std::fs::read_dir(&projects_dir) {
         for entry in entries.flatten() {
             let memory_dir = entry.path().join("memory");
@@ -53,26 +88,32 @@ fn recently_modified_memories(_cwd: &str) -> Vec<PathBuf> {
             if let Ok(files) = std::fs::read_dir(&memory_dir) {
                 for file in files.flatten() {
                     let path = file.path();
-                    let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                    let name = path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_default();
                     if !name.ends_with(".md") || name == "MEMORY.md" {
                         continue;
                     }
-                    if let Ok(meta) = std::fs::metadata(&path) {
-                        if let Ok(modified) = meta.modified() {
-                            if modified > cutoff {
-                                recent.push(path);
-                            }
-                        }
+                    let key = path.to_string_lossy().to_string();
+                    let current_mtime = file_mtime(&path).unwrap_or(0);
+                    let last_synced = state.get(&key).copied().unwrap_or(0);
+
+                    if current_mtime > last_synced {
+                        unsynced.push(path);
                     }
                 }
             }
         }
     }
 
-    recent
+    unsynced
 }
 
-/// Qdrant config
+// ---------------------------------------------------------------------------
+// Qdrant config + upsert
+// ---------------------------------------------------------------------------
+
 #[derive(serde::Deserialize)]
 struct QdrantConfig {
     cluster_url: String,
@@ -97,7 +138,7 @@ fn load_config() -> Option<QdrantConfig> {
     serde_json::from_str(&content).ok()
 }
 
-/// Compute deterministic UUID from source path (same as sync.rs)
+/// Compute deterministic UUID from source path
 fn path_to_uuid(path: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(path.as_bytes());
@@ -142,7 +183,7 @@ fn parse_frontmatter(content: &str) -> Option<(String, String, String, String)> 
     Some((name, description, mem_type, body))
 }
 
-/// Upsert a single memory file to Qdrant
+/// Upsert a single memory file to Qdrant. Returns true on success.
 fn upsert_memory(config: &QdrantConfig, path: &PathBuf) -> bool {
     let content = match std::fs::read_to_string(path) {
         Ok(c) => c,
@@ -190,7 +231,6 @@ fn upsert_memory(config: &QdrantConfig, path: &PathBuf) -> bool {
         config.cluster_url, config.collection
     );
 
-    // Blocking HTTP call
     let rt = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -223,13 +263,13 @@ fn upsert_memory(config: &QdrantConfig, path: &PathBuf) -> bool {
 // Periodic session re-index — every ~50 tool calls
 // ---------------------------------------------------------------------------
 
-/// Tool call threshold before triggering a session re-index.
 const REINDEX_TOOL_CALL_THRESHOLD: u64 = 50;
-
-/// Session index collection name (same as session_index.rs).
 const SESSION_COLLECTION: &str = "claude-sessions";
 
-/// State file for tracking tool calls since last re-index.
+/// Minimum combined user+assistant text length to index an exchange.
+/// Filters out trivial "yes"/"ok"/"done" turns.
+const MIN_EXCHANGE_LENGTH: usize = 100;
+
 #[derive(serde::Serialize, serde::Deserialize, Default)]
 struct SessionIndexState {
     tool_calls_since_index: u64,
@@ -270,7 +310,7 @@ fn save_session_index_state(state: &SessionIndexState) {
     }
 }
 
-/// Deterministic UUID from session + chunk index (same pattern as session_index.rs).
+/// Deterministic UUID from session + chunk index.
 fn content_to_uuid(session_id: &str, chunk_index: usize) -> String {
     let mut hasher = Sha256::new();
     hasher.update(format!("{session_id}:periodic:{chunk_index}").as_bytes());
@@ -298,9 +338,36 @@ fn project_hash(cwd: &str) -> String {
     result[..4].iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// Check if an exchange is substantive enough to index.
+/// Filters out trivial turns like "yes", "ok", "done", single-word responses.
+fn is_substantive_exchange(user: &str, assistant: &str) -> bool {
+    let combined_len = user.len() + assistant.len();
+    if combined_len < MIN_EXCHANGE_LENGTH {
+        return false;
+    }
+
+    // Skip exchanges where the user message is trivial
+    let user_trimmed = user.trim().to_lowercase();
+    let trivial_patterns = [
+        "yes", "no", "ok", "okay", "done", "thanks", "thank you", "got it",
+        "sure", "y", "n", "yep", "nope", "continue", "go", "next", "fix it",
+        "all", "yee", "cool", "nice", "great", "perfect",
+    ];
+    if trivial_patterns.contains(&user_trimmed.as_str()) && assistant.len() < 200 {
+        return false;
+    }
+
+    true
+}
+
 /// Lightweight session re-index: parse the last ~10 exchanges from the
-/// transcript and upsert them to Qdrant's `claude-sessions` collection.
-fn periodic_session_index(config: &QdrantConfig, transcript_path: &str, session_id: &str, cwd: &str) {
+/// transcript and upsert substantive ones to Qdrant's `claude-sessions` collection.
+fn periodic_session_index(
+    config: &QdrantConfig,
+    transcript_path: &str,
+    session_id: &str,
+    cwd: &str,
+) {
     let content = match std::fs::read_to_string(transcript_path) {
         Ok(c) => c,
         Err(e) => {
@@ -331,30 +398,7 @@ fn periodic_session_index(config: &QdrantConfig, transcript_path: &str, session_
             .or_else(|| val.get("role").and_then(|v| v.as_str()))
             .unwrap_or("");
 
-        let msg_content = val
-            .get("message")
-            .and_then(|m| m.get("content"))
-            .or_else(|| val.get("content"));
-
-        let text = msg_content
-            .and_then(|c| match c {
-                serde_json::Value::String(s) => Some(s.clone()),
-                serde_json::Value::Array(arr) => {
-                    let parts: Vec<String> = arr
-                        .iter()
-                        .filter_map(|item| {
-                            if item.get("type").and_then(|v| v.as_str()) == Some("text") {
-                                item.get("text").and_then(|v| v.as_str()).map(String::from)
-                            } else {
-                                None
-                            }
-                        })
-                        .collect();
-                    if parts.is_empty() { None } else { Some(parts.join("\n")) }
-                }
-                _ => None,
-            })
-            .unwrap_or_default();
+        let text = extract_text_content(&val);
 
         match msg_type {
             "human" | "user" => {
@@ -398,11 +442,11 @@ fn periodic_session_index(config: &QdrantConfig, transcript_path: &str, session_
     let proj_hash = project_hash(cwd);
     let now = chrono::Utc::now().to_rfc3339();
 
-    // Build Qdrant points
+    // Build Qdrant points — filter out trivial exchanges
     let points: Vec<serde_json::Value> = recent
         .iter()
         .enumerate()
-        .filter(|(_, (u, a))| u.len() + a.len() >= 50)
+        .filter(|(_, (u, a))| is_substantive_exchange(u, a))
         .map(|(i, (user, assistant))| {
             let id = content_to_uuid(session_id, start + i);
             let combined = format!("User: {user}\nAssistant: {assistant}");
@@ -434,6 +478,7 @@ fn periodic_session_index(config: &QdrantConfig, transcript_path: &str, session_
         .collect();
 
     if points.is_empty() {
+        debug!("No substantive exchanges to index");
         return;
     }
 
@@ -471,11 +516,18 @@ fn periodic_session_index(config: &QdrantConfig, transcript_path: &str, session_
                 .await
             {
                 Ok(resp) if resp.status().is_success() => {
-                    info!(count = batch.len(), session = session_id, "Periodic session index upserted");
+                    info!(
+                        count = batch.len(),
+                        session = session_id,
+                        "Periodic session index upserted"
+                    );
                 }
                 Ok(resp) => {
                     let status = resp.status();
-                    warn!(status = %status, "Periodic session index upsert returned non-success");
+                    warn!(
+                        status = %status,
+                        "Periodic session index upsert returned non-success"
+                    );
                 }
                 Err(e) => {
                     warn!(error = %e, "Periodic session index upsert failed");
@@ -485,13 +537,48 @@ fn periodic_session_index(config: &QdrantConfig, transcript_path: &str, session_
     });
 }
 
-/// Process Stop — sync recently modified memory files to Qdrant,
+/// Extract text content from a JSONL message value.
+fn extract_text_content(val: &serde_json::Value) -> String {
+    let msg_content = val
+        .get("message")
+        .and_then(|m| m.get("content"))
+        .or_else(|| val.get("content"));
+
+    msg_content
+        .and_then(|c| match c {
+            serde_json::Value::String(s) => Some(s.clone()),
+            serde_json::Value::Array(arr) => {
+                let parts: Vec<String> = arr
+                    .iter()
+                    .filter_map(|item| {
+                        if item.get("type").and_then(|v| v.as_str()) == Some("text") {
+                            item.get("text").and_then(|v| v.as_str()).map(String::from)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                if parts.is_empty() {
+                    None
+                } else {
+                    Some(parts.join("\n"))
+                }
+            }
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
+// ---------------------------------------------------------------------------
+// Main hook entry point
+// ---------------------------------------------------------------------------
+
+/// Process Stop — sync changed memory files to Qdrant,
 /// and periodically re-index the session transcript.
 pub fn process(input: &HookInput) -> HookOutput {
     let cwd = input.cwd.as_deref().unwrap_or(".");
 
     // --- Periodic session re-index ---
-    // Increment tool call counter and check threshold
     let mut index_state = load_session_index_state();
     index_state.tool_calls_since_index += 1;
 
@@ -501,7 +588,6 @@ pub fn process(input: &HookInput) -> HookOutput {
             "Tool call threshold reached — triggering periodic session index"
         );
 
-        // We need session_id and transcript_path
         if let (Some(session_id), Some(transcript_path)) =
             (input.session_id.as_deref(), input.transcript_path.as_deref())
         {
@@ -515,24 +601,20 @@ pub fn process(input: &HookInput) -> HookOutput {
             }
         }
 
-        // Reset counter
         index_state.tool_calls_since_index = 0;
         index_state.last_indexed_at = Some(chrono::Utc::now().to_rfc3339());
     }
 
     save_session_index_state(&index_state);
 
-    // --- Memory file sync (existing behavior) ---
-
-    // Check for recently modified memory files
-    let recent = recently_modified_memories(cwd);
-    if recent.is_empty() {
+    // --- Memory file sync (state-tracked, replaces 30s window) ---
+    let unsynced = find_unsynced_memories();
+    if unsynced.is_empty() {
         return HookOutput::allow();
     }
 
-    debug!(count = recent.len(), "Found recently modified memory files");
+    debug!(count = unsynced.len(), "Found unsynced memory files");
 
-    // Load Qdrant config
     let config = match load_config() {
         Some(c) => c,
         None => {
@@ -541,20 +623,24 @@ pub fn process(input: &HookInput) -> HookOutput {
         }
     };
 
-    // Sync each modified file
+    // Sync each changed file and update state
+    let mut state = load_sync_state();
     let mut synced = 0;
-    for path in &recent {
+    for path in &unsynced {
         if upsert_memory(&config, path) {
             synced += 1;
+            let key = path.to_string_lossy().to_string();
+            let mtime = file_mtime(path).unwrap_or(0);
+            state.insert(key, mtime);
             debug!(file = %path.display(), "Synced memory to Qdrant");
         }
     }
 
     if synced > 0 {
-        debug!(synced, "Memory files synced to Qdrant");
+        save_sync_state(&state);
+        info!(synced, total = unsynced.len(), "Memory files synced to Qdrant");
     }
 
-    // Never block
     HookOutput::allow()
 }
 
@@ -594,9 +680,22 @@ mod tests {
         assert!(output.blocked.is_none());
     }
 
-    // -------------------------------------------------------------------
-    // Periodic session re-index tests
-    // -------------------------------------------------------------------
+    #[test]
+    fn test_is_substantive_exchange() {
+        assert!(!is_substantive_exchange("yes", "ok"));
+        assert!(!is_substantive_exchange("y", "done"));
+        assert!(is_substantive_exchange(
+            "fix the authentication bug in login.rs",
+            "I found the issue in the token validation. The JWT expiry check was comparing timestamps in different formats."
+        ));
+        // Short user + long assistant = ok
+        assert!(is_substantive_exchange(
+            "fix it",
+            &"x".repeat(250)
+        ));
+        // Trivial user + short assistant = skip
+        assert!(!is_substantive_exchange("ok", "Done."));
+    }
 
     #[test]
     fn test_session_index_state_roundtrip() {
@@ -607,7 +706,10 @@ mod tests {
         let json = serde_json::to_string(&state).unwrap();
         let loaded: SessionIndexState = serde_json::from_str(&json).unwrap();
         assert_eq!(loaded.tool_calls_since_index, 42);
-        assert_eq!(loaded.last_indexed_at.as_deref(), Some("2026-04-04T10:00:00Z"));
+        assert_eq!(
+            loaded.last_indexed_at.as_deref(),
+            Some("2026-04-04T10:00:00Z")
+        );
     }
 
     #[test]
@@ -647,5 +749,38 @@ mod tests {
     #[test]
     fn test_reindex_threshold() {
         assert_eq!(REINDEX_TOOL_CALL_THRESHOLD, 50);
+    }
+
+    #[test]
+    fn test_extract_text_content_string() {
+        let val = serde_json::json!({"content": "hello world"});
+        assert_eq!(extract_text_content(&val), "hello world");
+    }
+
+    #[test]
+    fn test_extract_text_content_array() {
+        let val = serde_json::json!({
+            "content": [
+                {"type": "text", "text": "hello"},
+                {"type": "image", "url": "..."},
+                {"type": "text", "text": "world"}
+            ]
+        });
+        assert_eq!(extract_text_content(&val), "hello\nworld");
+    }
+
+    #[test]
+    fn test_extract_text_content_empty() {
+        let val = serde_json::json!({"other": "field"});
+        assert_eq!(extract_text_content(&val), "");
+    }
+
+    #[test]
+    fn test_sync_state_roundtrip() {
+        let mut state = HashMap::new();
+        state.insert("/path/to/file.md".to_string(), 1234567890u64);
+        let json = serde_json::to_string(&state).unwrap();
+        let loaded: HashMap<String, u64> = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.get("/path/to/file.md"), Some(&1234567890));
     }
 }
