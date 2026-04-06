@@ -4,6 +4,8 @@
 //! Implements ports defined in the application layer.
 
 pub mod activity_log;
+pub mod filesystem;
+pub mod qdrant;
 pub mod anthropic;
 pub mod config;
 pub mod error_log;
