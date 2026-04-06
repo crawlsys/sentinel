@@ -189,6 +189,10 @@ mod tests {
         }
     }
 
+    // Mutex to serialize tests that use env var overrides for the state file.
+    // set_var/remove_var are process-global and unsafe in parallel tests.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn test_stop_no_changes_clears_state() {
         let git = StubGit {
@@ -206,7 +210,8 @@ mod tests {
 
     #[test]
     fn test_stop_with_changes_writes_state() {
-        // Use a process-unique temp file to avoid race conditions with parallel tests
+        let _guard = ENV_LOCK.lock().unwrap();
+
         let tmp = std::env::temp_dir().join(format!(
             "commit-hygiene-test-{}-{:?}.json",
             std::process::id(),
@@ -226,12 +231,10 @@ mod tests {
         let output = process_stop(&input, &git);
         assert!(output.blocked.is_none());
 
-        // State file should exist with our 3 files
         assert!(tmp.exists(), "State file should have been written");
         let state: CommitState = serde_json::from_str(&fs::read_to_string(&tmp).unwrap()).unwrap();
         assert_eq!(state.file_count, 3);
 
-        // Cleanup
         let _ = fs::remove_file(&tmp);
         std::env::remove_var("SENTINEL_COMMIT_HYGIENE_STATE");
     }
@@ -248,16 +251,22 @@ mod tests {
 
     #[test]
     fn test_prompt_below_threshold_no_inject() {
-        // Write state with only 2 files (below MIN_FILES=3)
-        if let Some(path) = state_file() {
-            let state = CommitState {
-                cwd: "/test/below".to_string(),
-                file_count: 2,
-                files: vec!["a.rs".into(), "b.rs".into()],
-                ts: "2026-03-05".into(),
-            };
-            let _ = fs::write(&path, serde_json::to_string(&state).unwrap());
-        }
+        let _guard = ENV_LOCK.lock().unwrap();
+
+        let tmp = std::env::temp_dir().join(format!(
+            "commit-hygiene-below-{}-{:?}.json",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::env::set_var("SENTINEL_COMMIT_HYGIENE_STATE", tmp.to_str().unwrap());
+
+        let state = CommitState {
+            cwd: "/test/below".to_string(),
+            file_count: 2,
+            files: vec!["a.rs".into(), "b.rs".into()],
+            ts: "2026-03-05".into(),
+        };
+        let _ = fs::write(&tmp, serde_json::to_string(&state).unwrap());
 
         let input = HookInput {
             cwd: Some("/test/below".to_string()),
@@ -265,6 +274,9 @@ mod tests {
         };
         let output = process_prompt(&input);
         assert!(output.hook_specific_output.is_none());
+
+        let _ = fs::remove_file(&tmp);
+        std::env::remove_var("SENTINEL_COMMIT_HYGIENE_STATE");
     }
 
     #[test]
