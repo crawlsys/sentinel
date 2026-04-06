@@ -11,6 +11,32 @@ use chrono::Utc;
 use sentinel_domain::events::{HookEvent, HookInput, HookOutput};
 use tracing::{debug, warn};
 
+/// Run an async block, handling both standalone and nested-runtime cases.
+/// If already inside a tokio runtime (e.g., called from MCP server), uses
+/// `block_in_place`. Otherwise creates a new single-threaded runtime.
+fn run_async_block<F: std::future::Future<Output = T>, T>(f: F) -> T {
+    match tokio::runtime::Handle::try_current() {
+        Ok(_handle) => {
+            // Already in a runtime — use block_in_place to avoid panic
+            tokio::task::block_in_place(|| {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("nested runtime")
+                    .block_on(f)
+            })
+        }
+        Err(_) => {
+            // No runtime — create one
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("new runtime")
+                .block_on(f)
+        }
+    }
+}
+
 /// Maximum memories to verify per session to limit API calls.
 const MAX_VERIFY_PER_SESSION: usize = 10;
 
@@ -369,16 +395,8 @@ pub fn process(input: &HookInput) -> HookOutput {
         }
     };
 
-    // 3. Run async verification in a blocking runtime
-    let rt = match tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-    {
-        Ok(rt) => rt,
-        Err(_) => return HookOutput::allow(),
-    };
-
-    let stale_count = rt.block_on(async {
+    // 3. Run async verification — handle both standalone and nested-runtime cases
+    let stale_count = run_async_block(async {
         let client = match reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(10))
             .build()
