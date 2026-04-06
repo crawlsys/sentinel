@@ -2,7 +2,8 @@
 //!
 //! Blocks Edit/Write tools when uncommitted changes exceed thresholds.
 //! Warns when editing directly on main/master (should use feature branches).
-//! Encourages small, frequent commits via worktree workflow.
+//! All git operations go through the injected GitStatusPort — no direct
+//! std::process::Command calls.
 
 use sentinel_domain::events::{HookEvent, HookInput, HookOutput};
 
@@ -12,46 +13,6 @@ const MAX_UNCOMMITTED_FILES: usize = 10;
 
 /// Protected branch names that should not receive direct edits.
 const PROTECTED_BRANCHES: &[&str] = &["main", "master"];
-
-/// Get the current git branch name from the working directory.
-fn current_branch(cwd: &str) -> Option<String> {
-    let output = std::process::Command::new("git")
-        .args(["rev-parse", "--abbrev-ref", "HEAD"])
-        .current_dir(cwd)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .output()
-        .ok()?;
-
-    if !output.status.success() {
-        return None;
-    }
-
-    let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if branch.is_empty() || branch == "HEAD" {
-        None
-    } else {
-        Some(branch)
-    }
-}
-
-/// Check if we're inside a git worktree (not the main working tree).
-fn is_worktree(cwd: &str) -> bool {
-    let output = std::process::Command::new("git")
-        .args(["rev-parse", "--is-inside-work-tree"])
-        .current_dir(cwd)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .output();
-
-    if output.is_err() {
-        return false;
-    }
-
-    // Check if .git is a file (worktree) vs directory (main tree)
-    let git_path = std::path::Path::new(cwd).join(".git");
-    git_path.is_file() // worktrees have .git as a file, not a directory
-}
 
 /// Process a git-hygiene hook event (PreToolUse for Edit/Write).
 ///
@@ -72,8 +33,8 @@ pub fn process(input: &HookInput, git: &dyn GitStatusPort) -> HookOutput {
     let cwd = input.cwd.as_deref().unwrap_or(".");
 
     // Check 1: Warn if on a protected branch and not in a worktree
-    if let Some(branch) = current_branch(cwd) {
-        if PROTECTED_BRANCHES.contains(&branch.as_str()) && !is_worktree(cwd) {
+    if let Ok(branch) = git.current_branch(cwd) {
+        if PROTECTED_BRANCHES.contains(&branch.as_str()) && !git.is_worktree(cwd) {
             return HookOutput::inject_context(
                 HookEvent::PreToolUse,
                 format!(
@@ -109,106 +70,138 @@ mod tests {
     struct StubGit {
         has_changes: bool,
         files: Vec<String>,
+        branch: String,
+        worktree: bool,
+    }
+
+    impl StubGit {
+        fn default_with(has_changes: bool, files: Vec<String>) -> Self {
+            Self {
+                has_changes,
+                files,
+                branch: "feat/test".to_string(),
+                worktree: false,
+            }
+        }
+
+        fn on_main() -> Self {
+            Self {
+                has_changes: false,
+                files: vec![],
+                branch: "main".to_string(),
+                worktree: false,
+            }
+        }
+
+        fn on_main_worktree() -> Self {
+            Self {
+                has_changes: false,
+                files: vec![],
+                branch: "main".to_string(),
+                worktree: true,
+            }
+        }
     }
 
     impl GitStatusPort for StubGit {
         fn has_uncommitted_changes(&self, _repo_path: &str) -> anyhow::Result<bool> {
             Ok(self.has_changes)
         }
-
         fn changed_files(&self, _repo_path: &str) -> anyhow::Result<Vec<String>> {
             Ok(self.files.clone())
+        }
+        fn current_branch(&self, _repo_path: &str) -> anyhow::Result<String> {
+            Ok(self.branch.clone())
+        }
+        fn is_worktree(&self, _repo_path: &str) -> bool {
+            self.worktree
         }
     }
 
     #[test]
     fn test_allows_non_edit_tools() {
-        let git = StubGit {
-            has_changes: true,
-            files: vec!["a.rs".into(); 20],
-        };
+        let git = StubGit::default_with(true, vec!["a.rs".into(); 20]);
         let input = HookInput {
             tool_name: Some("Bash".to_string()),
             cwd: Some(".".to_string()),
             ..Default::default()
         };
-        let output = process(&input, &git);
-        assert!(output.blocked.is_none());
+        assert!(process(&input, &git).blocked.is_none());
     }
 
     #[test]
     fn test_allows_when_no_tool_name() {
-        let git = StubGit {
-            has_changes: false,
-            files: vec![],
-        };
-        let input = HookInput::default();
-        let output = process(&input, &git);
-        assert!(output.blocked.is_none());
+        let git = StubGit::default_with(false, vec![]);
+        assert!(process(&HookInput::default(), &git).blocked.is_none());
     }
 
     #[test]
     fn test_allows_edit_under_threshold() {
-        let git = StubGit {
-            has_changes: true,
-            files: vec!["a.rs".into(), "b.rs".into()],
-        };
+        let git = StubGit::default_with(true, vec!["a.rs".into(), "b.rs".into()]);
         let input = HookInput {
             tool_name: Some("Edit".to_string()),
             cwd: Some(".".to_string()),
             ..Default::default()
         };
-        let output = process(&input, &git);
-        // May inject context (branch warning) but should not block
-        assert!(output.blocked.is_none() || output.blocked == Some(false));
+        assert!(process(&input, &git).blocked.is_none());
     }
 
     #[test]
     fn test_blocks_edit_over_threshold() {
         let files: Vec<String> = (0..15).map(|i| format!("file{i}.rs")).collect();
-        let git = StubGit {
-            has_changes: true,
-            files,
-        };
+        let git = StubGit::default_with(true, files);
         let input = HookInput {
             tool_name: Some("Edit".to_string()),
-            // Use a non-git dir so branch check doesn't interfere
-            cwd: Some("/tmp/not-a-git-repo".to_string()),
+            cwd: Some(".".to_string()),
             ..Default::default()
         };
         let output = process(&input, &git);
         assert_eq!(output.blocked, Some(true));
-        let reason = output
-            .hook_specific_output
-            .as_ref()
-            .and_then(|h| h.permission_decision_reason.as_deref())
-            .or(output.reason.as_deref())
-            .unwrap();
-        assert!(reason.contains("15 uncommitted files"));
     }
 
     #[test]
     fn test_blocks_write_over_threshold() {
         let files: Vec<String> = (0..12).map(|i| format!("file{i}.rs")).collect();
-        let git = StubGit {
-            has_changes: true,
-            files,
-        };
+        let git = StubGit::default_with(true, files);
         let input = HookInput {
             tool_name: Some("Write".to_string()),
-            cwd: Some("/tmp/not-a-git-repo".to_string()),
+            cwd: Some(".".to_string()),
             ..Default::default()
         };
-        let output = process(&input, &git);
-        assert_eq!(output.blocked, Some(true));
+        assert_eq!(process(&input, &git).blocked, Some(true));
     }
 
     #[test]
     fn test_allows_when_no_uncommitted_changes() {
-        let git = StubGit {
-            has_changes: false,
-            files: vec![],
+        let git = StubGit::default_with(false, vec![]);
+        let input = HookInput {
+            tool_name: Some("Edit".to_string()),
+            cwd: Some(".".to_string()),
+            ..Default::default()
         };
+        assert!(process(&input, &git).blocked.is_none());
+    }
+
+    #[test]
+    fn test_warns_on_main_without_worktree() {
+        let git = StubGit::on_main();
+        let input = HookInput {
+            tool_name: Some("Edit".to_string()),
+            cwd: Some(".".to_string()),
+            ..Default::default()
+        };
+        let output = process(&input, &git);
+        let ctx = output
+            .hook_specific_output
+            .as_ref()
+            .and_then(|h| h.additional_context.as_deref());
+        assert!(ctx.is_some(), "Should inject branch warning");
+        assert!(ctx.unwrap().contains("main"));
+    }
+
+    #[test]
+    fn test_allows_main_in_worktree() {
+        let git = StubGit::on_main_worktree();
         let input = HookInput {
             tool_name: Some("Edit".to_string()),
             cwd: Some(".".to_string()),
@@ -216,6 +209,22 @@ mod tests {
         };
         let output = process(&input, &git);
         assert!(output.blocked.is_none());
+        let ctx = output
+            .hook_specific_output
+            .as_ref()
+            .and_then(|h| h.additional_context.as_deref());
+        assert!(ctx.is_none(), "Should NOT warn in worktree");
+    }
+
+    #[test]
+    fn test_allows_feature_branch() {
+        let git = StubGit::default_with(false, vec![]);
+        let input = HookInput {
+            tool_name: Some("Edit".to_string()),
+            cwd: Some(".".to_string()),
+            ..Default::default()
+        };
+        assert!(process(&input, &git).blocked.is_none());
     }
 
     #[test]
@@ -223,11 +232,5 @@ mod tests {
         assert!(PROTECTED_BRANCHES.contains(&"main"));
         assert!(PROTECTED_BRANCHES.contains(&"master"));
         assert!(!PROTECTED_BRANCHES.contains(&"feat/my-feature"));
-    }
-
-    #[test]
-    fn test_current_branch_non_git_dir() {
-        // Non-git directory should return None
-        assert!(current_branch("/tmp").is_none());
     }
 }

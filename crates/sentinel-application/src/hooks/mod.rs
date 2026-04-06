@@ -110,4 +110,10 @@ pub trait GitStatusPort {
 
     /// Get list of changed files (staged + unstaged).
     fn changed_files(&self, repo_path: &str) -> anyhow::Result<Vec<String>>;
+
+    /// Get the current branch name (e.g. "main", "feat/my-feature").
+    fn current_branch(&self, repo_path: &str) -> anyhow::Result<String>;
+
+    /// Check if the path is inside a git worktree (not the main working tree).
+    fn is_worktree(&self, repo_path: &str) -> bool;
 }

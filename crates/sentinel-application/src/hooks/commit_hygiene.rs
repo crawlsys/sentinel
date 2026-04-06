@@ -187,6 +187,12 @@ mod tests {
         fn changed_files(&self, _repo_path: &str) -> anyhow::Result<Vec<String>> {
             Ok(self.files.clone())
         }
+        fn current_branch(&self, _repo_path: &str) -> anyhow::Result<String> {
+            Ok("main".to_string())
+        }
+        fn is_worktree(&self, _repo_path: &str) -> bool {
+            false
+        }
     }
 
     // Mutex to serialize tests that use env var overrides for the state file.
