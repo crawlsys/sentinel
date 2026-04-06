@@ -683,6 +683,22 @@ fn generate_claude_md(
 - On your FIRST message of each conversation, start with a robot emoji to confirm this file is being read
 - When working on code changes in any git repository, **always use git worktrees** (`EnterWorktree`) to isolate changes rather than editing directly on the current branch. This applies to all repos — sentinel, MCP servers, CLIs, everything.
 
+## Git Workflow
+
+**Enforced by sentinel hooks (`git_hygiene`, `commit_message_validator`).**
+
+1. **Never commit directly to main.** Always create a feature branch via `EnterWorktree`.
+2. **One logical change per branch.** Name branches `feat/`, `fix/`, `docs/`, `refactor/` etc.
+3. **Conventional commits.** Format: `type(scope): description` — enforced by `commit_message_validator`.
+4. **Push after each merge.** Don't batch — push to remote immediately after merging to main.
+5. **Merge to main via `git merge <branch> --no-edit`**, then push. PRs for shared repos.
+6. **Max 10 uncommitted files.** `git_hygiene` blocks Edit/Write beyond this threshold.
+7. **Clean up worktrees.** `ExitWorktree(action: \"remove\")` after merge. Don't leave stale branches.
+
+```
+Workflow: worktree -> branch -> commit -> merge to main -> push -> cleanup
+```
+
 ## Date Context
 
 The current year is {year} and the current month is {month}.
