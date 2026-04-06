@@ -65,7 +65,7 @@ fn is_conventional(message: &str) -> bool {
 }
 
 /// Process PreToolUse for Bash commands containing git commit.
-pub fn process(input: &HookInput) -> HookOutput {
+pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
     // Only act on Bash tool calls
     if input.tool_name.as_deref() != Some("Bash") {
         return HookOutput::allow();
@@ -133,7 +133,7 @@ mod tests {
             tool_name: Some("Read".into()),
             ..Default::default()
         };
-        assert!(process(&input).blocked.is_none());
+        let ctx = crate::hooks::test_support::stub_ctx(); assert!(process(&input, &ctx).blocked.is_none());
     }
 
     #[test]
@@ -143,7 +143,7 @@ mod tests {
             tool_input: Some(json!({"command": "cargo test"})),
             ..Default::default()
         };
-        assert!(process(&input).blocked.is_none());
+        let ctx = crate::hooks::test_support::stub_ctx(); assert!(process(&input, &ctx).blocked.is_none());
     }
 
     #[test]
@@ -153,7 +153,7 @@ mod tests {
             tool_input: Some(json!({"command": "git commit -m \"feat: add user auth\""})),
             ..Default::default()
         };
-        assert!(process(&input).blocked.is_none());
+        let ctx = crate::hooks::test_support::stub_ctx(); assert!(process(&input, &ctx).blocked.is_none());
     }
 
     #[test]
@@ -165,7 +165,7 @@ mod tests {
             ),
             ..Default::default()
         };
-        assert!(process(&input).blocked.is_none());
+        let ctx = crate::hooks::test_support::stub_ctx(); assert!(process(&input, &ctx).blocked.is_none());
     }
 
     #[test]
@@ -175,7 +175,7 @@ mod tests {
             tool_input: Some(json!({"command": "git commit -m 'chore: bump deps'"})),
             ..Default::default()
         };
-        assert!(process(&input).blocked.is_none());
+        let ctx = crate::hooks::test_support::stub_ctx(); assert!(process(&input, &ctx).blocked.is_none());
     }
 
     #[test]
@@ -185,7 +185,7 @@ mod tests {
             tool_input: Some(json!({"command": "git commit -m \"updated the thing\""})),
             ..Default::default()
         };
-        let output = process(&input);
+        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
         assert_eq!(output.blocked, Some(true));
         assert!(output.reason.as_ref().unwrap().contains("conventional"));
     }
@@ -197,7 +197,7 @@ mod tests {
             tool_input: Some(json!({"command": "git commit -m \"add new feature\""})),
             ..Default::default()
         };
-        let output = process(&input);
+        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
         assert_eq!(output.blocked, Some(true));
     }
 
@@ -208,7 +208,7 @@ mod tests {
             tool_input: Some(json!({"command": "git commit -m \"update: changed something\""})),
             ..Default::default()
         };
-        let output = process(&input);
+        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
         assert_eq!(output.blocked, Some(true));
     }
 
@@ -219,7 +219,7 @@ mod tests {
             tool_input: Some(json!({"command": "git commit --amend -m \"whatever\""})),
             ..Default::default()
         };
-        assert!(process(&input).blocked.is_none());
+        let ctx = crate::hooks::test_support::stub_ctx(); assert!(process(&input, &ctx).blocked.is_none());
     }
 
     #[test]
@@ -230,7 +230,7 @@ mod tests {
             tool_input: Some(json!({"command": "git commit"})),
             ..Default::default()
         };
-        assert!(process(&input).blocked.is_none());
+        let ctx = crate::hooks::test_support::stub_ctx(); assert!(process(&input, &ctx).blocked.is_none());
     }
 
     #[test]
@@ -241,7 +241,7 @@ mod tests {
             tool_input: Some(json!({"command": cmd})),
             ..Default::default()
         };
-        assert!(process(&input).blocked.is_none());
+        let ctx = crate::hooks::test_support::stub_ctx(); assert!(process(&input, &ctx).blocked.is_none());
     }
 
     #[test]
@@ -298,7 +298,7 @@ mod tests {
             tool_input: Some(json!({"command": "git push origin main"})),
             ..Default::default()
         };
-        assert!(process(&input).blocked.is_none());
+        let ctx = crate::hooks::test_support::stub_ctx(); assert!(process(&input, &ctx).blocked.is_none());
     }
 
     #[test]
@@ -307,6 +307,6 @@ mod tests {
             tool_name: Some("Bash".into()),
             ..Default::default()
         };
-        assert!(process(&input).blocked.is_none());
+        let ctx = crate::hooks::test_support::stub_ctx(); assert!(process(&input, &ctx).blocked.is_none());
     }
 }

@@ -9,7 +9,7 @@ use sentinel_domain::events::{HookInput, HookOutput};
 ///
 /// Logs agent completion for telemetry. Uses stderr (exit 0) since
 /// SubagentStop stdout is not injected into model context.
-pub fn process(input: &HookInput) -> HookOutput {
+pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
     let agent_type = input
         .extra
         .get("agent_type")
@@ -34,7 +34,7 @@ mod tests {
             .extra
             .insert("agent_type".to_string(), serde_json::json!("debugger"));
 
-        let output = process(&input);
+        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
         assert!(output.blocked.is_none());
     }
 }

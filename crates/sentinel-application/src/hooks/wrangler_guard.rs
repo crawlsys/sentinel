@@ -26,7 +26,7 @@ static WRANGLER_DEPLOY: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"wrangler.*deploy").unwrap());
 
 /// Process a PreToolUse Bash event for wrangler commands.
-pub fn process(input: &HookInput) -> HookOutput {
+pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
     let cmd = match extract_bash_command(input) {
         Some(c) => c,
         None => return HookOutput::allow(),
@@ -175,96 +175,96 @@ mod tests {
 
     #[test]
     fn test_non_wrangler_allowed() {
-        let output = process(&bash_input("ls -la"));
+        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&bash_input("ls -la"), &ctx);
         assert!(output.blocked.is_none());
     }
 
     #[test]
     fn test_wrangler_rs_deploy_allowed() {
-        let output = process(&bash_input("wrangler-rs workers deploy --env production"));
+        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&bash_input("wrangler-rs workers deploy --env production"), &ctx);
         assert!(output.blocked.is_none());
     }
 
     #[test]
     fn test_node_wrangler_deploy_blocked_unknown_dir() {
         // No CWD or unknown CWD → blocked
-        let output = process(&bash_input("npx wrangler deploy --env staging"));
+        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&bash_input("npx wrangler deploy --env staging"), &ctx);
         assert_eq!(output.blocked, Some(true));
     }
 
     #[test]
     fn test_node_wrangler_deploy_allowed_ai_dir() {
-        let output = process(&bash_input_with_cwd(
+        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&bash_input_with_cwd(
             "npx wrangler deploy --env staging",
             "/c/Users/garys/Documents/GitHub/firefly-pro-routing/rust/langgraph-service",
-        ));
+        ), &ctx);
         assert!(output.blocked.is_none());
     }
 
     #[test]
     fn test_node_wrangler_deploy_allowed_osm_dir() {
-        let output = process(&bash_input_with_cwd(
+        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&bash_input_with_cwd(
             "npx wrangler deploy --env staging",
             "C:/Users/garys/Documents/GitHub/firefly-pro-routing/osm-service",
-        ));
+        ), &ctx);
         assert!(output.blocked.is_none());
     }
 
     #[test]
     fn test_node_wrangler_deploy_allowed_api_root() {
-        let output = process(&bash_input_with_cwd(
+        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&bash_input_with_cwd(
             "npx wrangler deploy --env production",
             "/c/Users/garys/Documents/GitHub/firefly-pro-routing",
-        ));
+        ), &ctx);
         assert!(output.blocked.is_none());
     }
 
     #[test]
     fn test_node_wrangler_deploy_allowed_engine_dir() {
-        let output = process(&bash_input_with_cwd(
+        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&bash_input_with_cwd(
             "npx wrangler deploy --env staging",
             "C:/Users/garys/Documents/GitHub/firefly-pro-routing/rust/engine-service",
-        ));
+        ), &ctx);
         assert!(output.blocked.is_none());
     }
 
     #[test]
     fn test_node_wrangler_deploy_blocked_wrong_dir() {
-        let output = process(&bash_input_with_cwd(
+        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&bash_input_with_cwd(
             "npx wrangler deploy --env staging",
             "/c/Users/garys/Documents/GitHub/some-other-project",
-        ));
+        ), &ctx);
         assert_eq!(output.blocked, Some(true));
     }
 
     #[test]
     fn test_node_wrangler_deploy_allowed_unc_prefix() {
-        let output = process(&bash_input_with_cwd(
+        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&bash_input_with_cwd(
             "npx wrangler deploy --env staging",
             "\\\\?\\C:\\Users\\garys\\Documents\\GitHub\\firefly-pro-routing\\rust\\langgraph-service",
-        ));
+        ), &ctx);
         assert!(output.blocked.is_none());
     }
 
     #[test]
     fn test_node_wrangler_containers_push_allowed() {
-        let output = process(&bash_input(
+        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&bash_input(
             "\"/c/Users/garys/AppData/Roaming/npm/wrangler\" containers push firefly-api:v1.0",
-        ));
+        ), &ctx);
         assert!(output.blocked.is_none());
     }
 
     #[test]
     fn test_node_wrangler_secret_put_allowed() {
-        let output = process(&bash_input(
+        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&bash_input(
             "\"/c/Users/garys/AppData/Roaming/npm/wrangler\" secret put DATABASE_URL --env dev",
-        ));
+        ), &ctx);
         assert!(output.blocked.is_none());
     }
 
     #[test]
     fn test_containers_delete_allowed() {
-        let output = process(&bash_input("npx wrangler containers delete old-app"));
+        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&bash_input("npx wrangler containers delete old-app"), &ctx);
         assert!(output.blocked.is_none());
     }
 
@@ -273,22 +273,22 @@ mod tests {
         // Set SENTINEL_TEST to prevent show_delete_dialog from launching the
         // real GUI dialog (which hangs waiting for user input in test env)
         std::env::set_var("SENTINEL_TEST", "1");
-        let output = process(&bash_input(
+        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&bash_input(
             "wrangler-rs delete --name hook-test-disposable",
-        ));
+        ), &ctx);
         assert_eq!(output.blocked, Some(true));
         std::env::remove_var("SENTINEL_TEST");
     }
 
     #[test]
     fn test_no_tool_input_allowed() {
-        let output = process(&HookInput::default());
+        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&HookInput::default(), &ctx);
         assert!(output.blocked.is_none());
     }
 
     #[test]
     fn test_plain_wrangler_deploy_blocked_no_cwd() {
-        let output = process(&bash_input("wrangler deploy --env production"));
+        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&bash_input("wrangler deploy --env production"), &ctx);
         assert_eq!(output.blocked, Some(true));
     }
 }

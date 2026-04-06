@@ -323,7 +323,7 @@ fn handle_task_update(input: &HookInput) -> HookOutput {
 }
 
 /// Process a todo interceptor hook event (PostToolUse)
-pub fn process(input: &HookInput) -> HookOutput {
+pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
     match input.tool_name.as_deref() {
         Some(TASK_CREATE) => handle_task_create(input),
         Some(TASK_UPDATE) => handle_task_update(input),
@@ -341,7 +341,7 @@ mod tests {
             tool_name: Some("Bash".to_string()),
             ..Default::default()
         };
-        let output = process(&input);
+        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
         assert!(output.blocked.is_none());
     }
 
@@ -357,7 +357,7 @@ mod tests {
             session_id: Some("test-session".to_string()),
             ..Default::default()
         };
-        let output = process(&input);
+        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
         assert!(output.blocked.is_none());
     }
 
@@ -373,7 +373,7 @@ mod tests {
             session_id: Some("test-session".to_string()),
             ..Default::default()
         };
-        let output = process(&input);
+        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
         assert!(output.blocked.is_none());
     }
 
@@ -387,7 +387,7 @@ mod tests {
             })),
             ..Default::default()
         };
-        let output = process(&input);
+        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
         assert!(output.blocked.is_none());
     }
 
@@ -498,7 +498,7 @@ mod tests {
     #[test]
     fn test_allows_no_tool_name() {
         let input = HookInput::default();
-        let output = process(&input);
+        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
         assert!(output.blocked.is_none());
     }
 
@@ -509,7 +509,7 @@ mod tests {
             tool_input: None,
             ..Default::default()
         };
-        let output = process(&input);
+        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
         assert!(output.blocked.is_none());
     }
 }

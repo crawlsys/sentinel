@@ -24,7 +24,7 @@ const TRIGGER_SUFFIXES: &[&str] = &[
 ];
 
 /// Process a `PostToolUse` event. Returns context injection if a cascade is needed.
-pub fn process(input: &HookInput) -> HookOutput {
+pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
     let Some(tool_name) = input.tool_name.as_deref() else {
         return HookOutput::allow();
     };
@@ -348,7 +348,7 @@ mod tests {
     fn test_process_ignores_non_trigger_tools() {
         let mut input = HookInput::default();
         input.tool_name = Some("mcp__linear__list_issues".to_string());
-        let output = process(&input);
+        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
         assert!(output.hook_specific_output.is_none());
     }
 
@@ -357,7 +357,7 @@ mod tests {
         let mut input = HookInput::default();
         input.tool_name = Some("mcp__accounts__account_switch".to_string());
         input.tool_result = None;
-        let output = process(&input);
+        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
         assert!(output.hook_specific_output.is_none());
     }
 
@@ -366,7 +366,7 @@ mod tests {
         let mut input = HookInput::default();
         input.tool_name = Some("mcp__accounts__account_switch".to_string());
         input.tool_result = Some(serde_json::json!("Error: profile 'bad' not found"));
-        let output = process(&input);
+        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
         assert!(output.hook_specific_output.is_none());
     }
 

@@ -9,7 +9,7 @@ use sentinel_domain::events::{HookInput, HookOutput};
 ///
 /// Logs the denial. Does not auto-retry — that would bypass the
 /// permission system's intent. Just observes for diagnostics.
-pub fn process(input: &HookInput) -> HookOutput {
+pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
     let reason = input
         .extra
         .get("reason")
@@ -35,7 +35,7 @@ mod tests {
             .extra
             .insert("reason".to_string(), serde_json::json!("auto_denied"));
 
-        let output = process(&input);
+        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
         assert!(output.blocked.is_none());
     }
 }

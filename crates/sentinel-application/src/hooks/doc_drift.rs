@@ -517,7 +517,7 @@ fn resolve_drift_for_cwd(cwd_str: &str) {
 // ---------------------------------------------------------------------------
 
 /// Process on Stop — detect drift and write findings.
-pub fn process_stop(input: &HookInput) -> HookOutput {
+pub fn process_stop(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
     let cwd_str = input.cwd.as_deref().unwrap_or(".");
     let cwd = Path::new(cwd_str);
 
@@ -550,7 +550,7 @@ pub fn process_stop(input: &HookInput) -> HookOutput {
 }
 
 /// Process on UserPromptSubmit — inject update instructions if drift exists.
-pub fn process_prompt(input: &HookInput) -> HookOutput {
+pub fn process_prompt(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
     let cwd_str = input.cwd.as_deref().unwrap_or(".");
 
     let entries = read_unresolved_drift(cwd_str);
@@ -770,7 +770,7 @@ mod tests {
             cwd: Some("/nonexistent/path/that/does/not/exist".into()),
             ..Default::default()
         };
-        let output = process_stop(&input);
+        let ctx = crate::hooks::test_support::stub_ctx(); let output = process_stop(&input, &ctx);
         assert!(output.blocked.is_none());
     }
 
@@ -781,7 +781,7 @@ mod tests {
             cwd: Some(dir.path().to_string_lossy().to_string()),
             ..Default::default()
         };
-        let output = process_prompt(&input);
+        let ctx = crate::hooks::test_support::stub_ctx(); let output = process_prompt(&input, &ctx);
         assert!(output.blocked.is_none());
         assert!(output.hook_specific_output.is_none());
     }

@@ -10,7 +10,7 @@ use sentinel_domain::events::{HookInput, HookOutput};
 ///
 /// Performs minimal cleanup: flush pending state to disk.
 /// Must complete within 1.5s — no network calls, no heavy I/O.
-pub fn process(input: &HookInput) -> HookOutput {
+pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
     let reason = input
         .extra
         .get("reason")
@@ -55,7 +55,7 @@ mod tests {
             .extra
             .insert("reason".to_string(), serde_json::json!("prompt_input_exit"));
 
-        let output = process(&input);
+        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
         assert!(output.blocked.is_none());
     }
 }

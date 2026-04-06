@@ -8,7 +8,7 @@ use sentinel_domain::events::{HookEvent, HookInput, HookOutput};
 /// Process TeammateIdle event
 ///
 /// Injects context reminding the teammate to check for remaining work.
-pub fn process(input: &HookInput) -> HookOutput {
+pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
     let teammate_name = input
         .extra
         .get("teammate_name")
@@ -51,7 +51,7 @@ mod tests {
             .extra
             .insert("team_name".to_string(), serde_json::json!("my-project"));
 
-        let output = process(&input);
+        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
         assert!(output.hook_specific_output.is_some());
         let ctx = output.hook_specific_output.unwrap().additional_context;
         let ctx = ctx.as_deref().unwrap();
@@ -63,7 +63,7 @@ mod tests {
     #[test]
     fn test_teammate_idle_handles_missing_fields() {
         let input = HookInput::default();
-        let output = process(&input);
+        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
         assert!(output.hook_specific_output.is_some());
         let ctx = output.hook_specific_output.unwrap().additional_context;
         let ctx = ctx.as_deref().unwrap();

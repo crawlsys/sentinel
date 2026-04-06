@@ -251,7 +251,7 @@ fn write_persistent_tasks(
 ///
 /// Finds the active task directory, reads all task files, and writes
 /// a persistent snapshot to `~/.claude/persistent-tasks/{project_hash}/`.
-pub fn process(input: &HookInput) -> HookOutput {
+pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
     let session_id = input.session_id.as_deref().unwrap_or("unknown");
     let cwd = input.cwd.as_deref().unwrap_or(".");
 
@@ -402,7 +402,7 @@ mod tests {
             cwd: Some(".".to_string()),
             ..Default::default()
         };
-        let output = process(&input);
+        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
         assert!(output.blocked.is_none());
     }
 }

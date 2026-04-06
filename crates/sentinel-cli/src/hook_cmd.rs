@@ -255,25 +255,25 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
             output.merge(&error_output);
 
             // Hygiene override — detect override commands in prompt
-            let override_output = hooks::hygiene_override::process(&input);
+            let override_output = hooks::hygiene_override::process(&input, &ctx);
             output.merge(&override_output);
 
             // Worktree reminder — remind to use EnterWorktree in git repos
-            let worktree_output = hooks::worktree_reminder::process(&input);
+            let worktree_output = hooks::worktree_reminder::process(&input, &ctx);
             output.merge(&worktree_output);
 
             // Todo loader — inject active todos into context
-            let todo_output = hooks::todo_loader::process(&input);
+            let todo_output = hooks::todo_loader::process(&input, &ctx);
             output.merge(&todo_output);
 
             // --- Two-phase hooks (read state written by Stop, inject instructions) ---
 
             // Doc drift — inject update instructions for stale docs
-            let drift_output = hooks::doc_drift::process_prompt(&input);
+            let drift_output = hooks::doc_drift::process_prompt(&input, &ctx);
             output.merge(&drift_output);
 
             // Doc cleanup — inject cleanup instructions for junk docs
-            let cleanup_output = hooks::doc_cleanup::process_prompt(&input);
+            let cleanup_output = hooks::doc_cleanup::process_prompt(&input, &ctx);
             output.merge(&cleanup_output);
 
             // Commit hygiene — remind about uncommitted changes
@@ -314,19 +314,19 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
 
             // Pre-commit verification — block git commit/push without test evidence (Bash only)
             if matches!(input.tool_name.as_deref(), Some("Bash")) {
-                let commit_output = hooks::pre_commit_verification::process(&input);
+                let commit_output = hooks::pre_commit_verification::process(&input, &ctx);
                 output.merge(&commit_output);
 
                 // Commit message validator — enforce conventional commits (Bash only)
-                let msg_output = hooks::commit_message_validator::process(&input);
+                let msg_output = hooks::commit_message_validator::process(&input, &ctx);
                 output.merge(&msg_output);
 
                 // Pre-push Steel test — block git push without Steel test (Bash only)
-                let steel_output = hooks::pre_push_steel_test::process(&input);
+                let steel_output = hooks::pre_push_steel_test::process(&input, &ctx);
                 output.merge(&steel_output);
 
                 // Wrangler guard — block Node wrangler deploy, gate deletes (Bash only)
-                let wrangler_output = hooks::wrangler_guard::process(&input);
+                let wrangler_output = hooks::wrangler_guard::process(&input, &ctx);
                 output.merge(&wrangler_output);
             }
         }
@@ -337,7 +337,7 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
             output.merge(&mcp_output);
 
             // Todo interceptor — persist rich todos from TodoWrite calls
-            let todo_output = hooks::todo_interceptor::process(&input);
+            let todo_output = hooks::todo_interceptor::process(&input, &ctx);
             output.merge(&todo_output);
 
             // Evidence collector — capture tool results for proof chains.
@@ -354,17 +354,17 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
             output.merge(&activity_output);
 
             // Steel test recorder — write state file on successful session release
-            let steel_output = hooks::pre_push_steel_test::process_post_tool(&input);
+            let steel_output = hooks::pre_push_steel_test::process_post_tool(&input, &ctx);
             output.merge(&steel_output);
 
             // Plan organizer — inject plan file organization instructions (ExitPlanMode only)
             if matches!(input.tool_name.as_deref(), Some("ExitPlanMode")) {
-                let plan_output = hooks::plan_organizer::process(&input);
+                let plan_output = hooks::plan_organizer::process(&input, &ctx);
                 output.merge(&plan_output);
             }
 
             // Account cascade — auto-switch all MCP servers after account change
-            let cascade_output = hooks::account_cascade::process(&input);
+            let cascade_output = hooks::account_cascade::process(&input, &ctx);
             output.merge(&cascade_output);
         }
 
@@ -388,11 +388,11 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
             output.merge(&hygiene_output);
 
             // Doc cleanup — scan for junk docs
-            let doc_output = hooks::doc_cleanup::process_stop(&input);
+            let doc_output = hooks::doc_cleanup::process_stop(&input, &ctx);
             output.merge(&doc_output);
 
             // Doc drift — detect stale README/CLAUDE.md/CHANGELOG
-            let drift_output = hooks::doc_drift::process_stop(&input);
+            let drift_output = hooks::doc_drift::process_stop(&input, &ctx);
             output.merge(&drift_output);
 
             // Verification gate — detect unverified completion claims
@@ -404,7 +404,7 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
             output.merge(&activity_stop_output);
 
             // Task persist — final snapshot catches any TaskUpdate calls mid-turn
-            let task_persist_output = hooks::task_persist::process(&input);
+            let task_persist_output = hooks::task_persist::process(&input, &ctx);
             output.merge(&task_persist_output);
 
             // Memory extract — sync recently modified memory files to Qdrant
@@ -438,11 +438,11 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
             }
 
             // Session init — log session, sync marketplace repo, inject startup context
-            let init_output = hooks::session_init::process(&input);
+            let init_output = hooks::session_init::process(&input, &ctx);
             output.merge(&init_output);
 
             // Task rehydrate — inject persistent tasks from previous sessions
-            let rehydrate_output = hooks::task_rehydrate::process(&input);
+            let rehydrate_output = hooks::task_rehydrate::process(&input, &ctx);
             output.merge(&rehydrate_output);
 
             // Memory verify — verify stale memories against ground truth (24h cooldown)
@@ -469,17 +469,17 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
 
         HookEvent::TeammateIdle => {
             // Team quality gate — remind teammate to check for remaining work
-            let idle_output = hooks::teammate_idle::process(&input);
+            let idle_output = hooks::teammate_idle::process(&input, &ctx);
             output.merge(&idle_output);
         }
 
         HookEvent::TaskCompleted => {
             // Task verification gate — verify work before marking complete
-            let completed_output = hooks::task_completed::process(&input);
+            let completed_output = hooks::task_completed::process(&input, &ctx);
             output.merge(&completed_output);
 
             // Task persist — snapshot task list to persistent markdown + JSON
-            let persist_output = hooks::task_persist::process(&input);
+            let persist_output = hooks::task_persist::process(&input, &ctx);
             output.merge(&persist_output);
         }
 
@@ -487,7 +487,7 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
 
         HookEvent::SessionEnd => {
             // Session cleanup — flush state, log session end (1.5s timeout!)
-            let end_output = hooks::session_end::process(&input);
+            let end_output = hooks::session_end::process(&input, &ctx);
             output.merge(&end_output);
         }
 
@@ -499,35 +499,35 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
 
         HookEvent::SubagentStart => {
             // Inject skill context into spawned agents
-            let subagent_output = hooks::subagent_start::process(&input);
+            let subagent_output = hooks::subagent_start::process(&input, &ctx);
             output.merge(&subagent_output);
         }
 
         HookEvent::SubagentStop => {
             // Log agent completion for telemetry
-            let subagent_output = hooks::subagent_stop::process(&input);
+            let subagent_output = hooks::subagent_stop::process(&input, &ctx);
             output.merge(&subagent_output);
         }
 
         HookEvent::TaskCreated => {
             // Log task creation for telemetry
-            let task_output = hooks::task_created::process(&input);
+            let task_output = hooks::task_created::process(&input, &ctx);
             output.merge(&task_output);
 
             // Task persist — snapshot task list to persistent markdown + JSON
-            let persist_output = hooks::task_persist::process(&input);
+            let persist_output = hooks::task_persist::process(&input, &ctx);
             output.merge(&persist_output);
         }
 
         HookEvent::Setup => {
             // Repo init/maintenance
-            let setup_output = hooks::setup::process(&input);
+            let setup_output = hooks::setup::process(&input, &ctx);
             output.merge(&setup_output);
         }
 
         HookEvent::CwdChanged => {
             // Working directory changed — re-detect project context
-            let cwd_output = hooks::cwd_changed::process(&input);
+            let cwd_output = hooks::cwd_changed::process(&input, &ctx);
             output.merge(&cwd_output);
         }
 
@@ -539,7 +539,7 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
 
         HookEvent::PermissionDenied => {
             // Auto-mode denied a tool call — log for diagnostics
-            let denied_output = hooks::permission_denied::process(&input);
+            let denied_output = hooks::permission_denied::process(&input, &ctx);
             output.merge(&denied_output);
         }
 

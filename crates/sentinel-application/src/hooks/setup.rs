@@ -8,7 +8,7 @@ use sentinel_domain::events::{HookInput, HookOutput};
 /// Process Setup event
 ///
 /// Logs setup events. Could trigger `sentinel init` for init triggers.
-pub fn process(input: &HookInput) -> HookOutput {
+pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
     let trigger = input
         .extra
         .get("trigger")
@@ -32,7 +32,7 @@ mod tests {
             .extra
             .insert("trigger".to_string(), serde_json::json!("init"));
 
-        let output = process(&input);
+        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
         assert!(output.blocked.is_none());
     }
 }

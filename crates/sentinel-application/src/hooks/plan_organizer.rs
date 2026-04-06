@@ -35,7 +35,7 @@ fn detect_project(cwd: &str) -> String {
 
 /// Process an ExitPlanMode PostToolUse event.
 /// Injects context instructing Claude to organize the plan file.
-pub fn process(input: &HookInput) -> HookOutput {
+pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
     // Only fire on ExitPlanMode
     if input.tool_name.as_deref() != Some("ExitPlanMode") {
         return HookOutput::allow();
@@ -72,14 +72,14 @@ mod tests {
             tool_name: Some("Bash".to_string()),
             ..Default::default()
         };
-        let output = process(&input);
+        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
         assert!(output.hook_specific_output.is_none());
     }
 
     #[test]
     fn test_ignores_no_tool_name() {
         let input = HookInput::default();
-        let output = process(&input);
+        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
         assert!(output.hook_specific_output.is_none());
     }
 
@@ -90,7 +90,7 @@ mod tests {
             cwd: Some("/home/gary/Documents/GitHub/firefly-pro-crm".to_string()),
             ..Default::default()
         };
-        let output = process(&input);
+        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
         assert!(output.hook_specific_output.is_some());
         let ctx = output.hook_specific_output.unwrap().additional_context;
         let ctx = ctx.as_deref().unwrap();
@@ -166,7 +166,7 @@ mod tests {
             cwd: Some("/home/gary/Documents/GitHub/legatus".to_string()),
             ..Default::default()
         };
-        let output = process(&input);
+        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
         let ctx = output.hook_specific_output.unwrap().additional_context;
         let ctx = ctx.as_deref().unwrap();
         assert!(ctx.contains("plans/legatus"));
@@ -179,7 +179,7 @@ mod tests {
             cwd: Some("/tmp".to_string()),
             ..Default::default()
         };
-        let output = process(&input);
+        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
         let hso = output.hook_specific_output.unwrap();
         assert_eq!(hso.hook_event_name, "PostToolUse");
     }

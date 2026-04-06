@@ -37,7 +37,7 @@ fn extract_linear_id(subject: &str) -> Option<&str> {
 ///
 /// Injects context reminding the teammate to verify before marking complete.
 /// If the task subject contains `@linear:{ID}`, also injects Linear sync instructions.
-pub fn process(input: &HookInput) -> HookOutput {
+pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
     let task_subject = input
         .extra
         .get("task_subject")
@@ -114,7 +114,7 @@ mod tests {
             .extra
             .insert("task_id".to_string(), serde_json::json!("42"));
 
-        let output = process(&input);
+        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
         assert!(output.hook_specific_output.is_some());
         let ctx = output.hook_specific_output.unwrap().additional_context;
         let ctx = ctx.as_deref().unwrap();
@@ -127,7 +127,7 @@ mod tests {
     #[test]
     fn test_task_completed_handles_missing_fields() {
         let input = HookInput::default();
-        let output = process(&input);
+        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
         assert!(output.hook_specific_output.is_some());
         let ctx = output.hook_specific_output.unwrap().additional_context;
         let ctx = ctx.as_deref().unwrap();
@@ -170,7 +170,7 @@ mod tests {
             .extra
             .insert("task_id".to_string(), serde_json::json!("7"));
 
-        let output = process(&input);
+        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
         let ctx = output.hook_specific_output.unwrap().additional_context;
         let ctx = ctx.as_deref().unwrap();
         assert!(ctx.contains("[Linear Sync]"));

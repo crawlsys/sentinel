@@ -49,7 +49,7 @@ fn suggests_code_changes(prompt: &str) -> bool {
         .any(|p| Regex::new(p).map(|re| re.is_match(&lower)).unwrap_or(false))
 }
 
-pub fn process(input: &HookInput) -> HookOutput {
+pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
     let cwd = match &input.cwd {
         Some(c) => c.as_str(),
         None => return HookOutput::allow(),
@@ -120,7 +120,7 @@ mod tests {
     #[test]
     fn test_process_no_cwd() {
         let input = HookInput::default();
-        let output = process(&input);
+        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
         assert!(output.hook_specific_output.is_none());
     }
 
@@ -131,7 +131,7 @@ mod tests {
             prompt: Some("fix the code".to_string()),
             ..Default::default()
         };
-        let output = process(&input);
+        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
         assert!(output.hook_specific_output.is_none());
     }
 }

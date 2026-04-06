@@ -8,7 +8,7 @@ use sentinel_domain::events::{HookEvent, HookInput, HookOutput};
 /// Process SubagentStart event
 ///
 /// Injects active skill and project context into the spawned agent.
-pub fn process(input: &HookInput) -> HookOutput {
+pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
     let agent_type = input
         .extra
         .get("agent_type")
@@ -59,7 +59,7 @@ mod tests {
             .extra
             .insert("agent_type".to_string(), serde_json::json!("code-reviewer"));
 
-        let output = process(&input);
+        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
         assert!(output.hook_specific_output.is_some());
         let ctx = output.hook_specific_output.unwrap().additional_context;
         let ctx = ctx.as_deref().unwrap();

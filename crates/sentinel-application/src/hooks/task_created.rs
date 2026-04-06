@@ -8,7 +8,7 @@ use sentinel_domain::events::{HookInput, HookOutput};
 /// Process TaskCreated event
 ///
 /// Logs task creation for telemetry tracking.
-pub fn process(input: &HookInput) -> HookOutput {
+pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
     let task_id = input
         .extra
         .get("task_id")
@@ -46,7 +46,7 @@ mod tests {
             .extra
             .insert("task_subject".to_string(), serde_json::json!("Fix bug"));
 
-        let output = process(&input);
+        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
         assert!(output.blocked.is_none());
     }
 }

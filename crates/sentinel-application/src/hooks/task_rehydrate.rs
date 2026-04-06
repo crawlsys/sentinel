@@ -94,7 +94,7 @@ fn relative_time(updated_at: &str) -> String {
 }
 
 /// Process SessionStart — inject persistent tasks into context
-pub fn process(input: &HookInput) -> HookOutput {
+pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
     let session_id = input.session_id.as_deref().unwrap_or("unknown");
     let cwd = input.cwd.as_deref().unwrap_or(".");
     let proj_hash = project_hash(cwd);
@@ -224,7 +224,7 @@ mod tests {
             cwd: Some("/nonexistent/project".to_string()),
             ..Default::default()
         };
-        let output = process(&input);
+        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
         // Should allow (no tasks to inject)
         assert!(output.hook_specific_output.is_none() || {
             output

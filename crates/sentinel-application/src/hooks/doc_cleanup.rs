@@ -172,7 +172,7 @@ fn scan_docs(dir: &Path, cwd: &Path, depth: usize, max_depth: usize, results: &m
 // Stop phase: detect junk docs and write state
 // ---------------------------------------------------------------------------
 
-pub fn process_stop(input: &HookInput) -> HookOutput {
+pub fn process_stop(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
     let cwd_str = input.cwd.as_deref().unwrap_or(".");
     let cwd = Path::new(cwd_str);
 
@@ -210,7 +210,7 @@ pub fn process_stop(input: &HookInput) -> HookOutput {
 // UserPromptSubmit phase: inject cleanup instructions
 // ---------------------------------------------------------------------------
 
-pub fn process_prompt(input: &HookInput) -> HookOutput {
+pub fn process_prompt(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
     let cwd = input.cwd.as_deref().unwrap_or(".");
 
     let path = match state_file() {
@@ -276,7 +276,7 @@ mod tests {
             cwd: Some(dir.path().to_string_lossy().to_string()),
             ..Default::default()
         };
-        let output = process_stop(&input);
+        let ctx = crate::hooks::test_support::stub_ctx(); let output = process_stop(&input, &ctx);
         assert!(output.blocked.is_none());
     }
 
@@ -292,7 +292,7 @@ mod tests {
             cwd: Some(dir.path().to_string_lossy().to_string()),
             ..Default::default()
         };
-        let output = process_stop(&input);
+        let ctx = crate::hooks::test_support::stub_ctx(); let output = process_stop(&input, &ctx);
         assert!(output.blocked.is_none());
     }
 
@@ -348,7 +348,7 @@ mod tests {
             cwd: Some("/nonexistent/test/path".into()),
             ..Default::default()
         };
-        let output = process_prompt(&input);
+        let ctx = crate::hooks::test_support::stub_ctx(); let output = process_prompt(&input, &ctx);
         assert!(output.hook_specific_output.is_none());
     }
 

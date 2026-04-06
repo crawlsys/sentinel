@@ -179,7 +179,7 @@ pub fn is_signed_override_active(
 
 /// Process the hygiene-override hook event.
 /// Accepts session_id for session-scoped override files.
-pub fn process(input: &HookInput) -> HookOutput {
+pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
     let prompt = match &input.prompt {
         Some(p) => p.to_lowercase(),
         None => return HookOutput::allow(),
@@ -292,7 +292,7 @@ mod tests {
     #[test]
     fn test_process_no_prompt() {
         let input = HookInput::default();
-        let output = process(&input);
+        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
         assert!(output.blocked.is_none());
         assert!(output.hook_specific_output.is_none());
     }
@@ -303,7 +303,7 @@ mod tests {
             prompt: Some("just a normal message".to_string()),
             ..Default::default()
         };
-        let output = process(&input);
+        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
         assert!(output.blocked.is_none());
         assert!(output.hook_specific_output.is_none());
     }
@@ -316,7 +316,7 @@ mod tests {
             session_id: Some(session.to_string()),
             ..Default::default()
         };
-        let output = process(&input);
+        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
         assert!(output.blocked.is_none());
         // The override file should exist in temp dir (session-scoped)
         assert!(hygiene_override_path(session).exists());
@@ -332,7 +332,7 @@ mod tests {
             session_id: Some(session.to_string()),
             ..Default::default()
         };
-        let output = process(&input);
+        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
         assert!(output.blocked.is_none());
         assert!(verification_override_path(session).exists());
         // Clean up
@@ -347,7 +347,7 @@ mod tests {
             session_id: Some(session.to_string()),
             ..Default::default()
         };
-        let output = process(&input);
+        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
         assert!(output.blocked.is_none());
         // Should match because prompt is lowercased
         assert!(hygiene_override_path(session).exists());

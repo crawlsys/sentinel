@@ -169,7 +169,7 @@ fn transcript_has_test_evidence(transcript_path: &str) -> bool {
 
 /// Process a pre-commit verification hook event (PreToolUse).
 /// Uses session-scoped signed override check.
-pub fn process(input: &HookInput) -> HookOutput {
+pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
     let session_id = input.session_id.as_deref().unwrap_or("unknown");
     let override_path = default_override_path(session_id);
     process_with_override(input, &override_path, session_id)
@@ -274,7 +274,7 @@ mod tests {
             tool_input: Some(serde_json::json!({"file_path": "foo.rs"})),
             ..Default::default()
         };
-        let output = process(&input);
+        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
         assert!(output.blocked.is_none());
     }
 
@@ -285,7 +285,7 @@ mod tests {
             tool_input: Some(serde_json::json!({"command": "ls -la"})),
             ..Default::default()
         };
-        let output = process(&input);
+        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
         assert!(output.blocked.is_none());
     }
 
@@ -336,7 +336,7 @@ mod tests {
             transcript_path: Some(tmpfile.path().to_string_lossy().to_string()),
             ..Default::default()
         };
-        let output = process(&input);
+        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
         assert!(output.blocked.is_none());
     }
 
@@ -387,7 +387,7 @@ mod tests {
     #[test]
     fn test_allows_no_tool_name() {
         let input = HookInput::default();
-        let output = process(&input);
+        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
         assert!(output.blocked.is_none());
     }
 
@@ -406,7 +406,7 @@ mod tests {
             transcript_path: Some(tmpfile.path().to_string_lossy().to_string()),
             ..Default::default()
         };
-        let output = process(&input);
+        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
         assert!(output.blocked.is_none());
     }
 

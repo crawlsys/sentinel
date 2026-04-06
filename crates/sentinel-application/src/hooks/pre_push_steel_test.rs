@@ -280,7 +280,7 @@ pub fn record_steel_test_passed(session_id: &str) {
 /// 2. Bash tool result containing `STEEL_TEST_PASS` — CDP/Puppeteer test completed
 ///
 /// Should be called from the PostToolUse event dispatch in hook_cmd.rs.
-pub fn process_post_tool(input: &HookInput) -> HookOutput {
+pub fn process_post_tool(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
     let tool = match &input.tool_name {
         Some(name) => name.as_str(),
         None => return HookOutput::allow(),
@@ -312,7 +312,7 @@ pub fn process_post_tool(input: &HookInput) -> HookOutput {
 }
 
 /// Process a pre-push Steel test hook event (PreToolUse)
-pub fn process(input: &HookInput) -> HookOutput {
+pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
     // Only act on Bash tool calls
     let tool = match &input.tool_name {
         Some(name) if name == "Bash" => name.as_str(),
@@ -391,7 +391,7 @@ mod tests {
             tool_name: Some("Read".to_string()),
             ..Default::default()
         };
-        let output = process(&input);
+        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
         assert!(output.blocked.is_none());
     }
 
@@ -402,7 +402,7 @@ mod tests {
             tool_input: Some(serde_json::json!({"command": "git commit -m 'test'"})),
             ..Default::default()
         };
-        let output = process(&input);
+        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
         assert!(output.blocked.is_none());
     }
 
@@ -498,7 +498,7 @@ mod tests {
             session_id: Some(session_id.to_string()),
             ..Default::default()
         };
-        let output = process(&input);
+        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
         assert!(output.blocked.is_none());
 
         // Cleanup
@@ -536,7 +536,7 @@ mod tests {
     #[test]
     fn test_allows_no_tool_name() {
         let input = HookInput::default();
-        let output = process(&input);
+        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
         assert!(output.blocked.is_none());
     }
 
@@ -596,7 +596,7 @@ mod tests {
             session_id: Some(session_id.to_string()),
             ..Default::default()
         };
-        let output = process_post_tool(&input);
+        let ctx = crate::hooks::test_support::stub_ctx(); let output = process_post_tool(&input, &ctx);
         assert!(output.blocked.is_none());
         assert!(
             has_recent_steel_test(session_id),
@@ -618,7 +618,7 @@ mod tests {
             session_id: Some(session_id.to_string()),
             ..Default::default()
         };
-        let output = process_post_tool(&input);
+        let ctx = crate::hooks::test_support::stub_ctx(); let output = process_post_tool(&input, &ctx);
         assert!(output.blocked.is_none());
         assert!(
             !state_path.exists(),
@@ -638,7 +638,7 @@ mod tests {
             session_id: Some(session_id.to_string()),
             ..Default::default()
         };
-        let output = process_post_tool(&input);
+        let ctx = crate::hooks::test_support::stub_ctx(); let output = process_post_tool(&input, &ctx);
         assert!(output.blocked.is_none());
         assert!(
             has_recent_steel_test(session_id),
@@ -660,7 +660,7 @@ mod tests {
             session_id: Some(session_id.to_string()),
             ..Default::default()
         };
-        let output = process_post_tool(&input);
+        let ctx = crate::hooks::test_support::stub_ctx(); let output = process_post_tool(&input, &ctx);
         assert!(output.blocked.is_none());
         assert!(
             !state_path.exists(),

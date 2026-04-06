@@ -69,7 +69,7 @@ fn filter_project_todos<'a>(todos: &'a [TodoEntry], cwd: &str) -> Vec<&'a TodoEn
 }
 
 /// Process the todo-loader hook event
-pub fn process(input: &HookInput) -> HookOutput {
+pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
     let cwd = input.cwd.as_deref().unwrap_or(".");
     let session_id = input.session_id.as_deref().unwrap_or("unknown");
 
@@ -250,7 +250,7 @@ mod tests {
     #[test]
     fn test_process_no_cwd_returns_context() {
         let input = HookInput::default();
-        let output = process(&input);
+        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
         // Should not block, should inject some context
         assert!(output.blocked.is_none());
     }
