@@ -229,3 +229,22 @@ pub trait FileSystemPort: Send + Sync {
     /// Get file metadata (for mtime checks).
     fn metadata(&self, path: &std::path::Path) -> anyhow::Result<std::fs::Metadata>;
 }
+
+// ---------------------------------------------------------------------------
+// HookContext — bundles all injected ports for hook functions
+// ---------------------------------------------------------------------------
+
+/// Context passed to all hook `process()` functions.
+///
+/// Bundles all injected ports so hook signatures stay stable as new
+/// ports are added. Constructed once in the dispatcher (hook_cmd.rs).
+pub struct HookContext<'a> {
+    /// Git operations (branch, worktree, uncommitted changes).
+    pub git: &'a dyn GitStatusPort,
+
+    /// Vector database (Qdrant). `None` if not configured.
+    pub vector_store: Option<&'a dyn VectorStorePort>,
+
+    /// Filesystem operations. Always present.
+    pub fs: &'a dyn FileSystemPort,
+}

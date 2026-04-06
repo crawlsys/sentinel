@@ -158,6 +158,16 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
         sentinel_infrastructure::qdrant::QdrantAdapter::from_config()
             .map(|a| Arc::new(a) as Arc<dyn VectorStorePort>);
 
+    // Construct filesystem adapter
+    let real_fs = sentinel_infrastructure::filesystem::RealFileSystem;
+
+    // Bundle all ports into HookContext — will be passed to hooks as they migrate
+    let _ctx = hooks::HookContext {
+        git: &git,
+        vector_store: vector_store.as_deref(),
+        fs: &real_fs,
+    };
+
     // Process through matching hooks based on event type
     let mut output = HookOutput::allow();
 
