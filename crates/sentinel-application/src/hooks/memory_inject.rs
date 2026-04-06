@@ -736,7 +736,10 @@ async fn increment_access_counts(
 }
 
 /// Process UserPromptSubmit — inject relevant memories (precomputed or live fallback).
-pub fn process(input: &HookInput) -> HookOutput {
+///
+/// `vector_store`: injected Qdrant adapter. If `None`, falls back to direct HTTP
+/// via internal `load_config()` (legacy path, to be removed once all hooks migrate).
+pub fn process(input: &HookInput, vector_store: Option<&dyn super::VectorStorePort>) -> HookOutput {
     // Skip if no prompt or prompt is too short
     let prompt = match input.prompt.as_deref() {
         Some(p) if p.len() > 10 => p,
@@ -796,7 +799,7 @@ pub fn process(input: &HookInput) -> HookOutput {
 /// Reads the last user prompt from `last-injected-memories.json` (written by the
 /// previous UserPromptSubmit), searches Qdrant, and writes results to
 /// `precomputed-memories.json` for the next turn to read instantly.
-pub fn process_stop(input: &HookInput) -> HookOutput {
+pub fn process_stop(input: &HookInput, _vector_store: Option<&dyn super::VectorStorePort>) -> HookOutput {
     // Read the last user prompt from the injected state file
     let state_dir = match dirs::home_dir() {
         Some(h) => h.join(".claude").join("sentinel").join("state"),
@@ -933,7 +936,7 @@ mod tests {
             ..Default::default()
         };
         // Should allow without config (no Qdrant setup)
-        let output = process(&input);
+        let output = process(&input, None);
         assert!(output.blocked.is_none());
     }
 
@@ -943,7 +946,7 @@ mod tests {
             prompt: Some("hi".to_string()),
             ..Default::default()
         };
-        let output = process(&input);
+        let output = process(&input, None);
         assert!(output.hook_specific_output.is_none());
     }
 
@@ -953,7 +956,7 @@ mod tests {
             prompt: Some("/commit".to_string()),
             ..Default::default()
         };
-        let output = process(&input);
+        let output = process(&input, None);
         assert!(output.hook_specific_output.is_none());
     }
 
@@ -1303,7 +1306,7 @@ mod tests {
             cwd: Some("/nonexistent".to_string()),
             ..Default::default()
         };
-        let output = process_stop(&input);
+        let output = process_stop(&input, None);
         assert!(output.blocked.is_none());
     }
 }

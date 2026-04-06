@@ -371,7 +371,7 @@ async fn update_payload(
 }
 
 /// Process SessionStart — verify stale memories.
-pub fn process(input: &HookInput) -> HookOutput {
+pub fn process(input: &HookInput, _vector_store: Option<&dyn super::VectorStorePort>) -> HookOutput {
     // 1. Check 24h cooldown
     if !check_cooldown() {
         debug!("Memory verify cooldown active — skipping");

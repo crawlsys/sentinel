@@ -14,6 +14,9 @@ use sentinel_domain::events::{HookEvent, HookOutput, HookSpecificOutput};
 use sentinel_domain::state::SessionState;
 use sentinel_domain::workflow::{SkillSteps, SkillWorkflow};
 
+use std::sync::Arc;
+use sentinel_application::hooks::VectorStorePort;
+
 /// Infrastructure implementation of GitStatusPort
 struct RealGit;
 
@@ -150,6 +153,11 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
 
     let git = RealGit;
 
+    // Construct vector store adapter (None if Qdrant not configured)
+    let vector_store: Option<Arc<dyn VectorStorePort>> =
+        sentinel_infrastructure::qdrant::QdrantAdapter::from_config()
+            .map(|a| Arc::new(a) as Arc<dyn VectorStorePort>);
+
     // Process through matching hooks based on event type
     let mut output = HookOutput::allow();
 
@@ -275,7 +283,7 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
             output.merge(&activity_prompt_output);
 
             // Memory inject — search Qdrant for semantically relevant memories
-            let memory_output = hooks::memory_inject::process(&input);
+            let memory_output = hooks::memory_inject::process(&input, vector_store.as_deref());
             output.merge(&memory_output);
         }
 
@@ -390,15 +398,15 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
             output.merge(&task_persist_output);
 
             // Memory extract — sync recently modified memory files to Qdrant
-            let memory_extract_output = hooks::memory_extract::process(&input);
+            let memory_extract_output = hooks::memory_extract::process(&input, vector_store.as_deref());
             output.merge(&memory_extract_output);
 
             // Memory feedback — boost used memories, flag corrections
-            let memory_feedback_output = hooks::memory_feedback::process(&input);
+            let memory_feedback_output = hooks::memory_feedback::process(&input, vector_store.as_deref());
             output.merge(&memory_feedback_output);
 
             // Memory inject (Stop phase) — pre-compute Qdrant search for next turn
-            let memory_precompute_output = hooks::memory_inject::process_stop(&input);
+            let memory_precompute_output = hooks::memory_inject::process_stop(&input, vector_store.as_deref());
             output.merge(&memory_precompute_output);
         }
 
@@ -428,7 +436,7 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
             output.merge(&rehydrate_output);
 
             // Memory verify — verify stale memories against ground truth (24h cooldown)
-            let verify_output = hooks::memory_verify::process(&input);
+            let verify_output = hooks::memory_verify::process(&input, vector_store.as_deref());
             output.merge(&verify_output);
 
             // Version drift check — runs once per session with 24h cooldown.
@@ -445,7 +453,7 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
             output.merge(&compact_output);
 
             // Session index — upsert transcript exchanges to Qdrant for search
-            let index_output = hooks::session_index::process(&input);
+            let index_output = hooks::session_index::process(&input, vector_store.as_deref());
             output.merge(&index_output);
         }
 
