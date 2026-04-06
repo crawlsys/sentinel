@@ -134,7 +134,7 @@ fn extract_mcp_info(tool: &str) -> Option<(String, String)> {
 // PostToolUse phase: log every tool call
 // ---------------------------------------------------------------------------
 
-pub fn process_post_tool(input: &HookInput) -> HookOutput {
+pub fn process_post_tool(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
     let tool = match &input.tool_name {
         Some(t) => t.clone(),
         None => return HookOutput::allow(),
@@ -180,7 +180,7 @@ pub fn process_post_tool(input: &HookInput) -> HookOutput {
 // Stop phase: build session summary for UserPromptSubmit to read
 // ---------------------------------------------------------------------------
 
-pub fn process_stop(input: &HookInput) -> HookOutput {
+pub fn process_stop(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
     let session_id = input.session_id.as_deref().unwrap_or("unknown");
 
     let path = match log_file() {
@@ -271,7 +271,7 @@ pub fn process_stop(input: &HookInput) -> HookOutput {
 // UserPromptSubmit phase: inject activity summary when context is elevated
 // ---------------------------------------------------------------------------
 
-pub fn process_prompt(input: &HookInput) -> HookOutput {
+pub fn process_prompt(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
     let session_id = input.session_id.as_deref().unwrap_or("unknown");
 
     let path = match summary_file() {
@@ -464,7 +464,7 @@ mod tests {
     #[test]
     fn test_post_tool_no_tool_name() {
         let input = HookInput::default();
-        let output = process_post_tool(&input);
+        let ctx = crate::hooks::test_support::stub_ctx(); let output = process_post_tool(&input, &ctx);
         assert!(output.blocked.is_none());
         assert!(output.hook_specific_output.is_none());
     }
@@ -477,7 +477,7 @@ mod tests {
             session_id: Some("test-activity".into()),
             ..Default::default()
         };
-        let output = process_post_tool(&input);
+        let ctx = crate::hooks::test_support::stub_ctx(); let output = process_post_tool(&input, &ctx);
         assert!(output.blocked.is_none());
     }
 
@@ -513,7 +513,7 @@ mod tests {
             session_id: Some("nonexistent-session-xyz".into()),
             ..Default::default()
         };
-        let output = process_prompt(&input);
+        let ctx = crate::hooks::test_support::stub_ctx(); let output = process_prompt(&input, &ctx);
         assert!(output.hook_specific_output.is_none());
     }
 
@@ -532,7 +532,7 @@ mod tests {
             session_id: Some("empty-session-no-activity".into()),
             ..Default::default()
         };
-        let output = process_stop(&input);
+        let ctx = crate::hooks::test_support::stub_ctx(); let output = process_stop(&input, &ctx);
         assert!(output.blocked.is_none());
     }
 }

@@ -161,8 +161,8 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
     // Construct filesystem adapter
     let real_fs = sentinel_infrastructure::filesystem::RealFileSystem;
 
-    // Bundle all ports into HookContext — will be passed to hooks as they migrate
-    let _ctx = hooks::HookContext {
+    // Bundle all ports into HookContext
+    let ctx = hooks::HookContext {
         git: &git,
         vector_store: vector_store.as_deref(),
         fs: &real_fs,
@@ -289,7 +289,7 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
             output.merge(&verify_prompt_output);
 
             // Activity tracker — inject session activity summary when context is elevated
-            let activity_prompt_output = hooks::activity_tracker::process_prompt(&input);
+            let activity_prompt_output = hooks::activity_tracker::process_prompt(&input, &ctx);
             output.merge(&activity_prompt_output);
 
             // Memory inject — search Qdrant for semantically relevant memories
@@ -350,7 +350,7 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
             output.merge(&evidence_output);
 
             // Activity tracker — log every tool call to activity-log.jsonl
-            let activity_output = hooks::activity_tracker::process_post_tool(&input);
+            let activity_output = hooks::activity_tracker::process_post_tool(&input, &ctx);
             output.merge(&activity_output);
 
             // Steel test recorder — write state file on successful session release
@@ -370,7 +370,7 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
 
         HookEvent::Stop => {
             // Execution log — capture [RUN]/[STEP]/[PHASE] markers from transcript
-            let exec_output = hooks::execution_log::process(&input);
+            let exec_output = hooks::execution_log::process(&input, &ctx);
             output.merge(&exec_output);
 
             // Skill telemetry — aggregate skill usage metrics
@@ -400,7 +400,7 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
             output.merge(&verify_output);
 
             // Activity tracker — build session summary from activity log
-            let activity_stop_output = hooks::activity_tracker::process_stop(&input);
+            let activity_stop_output = hooks::activity_tracker::process_stop(&input, &ctx);
             output.merge(&activity_stop_output);
 
             // Task persist — final snapshot catches any TaskUpdate calls mid-turn
@@ -459,7 +459,7 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
 
         HookEvent::PreCompact => {
             // Pre-compact snapshot — save session state before context compaction
-            let compact_output = hooks::pre_compact::process(&input);
+            let compact_output = hooks::pre_compact::process(&input, &ctx);
             output.merge(&compact_output);
 
             // Session index — upsert transcript exchanges to Qdrant for search
@@ -493,7 +493,7 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
 
         HookEvent::PostCompact => {
             // Restore critical state after context compaction
-            let compact_output = hooks::post_compact::process(&input);
+            let compact_output = hooks::post_compact::process(&input, &ctx);
             output.merge(&compact_output);
         }
 

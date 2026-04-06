@@ -248,3 +248,37 @@ pub struct HookContext<'a> {
     /// Filesystem operations. Always present.
     pub fs: &'a dyn FileSystemPort,
 }
+
+/// Test utilities for creating mock `HookContext`.
+#[cfg(test)]
+pub mod test_support {
+    use super::*;
+    use std::path::{Path, PathBuf};
+
+    pub struct StubGit;
+    impl GitStatusPort for StubGit {
+        fn has_uncommitted_changes(&self, _: &str) -> anyhow::Result<bool> { Ok(false) }
+        fn changed_files(&self, _: &str) -> anyhow::Result<Vec<String>> { Ok(vec![]) }
+        fn current_branch(&self, _: &str) -> anyhow::Result<String> { Ok("main".into()) }
+        fn is_worktree(&self, _: &str) -> bool { false }
+    }
+
+    pub struct StubFs;
+    impl FileSystemPort for StubFs {
+        fn home_dir(&self) -> Option<PathBuf> { Some(PathBuf::from("/mock/home")) }
+        fn read_to_string(&self, _: &Path) -> anyhow::Result<String> { anyhow::bail!("not found") }
+        fn write(&self, _: &Path, _: &[u8]) -> anyhow::Result<()> { Ok(()) }
+        fn create_dir_all(&self, _: &Path) -> anyhow::Result<()> { Ok(()) }
+        fn read_dir(&self, _: &Path) -> anyhow::Result<Vec<PathBuf>> { Ok(vec![]) }
+        fn exists(&self, _: &Path) -> bool { false }
+        fn is_dir(&self, _: &Path) -> bool { false }
+        fn metadata(&self, _: &Path) -> anyhow::Result<std::fs::Metadata> { anyhow::bail!("no") }
+    }
+
+    /// Create a test `HookContext` with stub ports.
+    pub fn stub_ctx() -> HookContext<'static> {
+        let git: &'static StubGit = Box::leak(Box::new(StubGit));
+        let fs: &'static StubFs = Box::leak(Box::new(StubFs));
+        HookContext { git, vector_store: None, fs }
+    }
+}

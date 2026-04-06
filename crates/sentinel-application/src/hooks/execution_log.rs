@@ -71,7 +71,7 @@ fn current_skill() -> String {
 }
 
 /// Process the execution-log hook event (Stop).
-pub fn process(input: &HookInput) -> HookOutput {
+pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
     let metrics = match metrics_dir() {
         Some(d) => d,
         None => return HookOutput::allow(),
@@ -203,7 +203,7 @@ mod tests {
     #[test]
     fn test_no_transcript_path() {
         let input = HookInput::default();
-        let output = process(&input);
+        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
         assert!(output.blocked.is_none());
     }
 
@@ -215,7 +215,7 @@ mod tests {
             session_id: Some("test-exec-empty".to_string()),
             ..Default::default()
         };
-        let output = process(&input);
+        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
         assert!(output.blocked.is_none());
     }
 
@@ -237,7 +237,7 @@ mod tests {
             cwd: Some(".".to_string()),
             ..Default::default()
         };
-        let output = process(&input);
+        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
         assert!(output.blocked.is_none());
     }
 
@@ -259,7 +259,7 @@ mod tests {
             cwd: Some(".".to_string()),
             ..Default::default()
         };
-        let output = process(&input);
+        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
         assert!(output.blocked.is_none());
     }
 

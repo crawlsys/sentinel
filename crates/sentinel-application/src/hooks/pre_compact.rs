@@ -180,7 +180,7 @@ fn read_session_state(session_id: &str) -> (Option<String>, Vec<String>, u64) {
 // PreCompact: snapshot session state before context compaction
 // ---------------------------------------------------------------------------
 
-pub fn process(input: &HookInput) -> HookOutput {
+pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
     let session_id = input.session_id.as_deref().unwrap_or("unknown");
     let cwd = input.cwd.as_deref();
 
@@ -234,7 +234,7 @@ mod tests {
     #[test]
     fn test_process_default_input() {
         let input = HookInput::default();
-        let output = process(&input);
+        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
         assert!(output.blocked.is_none());
     }
 
@@ -245,7 +245,7 @@ mod tests {
             cwd: Some(".".into()),
             ..Default::default()
         };
-        let output = process(&input);
+        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
         assert!(output.blocked.is_none());
     }
 
