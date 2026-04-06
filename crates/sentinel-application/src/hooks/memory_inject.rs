@@ -638,10 +638,101 @@ fn search_qdrant(config: &QdrantConfig, query: &str, _project_hash: &str, cwd: &
             .collect();
         write_injected_state(&state_entries, user_prompt);
 
+        // Increment access_count for returned memory hits (fire-and-forget)
+        let memory_ids: Vec<String> = reordered
+            .iter()
+            .filter(|(_, h)| h.source == "memory" && !h.id.is_empty())
+            .map(|(_, h)| h.id.clone())
+            .collect();
+        if !memory_ids.is_empty() {
+            increment_access_counts(&client, config, &memory_ids).await;
+        }
+
         Some(output)
     });
 
     result
+}
+
+/// Increment access_count for a batch of memory point IDs.
+/// Uses Qdrant's set_payload with a "+" increment pattern (payload update).
+async fn increment_access_counts(
+    client: &reqwest::Client,
+    config: &QdrantConfig,
+    point_ids: &[String],
+) {
+    // Qdrant doesn't support atomic increment in set_payload, so we read + write.
+    // For access_count this is fine — a race condition on count is acceptable.
+    let scroll_url = format!(
+        "{}/collections/{}/points",
+        config.cluster_url, config.collection
+    );
+
+    // Batch read current counts
+    let body = serde_json::json!({
+        "ids": point_ids,
+        "with_payload": ["access_count"]
+    });
+
+    let resp = match client
+        .post(&scroll_url)
+        .header("api-key", &config.api_key)
+        .json(&body)
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(_) => return,
+    };
+
+    let json: serde_json::Value = match resp.json().await {
+        Ok(j) => j,
+        Err(_) => return,
+    };
+
+    let points = json
+        .get("result")
+        .and_then(|r| r.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    // Build payload updates
+    let mut updates: Vec<serde_json::Value> = Vec::new();
+    for point in &points {
+        let id = match point.get("id").and_then(|v| v.as_str()) {
+            Some(id) => id,
+            None => continue,
+        };
+        let current = point
+            .get("payload")
+            .and_then(|p| p.get("access_count"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+
+        updates.push(serde_json::json!({
+            "payload": {
+                "access_count": current + 1,
+                "accessed_at": chrono::Utc::now().to_rfc3339()
+            },
+            "points": [id]
+        }));
+    }
+
+    // Apply updates
+    let update_url = format!(
+        "{}/collections/{}/points/payload",
+        config.cluster_url, config.collection
+    );
+    for update in &updates {
+        let _ = client
+            .post(&update_url)
+            .header("api-key", &config.api_key)
+            .json(update)
+            .send()
+            .await;
+    }
+
+    debug!(count = updates.len(), "Incremented access_count for injected memories");
 }
 
 /// Process UserPromptSubmit — inject relevant memories (precomputed or live fallback).
