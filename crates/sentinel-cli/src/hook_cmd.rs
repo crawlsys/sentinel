@@ -328,6 +328,10 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
                 let plan_output = hooks::plan_organizer::process(&input);
                 output.merge(&plan_output);
             }
+
+            // Account cascade — auto-switch all MCP servers after account change
+            let cascade_output = hooks::account_cascade::process(&input);
+            output.merge(&cascade_output);
         }
 
         HookEvent::Stop => {

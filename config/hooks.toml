@@ -75,6 +75,13 @@ description = "Collect tool results as evidence for proof chain"
 depends_on = []
 has_api_call = false
 
+[[hooks]]
+id = "account-cascade"
+event = "PostToolUse"
+description = "Auto-switch all MCP servers after account_switch/account_rotate/project_switch"
+depends_on = []
+has_api_call = false
+
 # === Stop ===
 
 [[hooks]]

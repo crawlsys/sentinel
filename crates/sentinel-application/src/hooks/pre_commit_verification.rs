@@ -13,6 +13,34 @@ use regex::Regex;
 use sentinel_domain::events::{HookInput, HookOutput};
 use std::path::PathBuf;
 
+/// Search all project directories for a session transcript JSONL.
+/// Fallback when `input.transcript_path` is missing or points to
+/// a worktree-scoped dir that doesn't contain the transcript file.
+///
+/// Returns the **largest** matching transcript, not the first — worktree-scoped
+/// project dirs often have small/empty transcripts while the original project
+/// dir has the real one with test evidence.
+fn find_transcript_by_session(session_id: &str) -> Option<String> {
+    let projects_dir = dirs::home_dir()?.join(".claude").join("projects");
+    if !projects_dir.exists() {
+        return None;
+    }
+    let mut best: Option<(u64, String)> = None;
+    for entry in std::fs::read_dir(&projects_dir).ok()?.flatten() {
+        if !entry.file_type().ok().is_some_and(|ft| ft.is_dir()) {
+            continue;
+        }
+        let path = entry.path().join(format!("{session_id}.jsonl"));
+        if let Ok(meta) = std::fs::metadata(&path) {
+            let size = meta.len();
+            if best.as_ref().is_none_or(|(best_size, _)| size > *best_size) {
+                best = Some((size, path.to_string_lossy().to_string()));
+            }
+        }
+    }
+    best.map(|(_, path)| path)
+}
+
 /// Test command patterns that count as verification evidence
 const TEST_COMMAND_PATTERNS: &[&str] = &[
     r"\bnpm\s+test\b",
@@ -192,8 +220,16 @@ fn process_with_override(
         return HookOutput::allow();
     }
 
-    // Layer 1: Check transcript for test evidence
-    if let Some(ref transcript_path) = input.transcript_path {
+    // Layer 1: Check transcript for test evidence.
+    // Try input.transcript_path first, then fall back to searching by session ID.
+    // Claude Code may not send transcript_path in PreToolUse, or it may resolve
+    // to a worktree-scoped project dir that doesn't contain the JSONL.
+    let resolved_transcript = input
+        .transcript_path
+        .clone()
+        .filter(|p| std::path::Path::new(p).exists())
+        .or_else(|| find_transcript_by_session(session_id));
+    if let Some(ref transcript_path) = resolved_transcript {
         if transcript_has_test_evidence(transcript_path) {
             return HookOutput::allow();
         }
@@ -384,5 +420,40 @@ mod tests {
         };
         let output = process_with_override(&input, &override_path, "test-sess");
         assert_eq!(output.blocked, Some(true));
+    }
+
+    #[test]
+    fn test_find_transcript_picks_largest_file() {
+        // Simulates worktree bug: two project dirs have the same session JSONL,
+        // but the worktree-scoped one is empty and the original has real content.
+        let tmpdir = tempfile::tempdir().unwrap();
+        let session_id = "test-find-largest";
+
+        // Create two "project" dirs
+        let worktree_dir = tmpdir.path().join("C--repo--worktree");
+        let original_dir = tmpdir.path().join("C--repo");
+        std::fs::create_dir_all(&worktree_dir).unwrap();
+        std::fs::create_dir_all(&original_dir).unwrap();
+
+        // Worktree transcript: empty
+        let worktree_transcript = worktree_dir.join(format!("{session_id}.jsonl"));
+        std::fs::write(&worktree_transcript, "").unwrap();
+
+        // Original transcript: has test evidence
+        let original_transcript = original_dir.join(format!("{session_id}.jsonl"));
+        std::fs::write(
+            &original_transcript,
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"cargo test"}}]}}"#,
+        )
+        .unwrap();
+
+        // The original (larger) transcript should have evidence
+        assert!(transcript_has_test_evidence(
+            &original_transcript.to_string_lossy()
+        ));
+        // The worktree (empty) one should not
+        assert!(!transcript_has_test_evidence(
+            &worktree_transcript.to_string_lossy()
+        ));
     }
 }

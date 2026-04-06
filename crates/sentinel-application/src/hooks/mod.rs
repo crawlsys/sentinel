@@ -4,6 +4,7 @@
 //! Each module implements one hook. Add new hooks here and
 //! update HOOK_NAMES to keep the count accurate.
 
+pub mod account_cascade;
 pub mod activity_tracker;
 mod block_context;
 pub mod commit_hygiene;
@@ -45,6 +46,7 @@ pub mod wrangler_guard;
 /// All hook module names — used for dynamic counting.
 /// Keep in sync with the `pub mod` declarations above.
 pub const HOOK_NAMES: &[&str] = &[
+    "account_cascade",
     "activity_tracker",
     "commit_hygiene",
     "commit_message_validator",
