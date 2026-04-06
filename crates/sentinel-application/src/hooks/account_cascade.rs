@@ -158,6 +158,32 @@ fn inject_auto_execute(result_text: &str) -> HookOutput {
     HookOutput::inject_context(HookEvent::PostToolUse, context)
 }
 
+/// All MCP servers that support account/workspace switching.
+/// Each entry: `(config_key, mcp_tool_call_template, label)`.
+///
+/// The `config_key` is looked up in project frontmatter.
+/// The template has `{}` where the config value is interpolated.
+const CASCADE_TARGETS: &[(&str, &str, &str)] = &[
+    ("linear_account",      "mcp__linear__switch_account(account_name: \"{}\")",          "Linear"),
+    ("doppler_account",     "mcp__doppler__switch_account(account_id: \"{}\")",            "Doppler"),
+    ("blacksmith_account",  "mcp__blacksmith__switch_account(account_name: \"{}\")",       "Blacksmith"),
+    ("cerebras_account",    "mcp__cerebras__switch_account(account_name: \"{}\")",         "Cerebras"),
+    ("neon_account",        "mcp__neon__switch_account(account_name: \"{}\")",             "Neon"),
+    ("railway_account",     "mcp__railway__switch_account(name: \"{}\")",                  "Railway"),
+    ("vercel_account",      "mcp__vercel__switch_account(name: \"{}\")",                   "Vercel"),
+    ("sentry_account",      "mcp__sentry__switch_account(account_id: \"{}\")",             "Sentry"),
+    ("onepassword_account", "mcp__1password__switch_account(account_name: \"{}\")",        "1Password"),
+    ("dragonfly_account",   "mcp__dragonfly__switch_account(account_name: \"{}\")",        "Dragonfly"),
+    ("gooddata_account",    "mcp__gooddata__switch_account(account_name: \"{}\")",         "GoodData"),
+    ("hyperswitch_account", "mcp__hyperswitch__switch_account(account_name: \"{}\")",      "Hyperswitch"),
+    ("nylas_account",       "mcp__nylas__switch_account(account_name: \"{}\")",            "Nylas"),
+    ("notion_account",      "mcp__notion__switch_account(profile_name: \"{}\")",           "Notion"),
+    ("cloudflare_account",  "mcp__cloudflare-wrangler__switch_account(account_id: \"{}\")", "Cloudflare"),
+    ("github_account",      "mcp__github__auth_switch(username: \"{}\")",                  "GitHub"),
+    ("firebase_account",    "mcp__google-firebase__login_use(email: \"{}\")",              "Firebase"),
+    ("loom_workspace",      "mcp__loom__switch_workspace(workspace_id: \"{}\")",           "Loom"),
+];
+
 /// Scan project configs for one whose `claude_account` matches the switched account name.
 /// Falls back to matching by project name or aliases if `claude_account` is not set.
 /// Returns a list of MCP tool call instructions for all mapped services.
@@ -195,28 +221,13 @@ fn build_cascade_instructions(projects_dir: &Path, account_name: &str) -> Vec<St
     };
 
     let mut instructions = Vec::new();
-    let mut step = 1;
 
-    if let Some(linear_account) = project.get("linear_account") {
-        instructions.push(format!(
-            "{step}. `mcp__linear__switch_account(account_name: \"{linear_account}\")` — Linear workspace"
-        ));
-        step += 1;
-    }
-
-    if let Some(doppler_account) = project.get("doppler_account") {
-        // Only cascade Doppler if an explicit account mapping exists.
-        // doppler_project/doppler_config are project-level, not account-level.
-        instructions.push(format!(
-            "{step}. `mcp__doppler__switch_account(account_id: \"{doppler_account}\")` — Doppler secrets"
-        ));
-        step += 1;
-    }
-
-    if let Some(blacksmith_account) = project.get("blacksmith_account") {
-        instructions.push(format!(
-            "{step}. `mcp__blacksmith__switch_account(account_name: \"{blacksmith_account}\")` — Blacksmith CI"
-        ));
+    for (config_key, tool_template, label) in CASCADE_TARGETS {
+        if let Some(value) = project.get(*config_key) {
+            let step = instructions.len() + 1;
+            let tool_call = tool_template.replace("{}", value);
+            instructions.push(format!("{step}. `{tool_call}` — {label}"));
+        }
     }
 
     instructions
@@ -404,6 +415,74 @@ mod tests {
         assert!(instructions[0].contains("linear"));
         assert!(instructions[1].contains("doppler"));
         assert!(instructions[2].contains("blacksmith"));
+    }
+
+    #[test]
+    fn test_build_cascade_all_18_services() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("full.md");
+        fs::write(&file, "\
+---
+name: fullproject
+claude_account: gary-max
+linear_account: gary@test.com (ws)
+doppler_account: gary@workplace
+blacksmith_account: myorg
+cerebras_account: default
+neon_account: prod
+railway_account: myapp
+vercel_account: team1
+sentry_account: gary@sentry
+onepassword_account: work
+dragonfly_account: prod-cache
+gooddata_account: analytics
+hyperswitch_account: payments
+nylas_account: email
+notion_account: workspace
+cloudflare_account: cf-123
+github_account: garysomerhalder
+firebase_account: gary@gmail.com
+loom_workspace: ws-abc123
+---
+").unwrap();
+
+        let instructions = build_cascade_instructions(dir.path(), "gary-max");
+        assert_eq!(instructions.len(), 18);
+        // Verify ordering matches CASCADE_TARGETS
+        assert!(instructions[0].contains("linear"));
+        assert!(instructions[1].contains("doppler"));
+        assert!(instructions[2].contains("blacksmith"));
+        assert!(instructions[3].contains("cerebras"));
+        assert!(instructions[4].contains("neon"));
+        assert!(instructions[5].contains("railway"));
+        assert!(instructions[6].contains("vercel"));
+        assert!(instructions[7].contains("sentry"));
+        assert!(instructions[8].contains("1password"));
+        assert!(instructions[9].contains("dragonfly"));
+        assert!(instructions[10].contains("gooddata"));
+        assert!(instructions[11].contains("hyperswitch"));
+        assert!(instructions[12].contains("nylas"));
+        assert!(instructions[13].contains("notion"));
+        assert!(instructions[14].contains("cloudflare"));
+        assert!(instructions[15].contains("github"));
+        assert!(instructions[16].contains("firebase"));
+        assert!(instructions[17].contains("loom"));
+        // Verify step numbering
+        assert!(instructions[0].starts_with("1."));
+        assert!(instructions[17].starts_with("18."));
+    }
+
+    #[test]
+    fn test_build_cascade_only_configured_services() {
+        // Only linear + railway configured — should get exactly 2 instructions
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("partial.md");
+        fs::write(&file, "---\nname: testproject\nclaude_account: gary-max\nlinear_account: gary@test.com (ws)\nrailway_account: myapp\n---\n").unwrap();
+
+        let instructions = build_cascade_instructions(dir.path(), "gary-max");
+        assert_eq!(instructions.len(), 2);
+        assert!(instructions[0].contains("linear"));
+        assert!(instructions[1].contains("railway"));
     }
 
     #[test]

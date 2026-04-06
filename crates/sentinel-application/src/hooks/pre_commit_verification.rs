@@ -222,15 +222,18 @@ fn process_with_override(
 
     // Layer 1: Check transcript for test evidence.
     // Try input.transcript_path first, then fall back to searching by session ID.
-    // Claude Code may not send transcript_path in PreToolUse, or it may resolve
-    // to a worktree-scoped project dir that doesn't contain the JSONL.
-    let resolved_transcript = input
-        .transcript_path
-        .clone()
-        .filter(|p| std::path::Path::new(p).exists())
-        .or_else(|| find_transcript_by_session(session_id));
-    if let Some(ref transcript_path) = resolved_transcript {
+    // In worktrees, Claude Code sends a transcript_path to a worktree-scoped
+    // project dir that exists but is nearly empty (1 line). The real transcript
+    // with test evidence is in the original project dir. So we check BOTH:
+    // the provided path first, then the fallback if no evidence was found.
+    if let Some(ref transcript_path) = input.transcript_path {
         if transcript_has_test_evidence(transcript_path) {
+            return HookOutput::allow();
+        }
+    }
+    // Fallback: search all project dirs for the largest transcript with this session ID
+    if let Some(ref fallback_path) = find_transcript_by_session(session_id) {
+        if transcript_has_test_evidence(fallback_path) {
             return HookOutput::allow();
         }
     }
