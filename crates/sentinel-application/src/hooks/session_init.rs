@@ -87,8 +87,8 @@ const SYNC_DIRS: &[&str] = &[
 /// Note: hooks no longer synced — all hooks run through the sentinel Rust engine
 const SYNC_DIRS_RECURSIVE: &[&str] = &[];
 
-/// Minimum number of skill directories for a valid sync
-const MIN_SKILL_DIRS: usize = 40;
+/// Minimum number of skill directories for a valid sync.
+const MIN_SKILL_DIRS: usize = sentinel_domain::constants::MIN_SKILL_DIRS;
 
 /// Process SessionStart event
 pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {

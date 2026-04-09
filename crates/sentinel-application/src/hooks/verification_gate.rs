@@ -8,13 +8,14 @@
 //! injects reminder to run verification before claiming completion.
 
 use regex::Regex;
+use sentinel_domain::constants;
 use sentinel_domain::events::{HookEvent, HookInput, HookOutput};
 use std::fs;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Cooldown duration (5 minutes)
-const COOLDOWN_MS: u64 = 5 * 60 * 1000;
+/// Cooldown duration.
+const COOLDOWN_MS: u64 = constants::HOOK_COOLDOWN_VERIFY_MS;
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 struct ClaimState {

@@ -9,6 +9,7 @@
 //! **UserPromptSubmit phase:** Reads drift findings, checks cooldown (30 min),
 //! and injects explicit update instructions into Claude's context.
 
+use sentinel_domain::constants;
 use sentinel_domain::events::{HookEvent, HookInput, HookOutput};
 use std::collections::HashSet;
 use std::fs;
@@ -16,8 +17,8 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Cooldown between drift reports (30 minutes — less aggressive than errors)
-const COOLDOWN_MS: u64 = 30 * 60 * 1000;
+/// Cooldown between drift reports.
+const COOLDOWN_MS: u64 = constants::HOOK_COOLDOWN_DOC_MS;
 
 /// Docs we monitor for staleness
 const MONITORED_DOCS: &[&str] = &[
