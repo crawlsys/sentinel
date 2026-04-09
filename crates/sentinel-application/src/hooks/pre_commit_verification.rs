@@ -20,24 +20,65 @@ use std::path::PathBuf;
 /// Returns the **largest** matching transcript, not the first — worktree-scoped
 /// project dirs often have small/empty transcripts while the original project
 /// dir has the real one with test evidence.
+///
+/// Also searches one level deeper (subdirectories within project dirs) to catch
+/// cases where Claude Code nests transcripts under session-scoped subdirs.
 fn find_transcript_by_session(session_id: &str) -> Option<String> {
     let projects_dir = dirs::home_dir()?.join(".claude").join("projects");
     if !projects_dir.exists() {
         return None;
     }
+    let filename = format!("{session_id}.jsonl");
     let mut best: Option<(u64, String)> = None;
+    let mut candidates_checked = 0u32;
+
     for entry in std::fs::read_dir(&projects_dir).ok()?.flatten() {
         if !entry.file_type().ok().is_some_and(|ft| ft.is_dir()) {
             continue;
         }
-        let path = entry.path().join(format!("{session_id}.jsonl"));
+
+        // Check top-level: projects/{dir}/{session_id}.jsonl
+        let path = entry.path().join(&filename);
         if let Ok(meta) = std::fs::metadata(&path) {
             let size = meta.len();
+            candidates_checked += 1;
             if best.as_ref().is_none_or(|(best_size, _)| size > *best_size) {
                 best = Some((size, path.to_string_lossy().to_string()));
             }
         }
+
+        // Check one level deeper: projects/{dir}/{subdir}/{session_id}.jsonl
+        // Claude Code sometimes nests transcripts in session-scoped subdirs
+        if let Ok(subdirs) = std::fs::read_dir(entry.path()) {
+            for subentry in subdirs.flatten() {
+                if subentry.file_type().ok().is_some_and(|ft| ft.is_dir()) {
+                    let subpath = subentry.path().join(&filename);
+                    if let Ok(meta) = std::fs::metadata(&subpath) {
+                        let size = meta.len();
+                        candidates_checked += 1;
+                        if best.as_ref().is_none_or(|(best_size, _)| size > *best_size) {
+                            best = Some((size, subpath.to_string_lossy().to_string()));
+                        }
+                    }
+                }
+            }
+        }
     }
+
+    if let Some((size, ref path)) = best {
+        eprintln!(
+            "[sentinel] pre-commit-verify: transcript fallback found {} candidate(s), \
+             best: {} ({} bytes)",
+            candidates_checked, path, size
+        );
+    } else {
+        eprintln!(
+            "[sentinel] pre-commit-verify: transcript fallback found 0 candidates \
+             for session '{}'",
+            session_id
+        );
+    }
+
     best.map(|(_, path)| path)
 }
 
@@ -281,19 +322,50 @@ fn process_with_override(
     // project dir that exists but is nearly empty (1 line). The real transcript
     // with test evidence is in the original project dir. So we check BOTH:
     // the provided path first, then the fallback if no evidence was found.
+    eprintln!(
+        "[sentinel] pre-commit-verify: session_id={}, transcript_path={:?}, cwd={:?}",
+        session_id,
+        input.transcript_path.as_deref().unwrap_or("(none)"),
+        input.cwd.as_deref().unwrap_or("(none)")
+    );
+
     if let Some(ref transcript_path) = input.transcript_path {
+        let exists = std::path::Path::new(transcript_path.as_str()).exists();
+        let size = std::fs::metadata(transcript_path).map(|m| m.len()).unwrap_or(0);
+        eprintln!(
+            "[sentinel] pre-commit-verify: checking input.transcript_path: {} (exists={}, {} bytes)",
+            transcript_path, exists, size
+        );
         if transcript_has_test_evidence(transcript_path) {
+            eprintln!("[sentinel] pre-commit-verify: EVIDENCE FOUND in input.transcript_path");
             return HookOutput::allow();
         }
+        eprintln!("[sentinel] pre-commit-verify: no evidence in input.transcript_path, trying fallback");
+    } else {
+        eprintln!("[sentinel] pre-commit-verify: no input.transcript_path, trying fallback");
     }
+
     // Fallback: search all project dirs for the largest transcript with this session ID
     if let Some(ref fallback_path) = find_transcript_by_session(session_id) {
+        let size = std::fs::metadata(fallback_path).map(|m| m.len()).unwrap_or(0);
+        eprintln!(
+            "[sentinel] pre-commit-verify: fallback transcript: {} ({} bytes)",
+            fallback_path, size
+        );
         if transcript_has_test_evidence(fallback_path) {
+            eprintln!("[sentinel] pre-commit-verify: EVIDENCE FOUND in fallback transcript");
             return HookOutput::allow();
         }
+        eprintln!("[sentinel] pre-commit-verify: NO evidence in fallback transcript either");
+    } else {
+        eprintln!(
+            "[sentinel] pre-commit-verify: fallback found NO transcript for session '{}'",
+            session_id
+        );
     }
 
     // No evidence found — BLOCK
+    eprintln!("[sentinel] pre-commit-verify: BLOCKING — no test evidence found anywhere");
     let message = format!(
         "\
 +============================================================+
