@@ -386,7 +386,7 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
             output.merge(&ctx_output);
 
             // Commit hygiene — detect uncommitted changes
-            let hygiene_output = hooks::commit_hygiene::process_stop(&input, &git);
+            let hygiene_output = hooks::commit_hygiene::process_stop(&input, &ctx);
             output.merge(&hygiene_output);
 
             // Doc cleanup — scan for junk docs

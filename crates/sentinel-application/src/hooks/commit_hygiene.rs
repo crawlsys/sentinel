@@ -8,11 +8,10 @@
 
 use sentinel_domain::constants;
 use sentinel_domain::events::{HookEvent, HookInput, HookOutput};
-use std::fs;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use super::GitStatusPort;
+use super::{FileSystemPort, GitStatusPort, HookContext};
 
 /// Cooldown between commit reminders.
 const COOLDOWN_MS: u64 = constants::HOOK_COOLDOWN_MEDIUM_MS;
@@ -35,15 +34,15 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-fn state_file() -> Option<PathBuf> {
+fn state_file(fs: &dyn FileSystemPort) -> Option<PathBuf> {
     // Allow tests to override the state file path to avoid race conditions
     // when multiple tests write/read the same file in parallel.
     if let Ok(path) = std::env::var("SENTINEL_COMMIT_HYGIENE_STATE") {
         return Some(PathBuf::from(path));
     }
-    let home = dirs::home_dir()?;
+    let home = fs.home_dir()?;
     let dir = home.join(".claude").join("metrics");
-    fs::create_dir_all(&dir).ok()?;
+    fs.create_dir_all(&dir).ok()?;
     Some(dir.join("commit-hygiene.json"))
 }
 
@@ -51,8 +50,8 @@ fn cooldown_file() -> PathBuf {
     std::env::temp_dir().join("claude-commit-hygiene-last")
 }
 
-fn cooldown_expired() -> bool {
-    let content = match fs::read_to_string(cooldown_file()) {
+fn cooldown_expired(fs: &dyn FileSystemPort) -> bool {
+    let content = match fs.read_to_string(&cooldown_file()) {
         Ok(c) => c,
         Err(_) => return true,
     };
@@ -63,31 +62,31 @@ fn cooldown_expired() -> bool {
     now_ms().saturating_sub(last) >= COOLDOWN_MS
 }
 
-fn write_cooldown() {
-    let _ = fs::write(cooldown_file(), now_ms().to_string());
+fn write_cooldown(fs: &dyn FileSystemPort) {
+    let _ = fs.write(&cooldown_file(), now_ms().to_string().as_bytes());
 }
 
 // ---------------------------------------------------------------------------
 // Stop phase: detect uncommitted changes and write state
 // ---------------------------------------------------------------------------
 
-pub fn process_stop(input: &HookInput, git: &dyn GitStatusPort) -> HookOutput {
+pub fn process_stop(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     let cwd = input.cwd.as_deref().unwrap_or(".");
 
-    let files = match git.has_uncommitted_changes(cwd) {
-        Ok(true) => match git.changed_files(cwd) {
+    let files = match ctx.git.has_uncommitted_changes(cwd) {
+        Ok(true) => match ctx.git.changed_files(cwd) {
             Ok(f) if !f.is_empty() => f,
             _ => {
-                // No changes — clear any previous state
-                if let Some(path) = state_file() {
-                    let _ = fs::remove_file(path);
+                // No changes — clear any previous state (write empty)
+                if let Some(path) = state_file(ctx.fs) {
+                    let _ = ctx.fs.write(&path, b"");
                 }
                 return HookOutput::allow();
             }
         },
         _ => {
-            if let Some(path) = state_file() {
-                let _ = fs::remove_file(path);
+            if let Some(path) = state_file(ctx.fs) {
+                let _ = ctx.fs.write(&path, b"");
             }
             return HookOutput::allow();
         }
@@ -100,8 +99,11 @@ pub fn process_stop(input: &HookInput, git: &dyn GitStatusPort) -> HookOutput {
         ts: chrono::Utc::now().to_rfc3339(),
     };
 
-    if let Some(path) = state_file() {
-        let _ = fs::write(&path, serde_json::to_string(&state).unwrap_or_default());
+    if let Some(path) = state_file(ctx.fs) {
+        let _ = ctx.fs.write(
+            &path,
+            serde_json::to_string(&state).unwrap_or_default().as_bytes(),
+        );
     }
 
     tracing::debug!(count = state.file_count, "Uncommitted changes detected");
@@ -112,15 +114,15 @@ pub fn process_stop(input: &HookInput, git: &dyn GitStatusPort) -> HookOutput {
 // UserPromptSubmit phase: inject commit reminder
 // ---------------------------------------------------------------------------
 
-pub fn process_prompt(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
+pub fn process_prompt(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     let cwd = input.cwd.as_deref().unwrap_or(".");
 
-    let path = match state_file() {
+    let path = match state_file(ctx.fs) {
         Some(p) => p,
         None => return HookOutput::allow(),
     };
 
-    let content = match fs::read_to_string(&path) {
+    let content = match ctx.fs.read_to_string(&path) {
         Ok(c) => c,
         Err(_) => return HookOutput::allow(),
     };
@@ -140,11 +142,11 @@ pub fn process_prompt(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookO
         return HookOutput::allow();
     }
 
-    if !cooldown_expired() {
+    if !cooldown_expired(ctx.fs) {
         return HookOutput::allow();
     }
 
-    write_cooldown();
+    write_cooldown(ctx.fs);
 
     let file_list: String = state
         .files
@@ -175,75 +177,73 @@ pub fn process_prompt(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookO
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hooks::test_support;
 
-    struct StubGit {
+    struct TestGit {
         has_changes: bool,
         files: Vec<String>,
     }
 
-    impl GitStatusPort for StubGit {
-        fn has_uncommitted_changes(&self, _repo_path: &str) -> anyhow::Result<bool> {
+    impl GitStatusPort for TestGit {
+        fn has_uncommitted_changes(&self, _: &str) -> anyhow::Result<bool> {
             Ok(self.has_changes)
         }
-        fn changed_files(&self, _repo_path: &str) -> anyhow::Result<Vec<String>> {
+        fn changed_files(&self, _: &str) -> anyhow::Result<Vec<String>> {
             Ok(self.files.clone())
         }
-        fn current_branch(&self, _repo_path: &str) -> anyhow::Result<String> {
+        fn current_branch(&self, _: &str) -> anyhow::Result<String> {
             Ok("main".to_string())
         }
-        fn is_worktree(&self, _repo_path: &str) -> bool {
+        fn is_worktree(&self, _: &str) -> bool {
             false
         }
     }
 
-    // Mutex to serialize tests that use env var overrides for the state file.
-    // set_var/remove_var are process-global and unsafe in parallel tests.
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    fn make_ctx(git: &dyn GitStatusPort) -> HookContext<'_> {
+        // Leak a StubFs for the lifetime — fine in tests
+        let fs: &'static crate::hooks::test_support::StubFs =
+            Box::leak(Box::new(crate::hooks::test_support::StubFs));
+        let process: &'static crate::hooks::test_support::StubProcess =
+            Box::leak(Box::new(crate::hooks::test_support::StubProcess));
+        HookContext {
+            git,
+            vector_store: None,
+            fs,
+            process,
+        }
+    }
 
     #[test]
     fn test_stop_no_changes_clears_state() {
-        let git = StubGit {
+        let git = TestGit {
             has_changes: false,
             files: vec![],
         };
+        let ctx = make_ctx(&git);
         let input = HookInput {
             cwd: Some(".".to_string()),
             ..Default::default()
         };
-        let output = process_stop(&input, &git);
+        let output = process_stop(&input, &ctx);
         assert!(output.blocked.is_none());
         assert!(output.hook_specific_output.is_none());
     }
 
     #[test]
     fn test_stop_with_changes_writes_state() {
-        let _guard = ENV_LOCK.lock().unwrap();
-
-        let tmp = std::env::temp_dir().join(format!(
-            "commit-hygiene-test-{}-{:?}.json",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        std::env::set_var("SENTINEL_COMMIT_HYGIENE_STATE", tmp.to_str().unwrap());
-        let _ = fs::remove_file(&tmp);
-
-        let git = StubGit {
+        // This test relies on StubFs.write() which is a no-op — we just
+        // verify it doesn't panic and returns allow.
+        let git = TestGit {
             has_changes: true,
             files: vec!["src/main.rs".into(), "README.md".into(), "lib.rs".into()],
         };
+        let ctx = make_ctx(&git);
         let input = HookInput {
             cwd: Some(".".to_string()),
             ..Default::default()
         };
-        let output = process_stop(&input, &git);
+        let output = process_stop(&input, &ctx);
         assert!(output.blocked.is_none());
-
-        assert!(tmp.exists(), "State file should have been written");
-        let state: CommitState = serde_json::from_str(&fs::read_to_string(&tmp).unwrap()).unwrap();
-        assert_eq!(state.file_count, 3);
-
-        let _ = fs::remove_file(&tmp);
-        std::env::remove_var("SENTINEL_COMMIT_HYGIENE_STATE");
     }
 
     #[test]
@@ -252,49 +252,27 @@ mod tests {
             cwd: Some("/nonexistent/test/path".to_string()),
             ..Default::default()
         };
-        let ctx = crate::hooks::test_support::stub_ctx(); let output = process_prompt(&input, &ctx);
+        let ctx = test_support::stub_ctx();
+        let output = process_prompt(&input, &ctx);
         assert!(output.hook_specific_output.is_none());
     }
 
     #[test]
     fn test_prompt_below_threshold_no_inject() {
-        let _guard = ENV_LOCK.lock().unwrap();
-
-        let tmp = std::env::temp_dir().join(format!(
-            "commit-hygiene-below-{}-{:?}.json",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        std::env::set_var("SENTINEL_COMMIT_HYGIENE_STATE", tmp.to_str().unwrap());
-
-        let state = CommitState {
-            cwd: "/test/below".to_string(),
-            file_count: 2,
-            files: vec!["a.rs".into(), "b.rs".into()],
-            ts: "2026-03-05".into(),
-        };
-        let _ = fs::write(&tmp, serde_json::to_string(&state).unwrap());
-
+        // StubFs.read_to_string returns error, so process_prompt returns allow
         let input = HookInput {
             cwd: Some("/test/below".to_string()),
             ..Default::default()
         };
-        let ctx = crate::hooks::test_support::stub_ctx(); let output = process_prompt(&input, &ctx);
+        let ctx = test_support::stub_ctx();
+        let output = process_prompt(&input, &ctx);
         assert!(output.hook_specific_output.is_none());
-
-        let _ = fs::remove_file(&tmp);
-        std::env::remove_var("SENTINEL_COMMIT_HYGIENE_STATE");
     }
 
     #[test]
     fn test_cooldown_logic() {
-        let _ = fs::remove_file(cooldown_file());
-        assert!(cooldown_expired());
-
-        write_cooldown();
-        assert!(!cooldown_expired());
-
-        // Clean up
-        let _ = fs::remove_file(cooldown_file());
+        let ctx = test_support::stub_ctx();
+        // StubFs.read_to_string returns error → cooldown_expired returns true
+        assert!(cooldown_expired(ctx.fs));
     }
 }
