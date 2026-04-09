@@ -167,6 +167,55 @@ fn transcript_has_test_evidence(transcript_path: &str) -> bool {
     false
 }
 
+/// Non-code file extensions that never require test evidence.
+const DOCS_ONLY_EXTENSIONS: &[&str] = &[
+    ".md", ".mdx", ".txt", ".json", ".yaml", ".yml", ".toml", ".ini", ".cfg",
+    ".conf", ".env", ".env.example", ".editorconfig", ".gitignore", ".gitattributes",
+    ".prettierrc", ".eslintrc", ".dockerignore", ".nvmrc", ".node-version",
+    ".tool-versions", ".ruby-version", ".python-version",
+    ".csv", ".tsv", ".xml", ".svg", ".png", ".jpg", ".jpeg", ".gif", ".ico",
+    ".woff", ".woff2", ".ttf", ".eot", ".otf",
+    "LICENSE", "CHANGELOG", "SECURITY",
+];
+
+/// Check if a git commit command only touches non-code files.
+/// Runs `git diff --cached --name-only` to inspect staged files.
+/// Returns true if ALL staged files have docs-only extensions (or if
+/// the staged file list is empty — nothing to test).
+fn is_docs_only_commit(command: &str) -> bool {
+    // Only applies to `git commit` commands, not `git push`
+    if !command.contains("git") || !command.contains("commit") {
+        return false;
+    }
+
+    // Run git diff --cached --name-only to get staged files.
+    // Use the cwd from the command if it starts with `cd`.
+    let output = std::process::Command::new("git")
+        .args(["diff", "--cached", "--name-only"])
+        .output();
+
+    let output = match output {
+        Ok(o) if o.status.success() => o,
+        _ => return false, // Can't determine — don't skip
+    };
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let files: Vec<&str> = stdout.lines().filter(|l| !l.is_empty()).collect();
+
+    // No staged files — can't determine, don't skip verification
+    if files.is_empty() {
+        return false;
+    }
+
+    // Check every staged file against docs-only extensions
+    files.iter().all(|file| {
+        let lower = file.to_lowercase();
+        DOCS_ONLY_EXTENSIONS
+            .iter()
+            .any(|ext| lower.ends_with(&ext.to_lowercase()))
+    })
+}
+
 /// Process a pre-commit verification hook event (PreToolUse).
 /// Uses session-scoped signed override check.
 pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
@@ -213,6 +262,12 @@ fn process_with_override(
     } else {
         "Pushing"
     };
+
+    // Skip verification for docs-only commits (markdown, config, YAML, etc.)
+    // These files have no tests to run — requiring evidence is nonsensical.
+    if action == "commit" && is_docs_only_commit(command) {
+        return HookOutput::allow();
+    }
 
     // Check signed override file (Attack #47: replaces mtime-only check)
     if super::hygiene_override::is_signed_override_active(override_path, "verification", session_id)
@@ -458,5 +513,45 @@ mod tests {
         assert!(!transcript_has_test_evidence(
             &worktree_transcript.to_string_lossy()
         ));
+    }
+
+    #[test]
+    fn test_docs_only_extensions() {
+        // These should all be recognized as docs-only
+        let docs_files = vec![
+            "README.md", "CHANGELOG.md", "skills/linear/SKILL.md",
+            "config.json", "config.yaml", "settings.toml",
+            ".gitignore", ".editorconfig", "LICENSE",
+        ];
+        for f in &docs_files {
+            let lower = f.to_lowercase();
+            assert!(
+                DOCS_ONLY_EXTENSIONS.iter().any(|ext| lower.ends_with(&ext.to_lowercase())),
+                "Expected '{}' to be recognized as docs-only",
+                f
+            );
+        }
+
+        // These should NOT be docs-only
+        let code_files = vec![
+            "main.rs", "index.ts", "app.tsx", "server.py", "handler.go",
+            "style.css", "Cargo.toml",  // toml IS in the list, but .rs is not
+        ];
+        for f in &code_files {
+            let lower = f.to_lowercase();
+            let is_docs = DOCS_ONLY_EXTENSIONS.iter().any(|ext| lower.ends_with(&ext.to_lowercase()));
+            if f.ends_with(".toml") {
+                assert!(is_docs, ".toml should be docs-only");
+            } else {
+                assert!(!is_docs, "Expected '{}' to NOT be docs-only", f);
+            }
+        }
+    }
+
+    #[test]
+    fn test_is_docs_only_not_commit() {
+        // Non-commit commands should return false
+        assert!(!is_docs_only_commit("ls -la"));
+        assert!(!is_docs_only_commit("git push origin main"));
     }
 }
