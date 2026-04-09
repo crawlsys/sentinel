@@ -228,6 +228,9 @@ pub trait FileSystemPort: Send + Sync {
 
     /// Get file metadata (for mtime checks).
     fn metadata(&self, path: &std::path::Path) -> anyhow::Result<std::fs::Metadata>;
+
+    /// Append bytes to a file (creates if needed, does not truncate).
+    fn append(&self, path: &std::path::Path, content: &[u8]) -> anyhow::Result<()>;
 }
 
 /// Port for spawning external processes.
@@ -306,6 +309,7 @@ pub mod test_support {
         fn exists(&self, _: &Path) -> bool { false }
         fn is_dir(&self, _: &Path) -> bool { false }
         fn metadata(&self, _: &Path) -> anyhow::Result<std::fs::Metadata> { anyhow::bail!("no") }
+        fn append(&self, _: &Path, _: &[u8]) -> anyhow::Result<()> { Ok(()) }
     }
 
     pub struct StubProcess;

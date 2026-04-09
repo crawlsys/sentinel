@@ -50,6 +50,21 @@ impl FileSystemPort for RealFileSystem {
     fn metadata(&self, path: &Path) -> Result<std::fs::Metadata> {
         std::fs::metadata(path).with_context(|| format!("metadata {}", path.display()))
     }
+
+    fn append(&self, path: &Path, content: &[u8]) -> Result<()> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("create_dir_all {}", parent.display()))?;
+        }
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .with_context(|| format!("append open {}", path.display()))?;
+        file.write_all(content)
+            .with_context(|| format!("append write {}", path.display()))
+    }
 }
 
 #[cfg(test)]
