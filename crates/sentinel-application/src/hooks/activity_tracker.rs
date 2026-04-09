@@ -6,6 +6,7 @@
 //! **UserPromptSubmit phase:** When context is elevated (Yellow+ zone),
 //! injects a compact session activity summary to help Claude stay oriented.
 
+use sentinel_domain::constants;
 use sentinel_domain::events::{HookEvent, HookInput, HookOutput};
 use std::collections::HashMap;
 use std::fs;
@@ -13,11 +14,11 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Cooldown between activity summaries (20 minutes)
-const COOLDOWN_MS: u64 = 20 * 60 * 1000;
+/// Cooldown between activity summaries.
+const COOLDOWN_MS: u64 = constants::HOOK_COOLDOWN_LONG_MS;
 
-/// Minimum tool calls before injecting a summary
-const MIN_CALLS_FOR_SUMMARY: usize = 15;
+/// Minimum tool calls before injecting a summary.
+const MIN_CALLS_FOR_SUMMARY: usize = constants::ACTIVITY_TRACKER_MIN_CALLS;
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 struct ActivityEntry {

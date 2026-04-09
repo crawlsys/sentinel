@@ -6,6 +6,7 @@
 //! **UserPromptSubmit phase:** Reads state, checks cooldown (15 min),
 //! injects reminder with file list.
 
+use sentinel_domain::constants;
 use sentinel_domain::events::{HookEvent, HookInput, HookOutput};
 use std::fs;
 use std::path::PathBuf;
@@ -13,11 +14,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::GitStatusPort;
 
-/// Cooldown between commit reminders (15 minutes)
-const COOLDOWN_MS: u64 = 15 * 60 * 1000;
+/// Cooldown between commit reminders.
+const COOLDOWN_MS: u64 = constants::HOOK_COOLDOWN_MEDIUM_MS;
 
-/// Minimum files to trigger a reminder
-const MIN_FILES: usize = 3;
+/// Minimum files to trigger a reminder.
+const MIN_FILES: usize = constants::COMMIT_HYGIENE_MIN_FILES;
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 struct CommitState {

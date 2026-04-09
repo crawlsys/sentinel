@@ -8,6 +8,7 @@
 //! Uses raw reqwest (not MCP tools — hooks can't call MCP tools).
 //! Same pattern as memory_inject.rs / memory_extract.rs.
 
+use sentinel_domain::constants;
 use sentinel_domain::events::{HookInput, HookOutput};
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
@@ -39,7 +40,7 @@ fn load_config() -> Option<QdrantConfig> {
 const COLLECTION: &str = "claude-sessions";
 
 /// Minimum combined content length for a chunk to be worth indexing
-const MIN_CHUNK_CHARS: usize = 50;
+const MIN_CHUNK_CHARS: usize = constants::MIN_CHUNK_CHARS;
 
 // ---------------------------------------------------------------------------
 // Project hashing (same as memory_inject.rs / task_persist.rs)
@@ -317,7 +318,7 @@ fn upsert_exchanges(
 
     rt.block_on(async {
         let client = match reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(10))
+            .timeout(constants::API_CALL_TIMEOUT_LONG)
             .build()
         {
             Ok(c) => c,

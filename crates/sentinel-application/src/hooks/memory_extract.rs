@@ -8,6 +8,7 @@
 //! **Periodic session re-index:** Every 50 tool calls, indexes the last ~10
 //! substantive exchanges to keep long-running sessions searchable.
 
+use sentinel_domain::constants;
 use sentinel_domain::events::{HookInput, HookOutput};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -241,7 +242,7 @@ fn upsert_memory(config: &QdrantConfig, path: &PathBuf) -> bool {
 
     rt.block_on(async {
         let client = match reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(5))
+            .timeout(constants::API_CALL_TIMEOUT)
             .build()
         {
             Ok(c) => c,
@@ -263,12 +264,12 @@ fn upsert_memory(config: &QdrantConfig, path: &PathBuf) -> bool {
 // Periodic session re-index — every ~50 tool calls
 // ---------------------------------------------------------------------------
 
-const REINDEX_TOOL_CALL_THRESHOLD: u64 = 50;
+const REINDEX_TOOL_CALL_THRESHOLD: u64 = constants::REINDEX_TOOL_CALL_THRESHOLD;
 const SESSION_COLLECTION: &str = "claude-sessions";
 
 /// Minimum combined user+assistant text length to index an exchange.
 /// Filters out trivial "yes"/"ok"/"done" turns.
-const MIN_EXCHANGE_LENGTH: usize = 100;
+const MIN_EXCHANGE_LENGTH: usize = constants::MIN_EXCHANGE_LENGTH;
 
 #[derive(serde::Serialize, serde::Deserialize, Default)]
 struct SessionIndexState {
@@ -493,7 +494,7 @@ fn periodic_session_index(
 
     rt.block_on(async {
         let client = match reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(10))
+            .timeout(constants::API_CALL_TIMEOUT_LONG)
             .build()
         {
             Ok(c) => c,

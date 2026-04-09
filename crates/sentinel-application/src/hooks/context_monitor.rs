@@ -6,13 +6,14 @@
 //! **UserPromptSubmit phase:** Reads zone state, injects zone-specific
 //! strategy guidance when usage is above 50%.
 
+use sentinel_domain::constants;
 use sentinel_domain::events::{HookEvent, HookInput, HookOutput};
 use std::fs;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Cooldown between context warnings (10 minutes)
-const COOLDOWN_MS: u64 = 10 * 60 * 1000;
+/// Cooldown between context warnings.
+const COOLDOWN_MS: u64 = constants::HOOK_COOLDOWN_SHORT_MS;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Zone {
