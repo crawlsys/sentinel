@@ -94,7 +94,7 @@ fn now_secs() -> u64 {
 
 /// Override expiry reduced from 5 minutes to 60 seconds (Attack #31).
 /// Shorter window limits exposure from accidental or social-engineered overrides.
-const OVERRIDE_TTL_SECS: u64 = 60;
+const OVERRIDE_TTL_SECS: u64 = sentinel_domain::constants::OVERRIDE_TTL_SECS;
 
 /// Check if prompt matches hygiene override patterns
 fn is_hygiene_override(prompt: &str) -> bool {

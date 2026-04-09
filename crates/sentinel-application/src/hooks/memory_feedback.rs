@@ -12,6 +12,7 @@
 //! Corrections: appended to `~/.claude/sentinel/state/memory-corrections.jsonl`.
 
 use chrono::Utc;
+use sentinel_domain::constants;
 use sentinel_domain::events::{HookInput, HookOutput};
 use std::path::PathBuf;
 use tracing::debug;
@@ -158,7 +159,7 @@ fn boost_memory(config: &QdrantConfig, memory_id: &str) -> bool {
 
     rt.block_on(async {
         let client = match reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(3))
+            .timeout(constants::API_CALL_TIMEOUT_SHORT)
             .build()
         {
             Ok(c) => c,

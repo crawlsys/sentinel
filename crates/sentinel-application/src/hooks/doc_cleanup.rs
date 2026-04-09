@@ -8,13 +8,14 @@
 //! injects cleanup instructions.
 
 use regex::Regex;
+use sentinel_domain::constants;
 use sentinel_domain::events::{HookEvent, HookInput, HookOutput};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Cooldown between cleanup reminders (30 minutes)
-const COOLDOWN_MS: u64 = 30 * 60 * 1000;
+/// Cooldown between cleanup reminders.
+const COOLDOWN_MS: u64 = constants::HOOK_COOLDOWN_DOC_MS;
 
 /// Root-level `.md` files that are expected and not considered orphaned.
 const ALLOWED_ROOT_MD: &[&str] = &[

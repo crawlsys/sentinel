@@ -31,11 +31,11 @@ impl ProofEngine {
         Self { state, judge }
     }
 
-    /// Minimum seconds between resubmissions after a failure
-    const RESUBMIT_COOLDOWN_SECS: i64 = 30;
+    /// Minimum seconds between resubmissions after a failure.
+    const RESUBMIT_COOLDOWN_SECS: i64 = sentinel_domain::constants::PROOF_RESUBMIT_COOLDOWN_SECS;
 
-    /// Maximum consecutive failures before requiring longer cooldown
-    const MAX_RAPID_FAILURES: u32 = 3;
+    /// Maximum consecutive failures before requiring longer cooldown.
+    const MAX_RAPID_FAILURES: u32 = sentinel_domain::constants::PROOF_MAX_RAPID_FAILURES;
 
     /// Submit evidence for a phase and build its proof.
     /// `workflow` is optional — if provided, enables sequential phase enforcement.

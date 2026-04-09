@@ -22,12 +22,13 @@
 
 use chrono::Utc;
 use regex::Regex;
+use sentinel_domain::constants;
 use sentinel_domain::events::{HookInput, HookOutput};
 use std::path::PathBuf;
 use std::time::Duration;
 
-/// Steel test validity window (2 hours)
-const TEST_VALIDITY: Duration = Duration::from_secs(2 * 60 * 60);
+/// Steel test validity window.
+const TEST_VALIDITY: Duration = constants::STEEL_TEST_VALIDITY;
 
 /// Frontend file extensions that trigger Steel test requirement
 const FRONTEND_EXTENSIONS: &[&str] = &[".tsx", ".jsx", ".css", ".scss", ".styled"];

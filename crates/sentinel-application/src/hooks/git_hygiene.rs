@@ -5,11 +5,12 @@
 //! All git operations go through the injected GitStatusPort — no direct
 //! std::process::Command calls.
 
+use sentinel_domain::constants;
 use sentinel_domain::events::{HookEvent, HookInput, HookOutput};
 
 use super::GitStatusPort;
 
-const MAX_UNCOMMITTED_FILES: usize = 10;
+const MAX_UNCOMMITTED_FILES: usize = constants::MAX_UNCOMMITTED_FILES;
 
 /// Protected branch names that should not receive direct edits.
 const PROTECTED_BRANCHES: &[&str] = &["main", "master"];

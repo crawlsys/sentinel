@@ -51,8 +51,10 @@ struct PrecomputedHit {
     memory_type: Option<String>,
 }
 
-/// Maximum age of precomputed results before they are considered stale (5 minutes).
-const PRECOMPUTED_MAX_AGE_SECS: i64 = 300;
+use sentinel_domain::constants;
+
+/// Maximum age of precomputed results before they are considered stale.
+const PRECOMPUTED_MAX_AGE_SECS: i64 = constants::PRECOMPUTED_SEARCH_MAX_AGE_SECS;
 
 fn precomputed_path() -> Option<PathBuf> {
     dirs::home_dir().map(|h| {
@@ -322,12 +324,12 @@ fn recency_label(created_at: Option<&str>) -> String {
 // Phase 5: Context-Aware Deduplication
 // ---------------------------------------------------------------------------
 
-/// Maximum bytes of existing context to load for dedup (50 KB).
-const DEDUP_CONTEXT_CAP: usize = 50 * 1024;
+/// Maximum bytes of existing context to load for dedup.
+const DEDUP_CONTEXT_CAP: usize = constants::DEDUP_CONTEXT_CAP;
 
-/// Shingle overlap threshold — if more than 60% of a hit's 3-word shingles
-/// already appear in the existing context, treat it as a duplicate.
-const DEDUP_OVERLAP_THRESHOLD: f64 = 0.60;
+/// Shingle overlap threshold — if more than this fraction of a hit's 3-word
+/// shingles already appear in the existing context, treat it as a duplicate.
+const DEDUP_OVERLAP_THRESHOLD: f64 = constants::DEDUP_OVERLAP_THRESHOLD;
 
 /// Build a set of 3-word shingles (lowercased) from text.
 fn build_shingles(text: &str) -> HashSet<String> {
@@ -539,7 +541,7 @@ fn search_qdrant(config: &QdrantConfig, query: &str, _project_hash: &str, cwd: &
 
     let result = rt.block_on(async {
         let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_millis(800))
+            .timeout(constants::VECTOR_QUERY_TIMEOUT)
             .build()
             .ok()?;
 
@@ -856,7 +858,7 @@ fn precompute_search(config: &QdrantConfig, query: &str, cwd: &str) {
 
     rt.block_on(async {
         let client = match reqwest::Client::builder()
-            .timeout(std::time::Duration::from_millis(1500))
+            .timeout(constants::VECTOR_BATCH_TIMEOUT)
             .build()
         {
             Ok(c) => c,

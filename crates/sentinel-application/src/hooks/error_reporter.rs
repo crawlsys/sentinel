@@ -8,11 +8,12 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use sentinel_domain::constants;
 use sentinel_domain::events::{HookEvent, HookInput, HookOutput};
 
-/// Cooldown between error reports (10 minutes)
-const COOLDOWN_MS: u64 = 10 * 60 * 1000;
-const MAX_ERRORS_IN_CONTEXT: usize = 3;
+/// Cooldown between error reports.
+const COOLDOWN_MS: u64 = constants::HOOK_COOLDOWN_SHORT_MS;
+const MAX_ERRORS_IN_CONTEXT: usize = constants::MAX_ERRORS_IN_CONTEXT;
 
 /// Linear workspace config for auto-filing — loaded from config file at runtime
 #[derive(Debug, serde::Deserialize)]

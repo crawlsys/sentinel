@@ -8,6 +8,7 @@
 //! Uses `tokio::runtime::Builder::new_current_thread()` for async HTTP.
 
 use chrono::Utc;
+use sentinel_domain::constants;
 use sentinel_domain::events::{HookEvent, HookInput, HookOutput};
 use tracing::{debug, warn};
 
@@ -38,10 +39,10 @@ fn run_async_block<F: std::future::Future<Output = T>, T>(f: F) -> T {
 }
 
 /// Maximum memories to verify per session to limit API calls.
-const MAX_VERIFY_PER_SESSION: usize = 10;
+const MAX_VERIFY_PER_SESSION: usize = constants::MAX_VERIFY_PER_SESSION;
 
 /// Memories not verified in this many days are eligible for re-verification.
-const VERIFY_STALE_DAYS: i64 = 7;
+const VERIFY_STALE_DAYS: i64 = constants::VERIFY_STALE_DAYS;
 
 /// 24h cooldown file path.
 fn cooldown_path() -> Option<std::path::PathBuf> {
@@ -398,7 +399,7 @@ pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
     // 3. Run async verification — handle both standalone and nested-runtime cases
     let stale_count = run_async_block(async {
         let client = match reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(10))
+            .timeout(constants::API_CALL_TIMEOUT_LONG)
             .build()
         {
             Ok(c) => c,
