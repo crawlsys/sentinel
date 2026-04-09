@@ -17,6 +17,8 @@ use sentinel_domain::events::{HookInput, HookOutput};
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 
+use super::{FileSystemPort, HookContext};
+
 /// Tool names we intercept
 const TASK_CREATE: &str = "TaskCreate";
 const TASK_UPDATE: &str = "TaskUpdate";
@@ -35,8 +37,8 @@ fn hex_encode(bytes: &[u8]) -> String {
 }
 
 /// Base directory for todos — flat, no project hash subdirectory
-fn todos_base_dir() -> Option<PathBuf> {
-    dirs::home_dir().map(|h| h.join(".claude").join("todos"))
+fn todos_base_dir(fs: &dyn FileSystemPort) -> Option<PathBuf> {
+    fs.home_dir().map(|h| h.join(".claude").join("todos"))
 }
 
 /// A parsed rich todo item
@@ -100,8 +102,8 @@ fn clean_description(content: &str) -> String {
 }
 
 /// Read existing active todos from a JSONL file
-fn read_existing_todos(path: &PathBuf) -> Vec<RichTodo> {
-    let content = match std::fs::read_to_string(path) {
+fn read_existing_todos(fs: &dyn FileSystemPort, path: &PathBuf) -> Vec<RichTodo> {
+    let content = match fs.read_to_string(path) {
         Ok(c) => c,
         Err(_) => return vec![],
     };
@@ -114,21 +116,21 @@ fn read_existing_todos(path: &PathBuf) -> Vec<RichTodo> {
 }
 
 /// Write todos back to a JSONL file (replaces entire file)
-fn write_todos(path: &PathBuf, todos: &[RichTodo]) {
+fn write_todos(fs: &dyn FileSystemPort, path: &PathBuf, todos: &[RichTodo]) {
     let content: String = todos
         .iter()
         .filter_map(|t| serde_json::to_string(t).ok())
         .collect::<Vec<_>>()
         .join("\n");
     if content.is_empty() {
-        let _ = std::fs::write(path, "");
+        let _ = fs.write(path, b"");
     } else {
-        let _ = std::fs::write(path, format!("{content}\n"));
+        let _ = fs.write(path, format!("{content}\n").as_bytes());
     }
 }
 
 /// Append todos to a JSONL file
-fn append_todos(path: &PathBuf, todos: &[RichTodo]) {
+fn append_todos(fs: &dyn FileSystemPort, path: &PathBuf, todos: &[RichTodo]) {
     if todos.is_empty() {
         return;
     }
@@ -137,14 +139,7 @@ fn append_todos(path: &PathBuf, todos: &[RichTodo]) {
         .filter_map(|t| serde_json::to_string(t).ok())
         .map(|s| format!("{s}\n"))
         .collect();
-    let _ = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-        .and_then(|mut f| {
-            use std::io::Write;
-            f.write_all(content.as_bytes())
-        });
+    let _ = fs.append(path, content.as_bytes());
 }
 
 /// Quick stats for analytics
@@ -158,9 +153,15 @@ struct QuickStats {
 }
 
 /// Update quick-stats.json
-fn update_stats(analytics_dir: &PathBuf, active_path: &PathBuf, completed_path: &PathBuf) {
-    let active = read_existing_todos(active_path);
-    let completed_count = std::fs::read_to_string(completed_path)
+fn update_stats(
+    fs: &dyn FileSystemPort,
+    analytics_dir: &PathBuf,
+    active_path: &PathBuf,
+    completed_path: &PathBuf,
+) {
+    let active = read_existing_todos(fs, active_path);
+    let completed_count = fs
+        .read_to_string(completed_path)
         .map(|c| c.lines().filter(|l| !l.is_empty()).count())
         .unwrap_or(0);
 
@@ -173,14 +174,16 @@ fn update_stats(analytics_dir: &PathBuf, active_path: &PathBuf, completed_path: 
     };
 
     let stats_path = analytics_dir.join("quick-stats.json");
-    let _ = std::fs::write(
+    let _ = fs.write(
         &stats_path,
-        serde_json::to_string_pretty(&stats).unwrap_or_default(),
+        serde_json::to_string_pretty(&stats)
+            .unwrap_or_default()
+            .as_bytes(),
     );
 }
 
 /// Handle a TaskCreate call — add a new task to active.jsonl
-fn handle_task_create(input: &HookInput) -> HookOutput {
+fn handle_task_create(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     let tool_input = match &input.tool_input {
         Some(ti) => ti,
         None => return HookOutput::allow(),
@@ -211,12 +214,12 @@ fn handle_task_create(input: &HookInput) -> HookOutput {
     let timestamp = Utc::now().to_rfc3339();
     let proj_hash = project_hash(cwd);
 
-    let base_dir = match todos_base_dir() {
+    let base_dir = match todos_base_dir(ctx.fs) {
         Some(d) => d,
         None => return HookOutput::allow(),
     };
     let analytics_dir = base_dir.join("analytics");
-    let _ = std::fs::create_dir_all(&analytics_dir);
+    let _ = ctx.fs.create_dir_all(&analytics_dir);
 
     let active_path = base_dir.join("active.jsonl");
     let completed_path = base_dir.join("completed.jsonl");
@@ -242,14 +245,14 @@ fn handle_task_create(input: &HookInput) -> HookOutput {
         completed_at: None,
     };
 
-    append_todos(&active_path, &[rich_todo]);
-    update_stats(&analytics_dir, &active_path, &completed_path);
+    append_todos(ctx.fs, &active_path, &[rich_todo]);
+    update_stats(ctx.fs, &analytics_dir, &active_path, &completed_path);
 
     HookOutput::allow()
 }
 
 /// Handle a TaskUpdate call — update status, move to completed if done
-fn handle_task_update(input: &HookInput) -> HookOutput {
+fn handle_task_update(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     let tool_input = match &input.tool_input {
         Some(ti) => ti,
         None => return HookOutput::allow(),
@@ -269,17 +272,17 @@ fn handle_task_update(input: &HookInput) -> HookOutput {
         return HookOutput::allow();
     }
 
-    let base_dir = match todos_base_dir() {
+    let base_dir = match todos_base_dir(ctx.fs) {
         Some(d) => d,
         None => return HookOutput::allow(),
     };
     let analytics_dir = base_dir.join("analytics");
-    let _ = std::fs::create_dir_all(&analytics_dir);
+    let _ = ctx.fs.create_dir_all(&analytics_dir);
 
     let active_path = base_dir.join("active.jsonl");
     let completed_path = base_dir.join("completed.jsonl");
 
-    let mut active_todos = read_existing_todos(&active_path);
+    let mut active_todos = read_existing_todos(ctx.fs, &active_path);
     let timestamp = Utc::now().to_rfc3339();
 
     // Find by position (task IDs are 1-based indices in Claude Code)
@@ -304,29 +307,29 @@ fn handle_task_update(input: &HookInput) -> HookOutput {
         if new_status == "completed" {
             todo.completed_at = Some(timestamp);
             // Write remaining active, append to completed
-            write_todos(&active_path, &active_todos);
-            append_todos(&completed_path, &[todo]);
+            write_todos(ctx.fs, &active_path, &active_todos);
+            append_todos(ctx.fs, &completed_path, &[todo]);
         } else if new_status == "deleted" {
             // Just remove from active, don't move to completed
-            write_todos(&active_path, &active_todos);
+            write_todos(ctx.fs, &active_path, &active_todos);
         } else {
             // Put back in active with updated fields
             active_todos.push(todo);
-            write_todos(&active_path, &active_todos);
+            write_todos(ctx.fs, &active_path, &active_todos);
         }
     }
     // If not found, this is a task we didn't track (e.g. pre-existing) — no-op
 
-    update_stats(&analytics_dir, &active_path, &completed_path);
+    update_stats(ctx.fs, &analytics_dir, &active_path, &completed_path);
 
     HookOutput::allow()
 }
 
 /// Process a todo interceptor hook event (PostToolUse)
-pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
+pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     match input.tool_name.as_deref() {
-        Some(TASK_CREATE) => handle_task_create(input),
-        Some(TASK_UPDATE) => handle_task_update(input),
+        Some(TASK_CREATE) => handle_task_create(input, ctx),
+        Some(TASK_UPDATE) => handle_task_update(input, ctx),
         _ => HookOutput::allow(),
     }
 }
@@ -442,8 +445,33 @@ mod tests {
         assert_ne!(h1, h2);
     }
 
+    /// A real-FS test adapter for roundtrip tests.
+    struct TestFs;
+    impl FileSystemPort for TestFs {
+        fn home_dir(&self) -> Option<PathBuf> { dirs::home_dir() }
+        fn read_to_string(&self, p: &std::path::Path) -> anyhow::Result<String> {
+            Ok(std::fs::read_to_string(p)?)
+        }
+        fn write(&self, p: &std::path::Path, c: &[u8]) -> anyhow::Result<()> {
+            if let Some(par) = p.parent() { std::fs::create_dir_all(par)?; }
+            Ok(std::fs::write(p, c)?)
+        }
+        fn create_dir_all(&self, p: &std::path::Path) -> anyhow::Result<()> { Ok(std::fs::create_dir_all(p)?) }
+        fn read_dir(&self, _: &std::path::Path) -> anyhow::Result<Vec<PathBuf>> { Ok(vec![]) }
+        fn exists(&self, p: &std::path::Path) -> bool { p.exists() }
+        fn is_dir(&self, p: &std::path::Path) -> bool { p.is_dir() }
+        fn metadata(&self, p: &std::path::Path) -> anyhow::Result<std::fs::Metadata> { Ok(std::fs::metadata(p)?) }
+        fn append(&self, p: &std::path::Path, c: &[u8]) -> anyhow::Result<()> {
+            if let Some(par) = p.parent() { std::fs::create_dir_all(par)?; }
+            use std::io::Write;
+            let mut f = std::fs::OpenOptions::new().create(true).append(true).open(p)?;
+            Ok(f.write_all(c)?)
+        }
+    }
+
     #[test]
     fn test_write_and_read_todos_roundtrip() {
+        let fs = TestFs;
         let tmpdir = tempfile::tempdir().unwrap();
         let active_path = tmpdir.path().join("active.jsonl");
 
@@ -464,10 +492,10 @@ mod tests {
         };
 
         // Write
-        write_todos(&active_path, &[todo.clone()]);
+        write_todos(&fs, &active_path, &[todo.clone()]);
 
         // Read back
-        let loaded = read_existing_todos(&active_path);
+        let loaded = read_existing_todos(&fs, &active_path);
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].content, "Fix auth bug");
         assert_eq!(loaded[0].priority, 1);
@@ -489,9 +517,9 @@ mod tests {
             updated_at: "2026-01-01T00:00:00Z".to_string(),
             completed_at: None,
         };
-        append_todos(&active_path, &[todo2]);
+        append_todos(&fs, &active_path, &[todo2]);
 
-        let loaded = read_existing_todos(&active_path);
+        let loaded = read_existing_todos(&fs, &active_path);
         assert_eq!(loaded.len(), 2);
     }
 

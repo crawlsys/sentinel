@@ -68,6 +68,7 @@ mod tests {
         fn exists(&self, _path: &Path) -> bool { false }
         fn is_dir(&self, _path: &Path) -> bool { false }
         fn metadata(&self, _path: &Path) -> anyhow::Result<std::fs::Metadata> { anyhow::bail!("no") }
+        fn append(&self, _path: &Path, _content: &[u8]) -> anyhow::Result<()> { Ok(()) }
     }
 
     struct StubGit;
