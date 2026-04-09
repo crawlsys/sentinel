@@ -10,18 +10,34 @@ use petgraph::graph::{DiGraph, NodeIndex};
 use crate::hooks::{HookId, HookSpec};
 
 /// Error during dependency resolution
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug)]
 pub enum DependencyError {
-    #[error("circular dependency detected involving hook: {0}")]
     CyclicDependency(String),
-
-    #[error("hook '{0}' depends on unknown hook '{1}'")]
     UnknownDependency(String, String),
-
     /// **Attack #180 fix**: Dependency chain too deep.
-    #[error("hook dependency chain depth ({depth}) exceeds maximum ({max})")]
     ExcessiveDepth { depth: usize, max: usize },
 }
+
+impl std::fmt::Display for DependencyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::CyclicDependency(hook) => {
+                write!(f, "circular dependency detected involving hook: {hook}")
+            }
+            Self::UnknownDependency(hook, dep) => {
+                write!(f, "hook '{hook}' depends on unknown hook '{dep}'")
+            }
+            Self::ExcessiveDepth { depth, max } => {
+                write!(
+                    f,
+                    "hook dependency chain depth ({depth}) exceeds maximum ({max})"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for DependencyError {}
 
 /// Resolved execution plan — hooks grouped into parallel batches
 #[derive(Debug, Clone)]

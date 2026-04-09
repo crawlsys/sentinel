@@ -239,22 +239,45 @@ pub struct ChainVerification {
 }
 
 /// Errors in proof chain operations
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug)]
 pub enum ProofChainError {
-    #[error("broken chain at phase '{phase}': expected previous_hash '{expected}', got '{got}'")]
     BrokenChain {
         phase: String,
         expected: String,
         got: String,
     },
-
-    #[error("invalid proof for phase '{phase}': hash verification failed")]
-    InvalidProof { phase: String },
-
+    InvalidProof {
+        phase: String,
+    },
     /// **Attack #175 fix**: Proof chain capacity exceeded.
-    #[error("proof chain for skill '{skill}' is full ({max} proofs max)")]
-    ChainFull { skill: String, max: usize },
+    ChainFull {
+        skill: String,
+        max: usize,
+    },
 }
+
+impl std::fmt::Display for ProofChainError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::BrokenChain {
+                phase,
+                expected,
+                got,
+            } => write!(
+                f,
+                "broken chain at phase '{phase}': expected previous_hash '{expected}', got '{got}'"
+            ),
+            Self::InvalidProof { phase } => {
+                write!(f, "invalid proof for phase '{phase}': hash verification failed")
+            }
+            Self::ChainFull { skill, max } => {
+                write!(f, "proof chain for skill '{skill}' is full ({max} proofs max)")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ProofChainError {}
 
 #[cfg(test)]
 mod tests {
