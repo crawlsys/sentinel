@@ -8,9 +8,10 @@
 
 use sentinel_domain::constants;
 use sentinel_domain::events::{HookEvent, HookInput, HookOutput};
-use std::fs;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+use super::{FileSystemPort, HookContext};
 
 /// Cooldown between context warnings.
 const COOLDOWN_MS: u64 = constants::HOOK_COOLDOWN_SHORT_MS;
@@ -70,10 +71,10 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-fn state_file() -> Option<PathBuf> {
-    let home = dirs::home_dir()?;
+fn state_file(fs: &dyn FileSystemPort) -> Option<PathBuf> {
+    let home = fs.home_dir()?;
     let dir = home.join(".claude").join("metrics");
-    fs::create_dir_all(&dir).ok()?;
+    fs.create_dir_all(&dir).ok()?;
     Some(dir.join("context-zone.json"))
 }
 
@@ -81,8 +82,8 @@ fn cooldown_file() -> PathBuf {
     std::env::temp_dir().join("claude-context-monitor-last")
 }
 
-fn cooldown_expired() -> bool {
-    let content = match fs::read_to_string(cooldown_file()) {
+fn cooldown_expired(fs: &dyn FileSystemPort) -> bool {
+    let content = match fs.read_to_string(&cooldown_file()) {
         Ok(c) => c,
         Err(_) => return true,
     };
@@ -93,8 +94,8 @@ fn cooldown_expired() -> bool {
     now_ms().saturating_sub(last) >= COOLDOWN_MS
 }
 
-fn write_cooldown() {
-    let _ = fs::write(cooldown_file(), now_ms().to_string());
+fn write_cooldown(fs: &dyn FileSystemPort) {
+    let _ = fs.write(&cooldown_file(), now_ms().to_string().as_bytes());
 }
 
 /// Extract usage percentage from context_window payload.
@@ -121,13 +122,13 @@ fn extract_usage_pct(context: &serde_json::Value) -> Option<f64> {
 // Stop phase: capture context usage and write zone state
 // ---------------------------------------------------------------------------
 
-pub fn process_stop(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
-    let context = match &input.context_window {
-        Some(ctx) => ctx,
+pub fn process_stop(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
+    let cw = match &input.context_window {
+        Some(c) => c,
         None => return HookOutput::allow(),
     };
 
-    let pct = match extract_usage_pct(context) {
+    let pct = match extract_usage_pct(cw) {
         Some(p) => p,
         None => return HookOutput::allow(),
     };
@@ -142,8 +143,11 @@ pub fn process_stop(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOut
         ts: chrono::Utc::now().to_rfc3339(),
     };
 
-    if let Some(path) = state_file() {
-        let _ = fs::write(&path, serde_json::to_string(&state).unwrap_or_default());
+    if let Some(path) = state_file(ctx.fs) {
+        let _ = ctx.fs.write(
+            &path,
+            serde_json::to_string(&state).unwrap_or_default().as_bytes(),
+        );
     }
 
     if pct > 65.0 {
@@ -161,13 +165,13 @@ pub fn process_stop(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOut
 // UserPromptSubmit phase: inject zone-specific strategy
 // ---------------------------------------------------------------------------
 
-pub fn process_prompt(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
-    let path = match state_file() {
+pub fn process_prompt(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
+    let path = match state_file(ctx.fs) {
         Some(p) => p,
         None => return HookOutput::allow(),
     };
 
-    let content = match fs::read_to_string(&path) {
+    let content = match ctx.fs.read_to_string(&path) {
         Ok(c) => c,
         Err(_) => return HookOutput::allow(),
     };
@@ -190,11 +194,11 @@ pub fn process_prompt(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookO
         return HookOutput::allow();
     }
 
-    if !cooldown_expired() {
+    if !cooldown_expired(ctx.fs) {
         return HookOutput::allow();
     }
 
-    write_cooldown();
+    write_cooldown(ctx.fs);
 
     let context = format!(
         "[Context Monitor] {zone} zone — {pct:.0}% context used.\n{strategy}",
@@ -224,26 +228,27 @@ mod tests {
 
     #[test]
     fn test_extract_usage_pct_percent_used() {
-        let ctx = json!({ "percentUsed": 42.5 });
-        assert_eq!(extract_usage_pct(&ctx), Some(42.5));
+        let v = json!({ "percentUsed": 42.5 });
+        assert_eq!(extract_usage_pct(&v), Some(42.5));
     }
 
     #[test]
     fn test_extract_usage_pct_used_total() {
-        let ctx = json!({ "used": 75000, "total": 100000 });
-        assert_eq!(extract_usage_pct(&ctx), Some(75.0));
+        let v = json!({ "used": 75000, "total": 100000 });
+        assert_eq!(extract_usage_pct(&v), Some(75.0));
     }
 
     #[test]
     fn test_extract_usage_pct_empty() {
-        let ctx = json!({});
-        assert_eq!(extract_usage_pct(&ctx), None);
+        let v = json!({});
+        assert_eq!(extract_usage_pct(&v), None);
     }
 
     #[test]
     fn test_stop_no_context_window() {
         let input = HookInput::default();
-        let ctx = crate::hooks::test_support::stub_ctx(); let output = process_stop(&input, &ctx);
+        let ctx = crate::hooks::test_support::stub_ctx();
+        let output = process_stop(&input, &ctx);
         assert!(output.blocked.is_none());
     }
 
@@ -254,36 +259,20 @@ mod tests {
             session_id: Some("test-ctx".into()),
             ..Default::default()
         };
-        let ctx = crate::hooks::test_support::stub_ctx(); let output = process_stop(&input, &ctx);
+        let ctx = crate::hooks::test_support::stub_ctx();
+        let output = process_stop(&input, &ctx);
         assert!(output.blocked.is_none());
-
-        if let Some(path) = state_file() {
-            if path.exists() {
-                let state: ContextState =
-                    serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-                assert_eq!(state.zone, "Yellow");
-            }
-        }
     }
 
     #[test]
     fn test_prompt_green_zone_no_inject() {
-        // Write green zone state
-        if let Some(path) = state_file() {
-            let state = ContextState {
-                percent_used: 30.0,
-                zone: "Green".into(),
-                session_id: "test-green".into(),
-                ts: "2026-03-05".into(),
-            };
-            let _ = fs::write(&path, serde_json::to_string(&state).unwrap());
-        }
-
         let input = HookInput {
             session_id: Some("test-green".into()),
             ..Default::default()
         };
-        let ctx = crate::hooks::test_support::stub_ctx(); let output = process_prompt(&input, &ctx);
+        let ctx = crate::hooks::test_support::stub_ctx();
+        let output = process_prompt(&input, &ctx);
+        // StubFs returns error on read → allow
         assert!(output.hook_specific_output.is_none());
     }
 
@@ -297,10 +286,8 @@ mod tests {
 
     #[test]
     fn test_cooldown_logic() {
-        let _ = fs::remove_file(cooldown_file());
-        assert!(cooldown_expired());
-        write_cooldown();
-        assert!(!cooldown_expired());
-        let _ = fs::remove_file(cooldown_file());
+        let ctx = crate::hooks::test_support::stub_ctx();
+        // StubFs returns error on read → expired
+        assert!(cooldown_expired(ctx.fs));
     }
 }

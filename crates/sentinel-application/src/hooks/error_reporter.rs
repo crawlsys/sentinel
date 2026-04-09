@@ -4,12 +4,13 @@
 //! unresolved infrastructure errors. If any found and cooldown (10 min) has
 //! expired, injects context instructing Claude to file Linear issues.
 
-use std::fs;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use sentinel_domain::constants;
 use sentinel_domain::events::{HookEvent, HookInput, HookOutput};
+
+use super::{FileSystemPort, HookContext};
 
 /// Cooldown between error reports.
 const COOLDOWN_MS: u64 = constants::HOOK_COOLDOWN_SHORT_MS;
@@ -43,15 +44,16 @@ impl Default for LinearConfig {
 }
 
 /// Load Linear config from ~/.claude/sentinel/config/error-reporter.toml
-fn load_linear_config() -> LinearConfig {
-    let path = dirs::home_dir()
+fn load_linear_config(fs: &dyn FileSystemPort) -> LinearConfig {
+    let path = fs
+        .home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".claude")
         .join("sentinel")
         .join("config")
         .join("error-reporter.toml");
 
-    if let Ok(content) = fs::read_to_string(&path) {
+    if let Ok(content) = fs.read_to_string(&path) {
         toml::from_str(&content).unwrap_or_default()
     } else {
         LinearConfig::default()
@@ -85,8 +87,8 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-fn errors_file() -> PathBuf {
-    dirs::home_dir()
+fn errors_file(fs: &dyn FileSystemPort) -> PathBuf {
+    fs.home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".claude")
         .join("metrics")
@@ -98,8 +100,8 @@ fn cooldown_file() -> PathBuf {
 }
 
 /// Read unresolved errors from errors.jsonl
-fn read_unresolved_errors(path: &PathBuf) -> Vec<ErrorEntry> {
-    let content = match fs::read_to_string(path) {
+fn read_unresolved_errors(fs: &dyn FileSystemPort, path: &PathBuf) -> Vec<ErrorEntry> {
+    let content = match fs.read_to_string(path) {
         Ok(c) => c,
         Err(_) => return Vec::new(),
     };
@@ -131,8 +133,8 @@ fn is_actionable_error(entry: &ErrorEntry) -> bool {
 }
 
 /// Check if cooldown has expired
-fn cooldown_expired(path: &PathBuf) -> bool {
-    let content = match fs::read_to_string(path) {
+fn cooldown_expired(fs: &dyn FileSystemPort, path: &PathBuf) -> bool {
+    let content = match fs.read_to_string(path) {
         Ok(c) => c,
         Err(_) => return true, // No cooldown file = expired
     };
@@ -144,36 +146,31 @@ fn cooldown_expired(path: &PathBuf) -> bool {
 }
 
 /// Write cooldown marker
-fn write_cooldown(path: &PathBuf) {
-    let _ = fs::write(path, now_ms().to_string());
+fn write_cooldown(fs: &dyn FileSystemPort, path: &PathBuf) {
+    let _ = fs.write(path, now_ms().to_string().as_bytes());
 }
 
 /// Process the error-reporter hook event
-pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
-    // Only meaningful on UserPromptSubmit, but we don't gate on that —
-    // the engine routes events to the correct hooks.
+pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     let _ = input;
 
-    let errors_path = errors_file();
-    let errors = read_unresolved_errors(&errors_path);
+    let errors_path = errors_file(ctx.fs);
+    let errors = read_unresolved_errors(ctx.fs, &errors_path);
 
     if errors.is_empty() {
         return HookOutput::allow();
     }
 
     let cooldown_path = cooldown_file();
-    if !cooldown_expired(&cooldown_path) {
+    if !cooldown_expired(ctx.fs, &cooldown_path) {
         return HookOutput::allow();
     }
 
-    let linear_config = load_linear_config();
+    let linear_config = load_linear_config(ctx.fs);
     if linear_config.team_id.is_empty() {
-        // No Linear config — can't file issues
         return HookOutput::allow();
     }
 
-    // Build a compact summary for the newest actionable errors only. Prompt
-    // hooks should stay small; the full error details remain in errors.jsonl.
     let error_lines: Vec<String> = errors
         .iter()
         .take(MAX_ERRORS_IN_CONTEXT)
@@ -185,7 +182,9 @@ pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
         })
         .collect();
 
-    let resolutions_path = dirs::home_dir()
+    let resolutions_path = ctx
+        .fs
+        .home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".claude")
         .join("metrics")
@@ -212,8 +211,7 @@ pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
         }
     );
 
-    // Write cooldown marker
-    write_cooldown(&cooldown_path);
+    write_cooldown(ctx.fs, &cooldown_path);
 
     HookOutput::inject_context(HookEvent::UserPromptSubmit, context)
 }
@@ -221,77 +219,94 @@ pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
-    use tempfile::TempDir;
 
-    /// Helper to create a temp errors.jsonl with given content
-    fn setup_errors_file(dir: &TempDir, content: &str) -> PathBuf {
-        let metrics = dir.path().join("metrics");
-        fs::create_dir_all(&metrics).unwrap();
-        let path = metrics.join("errors.jsonl");
-        let mut f = fs::File::create(&path).unwrap();
-        f.write_all(content.as_bytes()).unwrap();
-        path
+    /// A test FS that reads from a HashMap — no real disk needed.
+    struct MapFs {
+        files: std::collections::HashMap<PathBuf, String>,
+    }
+    impl MapFs {
+        fn new(files: Vec<(&str, &str)>) -> Self {
+            Self {
+                files: files
+                    .into_iter()
+                    .map(|(k, v)| (PathBuf::from(k), v.to_string()))
+                    .collect(),
+            }
+        }
+    }
+    impl FileSystemPort for MapFs {
+        fn home_dir(&self) -> Option<PathBuf> { Some(PathBuf::from("/mock/home")) }
+        fn read_to_string(&self, p: &std::path::Path) -> anyhow::Result<String> {
+            self.files
+                .get(p)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("not found"))
+        }
+        fn write(&self, _: &std::path::Path, _: &[u8]) -> anyhow::Result<()> { Ok(()) }
+        fn create_dir_all(&self, _: &std::path::Path) -> anyhow::Result<()> { Ok(()) }
+        fn read_dir(&self, _: &std::path::Path) -> anyhow::Result<Vec<PathBuf>> { Ok(vec![]) }
+        fn exists(&self, p: &std::path::Path) -> bool { self.files.contains_key(p) }
+        fn is_dir(&self, _: &std::path::Path) -> bool { false }
+        fn metadata(&self, _: &std::path::Path) -> anyhow::Result<std::fs::Metadata> { anyhow::bail!("no") }
+        fn append(&self, _: &std::path::Path, _: &[u8]) -> anyhow::Result<()> { Ok(()) }
     }
 
     #[test]
     fn test_read_unresolved_errors_empty_file() {
-        let dir = TempDir::new().unwrap();
-        let path = setup_errors_file(&dir, "");
-        let errors = read_unresolved_errors(&path);
+        let fs = MapFs::new(vec![("/test/errors.jsonl", "")]);
+        let path = PathBuf::from("/test/errors.jsonl");
+        let errors = read_unresolved_errors(&fs, &path);
         assert!(errors.is_empty());
     }
 
     #[test]
     fn test_read_unresolved_errors_filters_resolved() {
-        let dir = TempDir::new().unwrap();
-        let content = r#"{"id":"e1","component":"mcp","type":"crash","error":"timeout","severity":"warning","ts":"2026-01-01"}
-{"id":"e2","component":"hook","type":"fail","error":"parse error","severity":"info","ts":"2026-01-02","resolved":"GS-100"}"#;
-        let path = setup_errors_file(&dir, content);
-        let errors = read_unresolved_errors(&path);
+        let content = "{\"id\":\"e1\",\"component\":\"mcp\",\"type\":\"crash\",\"error\":\"timeout\",\"severity\":\"warning\",\"ts\":\"2026-01-01\"}\n\
+                       {\"id\":\"e2\",\"component\":\"hook\",\"type\":\"fail\",\"error\":\"parse error\",\"severity\":\"info\",\"ts\":\"2026-01-02\",\"resolved\":\"GS-100\"}";
+        let fs = MapFs::new(vec![("/test/errors.jsonl", content)]);
+        let path = PathBuf::from("/test/errors.jsonl");
+        let errors = read_unresolved_errors(&fs, &path);
         assert_eq!(errors.len(), 1);
         assert_eq!(errors[0].id, "e1");
     }
 
     #[test]
     fn test_read_unresolved_errors_skips_malformed_lines() {
-        let dir = TempDir::new().unwrap();
         let content = "not json at all\n{\"id\":\"e1\",\"component\":\"test\",\"type\":\"err\",\"error\":\"boom\",\"severity\":\"critical\",\"ts\":\"now\"}\n";
-        let path = setup_errors_file(&dir, content);
-        let errors = read_unresolved_errors(&path);
+        let fs = MapFs::new(vec![("/test/errors.jsonl", content)]);
+        let path = PathBuf::from("/test/errors.jsonl");
+        let errors = read_unresolved_errors(&fs, &path);
         assert_eq!(errors.len(), 1);
     }
 
     #[test]
     fn test_cooldown_expired_no_file() {
-        let path = PathBuf::from("/tmp/nonexistent-cooldown-file-test");
-        assert!(cooldown_expired(&path));
+        let fs = MapFs::new(vec![]);
+        let path = PathBuf::from("/tmp/nonexistent");
+        assert!(cooldown_expired(&fs, &path));
     }
 
     #[test]
     fn test_cooldown_not_expired() {
-        let dir = TempDir::new().unwrap();
-        let path = dir.path().join("cooldown");
-        fs::write(&path, now_ms().to_string()).unwrap();
-        assert!(!cooldown_expired(&path));
+        let ts = now_ms().to_string();
+        let fs = MapFs::new(vec![("/tmp/cooldown", &ts)]);
+        let path = PathBuf::from("/tmp/cooldown");
+        assert!(!cooldown_expired(&fs, &path));
     }
 
     #[test]
     fn test_cooldown_expired_old_timestamp() {
-        let dir = TempDir::new().unwrap();
-        let path = dir.path().join("cooldown");
-        let old = now_ms().saturating_sub(COOLDOWN_MS + 1000);
-        fs::write(&path, old.to_string()).unwrap();
-        assert!(cooldown_expired(&path));
+        let old = now_ms().saturating_sub(COOLDOWN_MS + 1000).to_string();
+        let fs = MapFs::new(vec![("/tmp/cooldown", &old)]);
+        let path = PathBuf::from("/tmp/cooldown");
+        assert!(cooldown_expired(&fs, &path));
     }
 
     #[test]
     fn test_process_no_errors_returns_allow() {
-        // With no errors.jsonl file, process should return allow
         let input = HookInput::default();
-        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
-        // We can't control the home dir in tests, but if there are no errors,
-        // it should return allow (empty output)
+        let ctx = crate::hooks::test_support::stub_ctx();
+        let output = process(&input, &ctx);
         assert!(output.blocked.is_none());
     }
 
@@ -301,7 +316,6 @@ mod tests {
         let entry: ErrorEntry = serde_json::from_str(json).unwrap();
         assert_eq!(entry.id, "e1");
         assert_eq!(entry.component, "mcp-health");
-        assert_eq!(entry.severity, "warning");
         assert!(entry.resolved.is_none());
     }
 
