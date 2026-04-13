@@ -10,10 +10,11 @@
 //! automatically cascade to all related services.
 
 use std::collections::HashMap;
-use std::fs;
 use std::path::Path;
 
 use sentinel_domain::events::{HookEvent, HookInput, HookOutput};
+
+use super::{FileSystemPort, HookContext};
 
 /// Tool name suffixes that trigger cascade behavior.
 /// Note: `account_rotate` is intentionally excluded — rate limit rotation
@@ -24,7 +25,7 @@ const TRIGGER_SUFFIXES: &[&str] = &[
 ];
 
 /// Process a `PostToolUse` event. Returns context injection if a cascade is needed.
-pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
+pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     let Some(tool_name) = input.tool_name.as_deref() else {
         return HookOutput::allow();
     };
@@ -48,7 +49,7 @@ pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
         return HookOutput::allow();
     }
 
-    let Some(home) = dirs::home_dir() else {
+    let Some(home) = ctx.fs.home_dir() else {
         return HookOutput::allow();
     };
 
@@ -65,7 +66,7 @@ pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
         return HookOutput::allow();
     }
 
-    let instructions = build_cascade_instructions(&projects_dir, &switched_account);
+    let instructions = build_cascade_instructions(ctx.fs, &projects_dir, &switched_account);
     if instructions.is_empty() {
         tracing::debug!(
             switched_account,
@@ -187,12 +188,12 @@ const CASCADE_TARGETS: &[(&str, &str, &str)] = &[
 /// Scan project configs for one whose `claude_account` matches the switched account name.
 /// Falls back to matching by project name or aliases if `claude_account` is not set.
 /// Returns a list of MCP tool call instructions for all mapped services.
-fn build_cascade_instructions(projects_dir: &Path, account_name: &str) -> Vec<String> {
-    if !projects_dir.is_dir() {
+fn build_cascade_instructions(fs: &dyn FileSystemPort, projects_dir: &Path, account_name: &str) -> Vec<String> {
+    if !fs.is_dir(projects_dir) {
         return vec![];
     }
 
-    let configs = load_project_configs(projects_dir);
+    let configs = load_project_configs(fs, projects_dir);
 
     // Strategy 1: exact match on claude_account field
     let project = configs.iter().find(|p| {
@@ -235,14 +236,13 @@ fn build_cascade_instructions(projects_dir: &Path, account_name: &str) -> Vec<St
 
 /// Load all project configs from `~/.claude/projects/*.md` as flat key-value maps.
 /// Only parses YAML frontmatter (between --- fences).
-fn load_project_configs(dir: &Path) -> Vec<HashMap<String, String>> {
+fn load_project_configs(fs: &dyn FileSystemPort, dir: &Path) -> Vec<HashMap<String, String>> {
     let mut configs = Vec::new();
-    let Ok(entries) = fs::read_dir(dir) else {
+    let Ok(entries) = fs.read_dir(dir) else {
         return configs;
     };
 
-    for entry in entries.flatten() {
-        let path = entry.path();
+    for path in entries {
         if path.extension().and_then(|e| e.to_str()) != Some("md") {
             continue;
         }
@@ -252,7 +252,7 @@ fn load_project_configs(dir: &Path) -> Vec<HashMap<String, String>> {
         {
             continue;
         }
-        if let Some(fields) = parse_frontmatter(&path) {
+        if let Some(fields) = parse_frontmatter(fs, &path) {
             configs.push(fields);
         }
     }
@@ -261,8 +261,8 @@ fn load_project_configs(dir: &Path) -> Vec<HashMap<String, String>> {
 }
 
 /// Parse YAML frontmatter from a markdown file into a flat key-value map.
-fn parse_frontmatter(path: &Path) -> Option<HashMap<String, String>> {
-    let content = fs::read_to_string(path).ok()?;
+fn parse_frontmatter(fs: &dyn FileSystemPort, path: &Path) -> Option<HashMap<String, String>> {
+    let content = fs.read_to_string(path).ok()?;
     let mut lines = content.lines();
 
     if lines.next()?.trim() != "---" {
@@ -302,6 +302,26 @@ fn parse_frontmatter(path: &Path) -> Option<HashMap<String, String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+
+    /// Real-FS wrapper for tests that need tempdir I/O.
+    struct TestFs;
+    impl FileSystemPort for TestFs {
+        fn home_dir(&self) -> Option<std::path::PathBuf> { dirs::home_dir() }
+        fn read_to_string(&self, p: &Path) -> anyhow::Result<String> { Ok(std::fs::read_to_string(p)?) }
+        fn write(&self, p: &Path, c: &[u8]) -> anyhow::Result<()> {
+            if let Some(par) = p.parent() { std::fs::create_dir_all(par)?; }
+            Ok(std::fs::write(p, c)?)
+        }
+        fn create_dir_all(&self, p: &Path) -> anyhow::Result<()> { Ok(std::fs::create_dir_all(p)?) }
+        fn read_dir(&self, p: &Path) -> anyhow::Result<Vec<std::path::PathBuf>> {
+            Ok(std::fs::read_dir(p)?.filter_map(|e| e.ok().map(|e| e.path())).collect())
+        }
+        fn exists(&self, p: &Path) -> bool { p.exists() }
+        fn is_dir(&self, p: &Path) -> bool { p.is_dir() }
+        fn metadata(&self, p: &Path) -> anyhow::Result<std::fs::Metadata> { Ok(std::fs::metadata(p)?) }
+        fn append(&self, _: &Path, _: &[u8]) -> anyhow::Result<()> { Ok(()) }
+    }
 
     #[test]
     fn test_extract_bold_text() {
@@ -348,7 +368,8 @@ mod tests {
     fn test_process_ignores_non_trigger_tools() {
         let mut input = HookInput::default();
         input.tool_name = Some("mcp__linear__list_issues".to_string());
-        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
+        let ctx = crate::hooks::test_support::stub_ctx();
+        let output = process(&input, &ctx);
         assert!(output.hook_specific_output.is_none());
     }
 
@@ -357,7 +378,8 @@ mod tests {
         let mut input = HookInput::default();
         input.tool_name = Some("mcp__accounts__account_switch".to_string());
         input.tool_result = None;
-        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
+        let ctx = crate::hooks::test_support::stub_ctx();
+        let output = process(&input, &ctx);
         assert!(output.hook_specific_output.is_none());
     }
 
@@ -366,7 +388,8 @@ mod tests {
         let mut input = HookInput::default();
         input.tool_name = Some("mcp__accounts__account_switch".to_string());
         input.tool_result = Some(serde_json::json!("Error: profile 'bad' not found"));
-        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
+        let ctx = crate::hooks::test_support::stub_ctx();
+        let output = process(&input, &ctx);
         assert!(output.hook_specific_output.is_none());
     }
 
@@ -398,7 +421,7 @@ mod tests {
         let file = dir.path().join("test.md");
         fs::write(&file, "---\nname: myproject\nclaude_account: gary-max\nlinear_account: gary@test.com (workspace)\n---\n# Hello").unwrap();
 
-        let fields = parse_frontmatter(&file).unwrap();
+        let fields = parse_frontmatter(&TestFs, &file).unwrap();
         assert_eq!(fields.get("name").unwrap(), "myproject");
         assert_eq!(fields.get("claude_account").unwrap(), "gary-max");
         assert_eq!(fields.get("linear_account").unwrap(), "gary@test.com (workspace)");
@@ -410,7 +433,7 @@ mod tests {
         let file = dir.path().join("test.md");
         fs::write(&file, "---\nname: testproject\nclaude_account: gary-max\nlinear_account: gary@test.com (ws)\ndoppler_account: gary@workplace\nblacksmith_account: myorg\n---\n").unwrap();
 
-        let instructions = build_cascade_instructions(dir.path(), "gary-max");
+        let instructions = build_cascade_instructions(&TestFs, dir.path(), "gary-max");
         assert_eq!(instructions.len(), 3);
         assert!(instructions[0].contains("linear"));
         assert!(instructions[1].contains("doppler"));
@@ -446,7 +469,7 @@ loom_workspace: ws-abc123
 ---
 ").unwrap();
 
-        let instructions = build_cascade_instructions(dir.path(), "gary-max");
+        let instructions = build_cascade_instructions(&TestFs, dir.path(), "gary-max");
         assert_eq!(instructions.len(), 18);
         // Verify ordering matches CASCADE_TARGETS
         assert!(instructions[0].contains("linear"));
@@ -479,7 +502,7 @@ loom_workspace: ws-abc123
         let file = dir.path().join("partial.md");
         fs::write(&file, "---\nname: testproject\nclaude_account: gary-max\nlinear_account: gary@test.com (ws)\nrailway_account: myapp\n---\n").unwrap();
 
-        let instructions = build_cascade_instructions(dir.path(), "gary-max");
+        let instructions = build_cascade_instructions(&TestFs, dir.path(), "gary-max");
         assert_eq!(instructions.len(), 2);
         assert!(instructions[0].contains("linear"));
         assert!(instructions[1].contains("railway"));
@@ -492,7 +515,7 @@ loom_workspace: ws-abc123
         let file = dir.path().join("test.md");
         fs::write(&file, "---\nname: testproject\nclaude_account: gary-max\nlinear_account: gary@test.com (ws)\ndoppler_project: myapp\n---\n").unwrap();
 
-        let instructions = build_cascade_instructions(dir.path(), "gary-max");
+        let instructions = build_cascade_instructions(&TestFs, dir.path(), "gary-max");
         assert_eq!(instructions.len(), 1); // only linear, no doppler
         assert!(instructions[0].contains("linear"));
     }
@@ -503,7 +526,7 @@ loom_workspace: ws-abc123
         let file = dir.path().join("test.md");
         fs::write(&file, "---\nname: testproject\nclaude_account: other-account\n---\n").unwrap();
 
-        let instructions = build_cascade_instructions(dir.path(), "gary-max");
+        let instructions = build_cascade_instructions(&TestFs, dir.path(), "gary-max");
         assert!(instructions.is_empty());
     }
 
@@ -514,7 +537,7 @@ loom_workspace: ws-abc123
         let file = dir.path().join("corvus.md");
         fs::write(&file, "---\nname: corvus\nlinear_account: gary@test.com (corvus)\n---\n").unwrap();
 
-        let instructions = build_cascade_instructions(dir.path(), "corvus");
+        let instructions = build_cascade_instructions(&TestFs, dir.path(), "corvus");
         assert_eq!(instructions.len(), 1);
         assert!(instructions[0].contains("linear"));
     }
@@ -525,7 +548,7 @@ loom_workspace: ws-abc123
         let file = dir.path().join("firefly.md");
         fs::write(&file, "---\nname: firefly-pro\naliases: [\"firefly\", \"crm\", \"fir\"]\nlinear_account: gary@fp.com (firefly-pro)\n---\n").unwrap();
 
-        let instructions = build_cascade_instructions(dir.path(), "firefly");
+        let instructions = build_cascade_instructions(&TestFs, dir.path(), "firefly");
         assert_eq!(instructions.len(), 1);
         assert!(instructions[0].contains("linear"));
     }
