@@ -10,6 +10,8 @@ use chrono::Utc;
 use sentinel_domain::events::{HookInput, HookOutput};
 use std::path::PathBuf;
 
+use super::{FileSystemPort, HookContext};
+
 /// Error patterns that indicate MCP server failure
 const ERROR_PATTERNS: &[&str] = &[
     "connection refused",
@@ -34,8 +36,8 @@ const ERROR_PATTERNS: &[&str] = &[
 ];
 
 /// Path to the errors JSONL file
-fn errors_file_path() -> Option<PathBuf> {
-    dirs::home_dir().map(|h| h.join(".claude").join("metrics").join("errors.jsonl"))
+fn errors_file_path(fs: &dyn FileSystemPort) -> Option<PathBuf> {
+    fs.home_dir().map(|h| h.join(".claude").join("metrics").join("errors.jsonl"))
 }
 
 /// Extract the MCP server name from a tool name like `mcp__linear__get_issue`
@@ -86,15 +88,21 @@ fn detect_error(input: &HookInput) -> Option<String> {
 }
 
 /// Log an MCP error to the errors JSONL file
-fn log_mcp_error(tool_name: &str, server_name: &str, error_detail: &str, session_id: &str) {
-    let errors_path = match errors_file_path() {
+fn log_mcp_error(
+    fs: &dyn FileSystemPort,
+    tool_name: &str,
+    server_name: &str,
+    error_detail: &str,
+    session_id: &str,
+) {
+    let errors_path = match errors_file_path(fs) {
         Some(p) => p,
         None => return,
     };
 
     // Ensure parent directory exists
     if let Some(parent) = errors_path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+        let _ = fs.create_dir_all(parent);
     }
 
     let ts = Utc::now().to_rfc3339();
@@ -123,18 +131,11 @@ fn log_mcp_error(tool_name: &str, server_name: &str, error_detail: &str, session
     });
 
     let line = format!("{}\n", serde_json::to_string(&entry).unwrap_or_default());
-    let _ = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&errors_path)
-        .and_then(|mut f| {
-            use std::io::Write;
-            f.write_all(line.as_bytes())
-        });
+    let _ = fs.append(&errors_path, line.as_bytes());
 }
 
 /// Process an MCP health check (PostToolUse)
-pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
+pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     let tool_name = match &input.tool_name {
         Some(name) if name.starts_with("mcp__") => name.as_str(),
         _ => return HookOutput::allow(),
@@ -145,7 +146,7 @@ pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
 
     // Check for errors in the tool result
     if let Some(error_detail) = detect_error(input) {
-        log_mcp_error(tool_name, server_name, &error_detail, session_id);
+        log_mcp_error(ctx.fs, tool_name, server_name, &error_detail, session_id);
     }
 
     // Never block — this hook is observational only
@@ -162,7 +163,8 @@ mod tests {
             tool_name: Some("Bash".to_string()),
             ..Default::default()
         };
-        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
+        let ctx = crate::hooks::test_support::stub_ctx();
+        let output = process(&input, &ctx);
         assert!(output.blocked.is_none());
     }
 
@@ -173,7 +175,8 @@ mod tests {
             tool_result: Some(serde_json::json!({"id": "FIR-123", "title": "Test issue"})),
             ..Default::default()
         };
-        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
+        let ctx = crate::hooks::test_support::stub_ctx();
+        let output = process(&input, &ctx);
         assert!(output.blocked.is_none());
     }
 
@@ -185,7 +188,8 @@ mod tests {
             session_id: Some("test-session".to_string()),
             ..Default::default()
         };
-        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
+        let ctx = crate::hooks::test_support::stub_ctx();
+        let output = process(&input, &ctx);
         // Should still allow (never blocks) but would log
         assert!(output.blocked.is_none());
 
@@ -258,7 +262,8 @@ mod tests {
     #[test]
     fn test_allows_no_tool_name() {
         let input = HookInput::default();
-        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
+        let ctx = crate::hooks::test_support::stub_ctx();
+        let output = process(&input, &ctx);
         assert!(output.blocked.is_none());
     }
 

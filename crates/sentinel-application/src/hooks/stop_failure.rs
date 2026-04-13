@@ -213,7 +213,7 @@ fn parse_absolute_time_flexible(s: &str) -> Option<u64> {
 /// Logs the error, parses reset time from error_details, and injects
 /// a system message advising Claude to call account_rotate with the
 /// correct cooldown_minutes.
-pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
+pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
     let error = input
         .extra
         .get("error")
@@ -229,7 +229,7 @@ pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
     tracing::warn!(error, error_details, "Turn ended with API error");
 
     // Log to errors.jsonl for diagnostics
-    if let Some(home) = dirs::home_dir() {
+    if let Some(home) = ctx.fs.home_dir() {
         let metrics_dir = home.join(".claude").join("metrics");
         let entry = serde_json::json!({
             "event": "stop_failure",
@@ -239,14 +239,8 @@ pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
             "ts": chrono::Utc::now().to_rfc3339(),
         });
 
-        if let Ok(mut file) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(metrics_dir.join("errors.jsonl"))
-        {
-            use std::io::Write;
-            let _ = writeln!(file, "{}", entry);
-        }
+        let line = format!("{}\n", entry);
+        let _ = ctx.fs.append(&metrics_dir.join("errors.jsonl"), line.as_bytes());
     }
 
     // If this is a rate limit error, parse reset time and advise rotation

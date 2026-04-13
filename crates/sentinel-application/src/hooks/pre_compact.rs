@@ -9,8 +9,9 @@
 //! snapshot to help Claude recover orientation after compaction.
 
 use sentinel_domain::events::{HookInput, HookOutput};
-use std::fs;
 use std::path::PathBuf;
+
+use super::{FileSystemPort, HookContext};
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 struct CompactSnapshot {
@@ -37,24 +38,24 @@ struct CompactSnapshot {
     ts: String,
 }
 
-fn metrics_dir() -> Option<PathBuf> {
-    let home = dirs::home_dir()?;
+fn metrics_dir(fs: &dyn FileSystemPort) -> Option<PathBuf> {
+    let home = fs.home_dir()?;
     let dir = home.join(".claude").join("metrics");
-    fs::create_dir_all(&dir).ok()?;
+    fs.create_dir_all(&dir).ok()?;
     Some(dir)
 }
 
-fn snapshot_file() -> Option<PathBuf> {
-    Some(metrics_dir()?.join("compact-snapshot.json"))
+fn snapshot_file(fs: &dyn FileSystemPort) -> Option<PathBuf> {
+    Some(metrics_dir(fs)?.join("compact-snapshot.json"))
 }
 
 /// Read the activity summary written by activity_tracker::process_stop
-fn read_activity_summary(session_id: &str) -> (Vec<String>, Vec<String>, Vec<(String, usize)>) {
-    let path = match metrics_dir() {
+fn read_activity_summary(fs: &dyn FileSystemPort, session_id: &str) -> (Vec<String>, Vec<String>, Vec<(String, usize)>) {
+    let path = match metrics_dir(fs) {
         Some(d) => d.join("activity-summary.json"),
         None => return (Vec::new(), Vec::new(), Vec::new()),
     };
-    let content = match fs::read_to_string(&path) {
+    let content = match fs.read_to_string(&path) {
         Ok(c) => c,
         Err(_) => return (Vec::new(), Vec::new(), Vec::new()),
     };
@@ -109,9 +110,9 @@ fn read_activity_summary(session_id: &str) -> (Vec<String>, Vec<String>, Vec<(St
 }
 
 /// Read context usage % from context-zone.json
-fn read_context_percent(session_id: &str) -> Option<f64> {
-    let path = metrics_dir()?.join("context-zone.json");
-    let content = fs::read_to_string(&path).ok()?;
+fn read_context_percent(fs: &dyn FileSystemPort, session_id: &str) -> Option<f64> {
+    let path = metrics_dir(fs)?.join("context-zone.json");
+    let content = fs.read_to_string(&path).ok()?;
     let val: serde_json::Value = serde_json::from_str(&content).ok()?;
 
     if val.get("session_id").and_then(|v| v.as_str()) != Some(session_id) {
@@ -122,9 +123,9 @@ fn read_context_percent(session_id: &str) -> Option<f64> {
 }
 
 /// Detect current git branch from cwd
-fn detect_git_branch(cwd: &str) -> Option<String> {
+fn detect_git_branch(fs: &dyn FileSystemPort, cwd: &str) -> Option<String> {
     let head_path = std::path::Path::new(cwd).join(".git").join("HEAD");
-    let content = fs::read_to_string(head_path).ok()?;
+    let content = fs.read_to_string(&head_path).ok()?;
     let trimmed = content.trim();
     if let Some(branch) = trimmed.strip_prefix("ref: refs/heads/") {
         Some(branch.to_string())
@@ -135,8 +136,8 @@ fn detect_git_branch(cwd: &str) -> Option<String> {
 }
 
 /// Read session state from the state store
-fn read_session_state(session_id: &str) -> (Option<String>, Vec<String>, u64) {
-    let home = match dirs::home_dir() {
+fn read_session_state(fs: &dyn FileSystemPort, session_id: &str) -> (Option<String>, Vec<String>, u64) {
+    let home = match fs.home_dir() {
         Some(h) => h,
         None => return (None, Vec::new(), 0),
     };
@@ -146,7 +147,7 @@ fn read_session_state(session_id: &str) -> (Option<String>, Vec<String>, u64) {
         .join("state")
         .join(format!("{session_id}.json"));
 
-    let content = match fs::read_to_string(&state_path) {
+    let content = match fs.read_to_string(&state_path) {
         Ok(c) => c,
         Err(_) => return (None, Vec::new(), 0),
     };
@@ -180,21 +181,21 @@ fn read_session_state(session_id: &str) -> (Option<String>, Vec<String>, u64) {
 // PreCompact: snapshot session state before context compaction
 // ---------------------------------------------------------------------------
 
-pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
+pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     let session_id = input.session_id.as_deref().unwrap_or("unknown");
     let cwd = input.cwd.as_deref();
 
     // Read session state
-    let (active_skill, phases_read, tool_calls) = read_session_state(session_id);
+    let (active_skill, phases_read, tool_calls) = read_session_state(ctx.fs, session_id);
 
     // Read activity data
-    let (recent_files, recent_git, tool_summary) = read_activity_summary(session_id);
+    let (recent_files, recent_git, tool_summary) = read_activity_summary(ctx.fs, session_id);
 
     // Read context %
-    let context_percent = read_context_percent(session_id);
+    let context_percent = read_context_percent(ctx.fs, session_id);
 
     // Detect git branch
-    let git_branch = cwd.and_then(detect_git_branch);
+    let git_branch = cwd.and_then(|c| detect_git_branch(ctx.fs, c));
 
     let snapshot = CompactSnapshot {
         session_id: session_id.to_string(),
@@ -210,10 +211,10 @@ pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
         ts: chrono::Utc::now().to_rfc3339(),
     };
 
-    if let Some(path) = snapshot_file() {
-        let _ = fs::write(
+    if let Some(path) = snapshot_file(ctx.fs) {
+        let _ = ctx.fs.write(
             &path,
-            serde_json::to_string_pretty(&snapshot).unwrap_or_default(),
+            serde_json::to_string_pretty(&snapshot).unwrap_or_default().as_bytes(),
         );
     }
 
@@ -234,7 +235,8 @@ mod tests {
     #[test]
     fn test_process_default_input() {
         let input = HookInput::default();
-        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
+        let ctx = crate::hooks::test_support::stub_ctx();
+        let output = process(&input, &ctx);
         assert!(output.blocked.is_none());
     }
 
@@ -245,23 +247,27 @@ mod tests {
             cwd: Some(".".into()),
             ..Default::default()
         };
-        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
+        let ctx = crate::hooks::test_support::stub_ctx();
+        let output = process(&input, &ctx);
         assert!(output.blocked.is_none());
     }
 
     #[test]
     fn test_snapshot_file_exists() {
-        assert!(snapshot_file().is_some());
+        let ctx = crate::hooks::test_support::stub_ctx();
+        assert!(snapshot_file(ctx.fs).is_some());
     }
 
     #[test]
     fn test_detect_git_branch_no_dir() {
-        assert!(detect_git_branch("/nonexistent/path/xyz").is_none());
+        let ctx = crate::hooks::test_support::stub_ctx();
+        assert!(detect_git_branch(ctx.fs, "/nonexistent/path/xyz").is_none());
     }
 
     #[test]
     fn test_read_session_state_missing() {
-        let (skill, phases, calls) = read_session_state("nonexistent-session-xyz");
+        let ctx = crate::hooks::test_support::stub_ctx();
+        let (skill, phases, calls) = read_session_state(ctx.fs, "nonexistent-session-xyz");
         assert!(skill.is_none());
         assert!(phases.is_empty());
         assert_eq!(calls, 0);
@@ -269,7 +275,8 @@ mod tests {
 
     #[test]
     fn test_read_activity_summary_missing() {
-        let (files, git, counts) = read_activity_summary("nonexistent-session-xyz");
+        let ctx = crate::hooks::test_support::stub_ctx();
+        let (files, git, counts) = read_activity_summary(ctx.fs, "nonexistent-session-xyz");
         assert!(files.is_empty());
         assert!(git.is_empty());
         assert!(counts.is_empty());
@@ -277,7 +284,8 @@ mod tests {
 
     #[test]
     fn test_read_context_percent_missing() {
-        assert!(read_context_percent("nonexistent-session-xyz").is_none());
+        let ctx = crate::hooks::test_support::stub_ctx();
+        assert!(read_context_percent(ctx.fs, "nonexistent-session-xyz").is_none());
     }
 
     #[test]
