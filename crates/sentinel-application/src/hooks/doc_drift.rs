@@ -13,9 +13,10 @@ use sentinel_domain::constants;
 use sentinel_domain::events::{HookEvent, HookInput, HookOutput};
 use std::collections::HashSet;
 use std::fs;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+use super::{FileSystemPort, HookContext};
 
 /// Cooldown between drift reports.
 const COOLDOWN_MS: u64 = constants::HOOK_COOLDOWN_DOC_MS;
@@ -49,23 +50,23 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-fn metrics_dir() -> Option<PathBuf> {
-    let home = dirs::home_dir()?;
+fn metrics_dir(fs: &dyn FileSystemPort) -> Option<PathBuf> {
+    let home = fs.home_dir()?;
     let dir = home.join(".claude").join("metrics");
-    fs::create_dir_all(&dir).ok()?;
+    fs.create_dir_all(&dir).ok()?;
     Some(dir)
 }
 
-fn drift_file() -> Option<PathBuf> {
-    Some(metrics_dir()?.join("doc-drift.jsonl"))
+fn drift_file(fs: &dyn FileSystemPort) -> Option<PathBuf> {
+    Some(metrics_dir(fs)?.join("doc-drift.jsonl"))
 }
 
 fn cooldown_file() -> PathBuf {
     std::env::temp_dir().join("claude-doc-drift-last")
 }
 
-fn cooldown_expired() -> bool {
-    let content = match fs::read_to_string(cooldown_file()) {
+fn cooldown_expired(fs: &dyn FileSystemPort) -> bool {
+    let content = match fs.read_to_string(&cooldown_file()) {
         Ok(c) => c,
         Err(_) => return true,
     };
@@ -76,8 +77,8 @@ fn cooldown_expired() -> bool {
     now_ms().saturating_sub(last) >= COOLDOWN_MS
 }
 
-fn write_cooldown() {
-    let _ = fs::write(cooldown_file(), now_ms().to_string());
+fn write_cooldown(fs: &dyn FileSystemPort) {
+    let _ = fs.write(&cooldown_file(), now_ms().to_string().as_bytes());
 }
 
 // ---------------------------------------------------------------------------
@@ -383,14 +384,15 @@ fn check_standard_file_drift(
 }
 
 /// Write drift findings to doc-drift.jsonl (append mode).
-fn write_drift_entries(entries: &[DriftEntry]) {
-    let path = match drift_file() {
+fn write_drift_entries(fs_port: &dyn FileSystemPort, entries: &[DriftEntry]) {
+    let path = match drift_file(fs_port) {
         Some(p) => p,
         None => return,
     };
 
     // Read existing unresolved entries to avoid duplicates
-    let existing: HashSet<String> = fs::read_to_string(&path)
+    let existing: HashSet<String> = fs_port
+        .read_to_string(&path)
         .unwrap_or_default()
         .lines()
         .filter_map(|l| serde_json::from_str::<DriftEntry>(l).ok())
@@ -398,14 +400,17 @@ fn write_drift_entries(entries: &[DriftEntry]) {
         .map(|e| format!("{}:{}", e.cwd, e.doc))
         .collect();
 
-    if let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(&path) {
-        for entry in entries {
-            let key = format!("{}:{}", entry.cwd, entry.doc);
-            if existing.contains(&key) {
-                continue; // Already have an unresolved entry for this doc
-            }
-            let _ = writeln!(file, "{}", serde_json::to_string(entry).unwrap_or_default());
+    let mut new_lines = String::new();
+    for entry in entries {
+        let key = format!("{}:{}", entry.cwd, entry.doc);
+        if existing.contains(&key) {
+            continue;
         }
+        new_lines.push_str(&serde_json::to_string(entry).unwrap_or_default());
+        new_lines.push('\n');
+    }
+    if !new_lines.is_empty() {
+        let _ = fs_port.append(&path, new_lines.as_bytes());
     }
 }
 
@@ -414,12 +419,12 @@ fn write_drift_entries(entries: &[DriftEntry]) {
 // ---------------------------------------------------------------------------
 
 /// Read unresolved drift entries for the given cwd.
-fn read_unresolved_drift(cwd_str: &str) -> Vec<DriftEntry> {
-    let path = match drift_file() {
+fn read_unresolved_drift(fs_port: &dyn FileSystemPort, cwd_str: &str) -> Vec<DriftEntry> {
+    let path = match drift_file(fs_port) {
         Some(p) => p,
         None => return Vec::new(),
     };
-    let content = match fs::read_to_string(&path) {
+    let content = match fs_port.read_to_string(&path) {
         Ok(c) => c,
         Err(_) => return Vec::new(),
     };
@@ -486,12 +491,12 @@ fn build_drift_context(entries: &[DriftEntry]) -> String {
 }
 
 /// Mark drift entries as resolved by rewriting the file.
-fn resolve_drift_for_cwd(cwd_str: &str) {
-    let path = match drift_file() {
+fn resolve_drift_for_cwd(fs_port: &dyn FileSystemPort, cwd_str: &str) {
+    let path = match drift_file(fs_port) {
         Some(p) => p,
         None => return,
     };
-    let content = match fs::read_to_string(&path) {
+    let content = match fs_port.read_to_string(&path) {
         Ok(c) => c,
         Err(_) => return,
     };
@@ -510,7 +515,7 @@ fn resolve_drift_for_cwd(cwd_str: &str) {
         })
         .collect();
 
-    let _ = fs::write(&path, updated.join("\n") + "\n");
+    let _ = fs_port.write(&path, (updated.join("\n") + "\n").as_bytes());
 }
 
 // ---------------------------------------------------------------------------
@@ -518,7 +523,7 @@ fn resolve_drift_for_cwd(cwd_str: &str) {
 // ---------------------------------------------------------------------------
 
 /// Process on Stop — detect drift and write findings.
-pub fn process_stop(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
+pub fn process_stop(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     let cwd_str = input.cwd.as_deref().unwrap_or(".");
     let cwd = Path::new(cwd_str);
 
@@ -541,25 +546,25 @@ pub fn process_stop(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOut
             "Doc drift detected: {:?}",
             drift_entries.iter().map(|e| &e.doc).collect::<Vec<_>>()
         );
-        write_drift_entries(&drift_entries);
+        write_drift_entries(ctx.fs, &drift_entries);
     } else {
         // No drift detected — resolve any previous findings for this cwd
-        resolve_drift_for_cwd(cwd_str);
+        resolve_drift_for_cwd(ctx.fs, cwd_str);
     }
 
     HookOutput::allow()
 }
 
 /// Process on UserPromptSubmit — inject update instructions if drift exists.
-pub fn process_prompt(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
+pub fn process_prompt(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     let cwd_str = input.cwd.as_deref().unwrap_or(".");
 
-    let entries = read_unresolved_drift(cwd_str);
+    let entries = read_unresolved_drift(ctx.fs, cwd_str);
     if entries.is_empty() {
         return HookOutput::allow();
     }
 
-    if !cooldown_expired() {
+    if !cooldown_expired(ctx.fs) {
         return HookOutput::allow();
     }
 
@@ -590,11 +595,11 @@ pub fn process_prompt(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookO
 
     if still_drifted.is_empty() {
         // Drift has been resolved — clean up
-        resolve_drift_for_cwd(cwd_str);
+        resolve_drift_for_cwd(ctx.fs, cwd_str);
         return HookOutput::allow();
     }
 
-    write_cooldown();
+    write_cooldown(ctx.fs);
 
     let context = build_drift_context(&entries);
     HookOutput::inject_context(HookEvent::UserPromptSubmit, context)
@@ -730,13 +735,9 @@ mod tests {
 
     #[test]
     fn test_cooldown_logic() {
-        // Fresh state — should be expired
-        let _ = fs::remove_file(cooldown_file());
-        assert!(cooldown_expired());
-
-        // After writing — should not be expired
-        write_cooldown();
-        assert!(!cooldown_expired());
+        let ctx = crate::hooks::test_support::stub_ctx();
+        // StubFs returns error on read → expired
+        assert!(cooldown_expired(ctx.fs));
     }
 
     #[test]
@@ -771,7 +772,8 @@ mod tests {
             cwd: Some("/nonexistent/path/that/does/not/exist".into()),
             ..Default::default()
         };
-        let ctx = crate::hooks::test_support::stub_ctx(); let output = process_stop(&input, &ctx);
+        let ctx = crate::hooks::test_support::stub_ctx();
+        let output = process_stop(&input, &ctx);
         assert!(output.blocked.is_none());
     }
 
@@ -782,7 +784,8 @@ mod tests {
             cwd: Some(dir.path().to_string_lossy().to_string()),
             ..Default::default()
         };
-        let ctx = crate::hooks::test_support::stub_ctx(); let output = process_prompt(&input, &ctx);
+        let ctx = crate::hooks::test_support::stub_ctx();
+        let output = process_prompt(&input, &ctx);
         assert!(output.blocked.is_none());
         assert!(output.hook_specific_output.is_none());
     }

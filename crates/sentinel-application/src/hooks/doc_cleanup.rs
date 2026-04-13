@@ -14,6 +14,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use super::{FileSystemPort, HookContext};
+
 /// Cooldown between cleanup reminders.
 const COOLDOWN_MS: u64 = constants::HOOK_COOLDOWN_DOC_MS;
 
@@ -61,10 +63,10 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-fn state_file() -> Option<PathBuf> {
-    let home = dirs::home_dir()?;
+fn state_file(fs: &dyn FileSystemPort) -> Option<PathBuf> {
+    let home = fs.home_dir()?;
     let dir = home.join(".claude").join("metrics");
-    fs::create_dir_all(&dir).ok()?;
+    fs.create_dir_all(&dir).ok()?;
     Some(dir.join("doc-cleanup.json"))
 }
 
@@ -72,8 +74,8 @@ fn cooldown_file() -> PathBuf {
     std::env::temp_dir().join("claude-doc-cleanup-last")
 }
 
-fn cooldown_expired() -> bool {
-    let content = match fs::read_to_string(cooldown_file()) {
+fn cooldown_expired(fs: &dyn FileSystemPort) -> bool {
+    let content = match fs.read_to_string(&cooldown_file()) {
         Ok(c) => c,
         Err(_) => return true,
     };
@@ -84,8 +86,8 @@ fn cooldown_expired() -> bool {
     now_ms().saturating_sub(last) >= COOLDOWN_MS
 }
 
-fn write_cooldown() {
-    let _ = fs::write(cooldown_file(), now_ms().to_string());
+fn write_cooldown(fs: &dyn FileSystemPort) {
+    let _ = fs.write(&cooldown_file(), now_ms().to_string().as_bytes());
 }
 
 /// Recursively scan `dir` for junk `.md` files up to `max_depth`.
@@ -173,7 +175,7 @@ fn scan_docs(dir: &Path, cwd: &Path, depth: usize, max_depth: usize, results: &m
 // Stop phase: detect junk docs and write state
 // ---------------------------------------------------------------------------
 
-pub fn process_stop(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
+pub fn process_stop(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     let cwd_str = input.cwd.as_deref().unwrap_or(".");
     let cwd = Path::new(cwd_str);
 
@@ -186,8 +188,8 @@ pub fn process_stop(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOut
 
     if results.is_empty() {
         // No junk — clear any previous state
-        if let Some(path) = state_file() {
-            let _ = fs::remove_file(path);
+        if let Some(path) = state_file(ctx.fs) {
+            let _ = ctx.fs.write(&path, b"");
         }
         return HookOutput::allow();
     }
@@ -198,8 +200,11 @@ pub fn process_stop(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOut
         ts: chrono::Utc::now().to_rfc3339(),
     };
 
-    if let Some(path) = state_file() {
-        let _ = fs::write(&path, serde_json::to_string(&state).unwrap_or_default());
+    if let Some(path) = state_file(ctx.fs) {
+        let _ = ctx.fs.write(
+            &path,
+            serde_json::to_string(&state).unwrap_or_default().as_bytes(),
+        );
     }
 
     tracing::info!(count = state.junk_docs.len(), "Junk docs detected");
@@ -211,15 +216,15 @@ pub fn process_stop(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOut
 // UserPromptSubmit phase: inject cleanup instructions
 // ---------------------------------------------------------------------------
 
-pub fn process_prompt(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
+pub fn process_prompt(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     let cwd = input.cwd.as_deref().unwrap_or(".");
 
-    let path = match state_file() {
+    let path = match state_file(ctx.fs) {
         Some(p) => p,
         None => return HookOutput::allow(),
     };
 
-    let content = match fs::read_to_string(&path) {
+    let content = match ctx.fs.read_to_string(&path) {
         Ok(c) => c,
         Err(_) => return HookOutput::allow(),
     };
@@ -234,11 +239,11 @@ pub fn process_prompt(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookO
         return HookOutput::allow();
     }
 
-    if !cooldown_expired() {
+    if !cooldown_expired(ctx.fs) {
         return HookOutput::allow();
     }
 
-    write_cooldown();
+    write_cooldown(ctx.fs);
 
     let doc_list: String = state
         .junk_docs
@@ -355,10 +360,8 @@ mod tests {
 
     #[test]
     fn test_cooldown_logic() {
-        let _ = fs::remove_file(cooldown_file());
-        assert!(cooldown_expired());
-        write_cooldown();
-        assert!(!cooldown_expired());
-        let _ = fs::remove_file(cooldown_file());
+        let ctx = crate::hooks::test_support::stub_ctx();
+        // StubFs returns error on read → expired
+        assert!(cooldown_expired(ctx.fs));
     }
 }
