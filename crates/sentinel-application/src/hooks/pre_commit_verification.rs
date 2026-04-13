@@ -117,8 +117,8 @@ const TEST_OUTPUT_PATTERNS: &[&str] = &[
 ];
 
 /// Path to the default override file (session-scoped via hygiene_override).
-fn default_override_path(session_id: &str) -> PathBuf {
-    super::hygiene_override::verification_override_path(session_id)
+fn default_override_path(fs: &dyn super::FileSystemPort, session_id: &str) -> PathBuf {
+    super::hygiene_override::verification_override_path(fs, session_id)
 }
 
 /// Check the transcript for test evidence (Layer 1: regex)
@@ -259,10 +259,10 @@ fn is_docs_only_commit(command: &str) -> bool {
 
 /// Process a pre-commit verification hook event (PreToolUse).
 /// Uses session-scoped signed override check.
-pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
+pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
     let session_id = input.session_id.as_deref().unwrap_or("unknown");
-    let override_path = default_override_path(session_id);
-    process_with_override(input, &override_path, session_id)
+    let override_path = default_override_path(ctx.fs, session_id);
+    process_with_override(input, &override_path, session_id, ctx.fs)
 }
 
 /// Internal: process with an explicit override file path (for testability).
@@ -270,6 +270,7 @@ fn process_with_override(
     input: &HookInput,
     override_path: &std::path::Path,
     session_id: &str,
+    fs: &dyn super::FileSystemPort,
 ) -> HookOutput {
     // Only act on Bash tool calls
     let tool = match &input.tool_name {
@@ -311,7 +312,7 @@ fn process_with_override(
     }
 
     // Check signed override file (Attack #47: replaces mtime-only check)
-    if super::hygiene_override::is_signed_override_active(override_path, "verification", session_id)
+    if super::hygiene_override::is_signed_override_active(fs, override_path, "verification", session_id)
     {
         return HookOutput::allow();
     }
@@ -426,7 +427,7 @@ mod tests {
             tool_input: Some(serde_json::json!({"command": "git commit -m 'test'"})),
             ..Default::default()
         };
-        let output = process_with_override(&input, &override_path, "test-sess");
+        let output = process_with_override(&input, &override_path, "test-sess", &crate::hooks::test_support::StubFs);
         assert_eq!(output.blocked, Some(true));
         assert!(output.reason.as_ref().unwrap().contains("BLOCKED"));
         assert!(output.reason.as_ref().unwrap().contains("Committing"));
@@ -442,7 +443,7 @@ mod tests {
             tool_input: Some(serde_json::json!({"command": "git push origin main"})),
             ..Default::default()
         };
-        let output = process_with_override(&input, &override_path, "test-sess");
+        let output = process_with_override(&input, &override_path, "test-sess", &crate::hooks::test_support::StubFs);
         assert_eq!(output.blocked, Some(true));
         assert!(output.reason.as_ref().unwrap().contains("Pushing"));
     }
@@ -473,20 +474,43 @@ mod tests {
         let override_path = tmpdir.path().join("test-override");
         let session_id = "test-sess-override";
 
+        let test_fs = crate::hooks::test_support::StubFs;
+
         // No override file — should not be active
         assert!(!hygiene_override::is_signed_override_active(
+            &test_fs,
             &override_path,
             "verification",
             session_id
         ));
 
+        // For write/read roundtrip, use a real-FS wrapper
+        struct RealTestFs;
+        impl super::super::FileSystemPort for RealTestFs {
+            fn home_dir(&self) -> Option<PathBuf> { dirs::home_dir() }
+            fn read_to_string(&self, p: &std::path::Path) -> anyhow::Result<String> { Ok(std::fs::read_to_string(p)?) }
+            fn write(&self, p: &std::path::Path, c: &[u8]) -> anyhow::Result<()> {
+                if let Some(par) = p.parent() { std::fs::create_dir_all(par)?; }
+                Ok(std::fs::write(p, c)?)
+            }
+            fn create_dir_all(&self, p: &std::path::Path) -> anyhow::Result<()> { Ok(std::fs::create_dir_all(p)?) }
+            fn read_dir(&self, _: &std::path::Path) -> anyhow::Result<Vec<PathBuf>> { Ok(vec![]) }
+            fn exists(&self, p: &std::path::Path) -> bool { p.exists() }
+            fn is_dir(&self, p: &std::path::Path) -> bool { p.is_dir() }
+            fn metadata(&self, p: &std::path::Path) -> anyhow::Result<std::fs::Metadata> { Ok(std::fs::metadata(p)?) }
+            fn append(&self, _: &std::path::Path, _: &[u8]) -> anyhow::Result<()> { Ok(()) }
+        }
+        let real_fs = RealTestFs;
+
         // Write a properly signed override file
         hygiene_override::write_signed_override_for_test(
+            &real_fs,
             &override_path,
             "verification",
             session_id,
         );
         assert!(hygiene_override::is_signed_override_active(
+            &real_fs,
             &override_path,
             "verification",
             session_id
@@ -498,13 +522,14 @@ mod tests {
             tool_input: Some(serde_json::json!({"command": "git commit -m 'override'"})),
             ..Default::default()
         };
-        let output = process_with_override(&input, &override_path, session_id);
+        let output = process_with_override(&input, &override_path, session_id, &real_fs);
         assert!(output.blocked.is_none());
 
         // Verify that a plain `touch` doesn't work
         let touch_path = tmpdir.path().join("touch-override");
         std::fs::write(&touch_path, "").unwrap();
         assert!(!hygiene_override::is_signed_override_active(
+            &real_fs,
             &touch_path,
             "verification",
             session_id
@@ -548,7 +573,7 @@ mod tests {
             tool_input: Some(serde_json::json!({"command": "git commit --amend"})),
             ..Default::default()
         };
-        let output = process_with_override(&input, &override_path, "test-sess");
+        let output = process_with_override(&input, &override_path, "test-sess", &crate::hooks::test_support::StubFs);
         assert_eq!(output.blocked, Some(true));
     }
 
