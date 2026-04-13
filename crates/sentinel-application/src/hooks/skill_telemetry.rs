@@ -6,50 +6,49 @@
 
 use sentinel_domain::events::{HookInput, HookOutput};
 use std::collections::HashMap;
-use std::fs;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use super::{FileSystemPort, HookContext};
+
 /// Resolve `~/.claude/metrics` directory, creating it if needed.
-fn metrics_dir() -> Option<PathBuf> {
-    let home = dirs::home_dir()?;
+fn metrics_dir(fs: &dyn FileSystemPort) -> Option<PathBuf> {
+    let home = fs.home_dir()?;
     let dir = home.join(".claude").join("metrics");
-    fs::create_dir_all(&dir).ok()?;
+    fs.create_dir_all(&dir).ok()?;
     Some(dir)
 }
 
 /// Detect project language from well-known manifest files in `dir`.
-fn detect_language(dir: &Path) -> &'static str {
-    if dir.join("package.json").exists() {
+fn detect_language(fs: &dyn FileSystemPort, dir: &Path) -> &'static str {
+    if fs.exists(&dir.join("package.json")) {
         return "typescript";
     }
-    if dir.join("Cargo.toml").exists() {
+    if fs.exists(&dir.join("Cargo.toml")) {
         return "rust";
     }
-    if dir.join("pubspec.yaml").exists() {
+    if fs.exists(&dir.join("pubspec.yaml")) {
         return "dart";
     }
-    if dir.join("pyproject.toml").exists() || dir.join("setup.py").exists() {
+    if fs.exists(&dir.join("pyproject.toml")) || fs.exists(&dir.join("setup.py")) {
         return "python";
     }
-    if dir.join("go.mod").exists() {
+    if fs.exists(&dir.join("go.mod")) {
         return "go";
     }
     "unknown"
 }
 
 /// Directory for telemetry state files — must match skill_router::telemetry_dir().
-/// Falls back to temp_dir() if home dir unavailable (shouldn't happen in practice).
-fn telemetry_state_dir() -> std::path::PathBuf {
-    dirs::home_dir()
+fn telemetry_state_dir(fs: &dyn FileSystemPort) -> PathBuf {
+    fs.home_dir()
         .map(|h| h.join(".claude").join("sentinel").join("telemetry"))
         .unwrap_or_else(|| std::env::temp_dir())
 }
 
 /// Read the current skill from the telemetry state file written by skill-router.
-fn read_current_skill() -> String {
-    let path = telemetry_state_dir().join("claude-current-skill");
-    fs::read_to_string(path)
+fn read_current_skill(fs: &dyn FileSystemPort) -> String {
+    let path = telemetry_state_dir(fs).join("claude-current-skill");
+    fs.read_to_string(&path)
         .ok()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
@@ -57,25 +56,25 @@ fn read_current_skill() -> String {
 }
 
 /// Read the run ID from the telemetry state file written by skill-router.
-fn read_run_id() -> Option<String> {
-    let path = telemetry_state_dir().join("claude-skill-run-id");
-    fs::read_to_string(path)
+fn read_run_id(fs: &dyn FileSystemPort) -> Option<String> {
+    let path = telemetry_state_dir(fs).join("claude-skill-run-id");
+    fs.read_to_string(&path)
         .map(|s| s.trim().to_string())
         .ok()
         .filter(|s| !s.is_empty())
 }
 
 /// Read the start time from the telemetry state file written by skill-router.
-fn read_start_time() -> Option<i64> {
-    let path = telemetry_state_dir().join("claude-skill-start-time");
-    fs::read_to_string(path)
+fn read_start_time(fs: &dyn FileSystemPort) -> Option<i64> {
+    let path = telemetry_state_dir(fs).join("claude-skill-start-time");
+    fs.read_to_string(&path)
         .ok()
         .and_then(|s| s.trim().parse().ok())
 }
 
 /// Generate the aggregate summary from the full telemetry file.
-fn regenerate_summary(telemetry_path: &Path, summary_path: &Path) {
-    let content = match fs::read_to_string(telemetry_path) {
+fn regenerate_summary(fs: &dyn FileSystemPort, telemetry_path: &Path, summary_path: &Path) {
+    let content = match fs.read_to_string(telemetry_path) {
         Ok(c) => c,
         Err(_) => return,
     };
@@ -159,17 +158,17 @@ fn regenerate_summary(telemetry_path: &Path, summary_path: &Path) {
         "avg_duration_by_skill": avg_durations,
     });
 
-    let _ = fs::write(
+    let _ = fs.write(
         summary_path,
-        serde_json::to_string_pretty(&summary).unwrap_or_default(),
+        serde_json::to_string_pretty(&summary).unwrap_or_default().as_bytes(),
     );
 }
 
 /// Process the skill-telemetry hook event (Stop).
-pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
-    let current_skill = read_current_skill();
+pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
+    let current_skill = read_current_skill(ctx.fs);
 
-    let metrics = match metrics_dir() {
+    let metrics = match metrics_dir(ctx.fs) {
         Some(d) => d,
         None => return HookOutput::allow(),
     };
@@ -178,13 +177,13 @@ pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
     let cwd_str = input.cwd.as_deref().unwrap_or(".");
     let cwd = Path::new(cwd_str);
 
-    let run_id = read_run_id().unwrap_or_default();
-    let start_time = read_start_time();
+    let run_id = read_run_id(ctx.fs).unwrap_or_default();
+    let start_time = read_start_time(ctx.fs);
     let duration_ms = start_time
         .map(|st| chrono::Utc::now().timestamp_millis() - st)
         .unwrap_or(0);
 
-    let language = detect_language(cwd);
+    let language = detect_language(ctx.fs, cwd);
     let timestamp = chrono::Utc::now().to_rfc3339();
 
     // Append telemetry entry
@@ -200,17 +199,8 @@ pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
         "ts": timestamp,
     });
 
-    if let Ok(mut file) = fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&telemetry_file)
-    {
-        let _ = writeln!(
-            file,
-            "{}",
-            serde_json::to_string(&entry).unwrap_or_default()
-        );
-    }
+    let entry_line = format!("{}\n", serde_json::to_string(&entry).unwrap_or_default());
+    let _ = ctx.fs.append(&telemetry_file, entry_line.as_bytes());
 
     // Append completion entry to routing.jsonl if we have a run_id
     if !run_id.is_empty() {
@@ -223,30 +213,28 @@ pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
             "ts": timestamp,
         });
 
-        if let Ok(mut file) = fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&routing_file)
-        {
-            let _ = writeln!(
-                file,
-                "{}",
-                serde_json::to_string(&completion).unwrap_or_default()
-            );
-        }
+        let completion_line = format!(
+            "{}\n",
+            serde_json::to_string(&completion).unwrap_or_default()
+        );
+        let _ = ctx.fs.append(&routing_file, completion_line.as_bytes());
 
-        // Clean up one-time run ID file
-        let _ = fs::remove_file(telemetry_state_dir().join("claude-skill-run-id"));
+        // Clean up one-time run ID file (write empty to clear)
+        let _ = ctx
+            .fs
+            .write(&telemetry_state_dir(ctx.fs).join("claude-skill-run-id"), b"");
     }
 
     // Regenerate summary every 10 executions
-    let line_count = fs::read_to_string(&telemetry_file)
+    let line_count = ctx
+        .fs
+        .read_to_string(&telemetry_file)
         .map(|c| c.lines().filter(|l| !l.is_empty()).count())
         .unwrap_or(0);
 
     if line_count > 0 && line_count % 10 == 0 {
         let summary_file = metrics.join("telemetry-summary.json");
-        regenerate_summary(&telemetry_file, &summary_file);
+        regenerate_summary(ctx.fs, &telemetry_file, &summary_file);
     }
 
     HookOutput::allow()
@@ -255,66 +243,94 @@ pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap as StdMap;
+
+    /// Test FS that tracks exists() calls via a set of paths.
+    struct TestFs {
+        existing: std::collections::HashSet<PathBuf>,
+        files: StdMap<PathBuf, String>,
+        written: std::sync::Mutex<StdMap<PathBuf, Vec<u8>>>,
+    }
+    impl TestFs {
+        fn with_existing(paths: &[&str]) -> Self {
+            Self {
+                existing: paths.iter().map(PathBuf::from).collect(),
+                files: StdMap::new(),
+                written: std::sync::Mutex::new(StdMap::new()),
+            }
+        }
+        fn with_files(files: Vec<(&str, &str)>) -> Self {
+            Self {
+                existing: files.iter().map(|(k, _)| PathBuf::from(k)).collect(),
+                files: files.into_iter().map(|(k, v)| (PathBuf::from(k), v.to_string())).collect(),
+                written: std::sync::Mutex::new(StdMap::new()),
+            }
+        }
+    }
+    impl FileSystemPort for TestFs {
+        fn home_dir(&self) -> Option<PathBuf> { Some(PathBuf::from("/mock/home")) }
+        fn read_to_string(&self, p: &Path) -> anyhow::Result<String> {
+            self.files.get(p).cloned().ok_or_else(|| anyhow::anyhow!("not found"))
+        }
+        fn write(&self, p: &Path, c: &[u8]) -> anyhow::Result<()> {
+            self.written.lock().unwrap().insert(p.to_path_buf(), c.to_vec()); Ok(())
+        }
+        fn create_dir_all(&self, _: &Path) -> anyhow::Result<()> { Ok(()) }
+        fn read_dir(&self, _: &Path) -> anyhow::Result<Vec<PathBuf>> { Ok(vec![]) }
+        fn exists(&self, p: &Path) -> bool { self.existing.contains(p) }
+        fn is_dir(&self, _: &Path) -> bool { false }
+        fn metadata(&self, _: &Path) -> anyhow::Result<std::fs::Metadata> { anyhow::bail!("no") }
+        fn append(&self, _: &Path, _: &[u8]) -> anyhow::Result<()> { Ok(()) }
+    }
 
     #[test]
     fn test_detect_language_typescript() {
-        let dir = tempfile::tempdir().unwrap();
-        fs::write(dir.path().join("package.json"), "{}").unwrap();
-        assert_eq!(detect_language(dir.path()), "typescript");
+        let fs = TestFs::with_existing(&["/proj/package.json"]);
+        assert_eq!(detect_language(&fs, Path::new("/proj")), "typescript");
     }
 
     #[test]
     fn test_detect_language_rust() {
-        let dir = tempfile::tempdir().unwrap();
-        fs::write(dir.path().join("Cargo.toml"), "").unwrap();
-        assert_eq!(detect_language(dir.path()), "rust");
+        let fs = TestFs::with_existing(&["/proj/Cargo.toml"]);
+        assert_eq!(detect_language(&fs, Path::new("/proj")), "rust");
     }
 
     #[test]
     fn test_detect_language_python() {
-        let dir = tempfile::tempdir().unwrap();
-        fs::write(dir.path().join("pyproject.toml"), "").unwrap();
-        assert_eq!(detect_language(dir.path()), "python");
+        let fs = TestFs::with_existing(&["/proj/pyproject.toml"]);
+        assert_eq!(detect_language(&fs, Path::new("/proj")), "python");
     }
 
     #[test]
     fn test_detect_language_go() {
-        let dir = tempfile::tempdir().unwrap();
-        fs::write(dir.path().join("go.mod"), "").unwrap();
-        assert_eq!(detect_language(dir.path()), "go");
+        let fs = TestFs::with_existing(&["/proj/go.mod"]);
+        assert_eq!(detect_language(&fs, Path::new("/proj")), "go");
     }
 
     #[test]
     fn test_detect_language_unknown() {
-        let dir = tempfile::tempdir().unwrap();
-        assert_eq!(detect_language(dir.path()), "unknown");
+        let fs = TestFs::with_existing(&[]);
+        assert_eq!(detect_language(&fs, Path::new("/proj")), "unknown");
     }
 
     #[test]
     fn test_process_no_metrics_dir_is_ok() {
-        // Even if metrics dir creation fails, process should return allow
         let input = HookInput::default();
-        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
+        let ctx = crate::hooks::test_support::stub_ctx();
+        let output = process(&input, &ctx);
         assert!(output.blocked.is_none());
     }
 
     #[test]
     fn test_regenerate_summary_empty() {
-        let dir = tempfile::tempdir().unwrap();
-        let telemetry = dir.path().join("telemetry.jsonl");
-        let summary = dir.path().join("summary.json");
-        fs::write(&telemetry, "").unwrap();
-        regenerate_summary(&telemetry, &summary);
-        // Summary should not be created for empty file
-        assert!(!summary.exists());
+        let fs = TestFs::with_files(vec![("/tel.jsonl", "")]);
+        regenerate_summary(&fs, Path::new("/tel.jsonl"), Path::new("/summary.json"));
+        // Empty file → no summary written
+        assert!(!fs.written.lock().unwrap().contains_key(Path::new("/summary.json")));
     }
 
     #[test]
     fn test_regenerate_summary_with_entries() {
-        let dir = tempfile::tempdir().unwrap();
-        let telemetry = dir.path().join("telemetry.jsonl");
-        let summary = dir.path().join("summary.json");
-
         let entries = vec![
             serde_json::json!({"skill":"linear","language":"typescript","duration_ms":1000}),
             serde_json::json!({"skill":"linear","language":"typescript","duration_ms":2000}),
@@ -325,12 +341,12 @@ mod tests {
             .map(|e| serde_json::to_string(e).unwrap())
             .collect::<Vec<_>>()
             .join("\n");
-        fs::write(&telemetry, content).unwrap();
+        let fs = TestFs::with_files(vec![("/tel.jsonl", &content)]);
+        regenerate_summary(&fs, Path::new("/tel.jsonl"), Path::new("/summary.json"));
 
-        regenerate_summary(&telemetry, &summary);
-
-        let result: serde_json::Value =
-            serde_json::from_str(&fs::read_to_string(&summary).unwrap()).unwrap();
+        let written = fs.written.lock().unwrap();
+        let bytes = written.get(Path::new("/summary.json")).expect("should be written");
+        let result: serde_json::Value = serde_json::from_slice(bytes).unwrap();
         assert_eq!(result["total_executions"], 3);
     }
 }

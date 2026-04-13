@@ -6,31 +6,31 @@
 
 use regex::Regex;
 use sentinel_domain::events::{HookInput, HookOutput};
-use std::fs;
-use std::io::Write;
 use std::path::PathBuf;
 
+use super::{FileSystemPort, HookContext};
+
 /// Resolve `~/.claude/metrics` directory, creating it if needed.
-fn metrics_dir() -> Option<PathBuf> {
-    let home = dirs::home_dir()?;
+fn metrics_dir(fs: &dyn FileSystemPort) -> Option<PathBuf> {
+    let home = fs.home_dir()?;
     let dir = home.join(".claude").join("metrics");
-    fs::create_dir_all(&dir).ok()?;
+    fs.create_dir_all(&dir).ok()?;
     Some(dir)
 }
 
 /// Read the byte-offset marker so we only process new transcript lines.
-fn read_offset(session_id: &str) -> usize {
+fn read_offset(fs: &dyn FileSystemPort, session_id: &str) -> usize {
     let path = std::env::temp_dir().join(format!("claude-execlog-offset-{session_id}"));
-    fs::read_to_string(path)
+    fs.read_to_string(&path)
         .ok()
         .and_then(|s| s.trim().parse().ok())
         .unwrap_or(0)
 }
 
 /// Persist the line-offset marker for next invocation.
-fn write_offset(session_id: &str, offset: usize) {
+fn write_offset(fs: &dyn FileSystemPort, session_id: &str, offset: usize) {
     let path = std::env::temp_dir().join(format!("claude-execlog-offset-{session_id}"));
-    let _ = fs::write(path, offset.to_string());
+    let _ = fs.write(&path, offset.to_string().as_bytes());
 }
 
 /// Classify a marker line into its type and optional step/phase number.
@@ -60,19 +60,20 @@ fn extract_context(line: &str) -> Option<String> {
 
 /// Read the current skill from the telemetry state file written by skill-router.
 /// Uses sentinel's protected telemetry dir instead of world-writable temp_dir(). (Attack #51)
-fn current_skill() -> String {
-    let dir = dirs::home_dir()
+fn current_skill(fs: &dyn FileSystemPort) -> String {
+    let dir = fs
+        .home_dir()
         .map(|h| h.join(".claude").join("sentinel").join("telemetry"))
         .unwrap_or_else(|| std::env::temp_dir());
     let path = dir.join("claude-current-skill");
-    fs::read_to_string(path)
+    fs.read_to_string(&path)
         .map(|s| s.trim().to_string())
         .unwrap_or_else(|_| "none".to_string())
 }
 
 /// Process the execution-log hook event (Stop).
-pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
-    let metrics = match metrics_dir() {
+pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
+    let metrics = match metrics_dir(ctx.fs) {
         Some(d) => d,
         None => return HookOutput::allow(),
     };
@@ -86,14 +87,14 @@ pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
     };
 
     // Read transcript, extract assistant text from new lines only
-    let transcript = match fs::read_to_string(&transcript_path) {
+    let transcript = match ctx.fs.read_to_string(std::path::Path::new(&transcript_path)) {
         Ok(t) => t,
         Err(_) => return HookOutput::allow(),
     };
 
     let lines: Vec<&str> = transcript.lines().collect();
     let total_lines = lines.len();
-    let last_offset = read_offset(session_id);
+    let last_offset = read_offset(ctx.fs, session_id);
     let start_idx = last_offset.min(total_lines);
 
     let mut text_chunks: Vec<String> = Vec::new();
@@ -117,7 +118,7 @@ pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
         }
     }
 
-    write_offset(session_id, total_lines);
+    write_offset(ctx.fs, session_id, total_lines);
 
     let message = text_chunks.join("\n");
     if message.is_empty() {
@@ -151,11 +152,11 @@ pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
     }
 
     // Build JSONL entries
-    let skill = current_skill();
+    let skill = current_skill(ctx.fs);
     let timestamp = chrono::Utc::now().to_rfc3339();
     let log_file = metrics.join("execution-log.jsonl");
 
-    let mut entries = Vec::new();
+    let mut all_lines = String::new();
     for line in &log_lines {
         let (marker_type, number) = classify_marker(line);
         let context = extract_context(line);
@@ -171,18 +172,11 @@ pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
             "cwd": cwd,
             "ts": timestamp,
         });
-        entries.push(entry);
+        all_lines.push_str(&serde_json::to_string(&entry).unwrap_or_default());
+        all_lines.push('\n');
     }
 
-    if let Ok(mut file) = fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log_file)
-    {
-        for entry in &entries {
-            let _ = writeln!(file, "{}", serde_json::to_string(entry).unwrap_or_default());
-        }
-    }
+    let _ = ctx.fs.append(&log_file, all_lines.as_bytes());
 
     HookOutput::allow()
 }
@@ -191,6 +185,7 @@ pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::io::Write;
 
     fn make_transcript(entries: &[serde_json::Value]) -> tempfile::NamedTempFile {
         let mut file = tempfile::NamedTempFile::new().unwrap();

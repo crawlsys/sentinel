@@ -9,10 +9,10 @@
 use sentinel_domain::constants;
 use sentinel_domain::events::{HookEvent, HookInput, HookOutput};
 use std::collections::HashMap;
-use std::fs;
-use std::io::Write;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+use super::{FileSystemPort, HookContext};
 
 /// Cooldown between activity summaries.
 const COOLDOWN_MS: u64 = constants::HOOK_COOLDOWN_LONG_MS;
@@ -53,27 +53,27 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-fn metrics_dir() -> Option<PathBuf> {
-    let home = dirs::home_dir()?;
+fn metrics_dir(fs: &dyn FileSystemPort) -> Option<PathBuf> {
+    let home = fs.home_dir()?;
     let dir = home.join(".claude").join("metrics");
-    fs::create_dir_all(&dir).ok()?;
+    fs.create_dir_all(&dir).ok()?;
     Some(dir)
 }
 
-fn log_file() -> Option<PathBuf> {
-    Some(metrics_dir()?.join("activity-log.jsonl"))
+fn log_file(fs: &dyn FileSystemPort) -> Option<PathBuf> {
+    Some(metrics_dir(fs)?.join("activity-log.jsonl"))
 }
 
-fn summary_file() -> Option<PathBuf> {
-    Some(metrics_dir()?.join("activity-summary.json"))
+fn summary_file(fs: &dyn FileSystemPort) -> Option<PathBuf> {
+    Some(metrics_dir(fs)?.join("activity-summary.json"))
 }
 
 fn cooldown_file() -> PathBuf {
     std::env::temp_dir().join("claude-activity-tracker-last")
 }
 
-fn cooldown_expired() -> bool {
-    let content = match fs::read_to_string(cooldown_file()) {
+fn cooldown_expired(fs: &dyn FileSystemPort) -> bool {
+    let content = match fs.read_to_string(&cooldown_file()) {
         Ok(c) => c,
         Err(_) => return true,
     };
@@ -84,8 +84,8 @@ fn cooldown_expired() -> bool {
     now_ms().saturating_sub(last) >= COOLDOWN_MS
 }
 
-fn write_cooldown() {
-    let _ = fs::write(cooldown_file(), now_ms().to_string());
+fn write_cooldown(fs: &dyn FileSystemPort) {
+    let _ = fs.write(&cooldown_file(), now_ms().to_string().as_bytes());
 }
 
 /// Extract file path from tool input (Edit, Write, Read, Glob, Grep).
@@ -135,7 +135,7 @@ fn extract_mcp_info(tool: &str) -> Option<(String, String)> {
 // PostToolUse phase: log every tool call
 // ---------------------------------------------------------------------------
 
-pub fn process_post_tool(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
+pub fn process_post_tool(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     let tool = match &input.tool_name {
         Some(t) => t.clone(),
         None => return HookOutput::allow(),
@@ -164,14 +164,9 @@ pub fn process_post_tool(input: &HookInput, _ctx: &super::HookContext<'_>) -> Ho
         ts: chrono::Utc::now().to_rfc3339(),
     };
 
-    if let Some(path) = log_file() {
-        if let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(&path) {
-            let _ = writeln!(
-                file,
-                "{}",
-                serde_json::to_string(&entry).unwrap_or_default()
-            );
-        }
+    if let Some(path) = log_file(ctx.fs) {
+        let line = format!("{}\n", serde_json::to_string(&entry).unwrap_or_default());
+        let _ = ctx.fs.append(&path, line.as_bytes());
     }
 
     HookOutput::allow()
@@ -181,15 +176,15 @@ pub fn process_post_tool(input: &HookInput, _ctx: &super::HookContext<'_>) -> Ho
 // Stop phase: build session summary for UserPromptSubmit to read
 // ---------------------------------------------------------------------------
 
-pub fn process_stop(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
+pub fn process_stop(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     let session_id = input.session_id.as_deref().unwrap_or("unknown");
 
-    let path = match log_file() {
+    let path = match log_file(ctx.fs) {
         Some(p) => p,
         None => return HookOutput::allow(),
     };
 
-    let content = match fs::read_to_string(&path) {
+    let content = match ctx.fs.read_to_string(&path) {
         Ok(c) => c,
         Err(_) => return HookOutput::allow(),
     };
@@ -261,8 +256,11 @@ pub fn process_stop(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOut
         ts: chrono::Utc::now().to_rfc3339(),
     };
 
-    if let Some(path) = summary_file() {
-        let _ = fs::write(&path, serde_json::to_string(&summary).unwrap_or_default());
+    if let Some(path) = summary_file(ctx.fs) {
+        let _ = ctx.fs.write(
+            &path,
+            serde_json::to_string(&summary).unwrap_or_default().as_bytes(),
+        );
     }
 
     HookOutput::allow()
@@ -272,15 +270,15 @@ pub fn process_stop(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOut
 // UserPromptSubmit phase: inject activity summary when context is elevated
 // ---------------------------------------------------------------------------
 
-pub fn process_prompt(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
+pub fn process_prompt(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     let session_id = input.session_id.as_deref().unwrap_or("unknown");
 
-    let path = match summary_file() {
+    let path = match summary_file(ctx.fs) {
         Some(p) => p,
         None => return HookOutput::allow(),
     };
 
-    let content = match fs::read_to_string(&path) {
+    let content = match ctx.fs.read_to_string(&path) {
         Ok(c) => c,
         Err(_) => return HookOutput::allow(),
     };
@@ -301,30 +299,30 @@ pub fn process_prompt(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookO
     }
 
     // Check if context is elevated (read from context-zone.json)
-    let in_elevated_zone = check_elevated_context(session_id);
+    let in_elevated_zone = check_elevated_context(ctx.fs, session_id);
 
     // Only inject when context is elevated OR there are a LOT of tool calls
     if !in_elevated_zone && summary.total_calls < 50 {
         return HookOutput::allow();
     }
 
-    if !cooldown_expired() {
+    if !cooldown_expired(ctx.fs) {
         return HookOutput::allow();
     }
 
-    write_cooldown();
+    write_cooldown(ctx.fs);
 
     let context = build_summary_context(&summary);
     HookOutput::inject_context(HookEvent::UserPromptSubmit, context)
 }
 
 /// Check if context monitor reported Yellow+ zone for this session.
-fn check_elevated_context(session_id: &str) -> bool {
-    let path = match metrics_dir() {
+fn check_elevated_context(fs: &dyn FileSystemPort, session_id: &str) -> bool {
+    let path = match metrics_dir(fs) {
         Some(d) => d.join("context-zone.json"),
         None => return false,
     };
-    let content = match fs::read_to_string(&path) {
+    let content = match fs.read_to_string(&path) {
         Ok(c) => c,
         Err(_) => return false,
     };
@@ -465,7 +463,8 @@ mod tests {
     #[test]
     fn test_post_tool_no_tool_name() {
         let input = HookInput::default();
-        let ctx = crate::hooks::test_support::stub_ctx(); let output = process_post_tool(&input, &ctx);
+        let ctx = crate::hooks::test_support::stub_ctx();
+        let output = process_post_tool(&input, &ctx);
         assert!(output.blocked.is_none());
         assert!(output.hook_specific_output.is_none());
     }
@@ -478,7 +477,8 @@ mod tests {
             session_id: Some("test-activity".into()),
             ..Default::default()
         };
-        let ctx = crate::hooks::test_support::stub_ctx(); let output = process_post_tool(&input, &ctx);
+        let ctx = crate::hooks::test_support::stub_ctx();
+        let output = process_post_tool(&input, &ctx);
         assert!(output.blocked.is_none());
     }
 
@@ -514,17 +514,16 @@ mod tests {
             session_id: Some("nonexistent-session-xyz".into()),
             ..Default::default()
         };
-        let ctx = crate::hooks::test_support::stub_ctx(); let output = process_prompt(&input, &ctx);
+        let ctx = crate::hooks::test_support::stub_ctx();
+        let output = process_prompt(&input, &ctx);
         assert!(output.hook_specific_output.is_none());
     }
 
     #[test]
     fn test_cooldown_logic() {
-        let _ = fs::remove_file(cooldown_file());
-        assert!(cooldown_expired());
-        write_cooldown();
-        assert!(!cooldown_expired());
-        let _ = fs::remove_file(cooldown_file());
+        let ctx = crate::hooks::test_support::stub_ctx();
+        // StubFs returns error on read → expired
+        assert!(cooldown_expired(ctx.fs));
     }
 
     #[test]
@@ -533,7 +532,8 @@ mod tests {
             session_id: Some("empty-session-no-activity".into()),
             ..Default::default()
         };
-        let ctx = crate::hooks::test_support::stub_ctx(); let output = process_stop(&input, &ctx);
+        let ctx = crate::hooks::test_support::stub_ctx();
+        let output = process_stop(&input, &ctx);
         assert!(output.blocked.is_none());
     }
 }
