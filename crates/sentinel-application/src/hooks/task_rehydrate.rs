@@ -12,6 +12,8 @@ use sentinel_domain::events::{HookEvent, HookInput, HookOutput};
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 
+use super::{FileSystemPort, HookContext};
+
 /// A task read from the persistent JSON file
 #[derive(Debug, Clone, serde::Deserialize)]
 struct Task {
@@ -48,23 +50,23 @@ fn project_hash(cwd: &str) -> String {
 }
 
 /// Get the persistent tasks directory for a project
-fn persistent_tasks_dir(project_hash: &str) -> Option<PathBuf> {
-    dirs::home_dir().map(|h| h.join(".claude").join("persistent-tasks").join(project_hash))
+fn persistent_tasks_dir(fs: &dyn FileSystemPort, project_hash: &str) -> Option<PathBuf> {
+    fs.home_dir().map(|h| h.join(".claude").join("persistent-tasks").join(project_hash))
 }
 
 /// Read tasks from the persistent JSON file
-fn read_persistent_tasks(project_hash: &str) -> Option<Vec<Task>> {
-    let dir = persistent_tasks_dir(project_hash)?;
+fn read_persistent_tasks(fs: &dyn FileSystemPort, project_hash: &str) -> Option<Vec<Task>> {
+    let dir = persistent_tasks_dir(fs, project_hash)?;
     let path = dir.join("tasks.json");
-    let content = std::fs::read_to_string(&path).ok()?;
+    let content = fs.read_to_string(&path).ok()?;
     serde_json::from_str(&content).ok()
 }
 
 /// Read metadata
-fn read_meta(project_hash: &str) -> Option<PersistMeta> {
-    let dir = persistent_tasks_dir(project_hash)?;
+fn read_meta(fs: &dyn FileSystemPort, project_hash: &str) -> Option<PersistMeta> {
+    let dir = persistent_tasks_dir(fs, project_hash)?;
     let path = dir.join("meta.json");
-    let content = std::fs::read_to_string(&path).ok()?;
+    let content = fs.read_to_string(&path).ok()?;
     serde_json::from_str(&content).ok()
 }
 
@@ -94,19 +96,19 @@ fn relative_time(updated_at: &str) -> String {
 }
 
 /// Process SessionStart — inject persistent tasks into context
-pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
+pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     let session_id = input.session_id.as_deref().unwrap_or("unknown");
     let cwd = input.cwd.as_deref().unwrap_or(".");
     let proj_hash = project_hash(cwd);
 
     // Read persistent tasks
-    let tasks = match read_persistent_tasks(&proj_hash) {
+    let tasks = match read_persistent_tasks(ctx.fs, &proj_hash) {
         Some(t) if !t.is_empty() => t,
         _ => return HookOutput::allow(),
     };
 
     // Check if these are from the current session (skip rehydration)
-    if let Some(meta) = read_meta(&proj_hash) {
+    if let Some(meta) = read_meta(ctx.fs, &proj_hash) {
         if is_current_session(&meta, session_id) {
             tracing::debug!("Persistent tasks are from current session — skipping rehydration");
             return HookOutput::allow();
@@ -122,7 +124,7 @@ pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
     }
 
     // Read meta for timestamp
-    let time_str = read_meta(&proj_hash)
+    let time_str = read_meta(ctx.fs, &proj_hash)
         .map(|m| relative_time(&m.updated_at))
         .unwrap_or_else(|| "unknown".to_string());
 
@@ -224,7 +226,8 @@ mod tests {
             cwd: Some("/nonexistent/project".to_string()),
             ..Default::default()
         };
-        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
+        let ctx = crate::hooks::test_support::stub_ctx();
+        let output = process(&input, &ctx);
         // Should allow (no tasks to inject)
         assert!(output.hook_specific_output.is_none() || {
             output

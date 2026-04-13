@@ -18,6 +18,8 @@ use sentinel_domain::events::{HookInput, HookOutput};
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 
+use super::{FileSystemPort, HookContext};
+
 /// A task read from Claude Code's on-disk format
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct Task {
@@ -59,40 +61,39 @@ fn project_hash(cwd: &str) -> String {
 }
 
 /// Get the persistent tasks directory for a project
-fn persistent_tasks_dir(project_hash: &str) -> Option<PathBuf> {
-    dirs::home_dir().map(|h| h.join(".claude").join("persistent-tasks").join(project_hash))
+fn persistent_tasks_dir(fs: &dyn FileSystemPort, project_hash: &str) -> Option<PathBuf> {
+    fs.home_dir().map(|h| h.join(".claude").join("persistent-tasks").join(project_hash))
 }
 
 /// Find the active task list directory.
 ///
 /// Strategy: look for the session_id as a directory name first (standalone session),
 /// then fall back to the most recently modified directory (team or unknown).
-fn find_active_task_dir(session_id: &str) -> Option<PathBuf> {
-    let home = dirs::home_dir()?;
+fn find_active_task_dir(fs: &dyn FileSystemPort, session_id: &str) -> Option<PathBuf> {
+    let home = fs.home_dir()?;
     let tasks_root = home.join(".claude").join("tasks");
 
-    if !tasks_root.is_dir() {
+    if !fs.is_dir(&tasks_root) {
         return None;
     }
 
     // First: try session_id directly (standalone sessions use session_id as dir name)
     let session_dir = tasks_root.join(session_id);
-    if session_dir.is_dir() && has_task_files(&session_dir) {
+    if fs.is_dir(&session_dir) && has_task_files(fs, &session_dir) {
         return Some(session_dir);
     }
 
     // Second: find the most recently modified directory with task files
     let mut best: Option<(PathBuf, std::time::SystemTime)> = None;
-    if let Ok(entries) = std::fs::read_dir(&tasks_root) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if !path.is_dir() {
+    if let Ok(entries) = fs.read_dir(&tasks_root) {
+        for path in entries {
+            if !fs.is_dir(&path) {
                 continue;
             }
-            if !has_task_files(&path) {
+            if !has_task_files(fs, &path) {
                 continue;
             }
-            if let Ok(meta) = std::fs::metadata(&path) {
+            if let Ok(meta) = fs.metadata(&path) {
                 if let Ok(modified) = meta.modified() {
                     if best.as_ref().map_or(true, |(_, best_time)| modified > *best_time) {
                         best = Some((path, modified));
@@ -106,31 +107,33 @@ fn find_active_task_dir(session_id: &str) -> Option<PathBuf> {
 }
 
 /// Check if a directory contains at least one .json task file (not .lock, not .highwatermark)
-fn has_task_files(dir: &PathBuf) -> bool {
-    std::fs::read_dir(dir)
+fn has_task_files(fs: &dyn FileSystemPort, dir: &PathBuf) -> bool {
+    fs.read_dir(dir)
         .map(|entries| {
-            entries
-                .flatten()
-                .any(|e| {
-                    let name = e.file_name();
-                    let name = name.to_string_lossy();
-                    name.ends_with(".json") && !name.starts_with('.')
-                })
+            entries.iter().any(|p| {
+                let name = p
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                name.ends_with(".json") && !name.starts_with('.')
+            })
         })
         .unwrap_or(false)
 }
 
 /// Read all tasks from a task list directory
-fn read_tasks(dir: &PathBuf) -> Vec<Task> {
+fn read_tasks(fs: &dyn FileSystemPort, dir: &PathBuf) -> Vec<Task> {
     let mut tasks = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
+    if let Ok(entries) = fs.read_dir(dir) {
+        for path in entries {
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
             if !name.ends_with(".json") || name.starts_with('.') {
                 continue;
             }
-            if let Ok(content) = std::fs::read_to_string(entry.path()) {
+            if let Ok(content) = fs.read_to_string(&path) {
                 if let Ok(task) = serde_json::from_str::<Task>(&content) {
                     tasks.push(task);
                 }
@@ -205,24 +208,25 @@ fn render_tasks_md(tasks: &[Task], cwd: &str, project_hash: &str, session_id: &s
 
 /// Persist tasks to disk (markdown + JSON + meta)
 fn write_persistent_tasks(
+    fs: &dyn FileSystemPort,
     tasks: &[Task],
     cwd: &str,
     project_hash: &str,
     session_id: &str,
-) -> Result<(), std::io::Error> {
-    let dir = match persistent_tasks_dir(project_hash) {
+) -> anyhow::Result<()> {
+    let dir = match persistent_tasks_dir(fs, project_hash) {
         Some(d) => d,
         None => return Ok(()),
     };
-    std::fs::create_dir_all(&dir)?;
+    fs.create_dir_all(&dir)?;
 
     // Write tasks.md (human-readable)
     let md = render_tasks_md(tasks, cwd, project_hash, session_id);
-    std::fs::write(dir.join("tasks.md"), &md)?;
+    fs.write(&dir.join("tasks.md"), md.as_bytes())?;
 
     // Write tasks.json (machine-readable for rehydration)
     let json = serde_json::to_string_pretty(tasks).unwrap_or_default();
-    std::fs::write(dir.join("tasks.json"), &json)?;
+    fs.write(&dir.join("tasks.json"), json.as_bytes())?;
 
     // Write meta.json
     let incomplete_count = tasks.iter().filter(|t| t.status != "completed").count();
@@ -235,7 +239,7 @@ fn write_persistent_tasks(
         incomplete_count,
     };
     let meta_json = serde_json::to_string_pretty(&meta).unwrap_or_default();
-    std::fs::write(dir.join("meta.json"), &meta_json)?;
+    fs.write(&dir.join("meta.json"), meta_json.as_bytes())?;
 
     tracing::debug!(
         project_hash,
@@ -251,12 +255,12 @@ fn write_persistent_tasks(
 ///
 /// Finds the active task directory, reads all task files, and writes
 /// a persistent snapshot to `~/.claude/persistent-tasks/{project_hash}/`.
-pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
+pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     let session_id = input.session_id.as_deref().unwrap_or("unknown");
     let cwd = input.cwd.as_deref().unwrap_or(".");
 
     // Find the active task directory
-    let task_dir = match find_active_task_dir(session_id) {
+    let task_dir = match find_active_task_dir(ctx.fs, session_id) {
         Some(dir) => dir,
         None => {
             tracing::debug!("No active task directory found — skipping persist");
@@ -265,14 +269,14 @@ pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
     };
 
     // Read all tasks
-    let tasks = read_tasks(&task_dir);
+    let tasks = read_tasks(ctx.fs, &task_dir);
     if tasks.is_empty() {
         return HookOutput::allow();
     }
 
     // Compute project hash and persist
     let proj_hash = project_hash(cwd);
-    if let Err(e) = write_persistent_tasks(&tasks, cwd, &proj_hash, session_id) {
+    if let Err(e) = write_persistent_tasks(ctx.fs, &tasks, cwd, &proj_hash, session_id) {
         tracing::warn!(error = %e, "Failed to persist tasks");
     }
 
@@ -283,6 +287,26 @@ pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
+
+    /// Minimal real-FS for tests that need to read temp directories.
+    struct TestFs;
+    impl FileSystemPort for TestFs {
+        fn home_dir(&self) -> Option<PathBuf> { dirs::home_dir() }
+        fn read_to_string(&self, p: &Path) -> anyhow::Result<String> { Ok(std::fs::read_to_string(p)?) }
+        fn write(&self, p: &Path, c: &[u8]) -> anyhow::Result<()> {
+            if let Some(par) = p.parent() { std::fs::create_dir_all(par)?; }
+            Ok(std::fs::write(p, c)?)
+        }
+        fn create_dir_all(&self, p: &Path) -> anyhow::Result<()> { Ok(std::fs::create_dir_all(p)?) }
+        fn read_dir(&self, p: &Path) -> anyhow::Result<Vec<PathBuf>> {
+            Ok(std::fs::read_dir(p)?.filter_map(|e| e.ok().map(|e| e.path())).collect())
+        }
+        fn exists(&self, p: &Path) -> bool { p.exists() }
+        fn is_dir(&self, p: &Path) -> bool { p.is_dir() }
+        fn metadata(&self, p: &Path) -> anyhow::Result<std::fs::Metadata> { Ok(std::fs::metadata(p)?) }
+        fn append(&self, _: &Path, _: &[u8]) -> anyhow::Result<()> { Ok(()) }
+    }
 
     #[test]
     fn test_project_hash_deterministic() {
@@ -371,7 +395,8 @@ mod tests {
             r#"{"id":"2","subject":"Second","description":"","status":"pending","blocks":[],"blockedBy":[]}"#,
         ).unwrap();
 
-        let tasks = read_tasks(&dir);
+        let fs = TestFs;
+        let tasks = read_tasks(&fs, &dir);
         assert_eq!(tasks.len(), 3);
         assert_eq!(tasks[0].id, "1");
         assert_eq!(tasks[1].id, "2");
@@ -380,19 +405,20 @@ mod tests {
 
     #[test]
     fn test_has_task_files() {
+        let fs = TestFs;
         let tmpdir = tempfile::tempdir().unwrap();
         let dir = tmpdir.path().to_path_buf();
 
         // Empty dir
-        assert!(!has_task_files(&dir));
+        assert!(!has_task_files(&fs, &dir));
 
         // Only .lock file
         std::fs::write(dir.join(".lock"), "").unwrap();
-        assert!(!has_task_files(&dir));
+        assert!(!has_task_files(&fs, &dir));
 
         // Add a task file
         std::fs::write(dir.join("1.json"), "{}").unwrap();
-        assert!(has_task_files(&dir));
+        assert!(has_task_files(&fs, &dir));
     }
 
     #[test]
@@ -402,7 +428,8 @@ mod tests {
             cwd: Some(".".to_string()),
             ..Default::default()
         };
-        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
+        let ctx = crate::hooks::test_support::stub_ctx();
+        let output = process(&input, &ctx);
         assert!(output.blocked.is_none());
     }
 }
