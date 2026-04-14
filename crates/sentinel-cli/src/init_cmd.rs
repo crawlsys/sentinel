@@ -97,7 +97,10 @@ fn run_single(repo: &PathBuf, dry_run: bool, force: bool) -> anyhow::Result<()> 
 }
 
 fn run_batch(dry_run: bool, force: bool) -> anyhow::Result<()> {
-    let repos = project_init::discover_repos();
+    let github_dir = dirs::home_dir()
+        .map(|h| h.join("Documents").join("GitHub"))
+        .ok_or_else(|| anyhow::anyhow!("cannot determine home directory"))?;
+    let repos = project_init::discover_repos(&github_dir);
 
     eprintln!(
         "{} {} — Batch Project Standards Audit {}",
