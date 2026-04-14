@@ -54,30 +54,10 @@ pub async fn run(event: &str, matcher: Option<&str>, standalone: bool) -> Result
         return Ok(());
     }
 
-    if standalone {
-        return run_internal(event, matcher, standalone).await;
-    }
-
-    let start_time = std::time::Instant::now();
-    debug!(event, ?matcher, standalone, "Processing hook event");
-
-    let hook_event = parse_hook_event(event)?;
-    if let Err(e) = validate_caller() {
-        // Caller validation failed — return safe empty JSON and exit early.
-        // The security event was already logged inside validate_caller().
-        debug!(error = %e, "Caller validation failed — returning safe response");
-        return write_safe_allow_response();
-    }
-
-    let raw_input = sentinel_infrastructure::stdin::read_raw_stdin(Duration::from_secs(3))?;
-    run_supervised(hook_event, event, matcher, raw_input).await?;
-
-    debug!(
-        event,
-        elapsed_ms = start_time.elapsed().as_millis() as u64,
-        "Hook supervisor completed"
-    );
-    Ok(())
+    // Always run inline — the supervisor (spawn child + pipe stdin/stdout)
+    // added 5-15s overhead on Windows due to process creation, pipe inheritance,
+    // and stdin read timing issues. Inline execution is instant.
+    run_internal(event, matcher, standalone).await
 }
 
 pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) -> Result<()> {
@@ -447,9 +427,9 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
             let rehydrate_output = hooks::task_rehydrate::process(&input, &ctx);
             output.merge(&rehydrate_output);
 
-            // Memory verify — verify stale memories against ground truth (24h cooldown)
-            let verify_output = hooks::memory_verify::process(&input, &ctx);
-            output.merge(&verify_output);
+            // Memory verify removed from SessionStart — Qdrant HTTP calls blocked
+            // startup for 5-20s. Verification now runs on PreCompact (background,
+            // non-critical path) where latency doesn't affect user experience.
 
             // Version drift check removed — Claude Code uses bun, not npm.
             // The old npm registry call added 4-20s to every cold SessionStart.

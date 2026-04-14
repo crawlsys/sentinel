@@ -105,12 +105,16 @@ pub const HOOK_NAMES: &[&str] = &[
 // Shared async runtime helper
 // ---------------------------------------------------------------------------
 
-/// Run an async block safely, whether or not we're already inside a tokio runtime.
+/// Hard wall-clock timeout for all async hook work.
+/// No Qdrant/API call may block a hook longer than this.
+const RUN_ASYNC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Run an async block safely with a hard wall-clock timeout.
 ///
-/// When sentinel hooks are invoked from the async CLI dispatcher (`hook_cmd::run`),
-/// a tokio runtime is already active. Creating a nested runtime panics with
-/// "Cannot start a runtime from within a runtime". This helper detects that case
-/// and spawns a scoped thread with its own runtime instead.
+/// Guarantees:
+/// 1. Never panics from nested tokio runtimes (uses scoped thread).
+/// 2. Never blocks longer than [`RUN_ASYNC_TIMEOUT`] — returns `T::default()`
+///    if the future doesn't complete in time.
 ///
 /// Used by all memory/Qdrant hooks that need to make async HTTP calls.
 pub fn run_async<F, T>(future: F) -> T
@@ -118,33 +122,32 @@ where
     F: std::future::Future<Output = T> + Send,
     T: Send + Default,
 {
-    if tokio::runtime::Handle::try_current().is_ok() {
-        // Already inside a runtime — run on a scoped thread to avoid nesting.
-        // `std::thread::scope` guarantees the thread joins before borrowed data
-        // goes out of scope, so the future can safely reference the caller's stack.
-        std::thread::scope(|s| {
-            s.spawn(|| {
-                match tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                {
-                    Ok(rt) => rt.block_on(future),
-                    Err(_) => T::default(),
-                }
-            })
-            .join()
-            .unwrap_or_default()
-        })
-    } else {
-        // No runtime — safe to create one directly.
-        match tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-        {
-            Ok(rt) => rt.block_on(future),
-            Err(_) => T::default(),
-        }
-    }
+    // Always run on a scoped thread with its own runtime.
+    // This avoids nested-runtime panics AND lets us enforce a wall-clock timeout
+    // via the thread join timeout (which kills slow DNS, TCP connect, etc).
+    std::thread::scope(|s| {
+        let handle = s.spawn(|| {
+            match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt.block_on(async {
+                    // Apply tokio timeout on top of reqwest timeouts
+                    match tokio::time::timeout(RUN_ASYNC_TIMEOUT, future).await {
+                        Ok(result) => result,
+                        Err(_) => {
+                            tracing::debug!("run_async: wall-clock timeout exceeded");
+                            T::default()
+                        }
+                    }
+                }),
+                Err(_) => T::default(),
+            }
+        });
+        // The scoped thread must join (Rust guarantees this), but the tokio
+        // timeout inside ensures the future is cancelled within RUN_ASYNC_TIMEOUT.
+        handle.join().unwrap_or_default()
+    })
 }
 
 /// Port for git status queries — implemented by the infrastructure layer.

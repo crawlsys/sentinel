@@ -1,11 +1,11 @@
 //! Memory Verify Hook — verify stored memories against ground truth on SessionStart.
 //!
 //! Runs on SessionStart with a 24h cooldown. Scrolls Qdrant for memories not
-//! verified in the last 7 days, extracts claims via Cerebras llama3.1-8b,
+//! verified in the last 7 days, extracts claims via Claude API (claude-haiku-4-5-20251001),
 //! verifies file_path claims with fs::exists(), and updates Qdrant payloads.
 //!
-//! Uses reqwest for both Cerebras and Qdrant API calls (same pattern as memory_inject.rs).
-//! Uses `tokio::runtime::Builder::new_current_thread()` for async HTTP.
+//! All network calls run inside `run_async()` which enforces a 3-second wall-clock
+//! timeout — the hook never blocks SessionStart.
 
 use chrono::Utc;
 use sentinel_domain::constants;
@@ -79,22 +79,31 @@ fn load_qdrant_config() -> Option<QdrantConfig> {
     serde_json::from_str(&content).ok()
 }
 
-/// Cerebras account config.
-#[derive(serde::Deserialize)]
-struct CerebrasConfig {
-    accounts: std::collections::HashMap<String, CerebrasAccount>,
-}
+/// Load Anthropic API key — tries env var first, then Doppler.
+fn load_anthropic_key() -> Option<String> {
+    // 1. Check env var (fast path — set by settings.json or parent process)
+    if let Ok(key) = std::env::var("ANTHROPIC_API_KEY") {
+        if !key.is_empty() {
+            return Some(key);
+        }
+    }
 
-#[derive(serde::Deserialize)]
-struct CerebrasAccount {
-    api_key: String,
-}
+    // 2. Fall back to Doppler via the service token already in env
+    let output = std::process::Command::new("doppler")
+        .args(["secrets", "get", "ANTHROPIC_API_KEY", "--plain"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
 
-fn load_cerebras_key() -> Option<String> {
-    let path = dirs::home_dir()?.join(".cerebras").join("accounts.json");
-    let content = std::fs::read_to_string(&path).ok()?;
-    let config: CerebrasConfig = serde_json::from_str(&content).ok()?;
-    config.accounts.get("default").map(|a| a.api_key.clone())
+    if output.status.success() {
+        let key = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !key.is_empty() {
+            return Some(key);
+        }
+    }
+
+    None
 }
 
 /// A memory point from Qdrant scroll.
@@ -200,8 +209,8 @@ async fn scroll_unverified(
         .collect()
 }
 
-/// Extract claims from content using Cerebras llama3.1-8b.
-async fn extract_claims_cerebras(
+/// Extract claims from content using Claude Haiku (fast, cheap).
+async fn extract_claims_claude(
     client: &reqwest::Client,
     api_key: &str,
     content: &str,
@@ -221,15 +230,15 @@ Return ONLY the JSON array, no other text."#
     );
 
     let body = serde_json::json!({
-        "model": "llama3.1-8b",
-        "messages": [{"role": "user", "content": prompt}],
+        "model": "claude-haiku-4-5-20251001",
         "max_tokens": 2000,
-        "temperature": 0.0
+        "messages": [{"role": "user", "content": prompt}]
     });
 
     let resp = match client
-        .post("https://api.cerebras.ai/v1/chat/completions")
-        .header("Authorization", format!("Bearer {api_key}"))
+        .post("https://api.anthropic.com/v1/messages")
+        .header("x-api-key", api_key)
+        .header("anthropic-version", "2023-06-01")
         .header("Content-Type", "application/json")
         .json(&body)
         .send()
@@ -237,7 +246,7 @@ Return ONLY the JSON array, no other text."#
     {
         Ok(r) => r,
         Err(e) => {
-            warn!(error = %e, "Cerebras API request failed");
+            warn!(error = %e, "Claude API request failed");
             return vec![];
         }
     };
@@ -247,12 +256,12 @@ Return ONLY the JSON array, no other text."#
         Err(_) => return vec![],
     };
 
+    // Claude Messages API response format
     let text = json
-        .get("choices")
+        .get("content")
         .and_then(|c| c.get(0))
-        .and_then(|c| c.get("message"))
-        .and_then(|m| m.get("content"))
-        .and_then(|c| c.as_str())
+        .and_then(|b| b.get("text"))
+        .and_then(|t| t.as_str())
         .unwrap_or("[]");
 
     // Strip markdown code fences
@@ -364,10 +373,10 @@ pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
         }
     };
 
-    let cerebras_key = match load_cerebras_key() {
+    let anthropic_key = match load_anthropic_key() {
         Some(k) => k,
         None => {
-            debug!("No Cerebras API key — skipping memory verify");
+            debug!("No Anthropic API key — skipping memory verify");
             return HookOutput::allow();
         }
     };
@@ -396,7 +405,7 @@ pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
         // 5. Verify each memory
         for memory in &memories {
             let claims =
-                extract_claims_cerebras(&client, &cerebras_key, &memory.content).await;
+                extract_claims_claude(&client, &anthropic_key, &memory.content).await;
 
             if claims.is_empty() {
                 // No claims — mark as verified (nothing to disprove)

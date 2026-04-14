@@ -17,13 +17,15 @@ pub const VECTOR_QUERY_TIMEOUT: Duration = Duration::from_millis(800);
 pub const VECTOR_BATCH_TIMEOUT: Duration = Duration::from_millis(1500);
 
 /// Standard external API call (Qdrant scroll, set_payload).
-pub const API_CALL_TIMEOUT: Duration = Duration::from_secs(5);
+/// Capped by run_async's 3s wall-clock timeout.
+pub const API_CALL_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Long-running external API call (bulk upsert, full index).
-pub const API_CALL_TIMEOUT_LONG: Duration = Duration::from_secs(10);
+/// Capped by run_async's 3s wall-clock timeout.
+pub const API_CALL_TIMEOUT_LONG: Duration = Duration::from_secs(3);
 
 /// Memory feedback / light verification call.
-pub const API_CALL_TIMEOUT_SHORT: Duration = Duration::from_secs(3);
+pub const API_CALL_TIMEOUT_SHORT: Duration = Duration::from_secs(2);
 
 // ---------------------------------------------------------------------------
 // Hook cooldown periods
