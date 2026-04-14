@@ -179,10 +179,10 @@ pub fn count_files_with_ext(dir: &Path, ext: &str) -> usize {
 }
 
 /// Count MCP servers from `~/.claude.json`.
-pub fn count_mcp_servers() -> usize {
-    let path = dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".claude.json");
+///
+/// `home_dir` should be the user's home directory (parent of `~/.claude/`).
+pub fn count_mcp_servers(home_dir: &Path) -> usize {
+    let path = home_dir.join(".claude.json");
 
     fs::read_to_string(path)
         .ok()
@@ -196,11 +196,10 @@ pub fn count_mcp_servers() -> usize {
 }
 
 /// Count Rust repos matching a suffix pattern in `~/Documents/GitHub/`.
-pub fn count_repos_with_suffix(suffix: &str) -> usize {
-    let gh_dir = dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("Documents")
-        .join("GitHub");
+///
+/// `home_dir` should be the user's home directory (parent of `~/.claude/`).
+pub fn count_repos_with_suffix(home_dir: &Path, suffix: &str) -> usize {
+    let gh_dir = home_dir.join("Documents").join("GitHub");
 
     fs::read_dir(gh_dir)
         .map(|entries| {
@@ -216,14 +215,22 @@ pub fn count_repos_with_suffix(suffix: &str) -> usize {
 }
 
 /// Count all marketplace components in `~/.claude/`.
+///
+/// Derives the user's home directory from `claude_dir` (its parent) to locate
+/// `~/.claude.json` and `~/Documents/GitHub/` without calling `dirs::home_dir()`.
 pub fn count_components(claude_dir: &Path) -> ComponentCounts {
+    let home_dir = claude_dir
+        .parent()
+        .unwrap_or(claude_dir)
+        .to_path_buf();
+
     let skills = count_subdirs(&claude_dir.join("skills"));
     let hooks = super::hooks::HOOK_NAMES.len();
     let commands = count_files_with_ext(&claude_dir.join("commands"), ".md");
     let agents = count_files_with_ext(&claude_dir.join("agents"), ".md");
-    let mcp_servers = count_mcp_servers();
-    let mcp_repos = count_repos_with_suffix("-mcp-rust");
-    let cli_repos = count_repos_with_suffix("-cli-rust");
+    let mcp_servers = count_mcp_servers(&home_dir);
+    let mcp_repos = count_repos_with_suffix(&home_dir, "-mcp-rust");
+    let cli_repos = count_repos_with_suffix(&home_dir, "-cli-rust");
 
     ComponentCounts {
         skills,
@@ -552,7 +559,7 @@ pub fn scan_marketplace(root_dir: &Path) -> MarketplaceSnapshot {
     let skills = scan_skills(root_dir, &mp_data);
 
     // --- Hooks ---
-    let hooks = scan_hooks();
+    let hooks = scan_hooks(root_dir);
 
     // --- Agents ---
     let agents = scan_agents(root_dir, &mp_data);
@@ -588,14 +595,19 @@ pub fn scan_marketplace(root_dir: &Path) -> MarketplaceSnapshot {
     );
 
     // --- Counts ---
+    let home_dir = root_dir
+        .parent()
+        .unwrap_or(root_dir)
+        .to_path_buf();
+
     let counts = ComponentCounts {
         skills: skills.len(),
         hooks: hooks.len(),
         agents: agents.len(),
         commands: commands.len(),
         mcp_servers: mcp_servers.len(),
-        mcp_repos: count_repos_with_suffix("-mcp-rust"),
-        cli_repos: count_repos_with_suffix("-cli-rust"),
+        mcp_repos: count_repos_with_suffix(&home_dir, "-mcp-rust"),
+        cli_repos: count_repos_with_suffix(&home_dir, "-cli-rust"),
     };
 
     MarketplaceSnapshot {
@@ -717,10 +729,10 @@ fn scan_skills(root_dir: &Path, mp_data: &serde_json::Value) -> Vec<Skill> {
 }
 
 /// Scan hooks from sentinel hooks.toml.
-fn scan_hooks() -> Vec<Hook> {
-    let hooks_toml_path = dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".claude")
+///
+/// `root_dir` is `~/.claude/` — hooks.toml lives at `root_dir/sentinel/config/hooks.toml`.
+fn scan_hooks(root_dir: &Path) -> Vec<Hook> {
+    let hooks_toml_path = root_dir
         .join("sentinel")
         .join("config")
         .join("hooks.toml");
@@ -981,9 +993,7 @@ fn run_validation(
     }
 
     // Sentinel hooks.toml
-    let hooks_toml_path = dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".claude")
+    let hooks_toml_path = root_dir
         .join("sentinel")
         .join("config")
         .join("hooks.toml");
