@@ -353,7 +353,7 @@ fn write_telemetry_state(skill: &str, run_id: &str) {
 /// Append a routing entry to metrics/routing.jsonl
 fn write_routing_entry(skill: &str, run_id: &str, input: &HookInput, prompt: &str) {
     let metrics_dir = match dirs::home_dir() {
-        Some(h) => h.join(".claude").join("metrics"),
+        Some(h) => super::metrics_dir(&h),
         None => return,
     };
     let _ = fs::create_dir_all(&metrics_dir);

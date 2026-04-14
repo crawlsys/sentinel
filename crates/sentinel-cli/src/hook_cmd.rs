@@ -529,7 +529,7 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
             tracing::debug!(tool_name, is_timeout, error, "Tool execution failed");
 
             if let Some(home) = dirs::home_dir() {
-                let metrics_dir = home.join(".claude").join("metrics");
+                let metrics_dir = home.join(".claude").join("sentinel").join("metrics");
                 let entry = serde_json::json!({
                     "event": "tool_failure",
                     "tool_name": tool_name,

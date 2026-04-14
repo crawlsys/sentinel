@@ -55,7 +55,7 @@ fn now_ms() -> u64 {
 
 fn metrics_dir(fs: &dyn FileSystemPort) -> Option<PathBuf> {
     let home = fs.home_dir()?;
-    let dir = home.join(".claude").join("metrics");
+    let dir = super::metrics_dir(&home);
     fs.create_dir_all(&dir).ok()?;
     Some(dir)
 }

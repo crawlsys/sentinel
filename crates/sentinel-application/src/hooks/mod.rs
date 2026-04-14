@@ -51,6 +51,23 @@ pub mod verification_gate;
 pub mod worktree_reminder;
 pub mod wrangler_guard;
 
+// ---------------------------------------------------------------------------
+// Centralized path helpers — all sentinel-owned files live under
+// `~/.claude/sentinel/` to keep the user's `.claude/` directory clean.
+// ---------------------------------------------------------------------------
+
+/// Return `<home>/.claude/sentinel`.
+pub fn sentinel_dir(home: &std::path::Path) -> std::path::PathBuf {
+    home.join(".claude").join("sentinel")
+}
+
+/// Return `<home>/.claude/sentinel/metrics`.
+///
+/// All metric/telemetry JSONL files go here (previously `~/.claude/metrics/`).
+pub fn metrics_dir(home: &std::path::Path) -> std::path::PathBuf {
+    sentinel_dir(home).join("metrics")
+}
+
 /// All hook module names — used for dynamic counting.
 /// Keep in sync with the `pub mod` declarations above.
 pub const HOOK_NAMES: &[&str] = &[

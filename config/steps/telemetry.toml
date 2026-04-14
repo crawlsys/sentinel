@@ -12,7 +12,7 @@ id = "collect"
 
 [[phases.steps]]
 id = "1.1"
-description = "Read metrics files from ~/.claude/metrics/"
+description = "Read metrics files from ~/.claude/sentinel/metrics/"
 
 [[phases.steps]]
 id = "1.2"

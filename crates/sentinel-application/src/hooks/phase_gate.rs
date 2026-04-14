@@ -1214,9 +1214,11 @@ fn check_protected_textual(normalized: &str) -> Option<&'static str> {
         return Some("sentinel config/state directory");
     }
 
-    // 3. Settings.json (hook registrations)
+    // 3. Settings files (hook registrations)
     if normalized.ends_with("/.claude/settings.json")
         || normalized.contains("/.claude/settings.json")
+        || normalized.ends_with("/.claude/sentinel-settings.json")
+        || normalized.contains("/.claude/sentinel-settings.json")
     {
         return Some("hook registration file");
     }
@@ -1317,10 +1319,10 @@ fn check_protected_canonical(
         }
     }
 
-    // settings.json at ~/.claude/ root
+    // settings.json / sentinel-settings.json at ~/.claude/ root
     if components.is_empty() {
         let filename = target.file_name()?.to_str()?;
-        if filename == "settings.json" {
+        if filename == "settings.json" || filename == "sentinel-settings.json" {
             return Some("hook registration file");
         }
     }

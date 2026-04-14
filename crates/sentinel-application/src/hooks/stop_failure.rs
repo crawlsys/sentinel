@@ -230,7 +230,7 @@ pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
 
     // Log to errors.jsonl for diagnostics
     if let Some(home) = ctx.fs.home_dir() {
-        let metrics_dir = home.join(".claude").join("metrics");
+        let metrics_dir = super::metrics_dir(&home);
         let entry = serde_json::json!({
             "event": "stop_failure",
             "error": error,

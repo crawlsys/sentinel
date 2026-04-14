@@ -88,11 +88,8 @@ fn now_ms() -> u64 {
 }
 
 fn errors_file(fs: &dyn FileSystemPort) -> PathBuf {
-    fs.home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".claude")
-        .join("metrics")
-        .join("errors.jsonl")
+    let home = fs.home_dir().unwrap_or_else(|| PathBuf::from("."));
+    super::metrics_dir(&home).join("errors.jsonl")
 }
 
 fn cooldown_file() -> PathBuf {
@@ -182,13 +179,10 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
         })
         .collect();
 
-    let resolutions_path = ctx
-        .fs
-        .home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".claude")
-        .join("metrics")
-        .join(".error-resolutions.json")
+    let resolutions_path = super::metrics_dir(
+        &ctx.fs.home_dir().unwrap_or_else(|| PathBuf::from(".")),
+    )
+    .join(".error-resolutions.json")
         .to_string_lossy()
         .replace('\\', "/");
 

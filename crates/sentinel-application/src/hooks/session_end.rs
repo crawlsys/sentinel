@@ -23,7 +23,7 @@ pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
 
     // Flush any buffered telemetry/metrics
     if let Some(home) = dirs::home_dir() {
-        let metrics_dir = home.join(".claude").join("metrics");
+        let metrics_dir = super::metrics_dir(&home);
         let end_entry = serde_json::json!({
             "event": "session_end",
             "session_id": session_id,

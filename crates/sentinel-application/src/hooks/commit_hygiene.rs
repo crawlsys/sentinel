@@ -41,7 +41,7 @@ fn state_file(fs: &dyn FileSystemPort) -> Option<PathBuf> {
         return Some(PathBuf::from(path));
     }
     let home = fs.home_dir()?;
-    let dir = home.join(".claude").join("metrics");
+    let dir = super::metrics_dir(&home);
     fs.create_dir_all(&dir).ok()?;
     Some(dir.join("commit-hygiene.json"))
 }

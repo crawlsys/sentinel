@@ -1,7 +1,8 @@
 //! Session Init — SessionStart hook
 //!
 //! Handles session initialization:
-//! - Logs session start to metrics/sessions.jsonl
+//! - Logs session start to sentinel/metrics/sessions.jsonl
+//! - Migrates old ~/.claude/metrics/ to ~/.claude/sentinel/metrics/ (one-time)
 //! - Syncs marketplace repo to ~/.claude/ (if local repo found)
 //! - Validates sync (critical files must exist)
 //! - Generates ~/.claude/CLAUDE.md with dynamic component counts
@@ -100,6 +101,9 @@ pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
     // 1. Log session start
     log_session_start(&claude_dir, session_id, cwd);
 
+    // 1.5. One-time migration: move ~/.claude/metrics/ → ~/.claude/sentinel/metrics/
+    migrate_metrics_dir(&claude_dir);
+
     // 2. Sync marketplace repo (if found)
     let sync_result = sync_marketplace(&claude_dir);
 
@@ -132,7 +136,8 @@ pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
     // 8. Build watch paths for FileChanged monitoring
     let claude_md_path = claude_dir.join("CLAUDE.md");
     let settings_path = claude_dir.join("settings.json");
-    let watch_paths: Vec<String> = [&claude_md_path, &settings_path]
+    let sentinel_settings_path = claude_dir.join("sentinel-settings.json");
+    let watch_paths: Vec<String> = [&claude_md_path, &settings_path, &sentinel_settings_path]
         .iter()
         .filter(|p| p.exists())
         .map(|p| p.to_string_lossy().to_string())
@@ -200,7 +205,7 @@ fn claude_dir() -> PathBuf {
 
 /// Log session start to metrics/sessions.jsonl
 fn log_session_start(claude_dir: &Path, session_id: &str, cwd: &str) {
-    let metrics_dir = claude_dir.join("metrics");
+    let metrics_dir = claude_dir.join("sentinel").join("metrics");
     let _ = fs::create_dir_all(&metrics_dir);
 
     let timestamp = chrono::Utc::now().to_rfc3339();
@@ -220,6 +225,66 @@ fn log_session_start(claude_dir: &Path, session_id: &str, cwd: &str) {
         .append(true)
         .open(&sessions_file)
         .and_then(|mut f| writeln!(f, "{}", entry));
+}
+
+/// One-time migration: move `~/.claude/metrics/*` → `~/.claude/sentinel/metrics/`.
+///
+/// Runs on every SessionStart but only does work when the old directory exists
+/// and contains files. After moving, the old directory is removed.
+fn migrate_metrics_dir(claude_dir: &Path) {
+    let old_dir = claude_dir.join("metrics");
+    let new_dir = claude_dir.join("sentinel").join("metrics");
+
+    if !old_dir.is_dir() {
+        return; // Nothing to migrate
+    }
+
+    let entries = match fs::read_dir(&old_dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+
+    let _ = fs::create_dir_all(&new_dir);
+
+    let mut moved = 0usize;
+    for entry in entries.flatten() {
+        let src = entry.path();
+        if src.is_file() {
+            let dst = new_dir.join(entry.file_name());
+            if !dst.exists() {
+                // Move file (copy + remove for cross-device safety)
+                if fs::copy(&src, &dst).is_ok() {
+                    let _ = fs::remove_file(&src);
+                    moved += 1;
+                }
+            } else {
+                // Destination already exists — append JSONL files, skip others
+                let name = entry.file_name();
+                let name_str = name.to_string_lossy();
+                if name_str.ends_with(".jsonl") {
+                    if let Ok(content) = fs::read(&src) {
+                        let _ = fs::OpenOptions::new()
+                            .create(true)
+                            .append(true)
+                            .open(&dst)
+                            .and_then(|mut f| f.write_all(&content));
+                    }
+                    let _ = fs::remove_file(&src);
+                    moved += 1;
+                }
+                // Non-JSONL duplicates: leave the old copy for safety
+            }
+        }
+    }
+
+    // Remove old directory if empty
+    if fs::read_dir(&old_dir).map(|mut d| d.next().is_none()).unwrap_or(false) {
+        let _ = fs::remove_dir(&old_dir);
+    }
+
+    if moved > 0 {
+        tracing::info!(moved, "Migrated metrics files to ~/.claude/sentinel/metrics/");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -451,6 +516,18 @@ fn validate_sync(claude_dir: &Path) -> ValidationResult {
         }
     } else {
         reasons.push("settings.json missing".to_string());
+    }
+
+    // 1b. sentinel-settings.json must exist and be valid JSON
+    let sentinel_settings_path = claude_dir.join("sentinel-settings.json");
+    if sentinel_settings_path.exists() {
+        if let Ok(content) = fs::read_to_string(&sentinel_settings_path) {
+            if serde_json::from_str::<serde_json::Value>(&content).is_err() {
+                reasons.push("sentinel-settings.json is invalid JSON".to_string());
+            }
+        }
+    } else {
+        reasons.push("sentinel-settings.json missing".to_string());
     }
 
     // 2. At least MIN_SKILL_DIRS skill directories
@@ -717,15 +794,21 @@ The Claude Code Marketplace is a modular ecosystem of components that extend Cla
 ~/.claude.json             <- MCP server registrations (user-scope)
 ~/.claude/
 ├── CLAUDE.md              <- Auto-generated on every session (live version)
-├── settings.json          <- Hook registrations (sentinel commands) + env vars
-├── sentinel/config/       <- Sentinel hook engine configuration
+├── settings.json          <- User preferences (no hooks)
+├── sentinel-settings.json <- Hook registrations (sentinel commands) + env vars
 ├── skills/                <- {skills} skill directories (SKILL.md each)
 ├── commands/              <- {commands} slash commands (.md files)
 ├── agents/                <- {agents} agent definitions (.md files)
 ├── plans/                 <- Implementation plans (markdown, per-project)
 ├── scripts/               <- Utility scripts (.js)
 ├── docs/                  <- Reference docs (auto-generated)
-└── metrics/               <- Usage analytics (JSONL)
+└── sentinel/
+    ├── config/            <- Sentinel hook engine configuration
+    ├── state/             <- Session state, precomputed memories
+    ├── metrics/           <- All metrics and analytics (JSONL)
+    ├── telemetry/         <- Skill telemetry
+    ├── proofs/            <- Proof chains
+    └── overrides/         <- Hygiene overrides
 ```
 
 ### MCP Server Configuration
@@ -854,7 +937,7 @@ Templates are tailored: MCP servers get mcp-router registration docs, CLIs get i
 ### Sentinel CLI
 
 ```bash
-sentinel hook --event <Event>         # Run hooks for an event (called by settings.json)
+sentinel hook --event <Event>         # Run hooks for an event (called by sentinel-settings.json)
 sentinel init                         # Audit cwd, generate missing standard files
 sentinel init --dry-run               # Preview only
 sentinel init --all                   # Batch: all repos under ~/Documents/GitHub/
@@ -892,7 +975,7 @@ The skill router auto-detects the active project from issue prefixes (e.g. `FIR-
 | **PostToolUse** | After Claude uses a tool | MCP health check, todo interceptor, evidence collector, plan organizer (ExitPlanMode) |
 | **PostToolUseFailure** | After tool execution fails | Pass-through (logged) |
 | **Stop** | Claude finishes responding | Execution log, skill telemetry, context monitor*, commit hygiene*, doc drift*, verification gate* |
-| **StopFailure** | Turn ends due to API error | Error logging to metrics/errors.jsonl |
+| **StopFailure** | Turn ends due to API error | Error logging to sentinel/metrics/errors.jsonl |
 | **PreCompact** | Before context compression | Session snapshot (preserves critical context) |
 | **PostCompact** | After context compression | Restore active skill context, reload phase files |
 | **Setup** | Repo init/maintenance | Project initialization |

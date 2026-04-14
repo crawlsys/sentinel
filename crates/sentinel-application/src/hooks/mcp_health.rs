@@ -37,7 +37,7 @@ const ERROR_PATTERNS: &[&str] = &[
 
 /// Path to the errors JSONL file
 fn errors_file_path(fs: &dyn FileSystemPort) -> Option<PathBuf> {
-    fs.home_dir().map(|h| h.join(".claude").join("metrics").join("errors.jsonl"))
+    fs.home_dir().map(|h| super::metrics_dir(&h).join("errors.jsonl"))
 }
 
 /// Extract the MCP server name from a tool name like `mcp__linear__get_issue`
