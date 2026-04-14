@@ -451,12 +451,8 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
             let verify_output = hooks::memory_verify::process(&input, &ctx);
             output.merge(&verify_output);
 
-            // Version drift check — runs once per session with 24h cooldown.
-            // Checks npm registry for latest Claude Code version and caches result.
-            if let Some(drift_msg) = check_version_drift() {
-                let drift_output = HookOutput::inject_context(HookEvent::SessionStart, drift_msg);
-                output.merge(&drift_output);
-            }
+            // Version drift check removed — Claude Code uses bun, not npm.
+            // The old npm registry call added 4-20s to every cold SessionStart.
         }
 
         HookEvent::PreCompact => {
@@ -1204,91 +1200,8 @@ fn show_glass_break_dialog() -> bool {
     }
 }
 
-/// Check if a newer Claude Code version is available (24h cooldown).
-///
-/// Queries the npm registry for the latest `@anthropic-ai/claude-code` version
-/// and caches the result to `~/.claude/sentinel/state/version-drift.json`.
-/// Returns a context message if a newer version was detected, None otherwise.
-fn check_version_drift() -> Option<String> {
-    let state_dir = dirs::home_dir()?.join(".claude").join("sentinel").join("state");
-    let drift_file = state_dir.join("version-drift.json");
-
-    // Check cooldown (24 hours)
-    if drift_file.exists() {
-        if let Ok(metadata) = std::fs::metadata(&drift_file) {
-            if let Ok(modified) = metadata.modified() {
-                if modified.elapsed().unwrap_or_default() < std::time::Duration::from_secs(86400) {
-                    // Read cached result
-                    if let Ok(content) = std::fs::read_to_string(&drift_file) {
-                        if let Ok(cached) = serde_json::from_str::<serde_json::Value>(&content) {
-                            if let Some(msg) = cached.get("message").and_then(|v| v.as_str()) {
-                                if !msg.is_empty() {
-                                    return Some(msg.to_string());
-                                }
-                            }
-                        }
-                    }
-                    return None; // Within cooldown, no drift found last check
-                }
-            }
-        }
-    }
-
-    // Run npm view to check latest version (synchronous, ~200ms typically)
-    let result = std::process::Command::new("npm")
-        .args(["view", "@anthropic-ai/claude-code", "version"])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .output()
-        .ok()?;
-
-    if !result.status.success() {
-        return None; // npm not available or offline
-    }
-
-    let latest = String::from_utf8_lossy(&result.stdout).trim().to_string();
-    if latest.is_empty() {
-        return None;
-    }
-
-    // Get current version from Claude Code env var (set since ~v2.1)
-    let current = std::env::var("CLAUDE_CODE_VERSION").ok();
-    let message = match &current {
-        Some(cur) if cur != &latest => {
-            format!(
-                "[sentinel] Claude Code version drift detected: installed {} → latest {}. \
-                 Run `npm update -g @anthropic-ai/claude-code` to update.",
-                cur, latest
-            )
-        }
-        _ => String::new(), // Same version or can't determine current
-    };
-
-    let entry = serde_json::json!({
-        "latest": latest,
-        "current": current,
-        "checked": chrono::Utc::now().to_rfc3339(),
-        "message": message,
-    });
-
-    let _ = std::fs::create_dir_all(&state_dir);
-    let _ = std::fs::write(
-        &drift_file,
-        serde_json::to_string_pretty(&entry).unwrap_or_default(),
-    );
-
-    tracing::debug!(
-        latest_npm = %latest,
-        current = ?current,
-        "Version drift check completed"
-    );
-
-    if message.is_empty() {
-        None
-    } else {
-        Some(message)
-    }
-}
+// check_version_drift removed — Claude Code uses bun (not npm).
+// The synchronous `npm view` call added 4-20s to every cold SessionStart.
 
 /// Extract skill name from router context like "[Skill Router] Detected skill: linear. MANDATORY..."
 fn extract_skill_name(context: &str) -> Option<String> {
