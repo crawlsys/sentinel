@@ -8,6 +8,7 @@
 //! **Periodic session re-index:** Every 50 tool calls, indexes the last ~10
 //! substantive exchanges to keep long-running sessions searchable.
 
+use super::FileSystemPort;
 use sentinel_domain::constants;
 use sentinel_domain::events::{HookInput, HookOutput};
 use sha2::{Digest, Sha256};
@@ -20,8 +21,8 @@ use tracing::{debug, info, warn};
 // ---------------------------------------------------------------------------
 
 /// State file: maps file path -> last synced mtime (as unix timestamp)
-fn sync_state_path() -> Option<PathBuf> {
-    dirs::home_dir().map(|h| {
+fn sync_state_path(fs: &dyn FileSystemPort) -> Option<PathBuf> {
+    fs.home_dir().map(|h| {
         h.join(".claude")
             .join("sentinel")
             .join("state")
@@ -29,34 +30,34 @@ fn sync_state_path() -> Option<PathBuf> {
     })
 }
 
-fn load_sync_state() -> HashMap<String, u64> {
-    let path = match sync_state_path() {
+fn load_sync_state(fs: &dyn FileSystemPort) -> HashMap<String, u64> {
+    let path = match sync_state_path(fs) {
         Some(p) => p,
         None => return HashMap::new(),
     };
-    let content = match std::fs::read_to_string(&path) {
+    let content = match fs.read_to_string(&path) {
         Ok(c) => c,
         Err(_) => return HashMap::new(),
     };
     serde_json::from_str(&content).unwrap_or_default()
 }
 
-fn save_sync_state(state: &HashMap<String, u64>) {
-    let path = match sync_state_path() {
+fn save_sync_state(fs: &dyn FileSystemPort, state: &HashMap<String, u64>) {
+    let path = match sync_state_path(fs) {
         Some(p) => p,
         None => return,
     };
     if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+        let _ = fs.create_dir_all(parent);
     }
     if let Ok(json) = serde_json::to_string(state) {
-        let _ = std::fs::write(&path, json);
+        let _ = fs.write(&path, json.as_bytes());
     }
 }
 
 /// Get mtime as unix timestamp for a file
-fn file_mtime(path: &std::path::Path) -> Option<u64> {
-    std::fs::metadata(path)
+fn file_mtime(fs: &dyn FileSystemPort, path: &std::path::Path) -> Option<u64> {
+    fs.metadata(path)
         .ok()?
         .modified()
         .ok()?
@@ -66,29 +67,28 @@ fn file_mtime(path: &std::path::Path) -> Option<u64> {
 }
 
 /// Find memory files that have changed since last sync
-fn find_unsynced_memories() -> Vec<PathBuf> {
-    let home = match dirs::home_dir() {
+fn find_unsynced_memories(fs: &dyn FileSystemPort) -> Vec<PathBuf> {
+    let home = match fs.home_dir() {
         Some(h) => h,
         None => return vec![],
     };
 
     let projects_dir = home.join(".claude").join("projects");
-    if !projects_dir.is_dir() {
+    if !fs.is_dir(&projects_dir) {
         return vec![];
     }
 
-    let state = load_sync_state();
+    let state = load_sync_state(fs);
     let mut unsynced = Vec::new();
 
-    if let Ok(entries) = std::fs::read_dir(&projects_dir) {
-        for entry in entries.flatten() {
-            let memory_dir = entry.path().join("memory");
-            if !memory_dir.is_dir() {
+    if let Ok(entries) = fs.read_dir(&projects_dir) {
+        for entry in entries {
+            let memory_dir = entry.join("memory");
+            if !fs.is_dir(&memory_dir) {
                 continue;
             }
-            if let Ok(files) = std::fs::read_dir(&memory_dir) {
-                for file in files.flatten() {
-                    let path = file.path();
+            if let Ok(files) = fs.read_dir(&memory_dir) {
+                for path in files {
                     let name = path
                         .file_name()
                         .map(|n| n.to_string_lossy().to_string())
@@ -97,7 +97,7 @@ fn find_unsynced_memories() -> Vec<PathBuf> {
                         continue;
                     }
                     let key = path.to_string_lossy().to_string();
-                    let current_mtime = file_mtime(&path).unwrap_or(0);
+                    let current_mtime = file_mtime(fs, &path).unwrap_or(0);
                     let last_synced = state.get(&key).copied().unwrap_or(0);
 
                     if current_mtime > last_synced {
@@ -133,9 +133,9 @@ fn default_model() -> String {
     "sentence-transformers/all-MiniLM-L6-v2".to_string()
 }
 
-fn load_config() -> Option<QdrantConfig> {
-    let path = dirs::home_dir()?.join(".qdrant").join("config.json");
-    let content = std::fs::read_to_string(&path).ok()?;
+fn load_config(fs: &dyn FileSystemPort) -> Option<QdrantConfig> {
+    let path = fs.home_dir()?.join(".qdrant").join("config.json");
+    let content = fs.read_to_string(&path).ok()?;
     serde_json::from_str(&content).ok()
 }
 
@@ -185,8 +185,8 @@ fn parse_frontmatter(content: &str) -> Option<(String, String, String, String)> 
 }
 
 /// Upsert a single memory file to Qdrant. Returns true on success.
-fn upsert_memory(config: &QdrantConfig, path: &PathBuf) -> bool {
-    let content = match std::fs::read_to_string(path) {
+fn upsert_memory(fs: &dyn FileSystemPort, config: &QdrantConfig, path: &PathBuf) -> bool {
+    let content = match fs.read_to_string(path) {
         Ok(c) => c,
         Err(_) => return false,
     };
@@ -269,8 +269,8 @@ struct SessionIndexState {
     last_indexed_at: Option<String>,
 }
 
-fn session_index_state_path() -> Option<PathBuf> {
-    dirs::home_dir().map(|h| {
+fn session_index_state_path(fs: &dyn FileSystemPort) -> Option<PathBuf> {
+    fs.home_dir().map(|h| {
         h.join(".claude")
             .join("sentinel")
             .join("state")
@@ -278,28 +278,28 @@ fn session_index_state_path() -> Option<PathBuf> {
     })
 }
 
-fn load_session_index_state() -> SessionIndexState {
-    let path = match session_index_state_path() {
+fn load_session_index_state(fs: &dyn FileSystemPort) -> SessionIndexState {
+    let path = match session_index_state_path(fs) {
         Some(p) => p,
         None => return SessionIndexState::default(),
     };
-    let content = match std::fs::read_to_string(&path) {
+    let content = match fs.read_to_string(&path) {
         Ok(c) => c,
         Err(_) => return SessionIndexState::default(),
     };
     serde_json::from_str(&content).unwrap_or_default()
 }
 
-fn save_session_index_state(state: &SessionIndexState) {
-    let path = match session_index_state_path() {
+fn save_session_index_state(fs: &dyn FileSystemPort, state: &SessionIndexState) {
+    let path = match session_index_state_path(fs) {
         Some(p) => p,
         None => return,
     };
     if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+        let _ = fs.create_dir_all(parent);
     }
     if let Ok(json) = serde_json::to_string_pretty(state) {
-        let _ = std::fs::write(&path, json);
+        let _ = fs.write(&path, json.as_bytes());
     }
 }
 
@@ -356,12 +356,14 @@ fn is_substantive_exchange(user: &str, assistant: &str) -> bool {
 /// Lightweight session re-index: parse the last ~10 exchanges from the
 /// transcript and upsert substantive ones to Qdrant's `claude-sessions` collection.
 fn periodic_session_index(
+    fs: &dyn FileSystemPort,
     config: &QdrantConfig,
     transcript_path: &str,
     session_id: &str,
     cwd: &str,
 ) {
-    let content = match std::fs::read_to_string(transcript_path) {
+    let transcript = std::path::Path::new(transcript_path);
+    let content = match fs.read_to_string(transcript) {
         Ok(c) => c,
         Err(e) => {
             warn!(error = %e, "Failed to read transcript for periodic index");
@@ -560,11 +562,12 @@ fn extract_text_content(val: &serde_json::Value) -> String {
 
 /// Process Stop — sync changed memory files to Qdrant,
 /// and periodically re-index the session transcript.
-pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
+pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
+    let fs = ctx.fs;
     let cwd = input.cwd.as_deref().unwrap_or(".");
 
     // --- Periodic session re-index ---
-    let mut index_state = load_session_index_state();
+    let mut index_state = load_session_index_state(fs);
     index_state.tool_calls_since_index += 1;
 
     if index_state.tool_calls_since_index >= REINDEX_TOOL_CALL_THRESHOLD {
@@ -578,10 +581,10 @@ pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
         {
             if !session_id.is_empty()
                 && !transcript_path.is_empty()
-                && PathBuf::from(transcript_path).exists()
+                && fs.exists(std::path::Path::new(transcript_path))
             {
-                if let Some(config) = load_config() {
-                    periodic_session_index(&config, transcript_path, session_id, cwd);
+                if let Some(config) = load_config(fs) {
+                    periodic_session_index(fs, &config, transcript_path, session_id, cwd);
                 }
             }
         }
@@ -590,17 +593,17 @@ pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
         index_state.last_indexed_at = Some(chrono::Utc::now().to_rfc3339());
     }
 
-    save_session_index_state(&index_state);
+    save_session_index_state(fs, &index_state);
 
     // --- Memory file sync (state-tracked, replaces 30s window) ---
-    let unsynced = find_unsynced_memories();
+    let unsynced = find_unsynced_memories(fs);
     if unsynced.is_empty() {
         return HookOutput::allow();
     }
 
     debug!(count = unsynced.len(), "Found unsynced memory files");
 
-    let config = match load_config() {
+    let config = match load_config(fs) {
         Some(c) => c,
         None => {
             debug!("No Qdrant config — skipping memory sync");
@@ -609,20 +612,20 @@ pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
     };
 
     // Sync each changed file and update state
-    let mut state = load_sync_state();
+    let mut state = load_sync_state(fs);
     let mut synced = 0;
     for path in &unsynced {
-        if upsert_memory(&config, path) {
+        if upsert_memory(fs, &config, path) {
             synced += 1;
             let key = path.to_string_lossy().to_string();
-            let mtime = file_mtime(path).unwrap_or(0);
+            let mtime = file_mtime(fs, path).unwrap_or(0);
             state.insert(key, mtime);
             debug!(file = %path.display(), "Synced memory to Qdrant");
         }
     }
 
     if synced > 0 {
-        save_sync_state(&state);
+        save_sync_state(fs, &state);
         info!(synced, total = unsynced.len(), "Memory files synced to Qdrant");
     }
 
