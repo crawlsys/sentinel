@@ -315,8 +315,10 @@ fn sync_marketplace(claude_dir: &Path) -> SyncResult {
         }
     }
 
-    // Try git pull first (fast-forward only)
-    let pull_ok = git_pull(&repo_dir);
+    // Skip git pull during SessionStart — network calls block for 4-20s.
+    // The marketplace repo is synced manually or via background cron.
+    // Just sync from whatever's on disk.
+    let pull_ok = true;
 
     // Sync directories
     let mut synced = 0u32;
