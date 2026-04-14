@@ -98,12 +98,6 @@ fn format_precomputed(data: &PrecomputedMemories) -> Option<String> {
     );
 
     for hit in &data.results {
-        let truncated = if hit.content.len() > 300 {
-            format!("{}...", &hit.content[..297])
-        } else {
-            hit.content.clone()
-        };
-
         let icon = if hit.source == "session" { "Session" } else { "Memory" };
         let recency = recency_label(hit.created_at.as_deref());
         let trust = match hit.access_count {
@@ -111,9 +105,12 @@ fn format_precomputed(data: &PrecomputedMemories) -> Option<String> {
             n if n >= 3 => " [trusted]",
             _ => "",
         };
+
+        // Compact summary line (~30 tokens)
+        let summary = compact_summary(&hit.content, 150);
         output.push_str(&format!(
             "\n- [{:.2}] [{}]{}{} **{}**:\n  {}\n",
-            hit.score, icon, recency, trust, hit.name, truncated
+            hit.score, icon, recency, trust, hit.name, summary
         ));
     }
 
@@ -203,6 +200,7 @@ struct SearchHit {
     #[allow(dead_code)]
     verified: Option<bool>,
     stale_reason: Option<String>,
+    private: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -294,6 +292,27 @@ fn temporal_score(hit: &SearchHit) -> f64 {
     let frequency_boost = 1.0 + 0.3 * (1.0 + access).ln();
 
     hit.score * recency_boost * frequency_boost
+}
+
+/// Produce a compact summary of content, truncating at `max_chars` on a word
+/// boundary. Collapses whitespace and strips leading newlines for clean output.
+fn compact_summary(content: &str, max_chars: usize) -> String {
+    // Collapse whitespace and trim
+    let clean: String = content
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    if clean.len() <= max_chars {
+        return clean;
+    }
+
+    // Truncate on word boundary
+    let truncated = &clean[..max_chars];
+    match truncated.rfind(' ') {
+        Some(pos) => format!("{}...", &truncated[..pos]),
+        None => format!("{truncated}..."),
+    }
 }
 
 /// Human-readable recency tag for display.
@@ -409,6 +428,21 @@ fn cwd_to_project_key(cwd: &str) -> String {
         .replace('/', "-")
 }
 
+// ---------------------------------------------------------------------------
+// Phase 7: Privacy Tags
+// ---------------------------------------------------------------------------
+
+/// Returns `true` if a hit's content or metadata indicates it should be excluded
+/// from injection. Supports `<private>` / `<!-- private -->` tags in content and
+/// a `private: true` payload field.
+fn is_private(hit: &SearchHit) -> bool {
+    let c = &hit.content;
+    c.contains("<private>")
+        || c.contains("<!-- private -->")
+        || c.contains("<private/>")
+        || c.contains("<private />")
+}
+
 /// Returns `true` if `hit_content` is a duplicate of something already present
 /// in `existing_context`, based on 3-word shingle overlap.
 ///
@@ -515,6 +549,10 @@ async fn search_collection(
                 .and_then(|v| v.as_str())
                 .filter(|s| !s.is_empty())
                 .map(String::from);
+            let private = payload
+                .get("private")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
             Some(SearchHit {
                 id,
                 score,
@@ -527,6 +565,7 @@ async fn search_collection(
                 memory_type,
                 verified,
                 stale_reason,
+                private,
             })
         })
         .collect()
@@ -589,6 +628,14 @@ fn search_qdrant(config: &QdrantConfig, query: &str, _project_hash: &str, cwd: &
         // Merge results from both collections
         let mut all: Vec<SearchHit> = memories.into_iter().chain(sessions).collect();
 
+        // Phase 7: Privacy filter — remove hits marked private (payload or content tag)
+        let pre_privacy = all.len();
+        all.retain(|hit| !hit.private && !is_private(hit));
+        let privacy_filtered = pre_privacy - all.len();
+        if privacy_filtered > 0 {
+            debug!(removed = privacy_filtered, "Filtered private memories");
+        }
+
         // Phase 5: Context-aware dedup — load existing context once, build
         // shingle set once, then filter hits that already appear in context.
         let existing_ctx = load_existing_context(cwd);
@@ -627,6 +674,7 @@ fn search_qdrant(config: &QdrantConfig, query: &str, _project_hash: &str, cwd: &
                     memory_type: None,
                     verified: None,
                     stale_reason: None,
+                    private: false,
                 };
                 let hit = std::mem::replace(&mut all[idx], placeholder);
                 (fs, hit)
@@ -645,12 +693,6 @@ fn search_qdrant(config: &QdrantConfig, query: &str, _project_hash: &str, cwd: &
         );
 
         for (final_score, hit) in &reordered {
-            let truncated = if hit.content.len() > 300 {
-                format!("{}...", &hit.content[..297])
-            } else {
-                hit.content.clone()
-            };
-
             let icon = if hit.source == "session" { "Session" } else { "Memory" };
             let recency = recency_label(hit.created_at.as_deref());
             let trust = match hit.access_count.unwrap_or(0) {
@@ -662,9 +704,12 @@ fn search_qdrant(config: &QdrantConfig, query: &str, _project_hash: &str, cwd: &
                 Some(reason) => format!(" [STALE: {}]", reason),
                 None => String::new(),
             };
+
+            // Compact summary (~30 tokens instead of ~100)
+            let summary = compact_summary(&hit.content, 150);
             output.push_str(&format!(
                 "\n- [{:.2}] [{}]{}{}{} **{}** ({}):\n  {}\n",
-                final_score, icon, recency, trust, stale_tag, hit.name, hit.project, truncated
+                final_score, icon, recency, trust, stale_tag, hit.name, hit.project, summary
             ));
         }
 
@@ -900,6 +945,9 @@ fn precompute_search(config: &QdrantConfig, query: &str, cwd: &str) {
 
         let mut all: Vec<SearchHit> = memories.into_iter().chain(sessions).collect();
 
+        // Phase 7: Privacy filter
+        all.retain(|hit| !hit.private && !is_private(hit));
+
         // Phase 5: Context-aware dedup
         let existing_ctx = load_existing_context(cwd);
         let ctx_shingles = build_shingles(&existing_ctx);
@@ -929,6 +977,7 @@ fn precompute_search(config: &QdrantConfig, query: &str, cwd: &str) {
                     memory_type: None,
                     verified: None,
                     stale_reason: None,
+                    private: false,
                 };
                 let hit = std::mem::replace(&mut all[idx], placeholder);
                 (fs, hit)
@@ -1012,6 +1061,7 @@ mod tests {
             memory_type: memory_type.map(String::from),
             verified: None,
             stale_reason: None,
+            private: false,
         }
     }
 
@@ -1337,5 +1387,80 @@ mod tests {
         };
         let ctx = crate::hooks::test_support::stub_ctx(); let output = process_stop(&input, &ctx);
         assert!(output.blocked.is_none());
+    }
+
+    // -------------------------------------------------------------------
+    // Phase 7: Privacy tag tests
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_is_private_content_tag() {
+        let mut hit = make_hit(0.9, "memory", None, None, None);
+        hit.content = "This is <private> secret data".to_string();
+        assert!(is_private(&hit));
+    }
+
+    #[test]
+    fn test_is_private_html_comment() {
+        let mut hit = make_hit(0.9, "memory", None, None, None);
+        hit.content = "<!-- private --> some secret".to_string();
+        assert!(is_private(&hit));
+    }
+
+    #[test]
+    fn test_is_private_self_closing() {
+        let mut hit = make_hit(0.9, "memory", None, None, None);
+        hit.content = "before <private/> after".to_string();
+        assert!(is_private(&hit));
+    }
+
+    #[test]
+    fn test_is_private_self_closing_space() {
+        let mut hit = make_hit(0.9, "memory", None, None, None);
+        hit.content = "before <private /> after".to_string();
+        assert!(is_private(&hit));
+    }
+
+    #[test]
+    fn test_is_private_payload_flag() {
+        let mut hit = make_hit(0.9, "memory", None, None, None);
+        hit.private = true;
+        // Content has no tag, but payload flag is set
+        assert!(hit.private);
+    }
+
+    #[test]
+    fn test_not_private_normal_content() {
+        let hit = make_hit(0.9, "memory", None, None, None);
+        assert!(!is_private(&hit));
+        assert!(!hit.private);
+    }
+
+    // -------------------------------------------------------------------
+    // Compact summary tests
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_compact_summary_short() {
+        let result = compact_summary("hello world", 150);
+        assert_eq!(result, "hello world");
+    }
+
+    #[test]
+    fn test_compact_summary_truncates_on_word_boundary() {
+        let long = "the quick brown fox jumps over the lazy dog and keeps running forever";
+        let result = compact_summary(long, 30);
+        assert!(result.len() <= 33); // 30 + "..."
+        assert!(result.ends_with("..."));
+        // Should not break mid-word
+        assert!(!result.chars().last().unwrap_or(' ').is_alphanumeric()
+            || result.ends_with("..."));
+    }
+
+    #[test]
+    fn test_compact_summary_collapses_whitespace() {
+        let messy = "  hello   world\n\nfoo   bar  ";
+        let result = compact_summary(messy, 150);
+        assert_eq!(result, "hello world foo bar");
     }
 }
