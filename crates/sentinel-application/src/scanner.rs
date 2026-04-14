@@ -20,6 +20,7 @@ use sha2::{Digest, Sha256};
 
 /// Dynamic component counts for CLAUDE.md generation and dashboard.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ComponentCounts {
     pub skills: usize,
     pub hooks: usize,

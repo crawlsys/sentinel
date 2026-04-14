@@ -2,7 +2,7 @@
 //!
 //! GET /api/logs — JSONL log reader with filtering
 //!
-//! Reads 8 log files from ~/.claude/metrics/ and returns sorted, filtered entries.
+//! Reads log files from ~/.claude/sentinel/metrics/ and returns sorted, filtered entries.
 
 use std::collections::HashMap;
 use std::fs;
@@ -63,6 +63,7 @@ fn metrics_dir() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".claude")
+        .join("sentinel")
         .join("metrics")
 }
 
