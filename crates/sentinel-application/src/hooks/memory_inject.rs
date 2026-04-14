@@ -532,14 +532,49 @@ async fn search_collection(
         .collect()
 }
 
+/// Run an async block safely, whether or not we're already inside a tokio runtime.
+///
+/// When sentinel hooks are invoked from the async CLI dispatcher (`hook_cmd::run`),
+/// a tokio runtime is already active. Creating a nested runtime panics with
+/// "Cannot start a runtime from within a runtime". This helper detects that case
+/// and spawns a scoped thread with its own runtime instead.
+fn run_async<F, T>(future: F) -> T
+where
+    F: std::future::Future<Output = T> + Send,
+    T: Send + Default,
+{
+    if tokio::runtime::Handle::try_current().is_ok() {
+        // Already inside a runtime — run on a scoped thread to avoid nesting.
+        // `std::thread::scope` guarantees the thread joins before borrowed data
+        // goes out of scope, so the future can safely reference the caller's stack.
+        std::thread::scope(|s| {
+            s.spawn(|| {
+                match tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
+                    Ok(rt) => rt.block_on(future),
+                    Err(_) => T::default(),
+                }
+            })
+            .join()
+            .unwrap_or_default()
+        })
+    } else {
+        // No runtime — safe to create one directly.
+        match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(rt) => rt.block_on(future),
+            Err(_) => T::default(),
+        }
+    }
+}
+
 /// Search both Qdrant collections and return merged formatted results.
 fn search_qdrant(config: &QdrantConfig, query: &str, _project_hash: &str, cwd: &str, user_prompt: Option<&str>) -> Option<String> {
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .ok()?;
-
-    let result = rt.block_on(async {
+    let result = run_async(async {
         let client = reqwest::Client::builder()
             .timeout(constants::VECTOR_QUERY_TIMEOUT)
             .build()
@@ -848,15 +883,7 @@ pub fn process_stop(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOut
 
 /// Run Qdrant search and write results to `precomputed-memories.json`.
 fn precompute_search(config: &QdrantConfig, query: &str, cwd: &str) {
-    let rt = match tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-    {
-        Ok(rt) => rt,
-        Err(_) => return,
-    };
-
-    rt.block_on(async {
+    run_async(async {
         let client = match reqwest::Client::builder()
             .timeout(constants::VECTOR_BATCH_TIMEOUT)
             .build()
