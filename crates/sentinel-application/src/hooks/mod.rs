@@ -101,6 +101,52 @@ pub const HOOK_NAMES: &[&str] = &[
     "wrangler_guard",
 ];
 
+// ---------------------------------------------------------------------------
+// Shared async runtime helper
+// ---------------------------------------------------------------------------
+
+/// Run an async block safely, whether or not we're already inside a tokio runtime.
+///
+/// When sentinel hooks are invoked from the async CLI dispatcher (`hook_cmd::run`),
+/// a tokio runtime is already active. Creating a nested runtime panics with
+/// "Cannot start a runtime from within a runtime". This helper detects that case
+/// and spawns a scoped thread with its own runtime instead.
+///
+/// Used by all memory/Qdrant hooks that need to make async HTTP calls.
+pub fn run_async<F, T>(future: F) -> T
+where
+    F: std::future::Future<Output = T> + Send,
+    T: Send + Default,
+{
+    if tokio::runtime::Handle::try_current().is_ok() {
+        // Already inside a runtime — run on a scoped thread to avoid nesting.
+        // `std::thread::scope` guarantees the thread joins before borrowed data
+        // goes out of scope, so the future can safely reference the caller's stack.
+        std::thread::scope(|s| {
+            s.spawn(|| {
+                match tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
+                    Ok(rt) => rt.block_on(future),
+                    Err(_) => T::default(),
+                }
+            })
+            .join()
+            .unwrap_or_default()
+        })
+    } else {
+        // No runtime — safe to create one directly.
+        match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(rt) => rt.block_on(future),
+            Err(_) => T::default(),
+        }
+    }
+}
+
 /// Port for git status queries — implemented by the infrastructure layer.
 /// The git-dependent hooks accept this trait so the application layer
 /// stays decoupled from infrastructure (no cyclic dependency).

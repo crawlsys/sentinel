@@ -149,15 +149,7 @@ fn detect_used_memories<'a>(
 // ---------------------------------------------------------------------------
 
 fn boost_memory(config: &QdrantConfig, memory_id: &str) -> bool {
-    let rt = match tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-    {
-        Ok(rt) => rt,
-        Err(_) => return false,
-    };
-
-    rt.block_on(async {
+    super::run_async(async {
         let client = match reqwest::Client::builder()
             .timeout(constants::API_CALL_TIMEOUT_SHORT)
             .build()

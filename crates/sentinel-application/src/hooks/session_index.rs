@@ -305,18 +305,7 @@ fn upsert_exchanges(
         return 0;
     }
 
-    let rt = match tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-    {
-        Ok(rt) => rt,
-        Err(e) => {
-            warn!(error = %e, "Failed to build tokio runtime");
-            return 0;
-        }
-    };
-
-    rt.block_on(async {
+    super::run_async(async {
         let client = match reqwest::Client::builder()
             .timeout(constants::API_CALL_TIMEOUT_LONG)
             .build()
