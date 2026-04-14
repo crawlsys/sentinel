@@ -190,6 +190,7 @@ pub fn process(
     input: &HookInput,
     state: &mut SessionState,
     workflows: &HashMap<String, SkillWorkflow>,
+    fs: &dyn super::FileSystemPort,
 ) -> HookOutput {
     let tool_name = match &input.tool_name {
         Some(name) => name.as_str(),
@@ -419,7 +420,7 @@ pub fn process(
     }
 
     // Delegate to gate evaluation for blocking decisions
-    let result = crate::gate::evaluate(state, workflows, input);
+    let result = crate::gate::evaluate(state, workflows, input, fs);
     match result {
         crate::gate::GateDecision::Allow => {
             // Additional post-merge skip detection:
@@ -1465,6 +1466,35 @@ mod tests {
     use super::*;
     use sentinel_domain::judge::JudgeModel;
     use sentinel_domain::workflow::WorkflowPhase;
+    use std::path::{Path, PathBuf};
+
+    /// Real filesystem port for tests — preserves pre-refactor behavior
+    /// by delegating to actual `dirs::home_dir()` and `Path::exists()`.
+    struct RealTestFs;
+    impl super::super::FileSystemPort for RealTestFs {
+        fn home_dir(&self) -> Option<PathBuf> { dirs::home_dir() }
+        fn read_to_string(&self, p: &Path) -> anyhow::Result<String> { Ok(std::fs::read_to_string(p)?) }
+        fn write(&self, p: &Path, content: &[u8]) -> anyhow::Result<()> {
+            if let Some(parent) = p.parent() { std::fs::create_dir_all(parent)?; }
+            Ok(std::fs::write(p, content)?)
+        }
+        fn create_dir_all(&self, p: &Path) -> anyhow::Result<()> { Ok(std::fs::create_dir_all(p)?) }
+        fn read_dir(&self, p: &Path) -> anyhow::Result<Vec<PathBuf>> {
+            Ok(std::fs::read_dir(p)?.filter_map(|e| e.ok().map(|e| e.path())).collect())
+        }
+        fn exists(&self, p: &Path) -> bool { p.exists() }
+        fn is_dir(&self, p: &Path) -> bool { p.is_dir() }
+        fn metadata(&self, p: &Path) -> anyhow::Result<std::fs::Metadata> { Ok(std::fs::metadata(p)?) }
+        fn append(&self, p: &Path, content: &[u8]) -> anyhow::Result<()> {
+            use std::io::Write;
+            if let Some(parent) = p.parent() { std::fs::create_dir_all(parent)?; }
+            let mut f = std::fs::OpenOptions::new().create(true).append(true).open(p)?;
+            f.write_all(content)?;
+            Ok(())
+        }
+    }
+
+    fn test_fs() -> RealTestFs { RealTestFs }
 
     fn test_workflow() -> SkillWorkflow {
         SkillWorkflow {
@@ -1513,7 +1543,7 @@ mod tests {
             tool_name: Some("Bash".to_string()),
             ..Default::default()
         };
-        let output = process(&input, &mut state, &workflows);
+        let output = process(&input, &mut state, &workflows, &test_fs());
         assert!(output.blocked.is_none());
     }
 
@@ -1528,7 +1558,7 @@ mod tests {
             tool_name: Some("Glob".to_string()),
             ..Default::default()
         };
-        let output = process(&input, &mut state, &workflows);
+        let output = process(&input, &mut state, &workflows, &test_fs());
         assert!(output.blocked.is_none());
     }
 
@@ -1558,7 +1588,7 @@ mod tests {
             tool_name: Some("Bash".to_string()),
             ..Default::default()
         };
-        let output = process(&input, &mut state, &workflows);
+        let output = process(&input, &mut state, &workflows, &test_fs());
         // No phase files on disk → gate allows
         assert!(output.blocked.is_none());
     }
@@ -1576,7 +1606,7 @@ mod tests {
             tool_name: Some("Bash".to_string()),
             ..Default::default()
         };
-        let output = process(&input, &mut state, &workflows);
+        let output = process(&input, &mut state, &workflows, &test_fs());
 
         // Check if linear phase files exist on this machine
         let claim_path = dirs::home_dir()
@@ -1617,7 +1647,7 @@ mod tests {
             })),
             ..Default::default()
         };
-        let output = process(&input, &mut state, &workflows);
+        let output = process(&input, &mut state, &workflows, &test_fs());
         // Read should always be allowed
         assert!(output.blocked.is_none());
         // Should record the phase read
@@ -1660,7 +1690,7 @@ mod tests {
             })),
             ..Default::default()
         };
-        let output = process(&input, &mut state, &workflows);
+        let output = process(&input, &mut state, &workflows, &test_fs());
         assert!(output.blocked.is_none());
         assert!(state.has_phase_been_read("linear", "claim.md"));
 
@@ -1691,7 +1721,7 @@ mod tests {
             })),
             ..Default::default()
         };
-        let output = process(&input, &mut state, &workflows);
+        let output = process(&input, &mut state, &workflows, &test_fs());
         assert!(output.blocked.is_none());
         // File does NOT exist on disk → untrusted → NOT recorded in phases_read
         // (Patch 23: only trusted reads are recorded to prevent progress inflation)
@@ -1723,7 +1753,7 @@ mod tests {
             })),
             ..Default::default()
         };
-        let output = process(&input, &mut state, &workflows);
+        let output = process(&input, &mut state, &workflows, &test_fs());
         assert!(output.blocked.is_none());
         // Path traversal should be rejected (ParentDir component detected) — no phase recorded
         assert!(state.phases_read.is_empty());
@@ -1744,7 +1774,7 @@ mod tests {
             })),
             ..Default::default()
         };
-        let output = process(&input, &mut state, &workflows);
+        let output = process(&input, &mut state, &workflows, &test_fs());
         assert!(output.blocked.is_none());
         assert!(state.has_phase_been_read("linear", "fetch.md"));
     }
@@ -1765,7 +1795,7 @@ mod tests {
             })),
             ..Default::default()
         };
-        let output = process(&input, &mut state, &workflows);
+        let output = process(&input, &mut state, &workflows, &test_fs());
         assert!(output.blocked.is_none());
         assert!(state.phases_read.is_empty());
     }
@@ -1794,7 +1824,7 @@ mod tests {
             tool_name: Some("Bash".to_string()),
             ..Default::default()
         };
-        let output = process(&input, &mut state, &workflows);
+        let output = process(&input, &mut state, &workflows, &test_fs());
         assert_eq!(output.blocked, Some(true));
         // deny() puts reason in hook_specific_output.permission_decision_reason
         let reason = output
@@ -1832,7 +1862,7 @@ mod tests {
             tool_name: Some("Bash".to_string()),
             ..Default::default()
         };
-        let output = process(&input, &mut state, &workflows);
+        let output = process(&input, &mut state, &workflows, &test_fs());
         // Should be allowed — all phases read
         assert!(output.blocked.is_none());
     }
@@ -1861,7 +1891,7 @@ mod tests {
                 })),
                 ..Default::default()
             };
-            let output = process(&input, &mut state, &workflows);
+            let output = process(&input, &mut state, &workflows, &test_fs());
             assert!(output.blocked.is_none());
             // File recorded for tracking
             assert!(state.has_phase_been_read("linear", "claim.md"));
@@ -1886,8 +1916,8 @@ mod tests {
             tool_name: Some("Bash".to_string()),
             ..Default::default()
         };
-        process(&input, &mut state, &workflows);
-        process(&input, &mut state, &workflows);
+        process(&input, &mut state, &workflows, &test_fs());
+        process(&input, &mut state, &workflows, &test_fs());
         assert_eq!(state.tool_calls, 2);
     }
 

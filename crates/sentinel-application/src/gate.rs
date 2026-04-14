@@ -3,6 +3,7 @@
 //! Decides whether tool calls should be blocked based on workflow state,
 //! proof chains, and custom gate rules.
 
+use crate::hooks::FileSystemPort;
 use sentinel_domain::events::HookInput;
 use sentinel_domain::state::SessionState;
 use sentinel_domain::workflow::{SkillWorkflow, WorkflowState};
@@ -26,6 +27,7 @@ pub fn evaluate(
     state: &SessionState,
     workflows: &std::collections::HashMap<String, SkillWorkflow>,
     input: &HookInput,
+    fs: &dyn FileSystemPort,
 ) -> GateDecision {
     let tool_name = match &input.tool_name {
         Some(name) => name.as_str(),
@@ -106,7 +108,8 @@ pub fn evaluate(
 
     // Check if workflow blocks this tool
     if let Some(block) = workflow_state.should_block(workflow, tool_name) {
-        let phases_dir = dirs::home_dir()
+        let phases_dir = fs
+            .home_dir()
             .expect("[sentinel] FATAL: Cannot determine home directory")
             .join(".claude/skills")
             .join(&effective_skill)
@@ -121,12 +124,12 @@ pub fn evaluate(
         // 2. "Phase file missing" — phases/ dir exists but the specific file is gone.
         //    This is likely a configuration error. Log a loud warning but still block,
         //    because the skill HAS a phase system — it's just broken.
-        if !phases_dir.exists() {
+        if !fs.exists(&phases_dir) {
             // Case 1: No phase system authored yet — allow
             return GateDecision::Allow;
         }
 
-        if !phase_file_path.exists() {
+        if !fs.exists(&phase_file_path) {
             // Case 2: Phase system exists but specific file is missing.
             // Log warning for debugging, but still block — fail closed.
             eprintln!(

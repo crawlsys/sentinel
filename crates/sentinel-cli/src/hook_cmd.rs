@@ -281,7 +281,7 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
 
         HookEvent::PreToolUse => {
             // Phase gate — check workflow state + track Read() calls on phase files
-            let gate_output = hooks::phase_gate::process(&input, &mut state, &workflows);
+            let gate_output = hooks::phase_gate::process(&input, &mut state, &workflows, ctx.fs);
             output.merge(&gate_output);
 
             if gate_output.blocked == Some(true) {
