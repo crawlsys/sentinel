@@ -12,6 +12,7 @@ pub mod judge;
 pub mod project;
 pub mod proof;
 pub mod routing;
+pub mod session;
 pub mod state;
 pub mod workflow;
 
@@ -22,5 +23,6 @@ pub use hooks::{HookId, HookResult, HookSpec};
 pub use judge::JudgeVerdict;
 pub use proof::{PhaseProof, ProofChain};
 pub use routing::RegexRouter;
+pub use session::SessionId;
 pub use state::SessionState;
 pub use workflow::{SkillWorkflow, WorkflowPhase};
