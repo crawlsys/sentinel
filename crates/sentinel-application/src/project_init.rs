@@ -356,16 +356,15 @@ const EXTRA_REPOS: &[&str] = &[
     "claude-code-marketplace",
 ];
 
-/// Discover all repos under ~/Documents/GitHub/ that match our patterns.
-pub fn discover_repos() -> Vec<PathBuf> {
-    let gh_dir = match dirs::home_dir() {
-        Some(h) => h.join("Documents").join("GitHub"),
-        None => return Vec::new(),
-    };
-
+/// Discover all repos under the given directory that match our patterns.
+///
+/// `github_dir` is typically `~/Documents/GitHub/` — the caller resolves
+/// the home directory so this function stays free of direct I/O path
+/// resolution.
+pub fn discover_repos(github_dir: &Path) -> Vec<PathBuf> {
     let mut repos = Vec::new();
 
-    let entries = match fs::read_dir(&gh_dir) {
+    let entries = match fs::read_dir(github_dir) {
         Ok(e) => e,
         Err(_) => return Vec::new(),
     };
