@@ -20,6 +20,15 @@ use std::path::PathBuf;
 
 use super::{FileSystemPort, HookContext};
 
+/// A single checklist item within a task
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct ChecklistItem {
+    id: String,
+    text: String,
+    #[serde(default)]
+    completed: bool,
+}
+
 /// A task read from Claude Code's on-disk format
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct Task {
@@ -37,6 +46,8 @@ struct Task {
     blocks: Vec<String>,
     #[serde(default, rename = "blockedBy")]
     blocked_by: Vec<String>,
+    #[serde(default)]
+    checklist: Vec<ChecklistItem>,
     #[serde(default)]
     metadata: Option<serde_json::Value>,
 }
@@ -188,8 +199,38 @@ fn render_tasks_md(tasks: &[Task], cwd: &str, project_hash: &str, session_id: &s
         if let Some(owner) = &task.owner {
             md.push_str(&format!("- **Owner:** {owner}\n"));
         }
+        // Render structured metadata fields
+        if let Some(meta) = &task.metadata {
+            if let Some(obj) = meta.as_object() {
+                if let Some(priority) = obj.get("priority").and_then(|v| v.as_str()) {
+                    md.push_str(&format!("- **Priority:** {priority}\n"));
+                }
+                if let Some(phase) = obj.get("phase").and_then(|v| v.as_str()) {
+                    md.push_str(&format!("- **Phase:** {phase}\n"));
+                }
+                if let Some(tags) = obj.get("skill_tags").and_then(|v| v.as_array()) {
+                    let tag_strs: Vec<&str> = tags.iter().filter_map(|t| t.as_str()).collect();
+                    if !tag_strs.is_empty() {
+                        md.push_str(&format!("- **Tags:** {}\n", tag_strs.join(", ")));
+                    }
+                }
+            }
+        }
         if !task.description.is_empty() {
             md.push_str(&format!("- **Description:** {}\n", task.description));
+        }
+        // Render checklist items
+        if !task.checklist.is_empty() {
+            let done = task.checklist.iter().filter(|c| c.completed).count();
+            md.push_str(&format!(
+                "- **Checklist:** ({}/{})\n",
+                done,
+                task.checklist.len()
+            ));
+            for item in &task.checklist {
+                let mark = if item.completed { "x" } else { " " };
+                md.push_str(&format!("  - [{mark}] {}\n", item.text));
+            }
         }
         md.push('\n');
     }
@@ -341,7 +382,23 @@ mod tests {
                 status: "in_progress".to_string(),
                 blocks: vec!["2".to_string()],
                 blocked_by: vec![],
-                metadata: None,
+                checklist: vec![
+                    ChecklistItem {
+                        id: "1".to_string(),
+                        text: "Design API".to_string(),
+                        completed: true,
+                    },
+                    ChecklistItem {
+                        id: "2".to_string(),
+                        text: "Write tests".to_string(),
+                        completed: false,
+                    },
+                ],
+                metadata: Some(serde_json::json!({
+                    "priority": "P0",
+                    "phase": "auth-refactor",
+                    "skill_tags": ["feature", "security"]
+                })),
             },
             Task {
                 id: "2".to_string(),
@@ -352,6 +409,7 @@ mod tests {
                 status: "pending".to_string(),
                 blocks: vec![],
                 blocked_by: vec!["1".to_string()],
+                checklist: vec![],
                 metadata: None,
             },
             Task {
@@ -363,6 +421,7 @@ mod tests {
                 status: "completed".to_string(),
                 blocks: vec![],
                 blocked_by: vec![],
+                checklist: vec![],
                 metadata: None,
             },
         ];
@@ -374,6 +433,14 @@ mod tests {
         assert!(md.contains("**Blocked by:** 1"));
         assert!(md.contains("incomplete: 2"));
         assert!(md.contains("completed: 1"));
+        // Checklist rendering
+        assert!(md.contains("**Checklist:** (1/2)"));
+        assert!(md.contains("[x] Design API"));
+        assert!(md.contains("[ ] Write tests"));
+        // Metadata rendering
+        assert!(md.contains("**Priority:** P0"));
+        assert!(md.contains("**Phase:** auth-refactor"));
+        assert!(md.contains("**Tags:** feature, security"));
     }
 
     #[test]
@@ -384,15 +451,15 @@ mod tests {
         // Write out of order
         std::fs::write(
             dir.join("3.json"),
-            r#"{"id":"3","subject":"Third","description":"","status":"pending","blocks":[],"blockedBy":[]}"#,
+            r#"{"id":"3","subject":"Third","description":"","status":"pending","blocks":[],"blockedBy":[],"checklist":[]}"#,
         ).unwrap();
         std::fs::write(
             dir.join("1.json"),
-            r#"{"id":"1","subject":"First","description":"","status":"pending","blocks":[],"blockedBy":[]}"#,
+            r#"{"id":"1","subject":"First","description":"","status":"pending","blocks":[],"blockedBy":[],"checklist":[]}"#,
         ).unwrap();
         std::fs::write(
             dir.join("2.json"),
-            r#"{"id":"2","subject":"Second","description":"","status":"pending","blocks":[],"blockedBy":[]}"#,
+            r#"{"id":"2","subject":"Second","description":"","status":"pending","blocks":[],"blockedBy":[],"checklist":[]}"#,
         ).unwrap();
 
         let fs = TestFs;

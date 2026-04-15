@@ -14,6 +14,16 @@ use std::path::PathBuf;
 
 use super::{FileSystemPort, HookContext};
 
+/// A single checklist item within a task
+#[derive(Debug, Clone, serde::Deserialize)]
+struct ChecklistItem {
+    #[allow(dead_code)]
+    id: String,
+    text: String,
+    #[serde(default)]
+    completed: bool,
+}
+
 /// A task read from the persistent JSON file
 #[derive(Debug, Clone, serde::Deserialize)]
 struct Task {
@@ -30,6 +40,10 @@ struct Task {
     #[serde(default)]
     #[allow(dead_code)]
     owner: Option<String>,
+    #[serde(default)]
+    checklist: Vec<ChecklistItem>,
+    #[serde(default)]
+    metadata: Option<serde_json::Value>,
 }
 
 /// Metadata from meta.json
@@ -154,6 +168,21 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
         if !task.blocked_by.is_empty() {
             context.push_str(&format!(" [blocked by: {}]", task.blocked_by.join(", ")));
         }
+        // Render metadata inline
+        if let Some(meta) = &task.metadata {
+            if let Some(obj) = meta.as_object() {
+                let mut meta_parts = Vec::new();
+                if let Some(priority) = obj.get("priority").and_then(|v| v.as_str()) {
+                    meta_parts.push(format!("priority={priority}"));
+                }
+                if let Some(phase) = obj.get("phase").and_then(|v| v.as_str()) {
+                    meta_parts.push(format!("phase={phase}"));
+                }
+                if !meta_parts.is_empty() {
+                    context.push_str(&format!(" [{}]", meta_parts.join(", ")));
+                }
+            }
+        }
         if !task.description.is_empty() {
             // Truncate long descriptions
             let desc = if task.description.len() > 200 {
@@ -162,6 +191,23 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
                 task.description.clone()
             };
             context.push_str(&format!("\n  {desc}"));
+        }
+        // Render checklist progress
+        if !task.checklist.is_empty() {
+            let done = task.checklist.iter().filter(|c| c.completed).count();
+            context.push_str(&format!(
+                "\n  Checklist ({}/{}): {}",
+                done,
+                task.checklist.len(),
+                task.checklist
+                    .iter()
+                    .map(|c| {
+                        let mark = if c.completed { "x" } else { " " };
+                        format!("[{mark}] {}", c.text)
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
         }
     }
 

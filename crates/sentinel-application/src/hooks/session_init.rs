@@ -786,7 +786,7 @@ These rules apply to ALL sessions regardless of mode:
 
 1. **Sequential Thinking** — For any non-trivial task (implementation, debugging, planning, refactoring, multi-step analysis), ALWAYS use `mcp__sequential-thinking__sequentialthinking` to break down the problem before taking action. Think through the approach step by step before writing any code or making changes.
 2. **Ask User Questions** — For non-trivial tasks, use `AskUserQuestion` to validate assumptions and surface unknowns before proceeding with implementation. Do not guess at requirements — ask what you don't know.
-3. **Blocking Tasks** — ALWAYS use `TaskCreate` to create tracked tasks for every piece of work. Break work into discrete steps and mark each as `in_progress` when starting and `completed` when done. No work should happen without a corresponding task.
+3. **Blocking Tasks** — ALWAYS use `TaskCreate` to create tracked tasks for every piece of work. Break work into discrete steps and mark each as `in_progress` when starting and `completed` when done. No work should happen without a corresponding task. Use `metadata` for structured priority/phase/tags, `addBlockedBy`/`addBlocks` for dependencies, and `checklist` for sub-items within tasks.
 
 ## Session Automation
 
@@ -1047,8 +1047,8 @@ The skill router auto-detects the active project from issue prefixes (e.g. `FIR-
 | **SubagentStart** | Subagent spawned | Inject active skill context into agent |
 | **SubagentStop** | Subagent concludes | Telemetry logging |
 | **TeammateIdle** | Agent about to go idle | Quality gate — reminds to check TaskList before stopping |
-| **TaskCreated** | Task being created | Telemetry logging |
-| **TaskCompleted** | Agent marks task done | Verification gate — ensures work is verified before marking complete |
+| **TaskCreated** | Task being created | Telemetry + metadata extraction (priority, skill tags, checklist) |
+| **TaskCompleted** | Agent marks task done | Verification gate — ensures work is verified, warns on incomplete checklists |
 | **PermissionDenied** | Auto-mode denies tool | Diagnostics logging |
 | **CwdChanged** | Working directory changes | Project context re-detection |
 

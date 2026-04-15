@@ -75,6 +75,29 @@ pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
         teammate_name, team_name, task_id, task_subject
     );
 
+    // Check for incomplete checklist items
+    if let Some(checklist) = input.extra.get("task_checklist").and_then(|v| v.as_array()) {
+        if !checklist.is_empty() {
+            let incomplete: Vec<&str> = checklist
+                .iter()
+                .filter(|item| !item.get("completed").and_then(|v| v.as_bool()).unwrap_or(false))
+                .filter_map(|item| item.get("text").and_then(|v| v.as_str()))
+                .collect();
+            if !incomplete.is_empty() {
+                context.push_str(&format!(
+                    "\n\n⚠ [Checklist Warning] {} of {} checklist items are NOT completed:\n{}",
+                    incomplete.len(),
+                    checklist.len(),
+                    incomplete
+                        .iter()
+                        .map(|t| format!("  - [ ] {t}"))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                ));
+            }
+        }
+    }
+
     // If task is bound to a Linear issue, append sync instructions
     if let Some(linear_id) = extract_linear_id(task_subject) {
         context.push_str(&format!(
@@ -167,6 +190,42 @@ mod tests {
     #[test]
     fn test_extract_linear_id_missing() {
         assert_eq!(extract_linear_id("[P0] Fix bug #security"), None);
+    }
+
+    #[test]
+    fn test_task_completed_with_incomplete_checklist() {
+        let mut input = HookInput::default();
+        input.extra.insert(
+            "task_subject".to_string(),
+            serde_json::json!("Build feature"),
+        );
+        input.extra.insert(
+            "teammate_name".to_string(),
+            serde_json::json!("dev-1"),
+        );
+        input
+            .extra
+            .insert("team_name".to_string(), serde_json::json!("team-a"));
+        input
+            .extra
+            .insert("task_id".to_string(), serde_json::json!("5"));
+        input.extra.insert(
+            "task_checklist".to_string(),
+            serde_json::json!([
+                {"id": "1", "text": "Design API", "completed": true},
+                {"id": "2", "text": "Write tests", "completed": false},
+                {"id": "3", "text": "Update docs", "completed": false}
+            ]),
+        );
+
+        let ctx = crate::hooks::test_support::stub_ctx();
+        let output = process(&input, &ctx);
+        let ctx = output.hook_specific_output.unwrap().additional_context;
+        let ctx = ctx.as_deref().unwrap();
+        assert!(ctx.contains("[Checklist Warning]"));
+        assert!(ctx.contains("2 of 3"));
+        assert!(ctx.contains("Write tests"));
+        assert!(ctx.contains("Update docs"));
     }
 
     #[test]
