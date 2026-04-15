@@ -208,6 +208,43 @@ fn transcript_has_test_evidence(transcript_path: &str) -> bool {
     false
 }
 
+/// Build configuration files that indicate a repo has a test/build toolchain.
+/// If NONE of these exist in the repo root, the repo is content-only and
+/// verification is skipped entirely (no tests to run).
+const BUILD_CONFIG_FILES: &[&str] = &[
+    "package.json",
+    "Cargo.toml",
+    "pyproject.toml",
+    "setup.py",
+    "setup.cfg",
+    "go.mod",
+    "Makefile",
+    "makefile",
+    "Dockerfile",
+    "pom.xml",
+    "build.gradle",
+    "build.gradle.kts",
+    "Gemfile",
+    "mix.exs",
+    "CMakeLists.txt",
+];
+
+/// Check if the current working directory is a content-only repo
+/// (no build config files → no test toolchain → nothing to verify).
+fn is_content_only_repo(cwd: Option<&str>) -> bool {
+    let dir = match cwd {
+        Some(d) if !d.is_empty() => std::path::PathBuf::from(d),
+        _ => match std::env::current_dir() {
+            Ok(d) => d,
+            Err(_) => return false,
+        },
+    };
+
+    !BUILD_CONFIG_FILES
+        .iter()
+        .any(|f| dir.join(f).exists())
+}
+
 /// Non-code file extensions that never require test evidence.
 const DOCS_ONLY_EXTENSIONS: &[&str] = &[
     ".md", ".mdx", ".txt", ".json", ".yaml", ".yml", ".toml", ".ini", ".cfg",
@@ -219,21 +256,29 @@ const DOCS_ONLY_EXTENSIONS: &[&str] = &[
     "LICENSE", "CHANGELOG", "SECURITY",
 ];
 
-/// Check if a git commit command only touches non-code files.
-/// Runs `git diff --cached --name-only` to inspect staged files.
-/// Returns true if ALL staged files have docs-only extensions (or if
-/// the staged file list is empty — nothing to test).
+/// Check if a git commit/push only touches non-code files.
+/// For commits: runs `git diff --cached --name-only` to inspect staged files.
+/// For pushes: runs `git diff origin/HEAD..HEAD --name-only` to inspect unpushed changes.
+/// Returns true if ALL files have docs-only extensions.
 fn is_docs_only_commit(command: &str) -> bool {
-    // Only applies to `git commit` commands, not `git push`
-    if !command.contains("git") || !command.contains("commit") {
+    let is_commit = command.contains("commit");
+    let is_push = command.contains("push");
+
+    if !is_commit && !is_push {
         return false;
     }
 
-    // Run git diff --cached --name-only to get staged files.
-    // Use the cwd from the command if it starts with `cd`.
-    let output = std::process::Command::new("git")
-        .args(["diff", "--cached", "--name-only"])
-        .output();
+    // Pick the right diff command based on action
+    let output = if is_commit {
+        std::process::Command::new("git")
+            .args(["diff", "--cached", "--name-only"])
+            .output()
+    } else {
+        // For push: check what's ahead of the remote
+        std::process::Command::new("git")
+            .args(["diff", "--name-only", "origin/HEAD..HEAD"])
+            .output()
+    };
 
     let output = match output {
         Ok(o) if o.status.success() => o,
@@ -243,12 +288,12 @@ fn is_docs_only_commit(command: &str) -> bool {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let files: Vec<&str> = stdout.lines().filter(|l| !l.is_empty()).collect();
 
-    // No staged files — can't determine, don't skip verification
+    // No files — can't determine, don't skip verification
     if files.is_empty() {
         return false;
     }
 
-    // Check every staged file against docs-only extensions
+    // Check every file against docs-only extensions
     files.iter().all(|file| {
         let lower = file.to_lowercase();
         DOCS_ONLY_EXTENSIONS
@@ -305,9 +350,16 @@ fn process_with_override(
         "Pushing"
     };
 
-    // Skip verification for docs-only commits (markdown, config, YAML, etc.)
+    // Skip verification for content-only repos (no package.json, Cargo.toml, etc.)
+    // These repos have no test toolchain — requiring evidence is nonsensical.
+    if is_content_only_repo(input.cwd.as_deref()) {
+        eprintln!("[sentinel] pre-commit-verify: content-only repo (no build config), skipping");
+        return HookOutput::allow();
+    }
+
+    // Skip verification for docs-only commits/pushes (markdown, config, YAML, etc.)
     // These files have no tests to run — requiring evidence is nonsensical.
-    if action == "commit" && is_docs_only_commit(command) {
+    if is_docs_only_commit(command) {
         return HookOutput::allow();
     }
 
