@@ -12,6 +12,11 @@ use sentinel_domain::events::{HookInput, HookOutput};
 
 /// Doppler read-only operations that are always safe.
 const DOPPLER_READ_OPS: &[&str] = &[
+    // mcp-router management tools (present on all MCP servers)
+    "mcp_health_check",
+    "mcp_list_servers",
+    "mcp_restart_server",
+    // Doppler read-only operations
     "current_account",
     "list_accounts",
     "get_me",
@@ -67,6 +72,14 @@ pub fn process(input: &HookInput) -> HookOutput {
         None => return HookOutput::allow(),
     };
 
+    // mcp-router management tools are always safe (health check, list, restart)
+    if tool.ends_with("__mcp_health_check")
+        || tool.ends_with("__mcp_list_servers")
+        || tool.ends_with("__mcp_restart_server")
+    {
+        return HookOutput::allow();
+    }
+
     // Auth0 — block ALL tools (it's an auth system, everything is sensitive)
     if tool.starts_with("mcp__auth0__") {
         return HookOutput::deny(
@@ -113,9 +126,19 @@ mod tests {
     }
 
     #[test]
-    fn test_blocks_all_auth0_tools() {
+    fn test_blocks_auth0_mutation_tools() {
         assert_eq!(process(&input_with_tool("mcp__auth0__authenticate")).blocked, Some(true));
-        assert_eq!(process(&input_with_tool("mcp__auth0__mcp_health_check")).blocked, Some(true));
+    }
+
+    #[test]
+    fn test_allows_mcp_router_tools_on_all_servers() {
+        // mcp-router management tools should always pass through
+        assert!(process(&input_with_tool("mcp__auth0__mcp_health_check")).blocked.is_none());
+        assert!(process(&input_with_tool("mcp__auth0__mcp_list_servers")).blocked.is_none());
+        assert!(process(&input_with_tool("mcp__auth0__mcp_restart_server")).blocked.is_none());
+        assert!(process(&input_with_tool("mcp__doppler__mcp_health_check")).blocked.is_none());
+        assert!(process(&input_with_tool("mcp__doppler__mcp_list_servers")).blocked.is_none());
+        assert!(process(&input_with_tool("mcp__doppler__mcp_restart_server")).blocked.is_none());
     }
 
     #[test]
