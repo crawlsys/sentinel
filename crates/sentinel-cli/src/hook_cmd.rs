@@ -373,6 +373,10 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
             let cascade_output = hooks::account_cascade::process(&input, &ctx);
             output.merge(&cascade_output);
 
+            // Build/deploy notify — push channel events for cargo build, test, git push
+            let build_output = hooks::build_notify::process(&input, &ctx);
+            output.merge(&build_output);
+
             // Tool usage gate — track sequential thinking and task creation markers
             if let Some(session_id) = input.session_id.as_deref() {
                 if let Some(tool) = input.tool_name.as_deref() {

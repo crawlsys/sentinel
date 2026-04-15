@@ -156,6 +156,29 @@ pub fn process_stop(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
             zone = zone.label(),
             "Context window usage elevated"
         );
+
+        // Push real-time channel notification for orange/red zone
+        let summary = format!(
+            "Context usage at {pct:.0}% ({z} zone). {strategy}",
+            z = zone.label(),
+            strategy = if zone == Zone::Red {
+                "Auto-compact imminent!"
+            } else {
+                "Consider delegating to agents."
+            },
+        );
+        let mut meta = serde_json::Map::new();
+        meta.insert(
+            "percent".to_string(),
+            serde_json::Value::Number(
+                serde_json::Number::from_f64(pct).unwrap_or_else(|| serde_json::Number::from(0)),
+            ),
+        );
+        meta.insert(
+            "zone".to_string(),
+            serde_json::Value::String(zone.label().to_string()),
+        );
+        crate::channel_events::emit("context_threshold", &summary, meta);
     }
 
     HookOutput::allow()

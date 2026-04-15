@@ -7,6 +7,7 @@
 pub mod account_cascade;
 pub mod activity_tracker;
 mod block_context;
+pub mod build_notify;
 pub mod commit_hygiene;
 pub mod commit_message_validator;
 pub mod context_monitor;
