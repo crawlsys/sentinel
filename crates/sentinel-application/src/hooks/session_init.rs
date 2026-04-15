@@ -742,17 +742,18 @@ fn generate_claude_md(
 
 ## Table of Contents
 1. [User Preferences](#user-preferences)
-2. [Date Context](#date-context)
-3. [Marketplace Architecture](#marketplace-architecture)
-4. [Using Slash Commands](#using-slash-commands)
-5. [Using Agents](#using-agents)
-6. [Using Skills](#using-skills)
-7. [Changelog & Version Tracking](#changelog--version-tracking)
-8. [Plans & Documentation](#plans--documentation)
-9. [Session Resume](#session-resume)
-10. [Context Management](#context-management)
-11. [`Autopilot` | `Planned` Mode Switch](#autopilot--planned-mode-switch)
-12. [Marketplace Stats](#marketplace-stats)
+2. [Required Tool Usage](#required-tool-usage)
+3. [Date Context](#date-context)
+4. [Marketplace Architecture](#marketplace-architecture)
+5. [Using Slash Commands](#using-slash-commands)
+6. [Using Agents](#using-agents)
+7. [Using Skills](#using-skills)
+8. [Changelog & Version Tracking](#changelog--version-tracking)
+9. [Plans & Documentation](#plans--documentation)
+10. [Session Resume](#session-resume)
+11. [Context Management](#context-management)
+12. [`Autopilot` | `Planned` Mode Switch](#autopilot--planned-mode-switch)
+13. [Marketplace Stats](#marketplace-stats)
 
 ---
 
@@ -777,6 +778,14 @@ fn generate_claude_md(
 ```
 Workflow: worktree -> branch -> commit -> merge to main -> push -> cleanup
 ```
+
+## Required Tool Usage
+
+These rules apply to ALL sessions regardless of mode:
+
+1. **Sequential Thinking** — For any non-trivial task (implementation, debugging, planning, refactoring, multi-step analysis), ALWAYS use `mcp__sequential-thinking__sequentialthinking` to break down the problem before taking action. Think through the approach step by step before writing any code or making changes.
+2. **Ask User Questions** — For non-trivial tasks, use `AskUserQuestion` to validate assumptions and surface unknowns before proceeding with implementation. Do not guess at requirements — ask what you don't know.
+3. **Blocking Tasks** — ALWAYS use `TaskCreate` to create tracked tasks for every piece of work. Break work into discrete steps and mark each as `in_progress` when starting and `completed` when done. No work should happen without a corresponding task.
 
 ## Date Context
 
