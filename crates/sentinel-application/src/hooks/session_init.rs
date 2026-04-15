@@ -1070,7 +1070,7 @@ Slash commands are user-invocable shortcuts. Invoke them with the `Skill` tool:
 | `/test` | Run tests with coverage | `Skill(skill: "test")` |
 | `/review` | 6-layer code review pipeline | `Skill(skill: "review")` |
 | `/explore` | Explore codebase structure | `Skill(skill: "explore")` |
-| `/plan` | Plan implementation before coding | `Skill(skill: "plan")` |
+| `/plan` | Enter built-in Plan Mode (EnterPlanMode → design → ExitPlanMode) | `Skill(skill: "plan")` |
 | `/debug` | Debug with root cause analysis | `Skill(skill: "debug")` |
 | `/pr` | Create pull request | `Skill(skill: "pr")` |
 | `/skills` | List all available skills | `Skill(skill: "skills")` |
@@ -1161,24 +1161,29 @@ The sentinel `skill_router` hook runs on every message and uses Claude Opus 4.6 
 
 ## Plans & Documentation
 
-### Plan Files
-All implementation plans go in `~/.claude/plans/` with subdirectories by project:
+### Built-in Plan Mode (ENFORCED)
 
-```
-~/.claude/plans/
-├── marketplace/           <- Claude Code Marketplace plans
-├── sentinel/              <- Sentinel engine plans
-├── firefly-pro/           <- Firefly Pro CRM plans
-├── legatus/               <- Legatus platform plans
-└── {{project-name}}/       <- Other project plans
-```
+Claude Code's built-in Plan Mode is **required** for all non-trivial implementation work. `CLAUDE_CODE_PLAN_MODE_REQUIRED=1` is set in `~/.claude/settings.json`.
+
+**Workflow:**
+1. Call `EnterPlanMode` — enters read-only exploration mode
+2. Explore: `Read`, `Glob`, `Grep`, `Task(subagent_type: "Explore")`, `mcp__sequential-thinking__sequentialthinking`
+3. Call `ExitPlanMode` with plan content — Claude Code saves the plan to disk and asks for user approval
+4. After approval, implement
+
+**Plan storage (two locations):**
+
+| Location | Written by | Purpose |
+|----------|-----------|---------|
+| `{{project}}/plans/{{slug}}.md` | Claude Code (native) | Editable via `/plan` slash command during session |
+| `~/.claude/plans/{{project}}/{{slug}}-v{{N}}.md` | sentinel `plan_organizer` hook | Cross-session archive with auto-versioning |
+
+The `slug` is Claude Code's random-word format (e.g. `bright-EAGLE-river`). Sentinel auto-copies the file with incrementing `-v1`, `-v2`, etc. every time you exit plan mode for the same slug.
 
 **Rules:**
-- Name plans descriptively: `feature-name/plan-v1.md`, not `plan.md`
-- Include status at the top: `Status: Draft | Approved | In Progress | Complete`
-- When starting implementation, update status to `In Progress`
-- When done, update status to `Complete` with a summary of what was actually built
-- NEVER delete plan files -- they are the historical record
+- NEVER bypass plan mode for complex work — `CLAUDE_CODE_PLAN_MODE_REQUIRED` blocks ExitPlanMode without a plan file
+- The archive copy is immutable — update plans via `/plan` which edits the original
+- NEVER delete files in `~/.claude/plans/` — they are the historical record
 
 ### README Maintenance
 After completing significant work in a project (new features, architecture changes, dependency updates):
@@ -1254,11 +1259,11 @@ prepend `🚀`; if `Planned`, prepend `📋`.
 *The instructions in this section (under this h3 heading) should only be
 followed when you are in the `Planned` mode state.*
 
-Unless I say so, **EVERYTHING** you do must be planned first. Don't use the
-built-in plan mode (for large tasks, use plan mode, but still follow **ALL**
-these instructions). Instead, put together a plan (without writing it to a file,
-if not a large task), ask me questions about anything you're not 100% not sure
-about, then present me with the clear and detailed plan. Do **NOT** proceed
+Unless I say so, **EVERYTHING** you do must be planned first. Use Claude Code's
+built-in Plan Mode (`EnterPlanMode` / `ExitPlanMode`) — it's enforced via the
+`CLAUDE_CODE_PLAN_MODE_REQUIRED=1` env var, so bypassing it will fail. Enter plan
+mode, explore read-only, ask me questions about anything you're not 100% sure
+about, then call `ExitPlanMode` with the plan for my approval. Do **NOT** proceed
 without my approval first.
 
 Once I approve a plan, **ANY** deviations or changes from that plan **MUST**

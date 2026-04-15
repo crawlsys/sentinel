@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Changed
+- **Plan system overhaul: use Claude Code's built-in Plan Mode** (2026-04-15)
+  - Removed custom `plan` skill from marketplace — Claude Code's `EnterPlanMode`/`ExitPlanMode` now authoritative
+  - Set `CLAUDE_CODE_PLAN_MODE_REQUIRED=1` in `marketplace.json` settings so install.js seeds it into `~/.claude/settings.json`
+  - Rewrote `plan_organizer` hook: now actually copies plan files to `~/.claude/plans/{project}/{slug}-v{N}.md` with auto-incrementing versions (previously only injected textual instructions for Claude to do the move)
+  - Extracts plan file path from `ExitPlanMode` tool_result JSON (`data.filePath`)
+  - `/plan` slash command now triggers built-in Plan Mode instead of the deleted custom skill
+  - Updated CLAUDE.md template: documents Plan Mode workflow, dual plan storage (Claude Code's native `{project}/plans/{slug}.md` + sentinel's archive)
+
 ### Added
 - Git + npx interceptors consolidated into sentinel workspace (2026-04-15)
   - DDD/Hexagonal: domain (28 git rules, 26 npx redirects), application (port traits + services), infrastructure (platform adapters)

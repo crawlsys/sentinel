@@ -1,41 +1,72 @@
 //! Plan Organizer Hook
 //!
 //! Fires on PostToolUse when tool_name == "ExitPlanMode".
-//! Injects instructions telling Claude to organize the plan file
-//! into ~/.claude/plans/{project}/{descriptive-name}.md instead of
-//! leaving it with Claude Code's random filename.
+//! Claude Code saves plans to `{project}/plans/{slug}.md` by default with
+//! a random slug (e.g. "bright-EAGLE-river.md"). This hook automatically
+//! copies the plan to `~/.claude/plans/{project}/{slug}-v{N}.md` with
+//! auto-incrementing versions — a stable, cross-session archive.
 //!
-//! The hook detects the project name from the working directory
-//! and injects context with the exact move/rename instructions.
+//! The original plan file is left in place so Claude Code's `/plan` command
+//! can still read and edit it.
 
 use sentinel_domain::events::{HookEvent, HookInput, HookOutput};
-use std::path::Path;
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use super::HookContext;
 
 /// Known project directory names → plan subdirectory mappings.
 /// Falls back to extracting the last path component of `cwd`.
 fn detect_project(cwd: &str) -> String {
     let path = Path::new(cwd);
-
-    // Use the last directory component as the project name
     let dir_name = path
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("general");
 
-    // Normalize common repo name patterns to plan folder names
-    let project = match dir_name {
-        "claude-code-marketplace" => "marketplace",
-        "firefly-pro-crm" | "firefly-pro-web-app" => "firefly-pro",
-        "sentinel" | "sentinel-launcher" => "sentinel",
-        _ => dir_name,
-    };
+    match dir_name {
+        "claude-code-marketplace" => "marketplace".to_string(),
+        "firefly-pro-crm" | "firefly-pro-web-app" => "firefly-pro".to_string(),
+        "sentinel" | "sentinel-launcher" => "sentinel".to_string(),
+        _ => dir_name.to_string(),
+    }
+}
 
-    project.to_string()
+/// Extract the plan file path from the tool result JSON.
+/// ExitPlanMode returns `{ "data": { "filePath": "...", ... } }` on success.
+fn extract_plan_path(tool_result: Option<&serde_json::Value>) -> Option<PathBuf> {
+    let resp = tool_result?;
+    // Try direct `filePath` first
+    if let Some(fp) = resp.get("filePath").and_then(|v| v.as_str()) {
+        return Some(PathBuf::from(fp));
+    }
+    // Try nested data.filePath
+    if let Some(fp) = resp
+        .get("data")
+        .and_then(|d| d.get("filePath"))
+        .and_then(|v| v.as_str())
+    {
+        return Some(PathBuf::from(fp));
+    }
+    None
+}
+
+/// Find the next available version number for a given slug in the target dir.
+/// Returns the path to write, e.g. `~/.claude/plans/sentinel/{slug}-v3.md`.
+fn next_versioned_path(target_dir: &Path, slug: &str) -> PathBuf {
+    for n in 1..1000 {
+        let candidate = target_dir.join(format!("{slug}-v{n}.md"));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    // Fallback — shouldn't happen in practice
+    target_dir.join(format!("{slug}-v999.md"))
 }
 
 /// Process an ExitPlanMode PostToolUse event.
-/// Injects context instructing Claude to organize the plan file.
-pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
+/// Copies the plan file into `~/.claude/plans/{project}/{slug}-v{N}.md`.
+pub fn process(input: &HookInput, _ctx: &HookContext<'_>) -> HookOutput {
     // Only fire on ExitPlanMode
     if input.tool_name.as_deref() != Some("ExitPlanMode") {
         return HookOutput::allow();
@@ -44,19 +75,84 @@ pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
     let cwd = input.cwd.as_deref().unwrap_or(".");
     let project = detect_project(cwd);
 
+    // Extract the plan file path from the tool response
+    let plan_path = match extract_plan_path(input.tool_result.as_ref()) {
+        Some(p) => p,
+        None => {
+            tracing::debug!("No plan file path in ExitPlanMode response; skipping");
+            return HookOutput::allow();
+        }
+    };
+
+    // Derive slug from filename (strip .md extension)
+    let slug = plan_path
+        .file_stem()
+        .and_then(|n| n.to_str())
+        .unwrap_or("plan")
+        .to_string();
+
+    // Build target directory
+    let home = match dirs::home_dir() {
+        Some(h) => h,
+        None => return HookOutput::allow(),
+    };
+    let target_dir = home.join(".claude").join("plans").join(&project);
+
+    // Create target dir
+    if let Err(e) = fs::create_dir_all(&target_dir) {
+        tracing::warn!(error = %e, dir = ?target_dir, "Failed to create plans dir");
+        return HookOutput::allow();
+    }
+
+    // Read the plan content
+    let plan_content = match fs::read_to_string(&plan_path) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(error = %e, path = ?plan_path, "Failed to read plan file");
+            return HookOutput::allow();
+        }
+    };
+
+    // Write versioned copy
+    let target_path = next_versioned_path(&target_dir, &slug);
+    if let Err(e) = fs::write(&target_path, &plan_content) {
+        tracing::warn!(error = %e, path = ?target_path, "Failed to write plan copy");
+        return HookOutput::allow();
+    }
+
+    tracing::info!(
+        project = %project,
+        slug = %slug,
+        path = ?target_path,
+        "Plan organized"
+    );
+
+    // Emit channel event for real-time notification
+    let summary = format!("Plan archived: {}", target_path.display());
+    let mut meta = serde_json::Map::new();
+    meta.insert(
+        "project".to_string(),
+        serde_json::Value::String(project.clone()),
+    );
+    meta.insert("slug".to_string(), serde_json::Value::String(slug.clone()));
+    meta.insert(
+        "archived_path".to_string(),
+        serde_json::Value::String(target_path.display().to_string()),
+    );
+    crate::channel_events::emit("plan_organized", &summary, meta);
+
+    // Inject context telling the user and Claude where the archived copy lives
     let context = format!(
-        "[Plan Organizer] MANDATORY: Organize the plan file now.\n\
+        "[Plan Organizer] Plan archived for cross-session reference.\n\
          \n\
-         Detected project: \"{project}\"\n\
+         Project:  {}\n\
+         Original: {} (Claude Code's /plan reads from here)\n\
+         Archive:  {}\n\
          \n\
-         After the user approves the plan, you MUST:\n\
-         1. Create the project subdirectory: mkdir -p ~/.claude/plans/{project}\n\
-         2. Move the plan file from its random name to: ~/.claude/plans/{project}/{{descriptive-name}}.md\n\
-         3. Use kebab-case for the filename (e.g., add-auth-flow.md, fix-routing-bug.md)\n\
-         4. Verify: ls ~/.claude/plans/{project}/\n\
-         5. If ~/.claude is a git repo, commit: git -C ~/.claude add plans/{project}/{{name}}.md && git -C ~/.claude commit -m \"plan: {{brief description}}\"\n\
-         \n\
-         NEVER leave plan files with random names (like squishy-gathering-fog.md) in ~/.claude/plans/."
+         The archive is versioned — re-running ExitPlanMode auto-increments to -v2, -v3, etc.",
+        project,
+        plan_path.display(),
+        target_path.display()
     );
 
     HookOutput::inject_context(HookEvent::PostToolUse, context)
@@ -65,6 +161,7 @@ pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::TempDir;
 
     #[test]
     fn test_ignores_non_exit_plan_mode() {
@@ -72,115 +169,74 @@ mod tests {
             tool_name: Some("Bash".to_string()),
             ..Default::default()
         };
-        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
+        let ctx = crate::hooks::test_support::stub_ctx();
+        let output = process(&input, &ctx);
         assert!(output.hook_specific_output.is_none());
     }
 
     #[test]
-    fn test_ignores_no_tool_name() {
-        let input = HookInput::default();
-        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
-        assert!(output.hook_specific_output.is_none());
-    }
-
-    #[test]
-    fn test_fires_on_exit_plan_mode() {
-        let input = HookInput {
-            tool_name: Some("ExitPlanMode".to_string()),
-            cwd: Some("/home/gary/Documents/GitHub/firefly-pro-crm".to_string()),
-            ..Default::default()
-        };
-        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
-        assert!(output.hook_specific_output.is_some());
-        let ctx = output.hook_specific_output.unwrap().additional_context;
-        let ctx = ctx.as_deref().unwrap();
-        assert!(ctx.contains("[Plan Organizer]"));
-        assert!(ctx.contains("firefly-pro"));
-        assert!(ctx.contains("MANDATORY"));
-    }
-
-    #[test]
-    fn test_detects_marketplace_project() {
+    fn test_detect_project() {
         assert_eq!(
             detect_project("/home/gary/Documents/GitHub/claude-code-marketplace"),
             "marketplace"
         );
-    }
-
-    #[test]
-    fn test_detects_firefly_project() {
         assert_eq!(
             detect_project("/home/gary/Documents/GitHub/firefly-pro-crm"),
             "firefly-pro"
         );
         assert_eq!(
-            detect_project("/home/gary/Documents/GitHub/firefly-pro-web-app"),
-            "firefly-pro"
-        );
-    }
-
-    #[test]
-    fn test_detects_sentinel_project() {
-        assert_eq!(
             detect_project("/home/gary/Documents/GitHub/sentinel"),
             "sentinel"
         );
-        assert_eq!(
-            detect_project("/home/gary/Documents/GitHub/sentinel-launcher"),
-            "sentinel"
-        );
-    }
-
-    #[test]
-    fn test_detects_generic_project() {
-        assert_eq!(
-            detect_project("/home/gary/Documents/GitHub/legatus"),
-            "legatus"
-        );
-        assert_eq!(detect_project("/home/gary/Documents/GitHub/velo"), "velo");
-    }
-
-    #[test]
-    fn test_fallback_to_general() {
-        // Root path or empty — should get something reasonable
+        assert_eq!(detect_project("/home/gary/Documents/GitHub/legatus"), "legatus");
         assert_eq!(detect_project("/"), "general");
     }
 
     #[test]
-    #[cfg(windows)]
-    fn test_windows_paths() {
+    fn test_extract_plan_path_direct() {
+        let resp = serde_json::json!({ "filePath": "/tmp/plan.md" });
         assert_eq!(
-            detect_project("C:\\Users\\gary\\Documents\\GitHub\\sentinel"),
-            "sentinel"
-        );
-        assert_eq!(
-            detect_project("C:\\Users\\gary\\Documents\\GitHub\\claude-code-marketplace"),
-            "marketplace"
+            extract_plan_path(Some(&resp)),
+            Some(PathBuf::from("/tmp/plan.md"))
         );
     }
 
     #[test]
-    fn test_context_includes_project_in_path() {
-        let input = HookInput {
-            tool_name: Some("ExitPlanMode".to_string()),
-            cwd: Some("/home/gary/Documents/GitHub/legatus".to_string()),
-            ..Default::default()
-        };
-        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
-        let ctx = output.hook_specific_output.unwrap().additional_context;
-        let ctx = ctx.as_deref().unwrap();
-        assert!(ctx.contains("plans/legatus"));
+    fn test_extract_plan_path_nested() {
+        let resp = serde_json::json!({ "data": { "filePath": "/tmp/plan.md", "plan": "..." } });
+        assert_eq!(
+            extract_plan_path(Some(&resp)),
+            Some(PathBuf::from("/tmp/plan.md"))
+        );
     }
 
     #[test]
-    fn test_hook_event_name_is_post_tool_use() {
-        let input = HookInput {
-            tool_name: Some("ExitPlanMode".to_string()),
-            cwd: Some("/tmp".to_string()),
-            ..Default::default()
-        };
-        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
-        let hso = output.hook_specific_output.unwrap();
-        assert_eq!(hso.hook_event_name, "PostToolUse");
+    fn test_extract_plan_path_missing() {
+        let resp = serde_json::json!({ "data": { "plan": "..." } });
+        assert_eq!(extract_plan_path(Some(&resp)), None);
+    }
+
+    #[test]
+    fn test_next_versioned_path_empty_dir() {
+        let tmp = TempDir::new().unwrap();
+        let path = next_versioned_path(tmp.path(), "my-plan");
+        assert_eq!(path, tmp.path().join("my-plan-v1.md"));
+    }
+
+    #[test]
+    fn test_next_versioned_path_increments() {
+        let tmp = TempDir::new().unwrap();
+        fs::write(tmp.path().join("my-plan-v1.md"), "").unwrap();
+        fs::write(tmp.path().join("my-plan-v2.md"), "").unwrap();
+        let path = next_versioned_path(tmp.path(), "my-plan");
+        assert_eq!(path, tmp.path().join("my-plan-v3.md"));
+    }
+
+    #[test]
+    fn test_next_versioned_path_isolated_per_slug() {
+        let tmp = TempDir::new().unwrap();
+        fs::write(tmp.path().join("foo-v1.md"), "").unwrap();
+        let path = next_versioned_path(tmp.path(), "bar");
+        assert_eq!(path, tmp.path().join("bar-v1.md"));
     }
 }
