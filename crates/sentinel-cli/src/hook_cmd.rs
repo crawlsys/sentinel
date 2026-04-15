@@ -159,18 +159,13 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
 
     match hook_event {
         HookEvent::UserPromptSubmit => {
-            // Skill router — classify and route to matching skill
-            // Uses AI classification (Cerebras/OpenAI) with regex fallback.
-            // Wrapped in a 5-second timeout as a safety net — if the entire
-            // routing pipeline hangs, fall back to regex-only routing so the
-            // user's message is never silently blocked.
-            let router = hooks::skill_router::default_router();
+            // Skill router — Opus AI classification on EVERY message.
+            // No regex fallback. If AI fails or times out, return no-match.
             let classifier = sentinel_infrastructure::rig_classifier::RigClassifier::from_env();
             let router_output = match tokio::time::timeout(
-                std::time::Duration::from_secs(5),
-                hooks::skill_router::process_with_ai(
+                std::time::Duration::from_secs(8),
+                hooks::skill_router::process(
                     &input,
-                    &router,
                     classifier
                         .as_ref()
                         .map(|c| c as &dyn sentinel_application::classifier::AiClassifier),
@@ -180,8 +175,8 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
             {
                 Ok(output) => output,
                 Err(_) => {
-                    debug!("Skill router timed out (5s) — falling back to regex-only");
-                    hooks::skill_router::process(&input, &router)
+                    tracing::warn!("Skill router timed out (8s) — no routing for this message");
+                    hooks::skill_router::build_no_match_output()
                 }
             };
             output.merge(&router_output);
