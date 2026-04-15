@@ -792,45 +792,47 @@ These rules apply to ALL sessions regardless of mode:
 
 **MANDATORY:** On your FIRST response of each session, create ALL of the following cron jobs using `CronCreate`. These run automatically in the background while you work.
 
-### Always-On Monitoring (create immediately)
+### Cron Jobs (create immediately — no external event source, must poll)
 
-1. **MCP Health Check** — every 15 minutes
-   ```
-   CronCreate(cron: "*/15 * * * *", recurring: true,
-     prompt: "Run mcp__sentinel__mcp_health_check. If any MCP server is unhealthy, try mcp__sentinel__mcp_restart_server to fix it. Report only if something is wrong.")
-   ```
-
-2. **Git Hygiene** — hourly at :03
+1. **Git Hygiene** — hourly at :03
    ```
    CronCreate(cron: "3 * * * *", recurring: true,
      prompt: "Check for unpushed commits: run git log @{{upstream}}..HEAD --oneline. Check for uncommitted changes: run git status --short. If either has results, remind Gary to push or commit.")
    ```
 
-3. **Worktree Cleanup** — hourly at :17
+2. **Worktree Cleanup** — hourly at :17
    ```
    CronCreate(cron: "17 * * * *", recurring: true,
      prompt: "Run git worktree list. For each worktree, check if its branch is merged into main with git branch --merged main. Report any stale worktrees that should be cleaned up.")
    ```
 
-4. **Task Audit** — hourly at :33
+3. **Task Audit** — hourly at :33
    ```
    CronCreate(cron: "33 * * * *", recurring: true,
      prompt: "Run TaskList. Report any tasks that are in_progress but appear stale (no recent activity). Remind Gary of pending work.")
    ```
 
-5. **Context Monitor** — every 30 minutes
-   ```
-   CronCreate(cron: "*/30 * * * *", recurring: true,
-     prompt: "Check context window usage. If above 65%, start delegating to agents. If above 75%, warn Gary that auto-compact is approaching.")
-   ```
+### Sentinel Channel Events (push — no cron needed)
 
-### Event-Triggered Automation (sentinel hooks handle these)
+These push into the session automatically via sentinel's Vulcan channel system:
+- **MCP server failure** → `mcp_health` hook pushes instantly when any MCP tool call fails
+- **Context window warning** → `context_monitor` hook pushes when usage enters yellow/orange/red zone
+- **Build/deploy completion** → `build_notify` hook pushes when cargo build, test, or git push finishes
 
-Sentinel hooks automatically inject CronCreate instructions when these events occur:
+### Hookdeck Channel Events (external webhook push — no cron needed)
+
+These arrive in real-time from external services via Hookdeck webhook gateway:
+- **GitHub CI failures** → `check_run.completed` webhook → instant notification
+- **PR review comments** → `pull_request_review.submitted` webhook → instant notification
+- **Linear issue updates** → `Issue.update` webhook → instant notification
+- **Vercel deploy status** → `deployment.ready`/`deployment.error` webhook → instant notification
+
+### Event-Triggered Automation (sentinel hooks inject CronCreate)
+
+Sentinel hooks detect specific tool calls and inject CronCreate for monitoring:
 - **PR created** (`gh pr create`) → auto-monitor CI, reviews, conflicts every 5 min
 - **Push to PR branch** (`git push`) → check CI results, notify on completion
 - **Merge to main** → verify push happened, changelog updated
-- **Background build** (`cargo build --release &`) → monitor completion
 - **Linear issue claimed** → track lifecycle, remind on blockers
 
 You do NOT need to create these manually — sentinel injects them via hooks.
