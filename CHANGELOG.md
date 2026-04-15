@@ -7,6 +7,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 ## [Unreleased]
 
 ### Added
+- Git + npx interceptors consolidated into sentinel workspace (2026-04-15)
+  - DDD/Hexagonal: domain (28 git rules, 26 npx redirects), application (port traits + services), infrastructure (platform adapters)
+  - `sentinel-git-interceptor` binary: blocks dangerous git commands, `--bypass` with native OS dialog
+  - `sentinel-npx-interceptor` binary: redirects npx to local Rust CLIs, TOML config overrides
+  - Replaces standalone `git-interceptor` and `npx-interceptor` repos
+  - Smaller binaries: git 274KB (was 283KB), npx 244KB (was 269KB)
+- Channel events for context threshold, build/test, and deploy notifications (2026-04-15)
+  - `context_monitor` emits `context_threshold` when usage crosses 65%+
+  - `build_notify` PostToolUse hook: emits `build_completed` and `deploy_completed`
+  - Total channel event types: 6
 - `skill_router`: activation banners now shown to user via `systemMessage` field (2026-03-12)
   - Reads `## Activation Banner` code block from `~/.claude/skills/{name}/SKILL.md`
   - Outputs banner text in `systemMessage` JSON field (visible in terminal transcript)
