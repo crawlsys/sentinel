@@ -11,6 +11,7 @@ pub mod anthropic;
 pub mod config;
 pub mod error_log;
 pub mod git;
+pub mod interceptor;
 pub mod ipc;
 pub mod mcp_transport;
 pub mod proof_store;

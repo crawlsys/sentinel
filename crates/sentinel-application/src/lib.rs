@@ -9,6 +9,7 @@ pub mod classifier;
 pub mod engine;
 pub mod gate;
 pub mod hooks;
+pub mod interceptor;
 pub mod judge_service;
 pub mod mcp_handler;
 pub mod project_init;
