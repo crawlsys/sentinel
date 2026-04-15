@@ -147,6 +147,22 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     // Check for errors in the tool result
     if let Some(error_detail) = detect_error(input) {
         log_mcp_error(ctx.fs, tool_name, server_name, &error_detail, session_id);
+
+        // Push failure event via channel for instant notification
+        let severity = if error_detail.contains("refused") || error_detail.contains("spawn") {
+            "critical"
+        } else {
+            "warning"
+        };
+        let mut meta = serde_json::Map::new();
+        meta.insert("server".into(), serde_json::Value::String(server_name.to_string()));
+        meta.insert("tool".into(), serde_json::Value::String(tool_name.to_string()));
+        meta.insert("severity".into(), serde_json::Value::String(severity.to_string()));
+        crate::channel_events::emit(
+            "mcp_server_failure",
+            &format!("MCP server `{server_name}` failed: {error_detail}. Try `mcp__sentinel__mcp_restart_server` to fix."),
+            meta,
+        );
     }
 
     // Never block — this hook is observational only
