@@ -2144,6 +2144,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "sentinel-git-interceptor"
+version = "0.1.0"
+dependencies = [
+ "sentinel-application",
+ "sentinel-domain",
+ "sentinel-infrastructure",
+]
+
+[[package]]
 name = "sentinel-infrastructure"
 version = "0.1.0"
 dependencies = [
@@ -2171,6 +2180,15 @@ dependencies = [
  "toml",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "sentinel-npx-interceptor"
+version = "0.1.0"
+dependencies = [
+ "sentinel-application",
+ "sentinel-domain",
+ "sentinel-infrastructure",
 ]
 
 [[package]]

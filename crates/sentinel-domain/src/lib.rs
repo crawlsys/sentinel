@@ -6,6 +6,7 @@
 pub mod constants;
 pub mod dependency;
 pub mod events;
+pub mod interceptor;
 pub mod evidence;
 pub mod hooks;
 pub mod judge;
