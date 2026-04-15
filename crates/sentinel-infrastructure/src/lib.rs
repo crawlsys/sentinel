@@ -1,7 +1,7 @@
 //! Sentinel Infrastructure Layer
 //!
 //! IO, HTTP clients, filesystem, git operations.
-//! Implements ports defined in the application layer.
+//! Implements ports defined in the domain layer (`sentinel_domain::ports`).
 
 pub mod activity_log;
 pub mod filesystem;

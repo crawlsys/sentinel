@@ -15,7 +15,7 @@ use sentinel_domain::state::SessionState;
 use sentinel_domain::workflow::{SkillSteps, SkillWorkflow};
 
 use std::sync::Arc;
-use sentinel_application::hooks::VectorStorePort;
+use sentinel_domain::ports::VectorStorePort;
 
 /// Infrastructure implementation of GitStatusPort
 struct RealGit;

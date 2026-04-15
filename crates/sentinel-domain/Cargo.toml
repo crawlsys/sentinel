@@ -16,6 +16,8 @@ uuid = { workspace = true }
 regex = { workspace = true }
 petgraph = { workspace = true }
 sha2 = { workspace = true }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

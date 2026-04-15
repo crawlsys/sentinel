@@ -4,7 +4,7 @@
 //! server-side embedding model configuration.
 
 use anyhow::{Context, Result};
-use sentinel_application::hooks::{VectorPoint, VectorScrollResult, VectorSearchHit, VectorStorePort};
+use sentinel_domain::ports::{VectorPoint, VectorScrollResult, VectorSearchHit, VectorStorePort};
 use tracing::debug;
 
 /// Qdrant Cloud configuration.

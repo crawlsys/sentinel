@@ -4,7 +4,7 @@
 //! with a mock filesystem that doesn't touch real disk.
 
 use anyhow::{Context, Result};
-use sentinel_application::hooks::FileSystemPort;
+use sentinel_domain::ports::FileSystemPort;
 use std::path::{Path, PathBuf};
 
 /// Infrastructure adapter implementing `FileSystemPort` via real std::fs.
