@@ -7,8 +7,8 @@ use sentinel_domain::events::{HookInput, HookOutput};
 
 /// Process SubagentStop event
 ///
-/// Logs agent completion for telemetry. Uses stderr (exit 0) since
-/// SubagentStop stdout is not injected into model context.
+/// Logs agent completion for telemetry and emits a channel event
+/// so the sentinel-mcp server can push a notification into the session.
 pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
     let agent_type = input
         .extra
@@ -18,8 +18,15 @@ pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
 
     tracing::debug!(agent_type, "Subagent stopping");
 
-    // SubagentStop is like Stop — stdout not injected.
-    // Log for telemetry, but don't try to inject context.
+    // Emit channel event for real-time push notification
+    let summary = format!("Background agent ({agent_type}) has finished.");
+    let mut meta = serde_json::Map::new();
+    meta.insert(
+        "agent_type".to_string(),
+        serde_json::Value::String(agent_type.to_string()),
+    );
+    crate::channel_events::emit("agent_completed", &summary, meta);
+
     HookOutput::allow()
 }
 

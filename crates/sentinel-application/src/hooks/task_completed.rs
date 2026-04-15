@@ -89,6 +89,23 @@ pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
         ));
     }
 
+    // Emit channel event for real-time push notification
+    let summary = format!("Task #{task_id} completed: '{task_subject}' (by {teammate_name})");
+    let mut meta = serde_json::Map::new();
+    meta.insert(
+        "task_id".to_string(),
+        serde_json::Value::String(task_id.to_string()),
+    );
+    meta.insert(
+        "task_subject".to_string(),
+        serde_json::Value::String(task_subject.to_string()),
+    );
+    meta.insert(
+        "teammate_name".to_string(),
+        serde_json::Value::String(teammate_name.to_string()),
+    );
+    crate::channel_events::emit("task_completed", &summary, meta);
+
     HookOutput::inject_context(HookEvent::TaskCompleted, &context)
 }
 

@@ -33,6 +33,19 @@ pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
         teammate_name, team_name
     );
 
+    // Emit channel event so the lead session gets a real-time push notification
+    let summary = format!("Teammate '{teammate_name}' (team: {team_name}) is going idle.");
+    let mut meta = serde_json::Map::new();
+    meta.insert(
+        "teammate_name".to_string(),
+        serde_json::Value::String(teammate_name.to_string()),
+    );
+    meta.insert(
+        "team_name".to_string(),
+        serde_json::Value::String(team_name.to_string()),
+    );
+    crate::channel_events::emit("teammate_idle", &summary, meta);
+
     HookOutput::inject_context(HookEvent::TeammateIdle, &context)
 }
 
