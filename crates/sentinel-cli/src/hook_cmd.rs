@@ -288,10 +288,14 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
                 state.record_blocked();
             }
 
-            // Git hygiene — check uncommitted changes (only for Edit/Write)
+            // Git hygiene — block on protected branch without worktree + uncommitted file limit
             if matches!(input.tool_name.as_deref(), Some("Edit" | "Write")) {
                 let hygiene_output = hooks::git_hygiene::process(&input, &git);
                 output.merge(&hygiene_output);
+
+                // Tool usage gate — require sequential thinking + task creation
+                let usage_output = hooks::tool_usage_gate::process(&input, ctx.fs);
+                output.merge(&usage_output);
             }
 
             // Pre-commit verification — block git commit/push without test evidence (Bash only)
@@ -348,6 +352,18 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
             // Account cascade — auto-switch all MCP servers after account change
             let cascade_output = hooks::account_cascade::process(&input, &ctx);
             output.merge(&cascade_output);
+
+            // Tool usage gate — track sequential thinking and task creation markers
+            if let Some(session_id) = input.session_id.as_deref() {
+                if let Some(tool) = input.tool_name.as_deref() {
+                    if tool.contains("sequentialthinking") {
+                        hooks::tool_usage_gate::mark_sequential_thinking_used(ctx.fs, session_id);
+                    }
+                    if tool == "TaskCreate" {
+                        hooks::tool_usage_gate::mark_task_created(ctx.fs, session_id);
+                    }
+                }
+            }
         }
 
         HookEvent::Stop => {
@@ -491,6 +507,11 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
             // Log task creation for telemetry
             let task_output = hooks::task_created::process(&input, &ctx);
             output.merge(&task_output);
+
+            // Tool usage gate — mark task created for this session
+            if let Some(session_id) = input.session_id.as_deref() {
+                hooks::tool_usage_gate::mark_task_created(ctx.fs, session_id);
+            }
 
             // Task persist — snapshot task list to persistent markdown + JSON
             let persist_output = hooks::task_persist::process(&input, &ctx);

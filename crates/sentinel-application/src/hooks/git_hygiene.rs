@@ -1,12 +1,12 @@
 //! Git Hygiene Gate
 //!
 //! Blocks Edit/Write tools when uncommitted changes exceed thresholds.
-//! Warns when editing directly on main/master (should use feature branches).
+//! Hard-blocks editing on main/master without a worktree.
 //! All git operations go through the injected GitStatusPort — no direct
 //! std::process::Command calls.
 
 use sentinel_domain::constants;
-use sentinel_domain::events::{HookEvent, HookInput, HookOutput};
+use sentinel_domain::events::{HookInput, HookOutput};
 
 use super::GitStatusPort;
 
@@ -33,17 +33,14 @@ pub fn process(input: &HookInput, git: &dyn GitStatusPort) -> HookOutput {
 
     let cwd = input.cwd.as_deref().unwrap_or(".");
 
-    // Check 1: Warn if on a protected branch and not in a worktree
+    // Check 1: BLOCK if on a protected branch and not in a worktree
     if let Ok(branch) = git.current_branch(cwd) {
         if PROTECTED_BRANCHES.contains(&branch.as_str()) && !git.is_worktree(cwd) {
-            return HookOutput::inject_context(
-                HookEvent::PreToolUse,
-                format!(
-                    "[Git Hygiene] You are editing directly on `{branch}`. \
-                     Use `EnterWorktree` to create an isolated branch first. \
-                     Direct edits to {branch} should be avoided — use feature branches."
-                ),
-            );
+            return HookOutput::deny(format!(
+                "[Git Hygiene] BLOCKED: editing directly on `{branch}` without a worktree. \
+                 Use `EnterWorktree` to create an isolated branch first. \
+                 Direct edits to protected branches are not allowed."
+            ));
         }
     }
 
@@ -184,7 +181,7 @@ mod tests {
     }
 
     #[test]
-    fn test_warns_on_main_without_worktree() {
+    fn test_blocks_on_main_without_worktree() {
         let git = StubGit::on_main();
         let input = HookInput {
             tool_name: Some("Edit".to_string()),
@@ -192,12 +189,7 @@ mod tests {
             ..Default::default()
         };
         let output = process(&input, &git);
-        let ctx = output
-            .hook_specific_output
-            .as_ref()
-            .and_then(|h| h.additional_context.as_deref());
-        assert!(ctx.is_some(), "Should inject branch warning");
-        assert!(ctx.unwrap().contains("main"));
+        assert_eq!(output.blocked, Some(true), "Should hard-block edits on main without worktree");
     }
 
     #[test]

@@ -69,7 +69,15 @@ has_api_call = false
 id = "git-hygiene-gate"
 event = "PreToolUse"
 matcher = ["Edit", "Write"]
-description = "Block edits when uncommitted changes exceed thresholds"
+description = "Block edits on protected branch without worktree or too many uncommitted files"
+depends_on = []
+has_api_call = false
+
+[[hooks]]
+id = "tool-usage-gate"
+event = "PreToolUse"
+matcher = ["Edit", "Write"]
+description = "Block edits without sequential thinking or task creation"
 depends_on = []
 has_api_call = false
 
