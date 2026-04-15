@@ -11,13 +11,16 @@ pub mod commit_hygiene;
 pub mod commit_message_validator;
 pub mod context_monitor;
 pub mod cwd_changed;
+pub mod db_ops_gate;
 pub mod doc_cleanup;
 pub mod doc_drift;
+pub mod doppler_auth0_gate;
 pub mod error_reporter;
 pub mod evidence_collector;
 pub mod execution_log;
 pub mod git_hygiene;
 pub mod hygiene_override;
+pub mod hygiene_reminders;
 pub mod mcp_health;
 pub mod memory_extract;
 pub mod memory_feedback;
@@ -28,6 +31,7 @@ pub mod phase_gate;
 pub mod phase_validator;
 pub mod plan_organizer;
 pub mod post_compact;
+pub mod pr_merge_gate;
 pub mod pre_commit_verification;
 pub mod pre_compact;
 pub mod pre_push_steel_test;
@@ -78,13 +82,16 @@ pub const HOOK_NAMES: &[&str] = &[
     "commit_message_validator",
     "context_monitor",
     "cwd_changed",
+    "db_ops_gate",
     "doc_cleanup",
     "doc_drift",
+    "doppler_auth0_gate",
     "error_reporter",
     "evidence_collector",
     "execution_log",
     "git_hygiene",
     "hygiene_override",
+    "hygiene_reminders",
     "mcp_health",
     "memory_extract",
     "memory_feedback",
@@ -95,6 +102,7 @@ pub const HOOK_NAMES: &[&str] = &[
     "phase_validator",
     "plan_organizer",
     "post_compact",
+    "pr_merge_gate",
     "pre_commit_verification",
     "pre_compact",
     "pre_push_steel_test",
@@ -217,6 +225,7 @@ pub mod test_support {
         fn changed_files(&self, _: &str) -> anyhow::Result<Vec<String>> { Ok(vec![]) }
         fn current_branch(&self, _: &str) -> anyhow::Result<String> { Ok("main".into()) }
         fn is_worktree(&self, _: &str) -> bool { false }
+        fn has_unpushed_commits(&self, _: &str) -> anyhow::Result<bool> { Ok(false) }
     }
 
     pub struct StubFs;

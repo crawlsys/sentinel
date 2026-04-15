@@ -82,6 +82,29 @@ depends_on = []
 has_api_call = false
 
 [[hooks]]
+id = "doppler-auth0-gate"
+event = "PreToolUse"
+description = "Block Doppler/Auth0 mutation tools without explicit permission"
+depends_on = []
+has_api_call = false
+
+[[hooks]]
+id = "pr-merge-gate"
+event = "PreToolUse"
+matcher = ["Bash"]
+description = "Block gh pr merge without explicit user confirmation"
+depends_on = []
+has_api_call = false
+
+[[hooks]]
+id = "db-ops-gate"
+event = "PreToolUse"
+matcher = ["Bash"]
+description = "Block production database migrations and destructive operations"
+depends_on = []
+has_api_call = false
+
+[[hooks]]
 id = "todo-interceptor"
 event = "PreToolUse"
 description = "Track todo-related tool calls"
@@ -105,6 +128,13 @@ depends_on = []
 has_api_call = false
 
 # === Stop ===
+
+[[hooks]]
+id = "hygiene-reminders"
+event = "Stop"
+description = "Detect unpushed commits, stale worktrees, missing changelog updates"
+depends_on = []
+has_api_call = false
 
 [[hooks]]
 id = "context-monitor"

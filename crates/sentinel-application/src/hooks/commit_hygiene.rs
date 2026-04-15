@@ -197,6 +197,9 @@ mod tests {
         fn is_worktree(&self, _: &str) -> bool {
             false
         }
+        fn has_unpushed_commits(&self, _: &str) -> anyhow::Result<bool> {
+            Ok(false)
+        }
     }
 
     fn make_ctx(git: &dyn GitStatusPort) -> HookContext<'_> {

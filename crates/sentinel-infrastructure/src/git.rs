@@ -77,6 +77,27 @@ pub fn has_uncommitted_changes(repo_path: &str) -> Result<bool> {
     Ok(!output.stdout.is_empty())
 }
 
+/// Check if local branch has commits not yet pushed to remote.
+/// Returns false if there's no remote tracking branch (not an error).
+pub fn has_unpushed_commits(repo_path: &str) -> Result<bool> {
+    let output = Command::new("git")
+        .args(["rev-list", "--count", "@{upstream}..HEAD"])
+        .current_dir(repo_path)
+        .output()
+        .context("Failed to check unpushed commits")?;
+
+    if !output.status.success() {
+        // No upstream tracking branch — not an error, just no push target
+        return Ok(false);
+    }
+
+    let count: usize = String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse()
+        .unwrap_or(0);
+    Ok(count > 0)
+}
+
 /// Get the repository root directory
 pub fn repo_root(start_path: &str) -> Result<String> {
     let output = run_git(

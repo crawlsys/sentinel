@@ -37,6 +37,10 @@ impl hooks::GitStatusPort for RealGit {
         // Worktrees have .git as a file (pointing to the main repo), not a directory
         std::path::Path::new(repo_path).join(".git").is_file()
     }
+
+    fn has_unpushed_commits(&self, repo_path: &str) -> Result<bool> {
+        sentinel_infrastructure::git::has_unpushed_commits(repo_path)
+    }
 }
 
 pub async fn run(event: &str, matcher: Option<&str>, standalone: bool) -> Result<()> {
@@ -274,6 +278,10 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
             let activity_prompt_output = hooks::activity_tracker::process_prompt(&input, &ctx);
             output.merge(&activity_prompt_output);
 
+            // Hygiene reminders — inject push/worktree/changelog reminders
+            let reminders_prompt_output = hooks::hygiene_reminders::process_prompt(&ctx);
+            output.merge(&reminders_prompt_output);
+
             // Memory inject — search Qdrant for semantically relevant memories
             let memory_output = hooks::memory_inject::process(&input, &ctx);
             output.merge(&memory_output);
@@ -298,6 +306,10 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
                 output.merge(&usage_output);
             }
 
+            // Doppler/Auth0 gate — block mutation tools (any tool type)
+            let doppler_output = hooks::doppler_auth0_gate::process(&input);
+            output.merge(&doppler_output);
+
             // Pre-commit verification — block git commit/push without test evidence (Bash only)
             if matches!(input.tool_name.as_deref(), Some("Bash")) {
                 let commit_output = hooks::pre_commit_verification::process(&input, &ctx);
@@ -314,6 +326,14 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
                 // Wrangler guard — block Node wrangler deploy, gate deletes (Bash only)
                 let wrangler_output = hooks::wrangler_guard::process(&input, &ctx);
                 output.merge(&wrangler_output);
+
+                // PR merge gate — block gh pr merge without confirmation (Bash only)
+                let pr_output = hooks::pr_merge_gate::process(&input);
+                output.merge(&pr_output);
+
+                // DB ops gate — block production database operations (Bash only)
+                let db_output = hooks::db_ops_gate::process(&input);
+                output.merge(&db_output);
             }
         }
 
@@ -392,6 +412,10 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
             // Doc drift — detect stale README/CLAUDE.md/CHANGELOG
             let drift_output = hooks::doc_drift::process_stop(&input, &ctx);
             output.merge(&drift_output);
+
+            // Hygiene reminders — detect unpushed commits, stale worktrees, changelog gaps
+            let reminders_output = hooks::hygiene_reminders::process_stop(&input, &ctx);
+            output.merge(&reminders_output);
 
             // Verification gate — detect unverified completion claims
             let verify_output = hooks::verification_gate::process_stop(&input, &ctx);

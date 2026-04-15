@@ -114,6 +114,9 @@ mod tests {
         fn is_worktree(&self, _repo_path: &str) -> bool {
             self.worktree
         }
+        fn has_unpushed_commits(&self, _repo_path: &str) -> anyhow::Result<bool> {
+            Ok(false)
+        }
     }
 
     #[test]

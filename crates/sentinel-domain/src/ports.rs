@@ -27,6 +27,9 @@ pub trait GitStatusPort {
 
     /// Check if the path is inside a git worktree (not the main working tree).
     fn is_worktree(&self, repo_path: &str) -> bool;
+
+    /// Check if local branch has commits not yet pushed to remote.
+    fn has_unpushed_commits(&self, repo_path: &str) -> anyhow::Result<bool>;
 }
 
 // ---------------------------------------------------------------------------
