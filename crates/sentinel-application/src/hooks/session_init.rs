@@ -743,17 +743,18 @@ fn generate_claude_md(
 ## Table of Contents
 1. [User Preferences](#user-preferences)
 2. [Required Tool Usage](#required-tool-usage)
-3. [Date Context](#date-context)
-4. [Marketplace Architecture](#marketplace-architecture)
-5. [Using Slash Commands](#using-slash-commands)
-6. [Using Agents](#using-agents)
-7. [Using Skills](#using-skills)
-8. [Changelog & Version Tracking](#changelog--version-tracking)
-9. [Plans & Documentation](#plans--documentation)
-10. [Session Resume](#session-resume)
-11. [Context Management](#context-management)
-12. [`Autopilot` | `Planned` Mode Switch](#autopilot--planned-mode-switch)
-13. [Marketplace Stats](#marketplace-stats)
+3. [Session Automation](#session-automation)
+4. [Date Context](#date-context)
+5. [Marketplace Architecture](#marketplace-architecture)
+6. [Using Slash Commands](#using-slash-commands)
+7. [Using Agents](#using-agents)
+8. [Using Skills](#using-skills)
+9. [Changelog & Version Tracking](#changelog--version-tracking)
+10. [Plans & Documentation](#plans--documentation)
+11. [Session Resume](#session-resume)
+12. [Context Management](#context-management)
+13. [`Autopilot` | `Planned` Mode Switch](#autopilot--planned-mode-switch)
+14. [Marketplace Stats](#marketplace-stats)
 
 ---
 
@@ -786,6 +787,61 @@ These rules apply to ALL sessions regardless of mode:
 1. **Sequential Thinking** — For any non-trivial task (implementation, debugging, planning, refactoring, multi-step analysis), ALWAYS use `mcp__sequential-thinking__sequentialthinking` to break down the problem before taking action. Think through the approach step by step before writing any code or making changes.
 2. **Ask User Questions** — For non-trivial tasks, use `AskUserQuestion` to validate assumptions and surface unknowns before proceeding with implementation. Do not guess at requirements — ask what you don't know.
 3. **Blocking Tasks** — ALWAYS use `TaskCreate` to create tracked tasks for every piece of work. Break work into discrete steps and mark each as `in_progress` when starting and `completed` when done. No work should happen without a corresponding task.
+
+## Session Automation
+
+**MANDATORY:** On your FIRST response of each session, create ALL of the following cron jobs using `CronCreate`. These run automatically in the background while you work.
+
+### Always-On Monitoring (create immediately)
+
+1. **MCP Health Check** — every 15 minutes
+   ```
+   CronCreate(cron: "*/15 * * * *", recurring: true,
+     prompt: "Run mcp__sentinel__mcp_health_check. If any MCP server is unhealthy, try mcp__sentinel__mcp_restart_server to fix it. Report only if something is wrong.")
+   ```
+
+2. **Git Hygiene** — hourly at :03
+   ```
+   CronCreate(cron: "3 * * * *", recurring: true,
+     prompt: "Check for unpushed commits: run git log @{{upstream}}..HEAD --oneline. Check for uncommitted changes: run git status --short. If either has results, remind Gary to push or commit.")
+   ```
+
+3. **Worktree Cleanup** — hourly at :17
+   ```
+   CronCreate(cron: "17 * * * *", recurring: true,
+     prompt: "Run git worktree list. For each worktree, check if its branch is merged into main with git branch --merged main. Report any stale worktrees that should be cleaned up.")
+   ```
+
+4. **Task Audit** — hourly at :33
+   ```
+   CronCreate(cron: "33 * * * *", recurring: true,
+     prompt: "Run TaskList. Report any tasks that are in_progress but appear stale (no recent activity). Remind Gary of pending work.")
+   ```
+
+5. **Context Monitor** — every 30 minutes
+   ```
+   CronCreate(cron: "*/30 * * * *", recurring: true,
+     prompt: "Check context window usage. If above 65%, start delegating to agents. If above 75%, warn Gary that auto-compact is approaching.")
+   ```
+
+### Event-Triggered Automation (sentinel hooks handle these)
+
+Sentinel hooks automatically inject CronCreate instructions when these events occur:
+- **PR created** (`gh pr create`) → auto-monitor CI, reviews, conflicts every 5 min
+- **Push to PR branch** (`git push`) → check CI results, notify on completion
+- **Merge to main** → verify push happened, changelog updated
+- **Background build** (`cargo build --release &`) → monitor completion
+- **Linear issue claimed** → track lifecycle, remind on blockers
+
+You do NOT need to create these manually — sentinel injects them via hooks.
+
+### Default /loop Behavior
+
+Running bare `/loop` uses `~/.claude/loop.md` which does:
+- Continue unfinished work from the conversation
+- Babysit open PRs (CI status, review comments, merge conflicts)
+- Run cleanup (stale worktrees, uncommitted changes, forgotten tasks)
+- Check Linear for new assigned issues
 
 ## Date Context
 

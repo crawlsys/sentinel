@@ -7,6 +7,7 @@
 pub mod account_cascade;
 pub mod activity_tracker;
 mod block_context;
+pub mod build_auto_monitor;
 pub mod build_notify;
 pub mod commit_hygiene;
 pub mod commit_message_validator;
@@ -22,6 +23,7 @@ pub mod execution_log;
 pub mod git_hygiene;
 pub mod hygiene_override;
 pub mod hygiene_reminders;
+pub mod linear_lifecycle;
 pub mod mcp_health;
 pub mod memory_extract;
 pub mod memory_feedback;
@@ -32,6 +34,7 @@ pub mod phase_gate;
 pub mod phase_validator;
 pub mod plan_organizer;
 pub mod post_compact;
+pub mod pr_auto_monitor;
 pub mod pr_merge_gate;
 pub mod pre_commit_verification;
 pub mod pre_compact;
@@ -79,6 +82,7 @@ pub fn metrics_dir(home: &std::path::Path) -> std::path::PathBuf {
 pub const HOOK_NAMES: &[&str] = &[
     "account_cascade",
     "activity_tracker",
+    "build_auto_monitor",
     "commit_hygiene",
     "commit_message_validator",
     "context_monitor",
@@ -93,6 +97,7 @@ pub const HOOK_NAMES: &[&str] = &[
     "git_hygiene",
     "hygiene_override",
     "hygiene_reminders",
+    "linear_lifecycle",
     "mcp_health",
     "memory_extract",
     "memory_feedback",
@@ -103,6 +108,7 @@ pub const HOOK_NAMES: &[&str] = &[
     "phase_validator",
     "plan_organizer",
     "post_compact",
+    "pr_auto_monitor",
     "pr_merge_gate",
     "pre_commit_verification",
     "pre_compact",

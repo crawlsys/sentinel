@@ -372,6 +372,20 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
             let build_output = hooks::build_notify::process(&input, &ctx);
             output.merge(&build_output);
 
+            // PR auto-monitor — inject CronCreate for PR monitoring (Bash only)
+            if matches!(input.tool_name.as_deref(), Some("Bash")) {
+                let pr_monitor_output = hooks::pr_auto_monitor::process(&input);
+                output.merge(&pr_monitor_output);
+
+                // Build auto-monitor — suggest monitoring for background builds (Bash only)
+                let build_monitor_output = hooks::build_auto_monitor::process(&input);
+                output.merge(&build_monitor_output);
+            }
+
+            // Linear lifecycle — inject CronCreate for issue lifecycle monitoring
+            let linear_output = hooks::linear_lifecycle::process(&input);
+            output.merge(&linear_output);
+
             // Tool usage gate — track sequential thinking and task creation markers
             if let Some(session_id) = input.session_id.as_deref() {
                 if let Some(tool) = input.tool_name.as_deref() {

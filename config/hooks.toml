@@ -127,6 +127,29 @@ description = "Auto-switch all MCP servers after account_switch/account_rotate/p
 depends_on = []
 has_api_call = false
 
+[[hooks]]
+id = "pr-auto-monitor"
+event = "PostToolUse"
+matcher = ["Bash"]
+description = "Inject CronCreate for PR monitoring after gh pr create, git push, merge"
+depends_on = []
+has_api_call = false
+
+[[hooks]]
+id = "build-auto-monitor"
+event = "PostToolUse"
+matcher = ["Bash"]
+description = "Inject monitoring suggestions for background builds"
+depends_on = []
+has_api_call = false
+
+[[hooks]]
+id = "linear-lifecycle"
+event = "PostToolUse"
+description = "Inject CronCreate for Linear issue lifecycle monitoring"
+depends_on = []
+has_api_call = false
+
 # === Stop ===
 
 [[hooks]]
