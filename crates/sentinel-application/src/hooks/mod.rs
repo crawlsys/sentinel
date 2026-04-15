@@ -47,6 +47,7 @@ pub mod task_rehydrate;
 pub mod teammate_idle;
 pub mod todo_interceptor;
 pub mod todo_loader;
+pub mod tool_usage_gate;
 pub mod verification_gate;
 pub mod worktree_reminder;
 pub mod wrangler_guard;
@@ -113,6 +114,7 @@ pub const HOOK_NAMES: &[&str] = &[
     "teammate_idle",
     "todo_interceptor",
     "todo_loader",
+    "tool_usage_gate",
     "verification_gate",
     "worktree_reminder",
     "wrangler_guard",
