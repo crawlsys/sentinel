@@ -58,7 +58,6 @@ pub mod todo_loader;
 pub mod tool_usage_gate;
 pub mod verification_gate;
 pub mod worktree_reminder;
-pub mod wrangler_guard;
 
 // ---------------------------------------------------------------------------
 // Centralized path helpers — all sentinel-owned files live under
@@ -132,7 +131,6 @@ pub const HOOK_NAMES: &[&str] = &[
     "tool_usage_gate",
     "verification_gate",
     "worktree_reminder",
-    "wrangler_guard",
 ];
 
 // ---------------------------------------------------------------------------

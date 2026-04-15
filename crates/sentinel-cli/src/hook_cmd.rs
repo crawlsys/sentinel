@@ -318,10 +318,6 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
                 let steel_output = hooks::pre_push_steel_test::process(&input, &ctx);
                 output.merge(&steel_output);
 
-                // Wrangler guard — block Node wrangler deploy, gate deletes (Bash only)
-                let wrangler_output = hooks::wrangler_guard::process(&input, &ctx);
-                output.merge(&wrangler_output);
-
                 // PR merge gate — block gh pr merge without confirmation (Bash only)
                 let pr_output = hooks::pr_merge_gate::process(&input);
                 output.merge(&pr_output);

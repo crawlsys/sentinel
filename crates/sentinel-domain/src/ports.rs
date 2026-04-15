@@ -157,7 +157,7 @@ pub trait FileSystemPort: Send + Sync {
 ///
 /// Abstracts std::process::Command calls for binary execution and
 /// fire-and-forget spawns. Used by session_init (qdrant sync, git),
-/// wrangler_guard (dialog binary), pre_push_steel_test (git).
+/// pre_push_steel_test (git).
 pub trait ProcessPort: Send + Sync {
     /// Run a command and capture output. Returns (exit_success, stdout, stderr).
     fn run(
