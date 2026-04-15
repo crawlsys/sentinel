@@ -747,7 +747,7 @@ fn generate_claude_md(
 4. [Date Context](#date-context)
 5. [Marketplace Architecture](#marketplace-architecture)
 6. [Using Slash Commands](#using-slash-commands)
-7. [Using Agents](#using-agents)
+7. [Using Agents & Agent Teams](#using-agents--agent-teams)
 8. [Using Skills](#using-skills)
 9. [Changelog & Version Tracking](#changelog--version-tracking)
 10. [Plans & Documentation](#plans--documentation)
@@ -1078,20 +1078,50 @@ When user types `/command`, use the `Skill` tool -- NOT a manual implementation.
 
 ---
 
-## Using Agents
+## Using Agents & Agent Teams
 
-Spawn specialized agents with the `Task` tool for parallel or delegated work:
+### Subagents (quick, focused tasks)
+
+Spawn specialized agents with the `Agent` tool for focused work that reports back:
 
 | Agent | Use When | Example |
 |-------|----------|---------|
-| `Explore` | Finding files, searching code | `Task(subagent_type: "Explore", prompt: "Find all API routes")` |
-| `Plan` | Architecture, implementation design | `Task(subagent_type: "Plan", prompt: "Plan auth refactor")` |
-| `Bash` | Git, npm, docker, system commands | `Task(subagent_type: "Bash", prompt: "Run tests and report")` |
-| `general-purpose` | Complex multi-step tasks | `Task(subagent_type: "general-purpose", prompt: "...")` |
-| `debugger` | Root cause analysis, bug fixing | `Task(subagent_type: "debugger", prompt: "Fix failing test")` |
-| `test-generator` | Write unit/integration/e2e tests | `Task(subagent_type: "test-generator", prompt: "...")` |
-| `code-reviewer` | Quality, bugs, security review | `Task(subagent_type: "code-reviewer", prompt: "...")` |
-| `refactorer` | Improve structure without changing behavior | `Task(subagent_type: "refactorer", prompt: "...")` |
+| `Explore` | Finding files, searching code | `Agent(subagent_type: "Explore", prompt: "Find all API routes")` |
+| `Plan` | Architecture, implementation design | `Agent(subagent_type: "Plan", prompt: "Plan auth refactor")` |
+| `general-purpose` | Complex multi-step tasks | `Agent(subagent_type: "general-purpose", prompt: "...")` |
+| `debugger` | Root cause analysis, bug fixing | `Agent(subagent_type: "debugger", prompt: "Fix failing test")` |
+| `test-generator` | Write unit/integration/e2e tests | `Agent(subagent_type: "test-generator", prompt: "...")` |
+| `code-reviewer` | Quality, bugs, security review | `Agent(subagent_type: "code-reviewer", prompt: "...")` |
+| `refactorer` | Improve structure without changing behavior | `Agent(subagent_type: "refactorer", prompt: "...")` |
+
+### Agent Teams (parallel, collaborative work) — PREFERRED
+
+**ALWAYS prefer agent teams over subagents when work can be parallelized.** Agent teams are more powerful: teammates share a task list, communicate with each other, and work independently in their own context windows.
+
+**When to use agent teams:**
+- Code review (security + performance + tests in parallel)
+- Debugging with competing hypotheses
+- Cross-layer features (frontend + backend + tests)
+- Research and exploration from multiple angles
+- Any task with 3+ independent subtasks
+
+**When to use subagents instead:**
+- Quick, focused lookup (find a file, search code)
+- Single task that reports a result back
+- Work that must be sequential
+
+**How to create a team:**
+```
+TeamCreate(team_name: "review-team", description: "PR review")
+```
+Then spawn teammates, create tasks, and let them self-coordinate.
+
+**Team size:** Start with 3-5 teammates. 5-6 tasks per teammate is optimal.
+
+**Sentinel hooks enforce quality:**
+- `TeammateIdle` — reminds teammates to check TaskList before stopping
+- `TaskCompleted` — verifies work before marking tasks done
+- `TaskCreated` — validates task structure
 
 ---
 
@@ -1100,7 +1130,7 @@ Spawn specialized agents with the `Task` tool for parallel or delegated work:
 Skills are modular capabilities loaded from `~/.claude/skills/{{name}}/SKILL.md`.
 
 ### Automatic Routing (skill-router hook)
-The sentinel `skill_router` hook runs on every message and uses regex matching to route requests to the matching skill. You will see `[Skill Router] Detected skill: <name>` in system reminders -- follow those instructions.
+The sentinel `skill_router` hook runs on every message and uses Claude Opus 4.6 AI classification to route requests to the matching skill. You will see `[Skill Router] Detected skill: <name>` in system reminders -- follow those instructions.
 
 ---
 
