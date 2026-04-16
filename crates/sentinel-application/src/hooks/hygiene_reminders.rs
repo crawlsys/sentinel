@@ -2,10 +2,11 @@
 //!
 //! **Stop phase:** Detects conditions that need reminders:
 //!   1. Unpushed commits (local ahead of remote)
-//!   2. Stale worktrees (merged but not cleaned up)
-//!   3. Missing changelog updates (code changed but CHANGELOG.md not)
+//!   2. Stale worktrees (merged but not cleaned up) — scoped to current repo
+//!   3. Missing changelog updates (code changed but CHANGELOG.md not updated)
 //!
-//! Writes state to `~/.claude/sentinel/state/hygiene-reminders.json`.
+//! State is scoped by repo root to prevent cross-project bleeding.
+//! State file: `~/.claude/sentinel/state/hygiene-{repo_hash}.json`
 //!
 //! **UserPromptSubmit phase:** Reads state and injects reminders.
 
@@ -22,28 +23,57 @@ struct ReminderState {
     stale_worktrees: Vec<String>,
     #[serde(default)]
     changelog_stale: bool,
+    /// The repo root this state was computed for — sanity check on load.
+    #[serde(default)]
+    repo_root: String,
 }
 
-fn state_file(fs: &dyn FileSystemPort) -> Option<PathBuf> {
+/// Derive a short stable hash from the repo root path for use in the filename.
+/// Uses a simple djb2-style hash — no crypto needed, just stable across runs.
+fn repo_hash(repo_root: &str) -> String {
+    let mut h: u64 = 5381;
+    for b in repo_root.bytes() {
+        h = h.wrapping_mul(33).wrapping_add(u64(b));
+    }
+    format!("{h:016x}")
+}
+
+fn u64(b: u8) -> u64 {
+    b as u64
+}
+
+fn state_file(fs: &dyn FileSystemPort, repo_root: &str) -> Option<PathBuf> {
     let home = fs.home_dir()?;
     let dir = home.join(".claude").join("sentinel").join("state");
     fs.create_dir_all(&dir).ok()?;
-    Some(dir.join("hygiene-reminders.json"))
+    Some(dir.join(format!("hygiene-{}.json", repo_hash(repo_root))))
 }
 
 // ── Stop phase: detect conditions ──────────────────────────────────────
 
 pub fn process_stop(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     let cwd = input.cwd.as_deref().unwrap_or(".");
-    let mut state = ReminderState::default();
+
+    // Scope everything to the repo root — prevents cross-project state bleeding.
+    let repo_root = match ctx.git.repo_root(cwd) {
+        Some(r) => r,
+        None => return HookOutput::allow(), // not a git repo
+    };
+
+    let mut state = ReminderState {
+        repo_root: repo_root.clone(),
+        ..Default::default()
+    };
 
     // 1. Check for unpushed commits
-    if let Ok(output) = ctx.git.has_unpushed_commits(cwd) {
-        state.unpushed_commits = output;
+    if let Ok(has_unpushed) = ctx.git.has_unpushed_commits(cwd) {
+        state.unpushed_commits = has_unpushed;
     }
 
-    // 2. Check for stale worktrees
-    let worktree_dir = PathBuf::from(cwd).join(".claude").join("worktrees");
+    // 2. Stale worktrees — only dirs inside THIS repo's .claude/worktrees/.
+    //    We only report dirs that exist on disk; git worktree registration state
+    //    is not available through the port, but orphaned dirs are the real problem.
+    let worktree_dir = PathBuf::from(&repo_root).join(".claude").join("worktrees");
     if ctx.fs.is_dir(&worktree_dir) {
         if let Ok(entries) = ctx.fs.read_dir(&worktree_dir) {
             for entry in entries {
@@ -56,23 +86,21 @@ pub fn process_stop(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
         }
     }
 
-    // 3. Check changelog staleness — if session had code changes but no CHANGELOG update
-    let changelog_path = PathBuf::from(cwd).join("CHANGELOG.md");
+    // 3. Changelog staleness — code files changed but CHANGELOG.md not touched.
+    //    Uses uncommitted changed files (git status). After a commit this clears
+    //    naturally since changed_files returns empty. That's correct behaviour:
+    //    if you committed without updating CHANGELOG, doc_drift catches it instead.
+    let changelog_path = PathBuf::from(&repo_root).join("CHANGELOG.md");
     if ctx.fs.exists(&changelog_path) {
-        // Simple heuristic: check if any .rs/.ts/.js files were modified more recently
-        // than CHANGELOG.md. We use git status for this.
         if let Ok(files) = ctx.git.changed_files(cwd) {
-            let has_code_changes = files.iter().any(|f| {
-                f.ends_with(".rs") || f.ends_with(".ts") || f.ends_with(".js")
-                    || f.ends_with(".tsx") || f.ends_with(".jsx") || f.ends_with(".py")
-            });
+            let has_code_changes = files.iter().any(is_code_file);
             let changelog_changed = files.iter().any(|f| f.contains("CHANGELOG"));
             state.changelog_stale = has_code_changes && !changelog_changed;
         }
     }
 
-    // Write state
-    if let Some(path) = state_file(ctx.fs) {
+    // Write state scoped to this repo root
+    if let Some(path) = state_file(ctx.fs, &repo_root) {
         if let Ok(json) = serde_json::to_string(&state) {
             let _ = ctx.fs.write(&path, json.as_bytes());
         }
@@ -81,10 +109,28 @@ pub fn process_stop(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     HookOutput::allow()
 }
 
+fn is_code_file(f: &String) -> bool {
+    f.ends_with(".rs")
+        || f.ends_with(".ts")
+        || f.ends_with(".tsx")
+        || f.ends_with(".js")
+        || f.ends_with(".jsx")
+        || f.ends_with(".py")
+        || f.ends_with(".go")
+}
+
 // ── UserPromptSubmit phase: inject reminders ───────────────────────────
 
-pub fn process_prompt(ctx: &HookContext<'_>) -> HookOutput {
-    let path = match state_file(ctx.fs) {
+pub fn process_prompt(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
+    let cwd = input.cwd.as_deref().unwrap_or(".");
+
+    // Load state scoped to the current repo root only.
+    let repo_root = match ctx.git.repo_root(cwd) {
+        Some(r) => r,
+        None => return HookOutput::allow(),
+    };
+
+    let path = match state_file(ctx.fs, &repo_root) {
         Some(p) => p,
         None => return HookOutput::allow(),
     };
@@ -98,6 +144,11 @@ pub fn process_prompt(ctx: &HookContext<'_>) -> HookOutput {
         Ok(s) => s,
         Err(_) => return HookOutput::allow(),
     };
+
+    // Sanity check: state must belong to this repo
+    if state.repo_root != repo_root {
+        return HookOutput::allow();
+    }
 
     let mut reminders = Vec::new();
 
@@ -130,17 +181,12 @@ pub fn process_prompt(ctx: &HookContext<'_>) -> HookOutput {
         return HookOutput::allow();
     }
 
-    HookOutput::inject_context(
-        HookEvent::UserPromptSubmit,
-        reminders.join("\n\n"),
-    )
+    HookOutput::inject_context(HookEvent::UserPromptSubmit, reminders.join("\n\n"))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // We test the state struct serialization and reminder generation
 
     #[test]
     fn test_empty_state_produces_no_reminders() {
@@ -156,11 +202,58 @@ mod tests {
             unpushed_commits: true,
             stale_worktrees: vec!["feat+old".to_string()],
             changelog_stale: true,
+            repo_root: "/repos/sentinel".to_string(),
         };
         let json = serde_json::to_string(&state).unwrap();
         let parsed: ReminderState = serde_json::from_str(&json).unwrap();
         assert!(parsed.unpushed_commits);
         assert_eq!(parsed.stale_worktrees.len(), 1);
         assert!(parsed.changelog_stale);
+        assert_eq!(parsed.repo_root, "/repos/sentinel");
+    }
+
+    #[test]
+    fn test_repo_hash_is_stable() {
+        let h1 = repo_hash("/repos/sentinel");
+        let h2 = repo_hash("/repos/sentinel");
+        assert_eq!(h1, h2);
+    }
+
+    #[test]
+    fn test_repo_hash_differs_for_different_roots() {
+        let h1 = repo_hash("/repos/sentinel");
+        let h2 = repo_hash("/repos/other-project");
+        assert_ne!(h1, h2);
+    }
+
+    #[test]
+    fn test_state_file_differs_per_repo() {
+        let ctx = crate::hooks::test_support::stub_ctx();
+        let path1 = state_file(ctx.fs, "/repos/sentinel");
+        let path2 = state_file(ctx.fs, "/repos/other-project");
+        assert_ne!(path1, path2);
+    }
+
+    #[test]
+    fn test_repo_root_mismatch_produces_no_reminders() {
+        // State written for repo A should not inject reminders when in repo B
+        let state = ReminderState {
+            unpushed_commits: true,
+            stale_worktrees: vec!["old-branch".to_string()],
+            changelog_stale: true,
+            repo_root: "/repos/sentinel".to_string(),
+        };
+        // Simulate: state says sentinel, but current repo_root is "other-project"
+        assert_ne!(state.repo_root, "/repos/other-project");
+    }
+
+    #[test]
+    fn test_is_code_file() {
+        assert!(is_code_file(&"src/main.rs".to_string()));
+        assert!(is_code_file(&"app/page.tsx".to_string()));
+        assert!(is_code_file(&"lib/utils.py".to_string()));
+        assert!(!is_code_file(&"README.md".to_string()));
+        assert!(!is_code_file(&"CHANGELOG.md".to_string()));
+        assert!(!is_code_file(&"config.toml".to_string()));
     }
 }

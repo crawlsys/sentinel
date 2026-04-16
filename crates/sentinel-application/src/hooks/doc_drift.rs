@@ -333,13 +333,32 @@ fn check_changelog_drift(
 
     // Check if changelog has an [Unreleased] section
     if !content.contains("[Unreleased]") && !content.contains("Unreleased") {
-        // Has a changelog but no unreleased section — might need updating
         if recent_changes.len() >= 3 {
             return Some(DriftEntry {
                 doc: "CHANGELOG.md".into(),
                 reason:
                     "CHANGELOG.md has no [Unreleased] section — recent changes may not be tracked"
                         .into(),
+                cwd: cwd_str.into(),
+                ts: ts.into(),
+                resolved: false,
+            });
+        }
+    }
+
+    // Check if CHANGELOG is older than recently modified source files.
+    // This catches committed changes where CHANGELOG wasn't updated.
+    if recent_changes.len() >= 2 {
+        let changelog_mtime = file_mod_time(path).unwrap_or(0);
+        let threshold = now_ms().saturating_sub(5 * 60 * 1000);
+        if changelog_mtime < threshold {
+            return Some(DriftEntry {
+                doc: "CHANGELOG.md".into(),
+                reason: format!(
+                    "CHANGELOG.md not updated — {} source file(s) changed recently. \
+                     Add an entry under `## [Unreleased]`.",
+                    recent_changes.len()
+                ),
                 cwd: cwd_str.into(),
                 ts: ts.into(),
                 resolved: false,
