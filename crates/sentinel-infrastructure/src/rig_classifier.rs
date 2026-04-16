@@ -31,7 +31,7 @@ impl RigClassifier {
     pub fn from_env() -> Option<Self> {
         match Self::openrouter() {
             Ok(classifier) => {
-                info!("AI classifier initialized: Claude Opus 4.6 via OpenRouter");
+                info!("AI classifier initialized: Claude Opus 4.7 via OpenRouter");
                 Some(classifier)
             }
             Err(e) => {
