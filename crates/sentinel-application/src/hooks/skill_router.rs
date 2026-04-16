@@ -179,19 +179,25 @@ fn build_match_output(skill: &str, input: &HookInput, prompt: &str, source: &str
     tracing::info!(skill = skill, source = source, "Skill routed");
 
     let skill_path = format!("~/.claude/skills/{}/SKILL.md", skill);
-    let context = format!(
-        "[Skill Router] Detected skill: {}. \
-         MANDATORY: You MUST Read(\"{}\") BEFORE responding. \
-         This is a non-negotiable requirement.",
-        skill, skill_path
-    );
-    let mut output = HookOutput::inject_context(HookEvent::UserPromptSubmit, context);
+    let banner = extract_banner(skill);
 
-    if let Some(banner) = extract_banner(skill) {
-        output.system_message = Some(banner);
-    }
+    let context = if let Some(ref b) = banner {
+        format!(
+            "{}\n\n[Skill Router] Detected skill: {}. \
+             MANDATORY: You MUST Read(\"{}\") BEFORE responding. \
+             This is a non-negotiable requirement.",
+            b, skill, skill_path
+        )
+    } else {
+        format!(
+            "[Skill Router] Detected skill: {}. \
+             MANDATORY: You MUST Read(\"{}\") BEFORE responding. \
+             This is a non-negotiable requirement.",
+            skill, skill_path
+        )
+    };
 
-    output
+    HookOutput::inject_context(HookEvent::UserPromptSubmit, context)
 }
 
 /// Build output for no match
