@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added
+
+- **`sentinel break --session <id>` / `--list` / `--json`** — programmatic access to glass-break state for out-of-process consumers (Legatus Utility, dashboards). `--session <id>` targets a specific session for `--status` / `--cancel` (previously both silently used "most recently modified state file"). `--list` enumerates every session under `~/.claude/sentinel/state/` with its break state (active first, then session ID). `--json` emits a stable `BreakStatusJson` schema — `{session_id, active, reason?, started_at?, expires_at?, remaining_secs, workflow?, tools_used_count}` — for `--status`, and a JSON array of the same for `--list`. Unreadable state files are skipped rather than poisoning the whole list. The anti-AI TTY challenge remains required for break **initiation**; `--cancel` does not require a TTY since it only tightens enforcement.
+
 ## [0.4.1] - 2026-04-16
 
 ### Fixed
