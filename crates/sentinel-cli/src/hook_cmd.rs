@@ -278,7 +278,7 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
             output.merge(&activity_prompt_output);
 
             // Hygiene reminders — inject push/worktree/changelog reminders
-            let reminders_prompt_output = hooks::hygiene_reminders::process_prompt(&ctx);
+            let reminders_prompt_output = hooks::hygiene_reminders::process_prompt(&input, &ctx);
             output.merge(&reminders_prompt_output);
 
             // Memory inject — search Qdrant for semantically relevant memories
