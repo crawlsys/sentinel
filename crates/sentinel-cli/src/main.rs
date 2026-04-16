@@ -184,7 +184,15 @@ enum Commands {
         #[arg(long)]
         history: bool,
 
-        /// Output history as JSON (use with --history)
+        /// List break state across all known sessions (use with --json for stdout JSON)
+        #[arg(long)]
+        list: bool,
+
+        /// Target a specific session ID (for --status / --cancel)
+        #[arg(long)]
+        session: Option<String>,
+
+        /// Output as JSON on stdout (applies to --status, --list, --history)
         #[arg(long)]
         json: bool,
     },
@@ -279,7 +287,14 @@ async fn main() -> anyhow::Result<()> {
             status,
             cancel,
             history,
+            list,
+            session,
             json,
-        } => break_cmd::run(reason, duration, workflow, status, cancel, history, json).await,
+        } => {
+            break_cmd::run(
+                reason, duration, workflow, status, cancel, history, list, session, json,
+            )
+            .await
+        }
     }
 }
