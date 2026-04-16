@@ -33,11 +33,11 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-fn state_file(fs: &dyn FileSystemPort) -> Option<PathBuf> {
+fn state_file(fs: &dyn FileSystemPort, session_id: &str) -> Option<PathBuf> {
     let home = fs.home_dir()?;
     let dir = super::metrics_dir(&home);
     fs.create_dir_all(&dir).ok()?;
-    Some(dir.join("unverified-claims.json"))
+    Some(dir.join(format!("unverified-claims-{session_id}.json")))
 }
 
 /// Test-only override for the cooldown file path.
@@ -222,7 +222,7 @@ pub fn process_stop(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
 
     if claims_found.is_empty() {
         // No claims — clear any previous state
-        if let Some(path) = state_file(ctx.fs) {
+        if let Some(path) = state_file(ctx.fs, session_id) {
             let _ = ctx.fs.write(&path, b"");
         }
         return HookOutput::allow();
@@ -244,7 +244,7 @@ pub fn process_stop(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     if evidence_found {
         // Claims verified — clear state
         tracing::debug!(claims = claims_found.len(), "Claims verified with evidence");
-        if let Some(path) = state_file(ctx.fs) {
+        if let Some(path) = state_file(ctx.fs, session_id) {
             let _ = ctx.fs.write(&path, b"");
         }
         return HookOutput::allow();
@@ -257,7 +257,7 @@ pub fn process_stop(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
         ts: chrono::Utc::now().to_rfc3339(),
     };
 
-    if let Some(path) = state_file(ctx.fs) {
+    if let Some(path) = state_file(ctx.fs, session_id) {
         let _ = ctx.fs.write(
             &path,
             serde_json::to_string(&state).unwrap_or_default().as_bytes(),
@@ -277,7 +277,8 @@ pub fn process_stop(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
 // ---------------------------------------------------------------------------
 
 pub fn process_prompt(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
-    let path = match state_file(ctx.fs) {
+    let session_id = input.session_id.as_deref().unwrap_or("unknown");
+    let path = match state_file(ctx.fs, session_id) {
         Some(p) => p,
         None => return HookOutput::allow(),
     };
