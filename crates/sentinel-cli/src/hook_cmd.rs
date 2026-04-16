@@ -386,7 +386,7 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
             let linear_output = hooks::linear_lifecycle::process(&input);
             output.merge(&linear_output);
 
-            // Tool usage gate — track sequential thinking and task creation markers
+            // Tool usage gate — track all enforcement markers
             if let Some(session_id) = input.session_id.as_deref() {
                 if let Some(tool) = input.tool_name.as_deref() {
                     if tool.contains("sequentialthinking") {
@@ -394,6 +394,16 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
                     }
                     if tool == "TaskCreate" {
                         hooks::tool_usage_gate::mark_task_created(ctx.fs, session_id);
+                    }
+                    if tool == "ExitPlanMode" {
+                        hooks::tool_usage_gate::mark_plan_approved(ctx.fs, session_id);
+                    }
+                    if tool == "TaskUpdate" {
+                        if let Some(ti) = input.tool_input.as_ref() {
+                            if ti.get("status").and_then(|v| v.as_str()) == Some("in_progress") {
+                                hooks::tool_usage_gate::mark_task_active(ctx.fs, session_id);
+                            }
+                        }
                     }
                 }
             }
@@ -433,6 +443,10 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
             // Verification gate — detect unverified completion claims
             let verify_output = hooks::verification_gate::process_stop(&input, &ctx);
             output.merge(&verify_output);
+
+            // Task coverage check — warn if uncommitted changes but no active task
+            let coverage_output = hooks::task_coverage_check::process(&input, &ctx);
+            output.merge(&coverage_output);
 
             // Activity tracker — build session summary from activity log
             let activity_stop_output = hooks::activity_tracker::process_stop(&input, &ctx);
