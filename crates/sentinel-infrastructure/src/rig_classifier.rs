@@ -1,7 +1,6 @@
 //! AI Skill Classifier via Rig LLM framework
 //!
-//! Uses Claude Opus 4.6 (primary) for intent classification.
-//! Falls back to Cerebras, then OpenAI if Anthropic is unavailable.
+//! Uses Claude Opus 4.6 via OpenRouter for intent classification.
 //! The classifier receives the user's message + a compact skill catalog
 //! and returns the best-matching skill name (or "none").
 
@@ -10,13 +9,12 @@ use futures::future::BoxFuture;
 use rig_core::agent::AgentBuilder;
 use rig_core::completion::Prompt;
 use rig_core::prelude::CompletionClient;
-use rig_core::providers::anthropic;
+use rig_core::providers::openrouter;
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 
-/// Anthropic Claude Opus 4.6 — most powerful, best routing accuracy
-const ANTHROPIC_MODEL: &str = "claude-opus-4-6";
-
+/// Claude Opus 4.6 via OpenRouter
+const OPENROUTER_MODEL: &str = "anthropic/claude-opus-4-6";
 
 /// Type-erased prompt function
 type PromptFn = Arc<dyn Fn(String, String) -> BoxFuture<'static, Result<String>> + Send + Sync>;
@@ -28,40 +26,38 @@ pub struct RigClassifier {
 }
 
 impl RigClassifier {
-    /// Initialize from environment — Anthropic Claude Opus 4.6 only.
-    /// Returns None if ANTHROPIC_API_KEY is not set.
+    /// Initialize from environment — reads OPENROUTER_API_KEY.
+    /// Returns None if the key is not set.
     pub fn from_env() -> Option<Self> {
-        match Self::anthropic() {
+        match Self::openrouter() {
             Ok(classifier) => {
-                info!("AI classifier initialized: Claude Opus 4.6");
+                info!("AI classifier initialized: Claude Opus 4.6 via OpenRouter");
                 Some(classifier)
             }
             Err(e) => {
-                warn!(error = %e, "Failed to initialize Anthropic classifier — ANTHROPIC_API_KEY required");
+                warn!(error = %e, "Failed to initialize OpenRouter classifier — OPENROUTER_API_KEY required");
                 None
             }
         }
     }
 
-    fn anthropic() -> Result<Self> {
-        let key = std::env::var("ANTHROPIC_API_KEY").context("ANTHROPIC_API_KEY not set")?;
-        let client = anthropic::Client::builder().api_key(key).build()
-            .map_err(|e| anyhow::anyhow!("Failed to build Anthropic client: {e}"))?;
-        let client = Arc::new(client);
+    fn openrouter() -> Result<Self> {
+        let key = std::env::var("OPENROUTER_API_KEY").context("OPENROUTER_API_KEY not set")?;
+        let client = Arc::new(openrouter::Client::new(&key).map_err(|e| anyhow::anyhow!("Failed to build OpenRouter client: {e}"))?);
         Ok(Self {
             prompt_fn: Arc::new(move |system, user_msg| {
                 let client = client.clone();
                 Box::pin(async move {
-                    let agent = AgentBuilder::new(client.completion_model(ANTHROPIC_MODEL))
+                    let agent = AgentBuilder::new(client.completion_model(OPENROUTER_MODEL))
                         .preamble(&system)
                         .build();
                     agent
                         .prompt(user_msg)
                         .await
-                        .map_err(|e| anyhow::anyhow!("Anthropic classifier: {e}"))
+                        .map_err(|e| anyhow::anyhow!("OpenRouter classifier: {e}"))
                 })
             }),
-            provider_name: "anthropic",
+            provider_name: "openrouter",
         })
     }
 
