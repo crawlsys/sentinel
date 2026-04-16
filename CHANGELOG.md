@@ -6,22 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
-### Fixed
-- **Cross-project task rehydration leak in `task_persist` hook** (2026-04-16)
-  - `find_active_task_dir` fell back to the globally most-recently-modified dir under `~/.claude/tasks/` when the session_id dir was missing, causing tasks from one project to be persisted under another project's cwd hash and rehydrated at SessionStart
-  - Now strictly scoped to `~/.claude/tasks/{session_id}/`; returns `None` (safe no-op) when missing
-  - Added regression tests: matching `session_id` wins over newer-mtime siblings, missing session returns `None`, empty session dir returns `None`
-
-### Changed
-- **Plan system overhaul: use Claude Code's built-in Plan Mode** (2026-04-15)
-  - Removed custom `plan` skill from marketplace — Claude Code's `EnterPlanMode`/`ExitPlanMode` now authoritative
-  - Set `CLAUDE_CODE_PLAN_MODE_REQUIRED=1` in `marketplace.json` settings so install.js seeds it into `~/.claude/settings.json`
-  - Rewrote `plan_organizer` hook: now actually copies plan files to `~/.claude/plans/{project}/{slug}-v{N}.md` with auto-incrementing versions (previously only injected textual instructions for Claude to do the move)
-  - Extracts plan file path from `ExitPlanMode` tool_result JSON (`data.filePath`)
-  - `/plan` slash command now triggers built-in Plan Mode instead of the deleted custom skill
-  - Updated CLAUDE.md template: documents Plan Mode workflow, dual plan storage (Claude Code's native `{project}/plans/{slug}.md` + sentinel's archive)
+## [0.4.0] - 2026-04-16
 
 ### Added
+- **`dep_check` hook**: detects outdated Rust dependencies via `cargo outdated` on `UserPromptSubmit`, injects advisory into context when stale crates are found (2026-04-16)
 - Git + npx interceptors consolidated into sentinel workspace (2026-04-15)
   - DDD/Hexagonal: domain (28 git rules, 26 npx redirects), application (port traits + services), infrastructure (platform adapters)
   - `sentinel-git-interceptor` binary: blocks dangerous git commands, `--bypass` with native OS dialog
@@ -32,11 +20,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   - `context_monitor` emits `context_threshold` when usage crosses 65%+
   - `build_notify` PostToolUse hook: emits `build_completed` and `deploy_completed`
   - Total channel event types: 6
-- `skill_router`: activation banners now shown to user via `systemMessage` field (2026-03-12)
-  - Reads `## Activation Banner` code block from `~/.claude/skills/{name}/SKILL.md`
-  - Outputs banner text in `systemMessage` JSON field (visible in terminal transcript)
-  - `additionalContext` still carries routing instructions for Claude (dual output)
-  - Previously banners relied on Claude reading the SKILL.md and displaying them — unreliable
 - `HookOutput.system_message` field in sentinel-domain (2026-03-12)
   - Serializes as `"systemMessage"` per Claude Code's JSON output schema
   - Merged via concatenation when multiple hooks produce system messages
@@ -62,6 +45,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - Worker hardening plan HTML (`plans/worker-hardening-plan-v1-styled.html`) with tooling versions table (2026-03-11)
 
 ### Changed
+- **Skill router classifier**: switched from Anthropic provider (`ANTHROPIC_API_KEY`) to OpenRouter (`OPENROUTER_API_KEY`); bumped model to Claude Opus 4.7 (`anthropic/claude-opus-4-7`) (2026-04-16)
+- **AI judge**: migrated from OpenAI direct (`OPENAI_API_KEY` + `gpt-5.4`) to OpenRouter (`OPENROUTER_API_KEY` + `openai/gpt-5.4`); single `JudgeProvider` struct replacing the previous multi-model `codex` field (2026-04-16)
+- **`skill_router` activation banner**: moved from `systemMessage` JSON field to `additionalContext` so the banner renders as a `<system-reminder>` visible to both the model and the user in the terminal (2026-04-16)
+- **rig-core**: upgraded 0.34 → 0.35 (2026-04-16)
+- **`break` CLI subcommand**: added `--session`, `--list`, `--json` flags for programmatic consumers (2026-04-16)
+- **Channel events**: session-scoped to prevent cross-session broadcast (2026-04-16)
+- **Plan system overhaul: use Claude Code's built-in Plan Mode** (2026-04-15)
+  - Removed custom `plan` skill from marketplace — Claude Code's `EnterPlanMode`/`ExitPlanMode` now authoritative
+  - Set `CLAUDE_CODE_PLAN_MODE_REQUIRED=1` in `marketplace.json` settings so install.js seeds it into `~/.claude/settings.json`
+  - Rewrote `plan_organizer` hook: now actually copies plan files to `~/.claude/plans/{project}/{slug}-v{N}.md` with auto-incrementing versions (previously only injected textual instructions for Claude to do the move)
+  - Extracts plan file path from `ExitPlanMode` tool_result JSON (`data.filePath`)
+  - `/plan` slash command now triggers built-in Plan Mode instead of the deleted custom skill
+  - Updated CLAUDE.md template: documents Plan Mode workflow, dual plan storage (Claude Code's native `{project}/plans/{slug}.md` + sentinel's archive)
+- `skill_router`: activation banners now injected via `additionalContext` (system-reminder visible to user + model); previously relied on `systemMessage` which only appeared in transcript (2026-03-12)
 - `doc_drift`: expanded from 3 monitored files (README, CLAUDE.md, CHANGELOG) to 6 (+ BUILDING.md, LICENSE, SECURITY.md); adds "run sentinel init" batch advice when 3+ standard files are missing (2026-03-12)
 - `skill_router`: added project-init routing rule with 5 patterns (init project, standardize files, sentinel init, create missing files, project.init) at priority 60 (2026-03-12)
 - `phase_gate`: fail-closed when `phases/` dir exists but file is missing; canonical path validation rejects `..` components, validates skill/file names are safe ASCII, resolves symlinks (2026-03-11)
@@ -69,6 +66,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - `wrangler_guard`: expanded with per-repo scoping and Cloudflare API verification (2026-03-11)
 - `skill_router`: fixed regex pattern match for broader skill detection (2026-03-11)
 - Worker hardening plan HTML: 5 UX improvements based on Codex GPT-5.4 review — table wrapping, increased spacing, full ARIA accessibility, responsive mobile CSS at 768px, critical/info callout classes (2026-03-11)
+
+### Fixed
+- **Cross-project task rehydration leak in `task_persist` hook** (2026-04-16)
+  - `find_active_task_dir` fell back to the globally most-recently-modified dir under `~/.claude/tasks/` when the session_id dir was missing, causing tasks from one project to be persisted under another project's cwd hash and rehydrated at SessionStart
+  - Now strictly scoped to `~/.claude/tasks/{session_id}/`; returns `None` (safe no-op) when missing
+  - Added regression tests: matching `session_id` wins over newer-mtime siblings, missing session returns `None`, empty session dir returns `None`
 
 ## [0.3.0] - 2026-03-10
 
