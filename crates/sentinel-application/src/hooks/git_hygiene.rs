@@ -15,6 +15,41 @@ const MAX_UNCOMMITTED_FILES: usize = constants::MAX_UNCOMMITTED_FILES;
 /// Protected branch names that should not receive direct edits.
 const PROTECTED_BRANCHES: &[&str] = &["main", "master"];
 
+/// Extract the target file path from a HookInput.
+///
+/// Checks `input.file_path` (Claude Code 2.1.89+), then falls back to
+/// `tool_input.file_path` for older runtimes.
+fn file_path_from_input(input: &HookInput) -> Option<String> {
+    if let Some(p) = &input.file_path {
+        if !p.is_empty() {
+            return Some(p.clone());
+        }
+    }
+    input
+        .tool_input
+        .as_ref()
+        .and_then(|v| v.get("file_path"))
+        .and_then(|v| v.as_str())
+        .map(ToString::to_string)
+}
+
+/// Check whether `file_path` lives inside the git repo rooted at `cwd`.
+///
+/// Returns `true` if we can't determine a repo root (be conservative —
+/// hook continues to apply). Returns `false` only when we have a repo root
+/// and the file is clearly outside it.
+fn is_path_inside_repo(file_path: &str, cwd: &str, git: &dyn GitStatusPort) -> bool {
+    let Some(repo_root) = git.repo_root(cwd) else {
+        return true;
+    };
+    let root = std::path::Path::new(&repo_root);
+    let target = std::path::Path::new(file_path);
+    // Canonicalize best-effort; fall back to raw paths on error.
+    let canon_root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    let canon_target = std::fs::canonicalize(target).unwrap_or_else(|_| target.to_path_buf());
+    canon_target.starts_with(&canon_root)
+}
+
 /// Process a git-hygiene hook event (PreToolUse for Edit/Write).
 ///
 /// Checks:
@@ -32,6 +67,15 @@ pub fn process(input: &HookInput, git: &dyn GitStatusPort) -> HookOutput {
     }
 
     let cwd = input.cwd.as_deref().unwrap_or(".");
+
+    // If the target file is outside the cwd's repo, this hook doesn't apply.
+    // git_hygiene governs the *current* repo — edits to files outside it
+    // (e.g. ~/.claude/ config files) are always allowed.
+    if let Some(file_path) = file_path_from_input(input) {
+        if !is_path_inside_repo(&file_path, cwd, git) {
+            return HookOutput::allow();
+        }
+    }
 
     // Check 1: BLOCK if on a protected branch and not in a worktree
     if let Ok(branch) = git.current_branch(cwd) {
@@ -70,6 +114,7 @@ mod tests {
         files: Vec<String>,
         branch: String,
         worktree: bool,
+        repo_root: Option<String>,
     }
 
     impl StubGit {
@@ -79,6 +124,7 @@ mod tests {
                 files,
                 branch: "feat/test".to_string(),
                 worktree: false,
+                repo_root: Some("/repo".to_string()),
             }
         }
 
@@ -88,6 +134,7 @@ mod tests {
                 files: vec![],
                 branch: "main".to_string(),
                 worktree: false,
+                repo_root: Some("/repo".to_string()),
             }
         }
 
@@ -97,6 +144,7 @@ mod tests {
                 files: vec![],
                 branch: "main".to_string(),
                 worktree: true,
+                repo_root: Some("/repo".to_string()),
             }
         }
     }
@@ -116,6 +164,9 @@ mod tests {
         }
         fn has_unpushed_commits(&self, _repo_path: &str) -> anyhow::Result<bool> {
             Ok(false)
+        }
+        fn repo_root(&self, _path: &str) -> Option<String> {
+            self.repo_root.clone()
         }
     }
 
@@ -221,6 +272,56 @@ mod tests {
             ..Default::default()
         };
         assert!(process(&input, &git).blocked.is_none());
+    }
+
+    #[test]
+    fn test_allows_edit_to_file_outside_repo() {
+        // cwd is the sentinel repo on main, but target file is ~/.claude/foo.json
+        // — not inside this repo, so the hook must allow it.
+        let git = StubGit::on_main();
+        let input = HookInput {
+            tool_name: Some("Edit".to_string()),
+            cwd: Some("/repo".to_string()),
+            file_path: Some("/home/user/.claude/config.json".to_string()),
+            ..Default::default()
+        };
+        assert!(
+            process(&input, &git).blocked.is_none(),
+            "should allow edits to files outside the cwd's repo"
+        );
+    }
+
+    #[test]
+    fn test_blocks_edit_to_file_inside_repo_on_main() {
+        let git = StubGit::on_main();
+        let input = HookInput {
+            tool_name: Some("Edit".to_string()),
+            cwd: Some("/repo".to_string()),
+            file_path: Some("/repo/src/foo.rs".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            process(&input, &git).blocked,
+            Some(true),
+            "should still block edits inside the repo on main"
+        );
+    }
+
+    #[test]
+    fn test_file_path_from_tool_input_fallback() {
+        let git = StubGit::on_main();
+        let input = HookInput {
+            tool_name: Some("Edit".to_string()),
+            cwd: Some("/repo".to_string()),
+            tool_input: Some(serde_json::json!({
+                "file_path": "/home/user/outside.txt"
+            })),
+            ..Default::default()
+        };
+        assert!(
+            process(&input, &git).blocked.is_none(),
+            "should pull file_path from tool_input when input.file_path is empty"
+        );
     }
 
     #[test]

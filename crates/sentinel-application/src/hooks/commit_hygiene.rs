@@ -200,6 +200,9 @@ mod tests {
         fn has_unpushed_commits(&self, _: &str) -> anyhow::Result<bool> {
             Ok(false)
         }
+        fn repo_root(&self, _: &str) -> Option<String> {
+            None
+        }
     }
 
     fn make_ctx(git: &dyn GitStatusPort) -> HookContext<'_> {

@@ -30,6 +30,10 @@ pub trait GitStatusPort {
 
     /// Check if local branch has commits not yet pushed to remote.
     fn has_unpushed_commits(&self, repo_path: &str) -> anyhow::Result<bool>;
+
+    /// Get the repository root (absolute path) for the given working path.
+    /// Returns `None` if the path is not inside any git repo.
+    fn repo_root(&self, path: &str) -> Option<String>;
 }
 
 // ---------------------------------------------------------------------------
