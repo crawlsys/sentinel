@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-04-16
+
+### Fixed
+- **Cross-project state leak in 4 two-phase hooks** — flat shared filenames caused last-writer-wins data loss between parallel sessions and projects
+  - `verification_gate`: `unverified-claims.json` → `unverified-claims-{session_id}.json`
+  - `commit_hygiene`: `commit-hygiene.json` → `commit-hygiene-{repo_hash}.json` (djb2 hash of repo root)
+  - `context_monitor`: `context-zone.json` → `context-zone-{session_id}.json`
+  - `activity_tracker`: `activity-summary.json` → `activity-summary-{session_id}.json`
+  - `pre_compact`: updated both callsites (`read_activity_summary`, `read_context_percent`) to match new scoped filenames
+  - `activity_tracker::check_elevated_context`: updated cross-hook read of context-zone to use scoped filename
+  - `hygiene_reminders` (0.4.0): same fix applied — `hygiene-{repo_hash}.json` pattern
+
 ## [0.4.0] - 2026-04-16
 
 ### Added

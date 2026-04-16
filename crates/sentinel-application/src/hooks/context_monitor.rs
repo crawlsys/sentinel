@@ -71,11 +71,11 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-fn state_file(fs: &dyn FileSystemPort) -> Option<PathBuf> {
+fn state_file(fs: &dyn FileSystemPort, session_id: &str) -> Option<PathBuf> {
     let home = fs.home_dir()?;
     let dir = super::metrics_dir(&home);
     fs.create_dir_all(&dir).ok()?;
-    Some(dir.join("context-zone.json"))
+    Some(dir.join(format!("context-zone-{session_id}.json")))
 }
 
 fn cooldown_file() -> PathBuf {
@@ -143,7 +143,7 @@ pub fn process_stop(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
         ts: chrono::Utc::now().to_rfc3339(),
     };
 
-    if let Some(path) = state_file(ctx.fs) {
+    if let Some(path) = state_file(ctx.fs, session_id) {
         let _ = ctx.fs.write(
             &path,
             serde_json::to_string(&state).unwrap_or_default().as_bytes(),
@@ -192,7 +192,8 @@ pub fn process_stop(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
 // ---------------------------------------------------------------------------
 
 pub fn process_prompt(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
-    let path = match state_file(ctx.fs) {
+    let session_id = input.session_id.as_deref().unwrap_or("unknown");
+    let path = match state_file(ctx.fs, session_id) {
         Some(p) => p,
         None => return HookOutput::allow(),
     };
@@ -207,8 +208,7 @@ pub fn process_prompt(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
         Err(_) => return HookOutput::allow(),
     };
 
-    // Only inject for the current session
-    let session_id = input.session_id.as_deref().unwrap_or("unknown");
+    // Defense-in-depth: file path already scopes to session, but double-check
     if state.session_id != session_id {
         return HookOutput::allow();
     }

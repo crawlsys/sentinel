@@ -52,7 +52,7 @@ fn snapshot_file(fs: &dyn FileSystemPort) -> Option<PathBuf> {
 /// Read the activity summary written by activity_tracker::process_stop
 fn read_activity_summary(fs: &dyn FileSystemPort, session_id: &str) -> (Vec<String>, Vec<String>, Vec<(String, usize)>) {
     let path = match metrics_dir(fs) {
-        Some(d) => d.join("activity-summary.json"),
+        Some(d) => d.join(format!("activity-summary-{session_id}.json")),
         None => return (Vec::new(), Vec::new(), Vec::new()),
     };
     let content = match fs.read_to_string(&path) {
@@ -109,9 +109,9 @@ fn read_activity_summary(fs: &dyn FileSystemPort, session_id: &str) -> (Vec<Stri
     (files, git, tool_counts)
 }
 
-/// Read context usage % from context-zone.json
+/// Read context usage % from context-zone-{session_id}.json
 fn read_context_percent(fs: &dyn FileSystemPort, session_id: &str) -> Option<f64> {
-    let path = metrics_dir(fs)?.join("context-zone.json");
+    let path = metrics_dir(fs)?.join(format!("context-zone-{session_id}.json"));
     let content = fs.read_to_string(&path).ok()?;
     let val: serde_json::Value = serde_json::from_str(&content).ok()?;
 

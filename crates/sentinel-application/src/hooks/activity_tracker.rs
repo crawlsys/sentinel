@@ -64,8 +64,8 @@ fn log_file(fs: &dyn FileSystemPort) -> Option<PathBuf> {
     Some(metrics_dir(fs)?.join("activity-log.jsonl"))
 }
 
-fn summary_file(fs: &dyn FileSystemPort) -> Option<PathBuf> {
-    Some(metrics_dir(fs)?.join("activity-summary.json"))
+fn summary_file(fs: &dyn FileSystemPort, session_id: &str) -> Option<PathBuf> {
+    Some(metrics_dir(fs)?.join(format!("activity-summary-{session_id}.json")))
 }
 
 fn cooldown_file() -> PathBuf {
@@ -256,7 +256,7 @@ pub fn process_stop(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
         ts: chrono::Utc::now().to_rfc3339(),
     };
 
-    if let Some(path) = summary_file(ctx.fs) {
+    if let Some(path) = summary_file(ctx.fs, session_id) {
         let _ = ctx.fs.write(
             &path,
             serde_json::to_string(&summary).unwrap_or_default().as_bytes(),
@@ -273,7 +273,7 @@ pub fn process_stop(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
 pub fn process_prompt(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     let session_id = input.session_id.as_deref().unwrap_or("unknown");
 
-    let path = match summary_file(ctx.fs) {
+    let path = match summary_file(ctx.fs, session_id) {
         Some(p) => p,
         None => return HookOutput::allow(),
     };
@@ -319,7 +319,7 @@ pub fn process_prompt(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
 /// Check if context monitor reported Yellow+ zone for this session.
 fn check_elevated_context(fs: &dyn FileSystemPort, session_id: &str) -> bool {
     let path = match metrics_dir(fs) {
-        Some(d) => d.join("context-zone.json"),
+        Some(d) => d.join(format!("context-zone-{session_id}.json")),
         None => return false,
     };
     let content = match fs.read_to_string(&path) {

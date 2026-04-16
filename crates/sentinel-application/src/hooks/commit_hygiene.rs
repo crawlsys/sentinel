@@ -34,16 +34,19 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-fn state_file(fs: &dyn FileSystemPort) -> Option<PathBuf> {
-    // Allow tests to override the state file path to avoid race conditions
-    // when multiple tests write/read the same file in parallel.
-    if let Ok(path) = std::env::var("SENTINEL_COMMIT_HYGIENE_STATE") {
-        return Some(PathBuf::from(path));
+fn repo_hash(repo_root: &str) -> String {
+    let mut h: u64 = 5381;
+    for b in repo_root.bytes() {
+        h = h.wrapping_mul(33).wrapping_add(u64::from(b));
     }
+    format!("{h:016x}")
+}
+
+fn state_file(fs: &dyn FileSystemPort, repo_root: &str) -> Option<PathBuf> {
     let home = fs.home_dir()?;
     let dir = super::metrics_dir(&home);
     fs.create_dir_all(&dir).ok()?;
-    Some(dir.join("commit-hygiene.json"))
+    Some(dir.join(format!("commit-hygiene-{}.json", repo_hash(repo_root))))
 }
 
 fn cooldown_file() -> PathBuf {
@@ -72,20 +75,21 @@ fn write_cooldown(fs: &dyn FileSystemPort) {
 
 pub fn process_stop(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     let cwd = input.cwd.as_deref().unwrap_or(".");
+    let root = ctx.git.repo_root(cwd).unwrap_or_else(|| cwd.to_string());
 
     let files = match ctx.git.has_uncommitted_changes(cwd) {
         Ok(true) => match ctx.git.changed_files(cwd) {
             Ok(f) if !f.is_empty() => f,
             _ => {
                 // No changes — clear any previous state (write empty)
-                if let Some(path) = state_file(ctx.fs) {
+                if let Some(path) = state_file(ctx.fs, &root) {
                     let _ = ctx.fs.write(&path, b"");
                 }
                 return HookOutput::allow();
             }
         },
         _ => {
-            if let Some(path) = state_file(ctx.fs) {
+            if let Some(path) = state_file(ctx.fs, &root) {
                 let _ = ctx.fs.write(&path, b"");
             }
             return HookOutput::allow();
@@ -99,7 +103,7 @@ pub fn process_stop(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
         ts: chrono::Utc::now().to_rfc3339(),
     };
 
-    if let Some(path) = state_file(ctx.fs) {
+    if let Some(path) = state_file(ctx.fs, &root) {
         let _ = ctx.fs.write(
             &path,
             serde_json::to_string(&state).unwrap_or_default().as_bytes(),
@@ -116,8 +120,9 @@ pub fn process_stop(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
 
 pub fn process_prompt(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     let cwd = input.cwd.as_deref().unwrap_or(".");
+    let root = ctx.git.repo_root(cwd).unwrap_or_else(|| cwd.to_string());
 
-    let path = match state_file(ctx.fs) {
+    let path = match state_file(ctx.fs, &root) {
         Some(p) => p,
         None => return HookOutput::allow(),
     };
