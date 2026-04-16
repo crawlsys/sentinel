@@ -76,45 +76,23 @@ fn persistent_tasks_dir(fs: &dyn FileSystemPort, project_hash: &str) -> Option<P
     fs.home_dir().map(|h| h.join(".claude").join("persistent-tasks").join(project_hash))
 }
 
-/// Find the active task list directory.
+/// Find the active task list directory for this session.
 ///
-/// Strategy: look for the session_id as a directory name first (standalone session),
-/// then fall back to the most recently modified directory (team or unknown).
+/// Strictly scoped to `~/.claude/tasks/{session_id}/`. Returns `None` if that
+/// directory doesn't exist or has no task files — callers must treat `None`
+/// as "nothing to persist".
+///
+/// No fallback: scanning `~/.claude/tasks/` for the most recently modified
+/// dir leaks tasks across projects. A session in project A would inherit
+/// project B's tasks if A's session dir hadn't been created yet.
 fn find_active_task_dir(fs: &dyn FileSystemPort, session_id: &str) -> Option<PathBuf> {
     let home = fs.home_dir()?;
-    let tasks_root = home.join(".claude").join("tasks");
-
-    if !fs.is_dir(&tasks_root) {
-        return None;
-    }
-
-    // First: try session_id directly (standalone sessions use session_id as dir name)
-    let session_dir = tasks_root.join(session_id);
+    let session_dir = home.join(".claude").join("tasks").join(session_id);
     if fs.is_dir(&session_dir) && has_task_files(fs, &session_dir) {
-        return Some(session_dir);
+        Some(session_dir)
+    } else {
+        None
     }
-
-    // Second: find the most recently modified directory with task files
-    let mut best: Option<(PathBuf, std::time::SystemTime)> = None;
-    if let Ok(entries) = fs.read_dir(&tasks_root) {
-        for path in entries {
-            if !fs.is_dir(&path) {
-                continue;
-            }
-            if !has_task_files(fs, &path) {
-                continue;
-            }
-            if let Ok(meta) = fs.metadata(&path) {
-                if let Ok(modified) = meta.modified() {
-                    if best.as_ref().map_or(true, |(_, best_time)| modified > *best_time) {
-                        best = Some((path, modified));
-                    }
-                }
-            }
-        }
-    }
-
-    best.map(|(path, _)| path)
 }
 
 /// Check if a directory contains at least one .json task file (not .lock, not .highwatermark)
@@ -498,5 +476,80 @@ mod tests {
         let ctx = crate::hooks::test_support::stub_ctx();
         let output = process(&input, &ctx);
         assert!(output.blocked.is_none());
+    }
+
+    /// FS that reports a caller-supplied home dir so tests can isolate `~/.claude/`.
+    struct ScopedHomeFs {
+        home: PathBuf,
+    }
+    impl FileSystemPort for ScopedHomeFs {
+        fn home_dir(&self) -> Option<PathBuf> { Some(self.home.clone()) }
+        fn read_to_string(&self, p: &Path) -> anyhow::Result<String> { Ok(std::fs::read_to_string(p)?) }
+        fn write(&self, p: &Path, c: &[u8]) -> anyhow::Result<()> {
+            if let Some(par) = p.parent() { std::fs::create_dir_all(par)?; }
+            Ok(std::fs::write(p, c)?)
+        }
+        fn create_dir_all(&self, p: &Path) -> anyhow::Result<()> { Ok(std::fs::create_dir_all(p)?) }
+        fn read_dir(&self, p: &Path) -> anyhow::Result<Vec<PathBuf>> {
+            Ok(std::fs::read_dir(p)?.filter_map(|e| e.ok().map(|e| e.path())).collect())
+        }
+        fn exists(&self, p: &Path) -> bool { p.exists() }
+        fn is_dir(&self, p: &Path) -> bool { p.is_dir() }
+        fn metadata(&self, p: &Path) -> anyhow::Result<std::fs::Metadata> { Ok(std::fs::metadata(p)?) }
+        fn append(&self, _: &Path, _: &[u8]) -> anyhow::Result<()> { Ok(()) }
+    }
+
+    /// Regression: `find_active_task_dir` must NOT fall back to the most
+    /// recently modified dir in `~/.claude/tasks/`. Doing so leaks tasks
+    /// across projects (see bug where a session in `C:\Users\garys` picked
+    /// up legatus-utility-rust tasks because legatus's dir had newer mtime).
+    #[test]
+    fn test_find_active_task_dir_no_cross_project_fallback() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().to_path_buf();
+        let tasks_root = home.join(".claude").join("tasks");
+
+        let target_session = "target-session-uuid";
+        let other_session = "other-session-uuid";
+
+        // Target session dir with a task file — older mtime.
+        let target_dir = tasks_root.join(target_session);
+        std::fs::create_dir_all(&target_dir).unwrap();
+        std::fs::write(target_dir.join("1.json"), "{}").unwrap();
+
+        // Other session dir with a task file — guaranteed newer mtime.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let other_dir = tasks_root.join(other_session);
+        std::fs::create_dir_all(&other_dir).unwrap();
+        std::fs::write(other_dir.join("1.json"), "{}").unwrap();
+
+        let fs = ScopedHomeFs { home };
+
+        // Lookup by matching session_id returns its own dir, not the newer one.
+        let found = find_active_task_dir(&fs, target_session).unwrap();
+        assert_eq!(found, target_dir);
+
+        // Lookup for a session with no dir returns None — not the newest sibling.
+        let missing = find_active_task_dir(&fs, "no-such-session");
+        assert!(missing.is_none(), "must not fall back to other sessions' dirs");
+    }
+
+    #[test]
+    fn test_find_active_task_dir_missing_tasks_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fs = ScopedHomeFs { home: tmp.path().to_path_buf() };
+        // ~/.claude/tasks/ doesn't exist at all.
+        assert!(find_active_task_dir(&fs, "any-session").is_none());
+    }
+
+    #[test]
+    fn test_find_active_task_dir_empty_session_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().to_path_buf();
+        let session_dir = home.join(".claude").join("tasks").join("session-x");
+        std::fs::create_dir_all(&session_dir).unwrap();
+        // Dir exists but has no .json task files.
+        let fs = ScopedHomeFs { home };
+        assert!(find_active_task_dir(&fs, "session-x").is_none());
     }
 }
