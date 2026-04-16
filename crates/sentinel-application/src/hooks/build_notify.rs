@@ -74,7 +74,10 @@ pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
             "success".to_string(),
             serde_json::Value::Bool(succeeded),
         );
-        crate::channel_events::emit("build_completed", &summary, meta);
+        crate::channel_events::emit(
+            "build_completed", &summary, meta,
+            input.session_id.as_deref(), input.cwd.as_deref(), Some("build_notify"),
+        );
         return HookOutput::allow();
     }
 
@@ -110,7 +113,10 @@ pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
                 serde_json::Value::String(target.trim_start_matches(" → ").to_string()),
             );
         }
-        crate::channel_events::emit("deploy_completed", &summary, meta);
+        crate::channel_events::emit(
+            "deploy_completed", &summary, meta,
+            input.session_id.as_deref(), input.cwd.as_deref(), Some("build_notify"),
+        );
     }
 
     HookOutput::allow()

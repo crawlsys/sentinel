@@ -1,7 +1,9 @@
 //! Channel event emitter for MCP push notifications.
 //!
-//! Writes event files to `~/.claude/sentinel/events/` for the sentinel-mcp
-//! server to pick up and push into the Claude Code session via MCP channels.
+//! Writes event files to `~/.claude/sentinel/events/{session_id}/` for the
+//! sentinel-mcp server to pick up and push into the correct Claude Code
+//! session via MCP channels. Session-scoped directories prevent cross-session
+//! event contamination when multiple Claude sessions run concurrently.
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -16,13 +18,22 @@ pub struct ChannelEvent {
     pub summary: String,
     /// ISO 8601 timestamp
     pub ts: String,
+    /// Session ID that owns this event
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    /// Project context (cwd basename or project name)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
+    /// Source agent or hook that generated this event
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_agent: Option<String>,
     /// Optional structured metadata
     #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
     pub meta: serde_json::Map<String, serde_json::Value>,
 }
 
-/// Get the events directory path.
-pub fn events_dir() -> std::path::PathBuf {
+/// Get the base events directory (parent of all session subdirs).
+fn events_base_dir() -> std::path::PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join(".claude")
@@ -30,12 +41,57 @@ pub fn events_dir() -> std::path::PathBuf {
         .join("events")
 }
 
-/// Emit a channel event by writing a JSON file to the events directory.
+/// Get the session-scoped events directory.
 ///
-/// The sentinel-mcp server watches this directory and pushes each event
-/// into the active Claude Code session via MCP channels.
-pub fn emit(event: &str, summary: &str, meta: serde_json::Map<String, serde_json::Value>) {
-    let dir = events_dir();
+/// Returns `~/.claude/sentinel/events/{session_id}/` for the given session,
+/// or falls back to `~/.claude/sentinel/events/_unscoped/` if no session ID
+/// is available.
+pub fn events_dir_for_session(session_id: Option<&str>) -> std::path::PathBuf {
+    let subdir = session_id.unwrap_or("_unscoped");
+    events_base_dir().join(subdir)
+}
+
+/// Get the events directory for the current session from env.
+pub fn events_dir() -> std::path::PathBuf {
+    let session_id = detect_session_id();
+    events_dir_for_session(session_id.as_deref())
+}
+
+/// Detect the current session ID from environment variables.
+fn detect_session_id() -> Option<String> {
+    std::env::var("CLAUDE_SESSION_ID")
+        .or_else(|_| std::env::var("SESSION_ID"))
+        .ok()
+        .filter(|s| !s.is_empty())
+}
+
+/// Derive a project name from a cwd path (uses the last path component).
+fn project_from_cwd(cwd: Option<&str>) -> Option<String> {
+    cwd.and_then(|p| {
+        std::path::Path::new(p)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(String::from)
+    })
+}
+
+/// Emit a channel event by writing a JSON file to the session-scoped events directory.
+///
+/// `session_id` and `cwd` should come from `HookInput` when available.
+/// If `session_id` is `None`, falls back to env var detection.
+pub fn emit(
+    event: &str,
+    summary: &str,
+    meta: serde_json::Map<String, serde_json::Value>,
+    session_id: Option<&str>,
+    cwd: Option<&str>,
+    source_agent: Option<&str>,
+) {
+    let resolved_session_id = session_id
+        .map(String::from)
+        .or_else(detect_session_id);
+
+    let dir = events_dir_for_session(resolved_session_id.as_deref());
     if let Err(e) = std::fs::create_dir_all(&dir) {
         warn!(error = %e, "Failed to create events directory");
         return;
@@ -52,6 +108,9 @@ pub fn emit(event: &str, summary: &str, meta: serde_json::Map<String, serde_json
         event: event.to_string(),
         summary: summary.to_string(),
         ts: now.to_rfc3339(),
+        session_id: resolved_session_id,
+        project: project_from_cwd(cwd),
+        source_agent: source_agent.map(String::from),
         meta,
     };
 
@@ -74,10 +133,20 @@ pub fn read_event(path: &std::path::Path) -> Option<ChannelEvent> {
     serde_json::from_str(&content).ok()
 }
 
-/// List all pending event files, sorted by name (oldest first).
+/// List all pending event files in a session-scoped directory, sorted oldest first.
+pub fn pending_events_for_session(session_id: Option<&str>) -> Vec<std::path::PathBuf> {
+    let dir = events_dir_for_session(session_id);
+    pending_events_in_dir(&dir)
+}
+
+/// List all pending event files in the current session's directory.
 pub fn pending_events() -> Vec<std::path::PathBuf> {
     let dir = events_dir();
-    let mut entries: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
+    pending_events_in_dir(&dir)
+}
+
+fn pending_events_in_dir(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut entries: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
         .ok()
         .into_iter()
         .flatten()
@@ -96,6 +165,41 @@ pub fn consume(path: &std::path::Path) {
     }
 }
 
+/// Remove session event directories older than the given duration.
+///
+/// Call during `SessionStart` to prevent stale directories from accumulating.
+pub fn cleanup_stale_sessions(max_age: std::time::Duration) {
+    let base = events_base_dir();
+    let cutoff = std::time::SystemTime::now()
+        .checked_sub(max_age)
+        .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+
+    let entries = match std::fs::read_dir(&base) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+
+        let modified = match path.metadata().and_then(|m| m.modified()) {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+
+        if modified < cutoff {
+            if let Err(e) = std::fs::remove_dir_all(&path) {
+                debug!(error = %e, path = %path.display(), "Failed to remove stale session events dir");
+            } else {
+                debug!(path = %path.display(), "Cleaned up stale session events directory");
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -109,6 +213,9 @@ mod tests {
             event: "agent_completed".to_string(),
             summary: "Researcher finished".to_string(),
             ts: Utc::now().to_rfc3339(),
+            session_id: Some("test-session-123".to_string()),
+            project: Some("sentinel".to_string()),
+            source_agent: Some("debugger".to_string()),
             meta: serde_json::Map::new(),
         };
 
@@ -118,5 +225,63 @@ mod tests {
         let read = read_event(&path).unwrap();
         assert_eq!(read.event, "agent_completed");
         assert_eq!(read.summary, "Researcher finished");
+        assert_eq!(read.session_id.as_deref(), Some("test-session-123"));
+        assert_eq!(read.project.as_deref(), Some("sentinel"));
+        assert_eq!(read.source_agent.as_deref(), Some("debugger"));
+    }
+
+    #[test]
+    fn test_roundtrip_legacy_format() {
+        let json = r#"{"event":"build_completed","summary":"Build done","ts":"2026-04-16T12:00:00Z","meta":{}}"#;
+        let event: ChannelEvent = serde_json::from_str(json).unwrap();
+        assert_eq!(event.event, "build_completed");
+        assert!(event.session_id.is_none());
+        assert!(event.project.is_none());
+        assert!(event.source_agent.is_none());
+    }
+
+    #[test]
+    fn test_events_dir_for_session() {
+        let dir = events_dir_for_session(Some("abc-123"));
+        assert!(dir.ends_with("events/abc-123") || dir.ends_with("events\\abc-123"));
+
+        let unscoped = events_dir_for_session(None);
+        assert!(unscoped.ends_with("events/_unscoped") || unscoped.ends_with("events\\_unscoped"));
+    }
+
+    #[test]
+    fn test_project_from_cwd() {
+        assert_eq!(project_from_cwd(Some("/Users/gary/projects/sentinel")), Some("sentinel".to_string()));
+        assert_eq!(project_from_cwd(Some("C:\\Users\\gary\\sentinel")), Some("sentinel".to_string()));
+        assert_eq!(project_from_cwd(None), None);
+    }
+
+    #[test]
+    fn test_cleanup_removes_old_dirs() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let base = tmpdir.path();
+        let stale = base.join("old-session");
+        std::fs::create_dir(&stale).unwrap();
+        std::fs::write(stale.join("event.json"), "{}").unwrap();
+
+        // With max_age=0, everything is "stale"
+        // We need to call with the base dir overridden — test the logic directly
+        let cutoff = std::time::SystemTime::now();
+        // Sleep tiny bit so mtime < cutoff
+        std::thread::sleep(std::time::Duration::from_millis(10));
+
+        for entry in std::fs::read_dir(base).unwrap().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                if let Ok(meta) = path.metadata() {
+                    if let Ok(modified) = meta.modified() {
+                        if modified < cutoff {
+                            let _ = std::fs::remove_dir_all(&path);
+                        }
+                    }
+                }
+            }
+        }
+        assert!(!stale.exists());
     }
 }

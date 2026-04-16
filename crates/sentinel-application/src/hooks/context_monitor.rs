@@ -178,7 +178,10 @@ pub fn process_stop(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
             "zone".to_string(),
             serde_json::Value::String(zone.label().to_string()),
         );
-        crate::channel_events::emit("context_threshold", &summary, meta);
+        crate::channel_events::emit(
+            "context_threshold", &summary, meta,
+            input.session_id.as_deref(), input.cwd.as_deref(), Some("context_monitor"),
+        );
     }
 
     HookOutput::allow()

@@ -127,7 +127,10 @@ pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
         "teammate_name".to_string(),
         serde_json::Value::String(teammate_name.to_string()),
     );
-    crate::channel_events::emit("task_completed", &summary, meta);
+    crate::channel_events::emit(
+        "task_completed", &summary, meta,
+        input.session_id.as_deref(), input.cwd.as_deref(), Some("task_completed"),
+    );
 
     HookOutput::inject_context(HookEvent::TaskCompleted, &context)
 }

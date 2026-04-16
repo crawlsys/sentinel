@@ -104,6 +104,9 @@ pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
     // 1.5. One-time migration: move ~/.claude/metrics/ → ~/.claude/sentinel/metrics/
     migrate_metrics_dir(&claude_dir);
 
+    // 1.6. Clean up stale channel event directories (older than 24h)
+    crate::channel_events::cleanup_stale_sessions(std::time::Duration::from_secs(86400));
+
     // 2. Sync marketplace repo (if found)
     let sync_result = sync_marketplace(&claude_dir);
 

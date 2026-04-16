@@ -44,7 +44,10 @@ pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
         "team_name".to_string(),
         serde_json::Value::String(team_name.to_string()),
     );
-    crate::channel_events::emit("teammate_idle", &summary, meta);
+    crate::channel_events::emit(
+        "teammate_idle", &summary, meta,
+        input.session_id.as_deref(), input.cwd.as_deref(), Some(teammate_name),
+    );
 
     HookOutput::inject_context(HookEvent::TeammateIdle, &context)
 }

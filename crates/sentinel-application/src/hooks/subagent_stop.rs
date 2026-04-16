@@ -25,7 +25,10 @@ pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
         "agent_type".to_string(),
         serde_json::Value::String(agent_type.to_string()),
     );
-    crate::channel_events::emit("agent_completed", &summary, meta);
+    crate::channel_events::emit(
+        "agent_completed", &summary, meta,
+        input.session_id.as_deref(), input.cwd.as_deref(), Some(agent_type),
+    );
 
     HookOutput::allow()
 }

@@ -162,6 +162,7 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
             "mcp_server_failure",
             &format!("MCP server `{server_name}` failed: {error_detail}. Try `mcp__sentinel__mcp_restart_server` to fix."),
             meta,
+            input.session_id.as_deref(), input.cwd.as_deref(), Some("mcp_health"),
         );
     }
 

@@ -139,7 +139,10 @@ pub fn process(input: &HookInput, _ctx: &HookContext<'_>) -> HookOutput {
         "archived_path".to_string(),
         serde_json::Value::String(target_path.display().to_string()),
     );
-    crate::channel_events::emit("plan_organized", &summary, meta);
+    crate::channel_events::emit(
+        "plan_organized", &summary, meta,
+        input.session_id.as_deref(), input.cwd.as_deref(), Some("plan_organizer"),
+    );
 
     // Inject context telling the user and Claude where the archived copy lives
     let context = format!(
