@@ -19,7 +19,7 @@ use tracing::{debug, info};
 use sentinel_domain::evidence::Evidence;
 use sentinel_domain::judge::{JudgeModel, JudgeVerdict};
 
-const CODEX_MODEL: &str = "gpt-5.3-codex";
+const CODEX_MODEL: &str = "gpt-5.4";
 
 /// Type-erased prompt function: (system, user_msg) -> response text
 type PromptFn = Arc<dyn Fn(String, String) -> BoxFuture<'static, Result<String>> + Send + Sync>;
