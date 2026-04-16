@@ -41,6 +41,10 @@ impl hooks::GitStatusPort for RealGit {
     fn has_unpushed_commits(&self, repo_path: &str) -> Result<bool> {
         sentinel_infrastructure::git::has_unpushed_commits(repo_path)
     }
+
+    fn repo_root(&self, path: &str) -> Option<String> {
+        sentinel_infrastructure::git::repo_root(path).ok()
+    }
 }
 
 pub async fn run(event: &str, matcher: Option<&str>, standalone: bool) -> Result<()> {

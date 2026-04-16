@@ -78,6 +78,7 @@ mod tests {
         fn current_branch(&self, _: &str) -> anyhow::Result<String> { Ok("main".into()) }
         fn is_worktree(&self, _: &str) -> bool { false }
         fn has_unpushed_commits(&self, _: &str) -> anyhow::Result<bool> { Ok(false) }
+        fn repo_root(&self, _: &str) -> Option<String> { None }
     }
 
     #[test]
