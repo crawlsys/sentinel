@@ -1,6 +1,6 @@
 //! AI Skill Classifier via Rig LLM framework
 //!
-//! Uses Claude Opus 4.6 via OpenRouter for intent classification.
+//! Uses Claude Opus 4.7 (latest) via OpenRouter for intent classification.
 //! The classifier receives the user's message + a compact skill catalog
 //! and returns the best-matching skill name (or "none").
 
@@ -13,8 +13,8 @@ use rig_core::providers::openrouter;
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 
-/// Claude Opus 4.6 via OpenRouter
-const OPENROUTER_MODEL: &str = "anthropic/claude-opus-4-6";
+/// Claude Opus 4.7 (latest) via OpenRouter
+const OPENROUTER_MODEL: &str = "anthropic/claude-opus-4-7";
 
 /// Type-erased prompt function
 type PromptFn = Arc<dyn Fn(String, String) -> BoxFuture<'static, Result<String>> + Send + Sync>;

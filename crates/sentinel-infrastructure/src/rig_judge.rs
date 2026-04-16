@@ -1,52 +1,51 @@
-//! Adversarial AI Judge via OpenAI Codex
+//! Adversarial AI Judge via OpenRouter (GPT-5.4)
 //!
-//! Uses a DIFFERENT model family (OpenAI Codex) from the one generating
-//! the work (Anthropic Opus) to ensure adversarial evaluation. The judge
-//! should never be the same model as the defendant — this prevents the
-//! "grading your own homework" antipattern.
+//! Uses GPT-5.4 via OpenRouter — a DIFFERENT model family from the Anthropic
+//! Opus used for skill routing — to ensure adversarial evaluation. The judge
+//! should never be the same model as the defendant: no "grading your own homework".
 //!
-//! All judge tiers route through Codex. No Anthropic fallback.
+//! All judge tiers route through OpenRouter. Reads OPENROUTER_API_KEY.
 
 use anyhow::{Context, Result};
 use futures::future::BoxFuture;
 use rig_core::agent::AgentBuilder;
 use rig_core::completion::Prompt;
 use rig_core::prelude::CompletionClient;
-use rig_core::providers::openai;
+use rig_core::providers::openrouter;
 use std::sync::Arc;
 use tracing::{debug, info};
 
 use sentinel_domain::evidence::Evidence;
 use sentinel_domain::judge::{JudgeModel, JudgeVerdict};
 
-const CODEX_MODEL: &str = "gpt-5.4";
+/// GPT-5.4 (latest) via OpenRouter — adversarially different from Anthropic classifier
+const JUDGE_MODEL: &str = "openai/gpt-5.4";
 
 /// Type-erased prompt function: (system, user_msg) -> response text
 type PromptFn = Arc<dyn Fn(String, String) -> BoxFuture<'static, Result<String>> + Send + Sync>;
 
-/// The Codex-backed adversarial judge provider
-struct CodexProvider {
+/// The OpenRouter-backed adversarial judge provider
+struct JudgeProvider {
     prompt_fn: PromptFn,
 }
 
-impl CodexProvider {
-    /// Initialize from OPENAI_API_KEY env var.
+impl JudgeProvider {
+    /// Initialize from OPENROUTER_API_KEY env var.
     fn from_env() -> Result<Self> {
-        let key = std::env::var("OPENAI_API_KEY").context("OPENAI_API_KEY not set")?;
-        let client: openai::CompletionsClient = openai::CompletionsClient::builder()
-            .api_key(key)
-            .build()
-            .map_err(|e| anyhow::anyhow!("Failed to build OpenAI Codex client: {e}"))?;
-        let client = Arc::new(client);
+        let key = std::env::var("OPENROUTER_API_KEY").context("OPENROUTER_API_KEY not set")?;
+        let client = Arc::new(
+            openrouter::Client::new(&key)
+                .map_err(|e| anyhow::anyhow!("Failed to build OpenRouter judge client: {e}"))?,
+        );
         Ok(Self {
             prompt_fn: Arc::new(move |system, user_msg| {
                 let client = client.clone();
                 Box::pin(async move {
-                    let agent = AgentBuilder::new(client.completion_model(CODEX_MODEL))
+                    let agent = AgentBuilder::new(client.completion_model(JUDGE_MODEL))
                         .preamble(&system)
                         .build();
                     let result: Result<String, _> = agent.prompt(user_msg).await;
-                    result.map_err(|e| anyhow::anyhow!("Codex judge: {e}"))
+                    result.map_err(|e| anyhow::anyhow!("OpenRouter judge: {e}"))
                 })
             }),
         })
@@ -56,7 +55,8 @@ impl CodexProvider {
     async fn judge(&self, system: &str, user_msg: &str) -> Result<JudgeVerdict> {
         let text = (self.prompt_fn)(system.to_string(), user_msg.to_string()).await?;
         debug!(
-            provider = "codex",
+            provider = "openrouter",
+            model = JUDGE_MODEL,
             response_len = text.len(),
             "Adversarial judge response received"
         );
@@ -68,38 +68,38 @@ impl CodexProvider {
     }
 }
 
-/// Adversarial Codex judge — all evaluations go through OpenAI Codex.
+/// Adversarial judge — GPT-5.4 via OpenRouter.
 ///
-/// Codex is a different model family from the Anthropic Opus that generates
+/// GPT-5.4 is a different model family from the Anthropic Opus that generates
 /// the work being evaluated, ensuring genuinely adversarial review.
 pub struct MultiModelJudge {
-    codex: Option<CodexProvider>,
+    judge: Option<JudgeProvider>,
 }
 
 impl MultiModelJudge {
     /// Initialize from environment variables.
     pub fn from_env() -> Self {
-        let codex = CodexProvider::from_env().ok();
+        let judge = JudgeProvider::from_env().ok();
 
-        if codex.is_none() {
+        if judge.is_none() {
             eprintln!(
                 "[sentinel] WARNING: No AI judge available. \
-                 Set OPENAI_API_KEY for adversarial Codex judge. \
+                 Set OPENROUTER_API_KEY for adversarial GPT-5.4 judge. \
                  All proof submissions will fail until configured."
             );
         }
         info!(
-            provider = if codex.is_some() { "codex" } else { "none" },
-            model = CODEX_MODEL,
+            provider = if judge.is_some() { "openrouter" } else { "none" },
+            model = JUDGE_MODEL,
             "Adversarial judge initialized"
         );
 
-        Self { codex }
+        Self { judge }
     }
 
-    /// Returns `true` if the Codex provider is available.
+    /// Returns `true` if the judge provider is available.
     pub fn has_any_provider(&self) -> bool {
-        self.codex.is_some()
+        self.judge.is_some()
     }
 }
 
@@ -113,16 +113,15 @@ impl sentinel_application::judge_service::JudgeService for MultiModelJudge {
         evidence: &Evidence,
         _model: JudgeModel,
     ) -> Result<JudgeVerdict> {
-        // All tiers route through Codex — adversarial by design
-        let provider = self.codex.as_ref().ok_or_else(|| {
+        let provider = self.judge.as_ref().ok_or_else(|| {
             anyhow::anyhow!(
-                "Adversarial Codex judge not available — set OPENAI_API_KEY"
+                "Adversarial judge not available — set OPENROUTER_API_KEY"
             )
         })?;
 
         info!(
-            provider = "codex",
-            model = CODEX_MODEL,
+            provider = "openrouter",
+            model = JUDGE_MODEL,
             skill = skill,
             phase = phase_id,
             "Adversarial judge evaluation"
@@ -231,7 +230,7 @@ mod tests {
 
     #[test]
     fn test_adversarial_judge_no_key() {
-        let judge = MultiModelJudge { codex: None };
+        let judge = MultiModelJudge { judge: None };
         assert!(!judge.has_any_provider());
     }
 }
