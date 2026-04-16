@@ -17,6 +17,7 @@ pub mod db_ops_gate;
 pub mod doc_cleanup;
 pub mod doc_drift;
 pub mod doppler_auth0_gate;
+pub mod dep_check;
 pub mod error_reporter;
 pub mod evidence_collector;
 pub mod execution_log;
@@ -88,6 +89,7 @@ pub const HOOK_NAMES: &[&str] = &[
     "context_monitor",
     "cwd_changed",
     "db_ops_gate",
+    "dep_check",
     "doc_cleanup",
     "doc_drift",
     "doppler_auth0_gate",

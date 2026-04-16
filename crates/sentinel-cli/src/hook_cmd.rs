@@ -498,8 +498,9 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
             // startup for 5-20s. Verification now runs on PreCompact (background,
             // non-critical path) where latency doesn't affect user experience.
 
-            // Version drift check removed — Claude Code uses bun, not npm.
-            // The old npm registry call added 4-20s to every cold SessionStart.
+            // Dependency freshness check — detect outdated deps (any language)
+            let dep_output = hooks::dep_check::process(&input, &ctx);
+            output.merge(&dep_output);
         }
 
         HookEvent::PreCompact => {
