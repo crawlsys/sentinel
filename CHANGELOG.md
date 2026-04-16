@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Fixed
+- **Cross-project task rehydration leak in `task_persist` hook** (2026-04-16)
+  - `find_active_task_dir` fell back to the globally most-recently-modified dir under `~/.claude/tasks/` when the session_id dir was missing, causing tasks from one project to be persisted under another project's cwd hash and rehydrated at SessionStart
+  - Now strictly scoped to `~/.claude/tasks/{session_id}/`; returns `None` (safe no-op) when missing
+  - Added regression tests: matching `session_id` wins over newer-mtime siblings, missing session returns `None`, empty session dir returns `None`
+
 ### Changed
 - **Plan system overhaul: use Claude Code's built-in Plan Mode** (2026-04-15)
   - Removed custom `plan` skill from marketplace — Claude Code's `EnterPlanMode`/`ExitPlanMode` now authoritative
