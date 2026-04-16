@@ -160,18 +160,24 @@ pub async fn run(
     status: bool,
     cancel: bool,
     history: bool,
-    history_json: bool,
+    list: bool,
+    session: Option<String>,
+    json: bool,
 ) -> Result<()> {
+    if list {
+        return list_breaks(json).await;
+    }
+
     if status {
-        return show_status().await;
+        return show_status(session, json).await;
     }
 
     if cancel {
-        return cancel_break().await;
+        return cancel_break(session).await;
     }
 
     if history {
-        return show_history(history_json).await;
+        return show_history(json).await;
     }
 
     // Initiate a new break
@@ -344,100 +350,253 @@ async fn initiate_break(
     Ok(())
 }
 
-/// Show the status of the current glass break
-async fn show_status() -> Result<()> {
-    let session_id = find_current_session();
-    match session_id {
-        Some(ref sid) => {
-            let _lock = sentinel_infrastructure::state_store::acquire_session_lock(sid)?;
-            let state = sentinel_infrastructure::state_store::load(sid)?;
+/// Machine-readable glass-break status for one session.
+///
+/// Emitted by `--status --json` and one entry per session by `--list --json`.
+/// Consumers (e.g. Legatus Utility) serialize this directly — changes are a
+/// semver-visible API break.
+#[derive(Debug, Serialize)]
+struct BreakStatusJson {
+    session_id: String,
+    active: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    started_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    expires_at: Option<String>,
+    remaining_secs: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    workflow: Option<String>,
+    tools_used_count: usize,
+}
 
-            match state.and_then(|s| s.glass_break) {
-                Some(gb) => {
-                    let now = Utc::now();
-                    if now < gb.expires_at {
-                        let remaining = gb.expires_at - now;
-                        let mins = remaining.num_minutes();
-                        let secs = remaining.num_seconds() % 60;
-                        eprintln!("  Glass break ACTIVE");
-                        eprintln!("    Reason:    {}", gb.reason);
-                        eprintln!("    Started:   {}", gb.started_at.format("%H:%M:%S UTC"));
-                        eprintln!("    Expires:   {}", gb.expires_at.format("%H:%M:%S UTC"));
-                        eprintln!("    Remaining: {}m {}s", mins, secs);
-                        eprintln!("    Workflow:  {}", gb.workflow.as_deref().unwrap_or("all"));
-                        eprintln!("    Challenge: {}", gb.challenge_code);
-                        eprintln!("    Tools used: {}", gb.tools_used.len());
-                        for tu in &gb.tools_used {
-                            eprintln!("      - {} {} ({})", tu.tool, tu.detail, tu.ts);
-                        }
-                    } else {
-                        eprintln!(
-                            "  No active glass break (last break expired at {})",
-                            gb.expires_at.format("%H:%M:%S UTC")
-                        );
-                    }
-                }
-                None => {
-                    eprintln!("  No active glass break.");
-                }
-            }
+impl BreakStatusJson {
+    fn for_session(sid: &str) -> Result<Self> {
+        let _lock = sentinel_infrastructure::state_store::acquire_session_lock(sid)?;
+        let state = sentinel_infrastructure::state_store::load(sid)?;
+        let now = Utc::now();
+        let gb = state.and_then(|s| s.glass_break);
+
+        let (active, reason, started_at, expires_at, remaining_secs, workflow, tools_used_count) =
+            match gb {
+                Some(ref gb) if now < gb.expires_at => (
+                    true,
+                    Some(gb.reason.clone()),
+                    Some(gb.started_at.to_rfc3339()),
+                    Some(gb.expires_at.to_rfc3339()),
+                    (gb.expires_at - now).num_seconds(),
+                    gb.workflow.clone(),
+                    gb.tools_used.len(),
+                ),
+                Some(ref gb) => (
+                    false,
+                    Some(gb.reason.clone()),
+                    Some(gb.started_at.to_rfc3339()),
+                    Some(gb.expires_at.to_rfc3339()),
+                    0,
+                    gb.workflow.clone(),
+                    gb.tools_used.len(),
+                ),
+                None => (false, None, None, None, 0, None, 0),
+            };
+
+        Ok(Self {
+            session_id: sid.to_string(),
+            active,
+            reason,
+            started_at,
+            expires_at,
+            remaining_secs,
+            workflow,
+            tools_used_count,
+        })
+    }
+}
+
+/// Show the status of a glass break for the specified session (or the most
+/// recently modified session if none given).
+async fn show_status(session: Option<String>, json: bool) -> Result<()> {
+    let session_id = session.or_else(find_current_session);
+    let Some(sid) = session_id else {
+        if json {
+            println!("null");
+        } else {
+            eprintln!("  No active session found.");
+        }
+        return Ok(());
+    };
+
+    let st = BreakStatusJson::for_session(&sid)?;
+
+    if json {
+        println!("{}", serde_json::to_string(&st)?);
+        return Ok(());
+    }
+
+    if st.active {
+        let mins = st.remaining_secs / 60;
+        let secs = st.remaining_secs % 60;
+        eprintln!("  Glass break ACTIVE");
+        eprintln!("    Session:   {}", st.session_id);
+        if let Some(ref r) = st.reason {
+            eprintln!("    Reason:    {r}");
+        }
+        if let Some(ref t) = st.started_at {
+            eprintln!("    Started:   {t}");
+        }
+        if let Some(ref t) = st.expires_at {
+            eprintln!("    Expires:   {t}");
+        }
+        eprintln!("    Remaining: {mins}m {secs}s");
+        eprintln!("    Workflow:  {}", st.workflow.as_deref().unwrap_or("all"));
+        eprintln!("    Tools used: {}", st.tools_used_count);
+    } else if let Some(ref t) = st.expires_at {
+        eprintln!("  No active glass break (last break expired at {t})");
+    } else {
+        eprintln!("  No active glass break.");
+    }
+    Ok(())
+}
+
+/// Cancel the current glass break for the specified session (or the most
+/// recently modified session if none given). Works from non-interactive
+/// contexts — cancelling can only *increase* enforcement, so the anti-AI
+/// TTY check doesn't apply here (only activation requires a terminal).
+async fn cancel_break(session: Option<String>) -> Result<()> {
+    let session_id = session.or_else(find_current_session);
+    let Some(sid) = session_id else {
+        eprintln!("  No active session found.");
+        return Ok(());
+    };
+
+    let _lock = sentinel_infrastructure::state_store::acquire_session_lock(&sid)?;
+    let mut state = sentinel_infrastructure::state_store::load(&sid)?
+        .unwrap_or_else(|| sentinel_domain::state::SessionState::new(sid.clone()));
+
+    match state.glass_break.take() {
+        Some(gb) => {
+            let entry = BreakLogEntry {
+                timestamp: gb.started_at.to_rfc3339(),
+                reason: gb.reason.clone(),
+                workflow: gb.workflow.clone(),
+                duration_minutes: gb.duration_minutes,
+                challenge_code: gb.challenge_code.clone(),
+                tools_used_during_break: gb
+                    .tools_used
+                    .iter()
+                    .map(|tu| BreakToolUseLog {
+                        tool: tu.tool.clone(),
+                        detail: tu.detail.clone(),
+                        ts: tu.ts.clone(),
+                    })
+                    .collect(),
+                auto_reengaged: false,
+            };
+            append_break_log(&entry)?;
+
+            sentinel_infrastructure::state_store::save(&mut state)?;
+            eprintln!("  [sentinel] Glass break CANCELLED for session '{sid}'.");
+            eprintln!("    {} tool calls were made during the break.", gb.tools_used.len());
         }
         None => {
-            eprintln!("  No active session found.");
+            eprintln!("  [sentinel] No active glass break to cancel for session '{sid}'.");
         }
     }
     Ok(())
 }
 
-/// Cancel the current glass break (re-engage workflow enforcement)
-async fn cancel_break() -> Result<()> {
-    let session_id = find_current_session();
-    match session_id {
-        Some(ref sid) => {
-            let _lock = sentinel_infrastructure::state_store::acquire_session_lock(sid)?;
-            let mut state = sentinel_infrastructure::state_store::load(sid)?
-                .unwrap_or_else(|| sentinel_domain::state::SessionState::new(sid.clone()));
-
-            match state.glass_break.take() {
-                Some(gb) => {
-                    // Update the JSONL log with tools_used
-                    let entry = BreakLogEntry {
-                        timestamp: gb.started_at.to_rfc3339(),
-                        reason: gb.reason.clone(),
-                        workflow: gb.workflow.clone(),
-                        duration_minutes: gb.duration_minutes,
-                        challenge_code: gb.challenge_code.clone(),
-                        tools_used_during_break: gb
-                            .tools_used
-                            .iter()
-                            .map(|tu| BreakToolUseLog {
-                                tool: tu.tool.clone(),
-                                detail: tu.detail.clone(),
-                                ts: tu.ts.clone(),
-                            })
-                            .collect(),
-                        auto_reengaged: false,
-                    };
-                    append_break_log(&entry)?;
-
-                    sentinel_infrastructure::state_store::save(&mut state)?;
-                    eprintln!(
-                        "  [sentinel] Glass break CANCELLED. Workflow enforcement re-engaged."
-                    );
-                    eprintln!(
-                        "    {} tool calls were made during the break.",
-                        gb.tools_used.len()
-                    );
-                }
-                None => {
-                    eprintln!("  [sentinel] No active glass break to cancel.");
-                }
-            }
-        }
+/// Enumerate every known session's break state. Reads every `*.json` under
+/// `~/.claude/sentinel/state/`, decrypts via the state_store, and emits one
+/// record per session. Sessions with no active or historical break still
+/// appear with `active: false`.
+async fn list_breaks(json: bool) -> Result<()> {
+    let state_dir = match dirs::home_dir() {
+        Some(h) => h.join(".claude").join("sentinel").join("state"),
         None => {
-            eprintln!("  No active session found.");
+            if json {
+                println!("[]");
+            } else {
+                eprintln!("  Cannot resolve home directory.");
+            }
+            return Ok(());
+        }
+    };
+
+    if !state_dir.exists() {
+        if json {
+            println!("[]");
+        } else {
+            eprintln!("  No sentinel state directory found.");
+        }
+        return Ok(());
+    }
+
+    let mut session_ids: Vec<String> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&state_dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            let Some(id) = name.strip_suffix(".json") else {
+                continue;
+            };
+            if id.ends_with(".tmp") || id.ends_with(".lock") {
+                continue;
+            }
+            session_ids.push(id.to_string());
         }
     }
+
+    let mut results: Vec<BreakStatusJson> = Vec::new();
+    for sid in &session_ids {
+        match BreakStatusJson::for_session(sid) {
+            Ok(st) => results.push(st),
+            Err(e) => {
+                // A single unreadable state file must not poison the whole list.
+                tracing::debug!(session = %sid, error = %e, "skipping unreadable session state");
+            }
+        }
+    }
+    // Active breaks first, then by session ID for determinism.
+    results.sort_by(|a, b| {
+        b.active
+            .cmp(&a.active)
+            .then_with(|| a.session_id.cmp(&b.session_id))
+    });
+
+    if json {
+        println!("{}", serde_json::to_string(&results)?);
+        return Ok(());
+    }
+
+    if results.is_empty() {
+        eprintln!("  No sessions found.");
+        return Ok(());
+    }
+
+    eprintln!("  Glass break state across {} session(s):", results.len());
+    eprintln!("  {:-<74}", "");
+    for st in &results {
+        let tag = if st.active { "ACTIVE " } else { "       " };
+        let remaining = if st.active {
+            let mins = st.remaining_secs / 60;
+            let secs = st.remaining_secs % 60;
+            format!("{mins}m {secs:02}s")
+        } else {
+            "—".to_string()
+        };
+        eprintln!(
+            "  {tag} {:<40} {:<12} {}",
+            st.session_id,
+            remaining,
+            st.reason.as_deref().unwrap_or(""),
+        );
+    }
+    eprintln!("  {:-<74}", "");
+    let active_count = results.iter().filter(|s| s.active).count();
+    eprintln!(
+        "  {active_count} active / {} total",
+        results.len()
+    );
     Ok(())
 }
 
