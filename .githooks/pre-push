@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# pre-push: block if sentinel-application unit tests fail.
+#
+# Install (repo root):
+#   git config core.hooksPath .githooks
+#
+# Bypass (emergencies only):
+#   SENTINEL_SKIP_PREPUSH_TEST=1 git push ...
+
+set -euo pipefail
+
+if [[ "${SENTINEL_SKIP_PREPUSH_TEST:-0}" == "1" ]]; then
+  echo "[pre-push] SENTINEL_SKIP_PREPUSH_TEST=1 set — skipping cargo test" >&2
+  exit 0
+fi
+
+echo "[pre-push] running: cargo test -p sentinel-application --lib" >&2
+if ! cargo test -p sentinel-application --lib --quiet; then
+  cat >&2 <<'EOF'
+
++============================================================+
+|  BLOCKED: sentinel-application tests FAILED               |
++============================================================+
+|  Fix the failures before pushing. Rerun:                   |
+|                                                            |
+|    cargo test -p sentinel-application --lib                |
+|                                                            |
+|  Emergency bypass (use sparingly):                         |
+|    SENTINEL_SKIP_PREPUSH_TEST=1 git push ...               |
++============================================================+
+
+EOF
+  exit 1
+fi
+
+echo "[pre-push] tests green — push allowed" >&2
+exit 0

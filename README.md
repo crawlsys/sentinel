@@ -136,6 +136,24 @@ cargo build --release
 
 Requires Rust 1.83+. The release profile enables LTO, single codegen unit, and binary stripping.
 
+## Testing & pre-push hook
+
+```bash
+cargo test -p sentinel-application --lib
+```
+
+This repo ships a `.githooks/pre-push` that runs the same command and blocks the push on failure. Enable it once per clone:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+The same test suite also runs on every push/PR via `.github/workflows/test.yml`. Emergency bypass (local only):
+
+```bash
+SENTINEL_SKIP_PREPUSH_TEST=1 git push ...
+```
+
 ## License
 
 MIT
