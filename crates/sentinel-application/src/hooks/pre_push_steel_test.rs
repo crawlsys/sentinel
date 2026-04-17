@@ -225,29 +225,54 @@ fn repo_has_steel_config(cwd: Option<&str>) -> bool {
     repo_has_steel_config_in(cwd, None)
 }
 
+/// Resolve a merge-base against a base ref, returning the SHA if found.
+fn merge_base(dir: &str, base_ref: &str) -> Option<String> {
+    let out = std::process::Command::new("git")
+        .args(["merge-base", "HEAD", base_ref])
+        .current_dir(dir)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let sha = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if sha.is_empty() { None } else { Some(sha) }
+}
+
 /// Check if the git diff (staged or branch) includes frontend file changes.
 /// Uses the working directory from the hook input.
+///
+/// Previous implementations used `origin/main..HEAD`, which includes every
+/// commit merged into main since the last `git fetch` — so a fresh
+/// backend-only branch got blamed for `.tsx`/`.css` files in earlier PRs.
+/// The merge-base approach is fetch-agnostic and always scoped to *this*
+/// branch's own changes.
 fn diff_has_frontend_files(cwd: Option<&str>) -> bool {
     let dir = cwd.unwrap_or(".");
 
-    // Try to get the diff stat against the tracking branch
+    // Candidate base refs, in preference order. First one that yields a
+    // merge-base with HEAD wins.
+    let candidates = [
+        "@{upstream}",
+        "main",
+        "origin/main",
+        "master",
+        "origin/master",
+    ];
+
+    let Some(base) = candidates.iter().find_map(|r| merge_base(dir, r)) else {
+        // No base resolved — allow push.
+        return false;
+    };
+
     let output = std::process::Command::new("git")
-        .args(["diff", "--name-only", "@{upstream}..HEAD"])
+        .args(["diff", "--name-only", &format!("{base}..HEAD")])
         .current_dir(dir)
         .output();
 
-    // Fallback: diff against origin/main if no upstream
-    let output = match output {
-        Ok(ref o) if o.status.success() && !o.stdout.is_empty() => output,
-        _ => std::process::Command::new("git")
-            .args(["diff", "--name-only", "origin/main..HEAD"])
-            .current_dir(dir)
-            .output(),
-    };
-
     let file_list = match output {
-        Ok(ref o) if o.status.success() => String::from_utf8_lossy(&o.stdout),
-        _ => return false, // Can't determine diff — allow push
+        Ok(ref o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
+        _ => return false,
     };
 
     file_list
@@ -557,6 +582,85 @@ mod tests {
         let tmpdir = tempfile::tempdir().unwrap();
         let result = diff_has_frontend_files(Some(tmpdir.path().to_str().unwrap()));
         assert!(!result, "Non-git dir should return false (allow push)");
+    }
+
+    /// Helper: run `git` in a directory and assert success.
+    fn git(dir: &std::path::Path, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .expect("git command failed to spawn");
+        assert!(
+            out.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    #[test]
+    fn test_diff_scoped_to_branch_ignores_prior_frontend_merges() {
+        // Regression for Apr 2026: a backend-only branch off fresh `main`
+        // was blocked because `origin/main..HEAD` included a prior frontend
+        // PR that had merged after the last fetch. Merge-base against local
+        // `main` should scope the diff to just this branch.
+        let tmpdir = tempfile::tempdir().unwrap();
+        let repo = tmpdir.path();
+        git(repo, &["init", "-q", "-b", "main"]);
+        git(repo, &["config", "user.email", "t@t.com"]);
+        git(repo, &["config", "user.name", "Test"]);
+
+        // Initial commit on main
+        std::fs::write(repo.join("README.md"), "hi").unwrap();
+        git(repo, &["add", "README.md"]);
+        git(repo, &["commit", "-q", "-m", "init"]);
+
+        // Merge a frontend PR into main AFTER the feature branch will be cut.
+        // First, cut the feature branch from current main.
+        git(repo, &["branch", "feature/backend-only"]);
+
+        // Now simulate an older frontend PR landing on main.
+        std::fs::write(repo.join("App.tsx"), "x").unwrap();
+        git(repo, &["add", "App.tsx"]);
+        git(repo, &["commit", "-q", "-m", "ui: old frontend PR"]);
+
+        // Switch to the backend-only feature branch and add a server-only commit.
+        git(repo, &["checkout", "-q", "feature/backend-only"]);
+        std::fs::write(repo.join("db.ts"), "export {}").unwrap();
+        git(repo, &["add", "db.ts"]);
+        git(repo, &["commit", "-q", "-m", "fix: backend-only"]);
+
+        // With the old `origin/main..HEAD` logic this would see App.tsx and
+        // return true. With merge-base, it should see only db.ts.
+        let result = diff_has_frontend_files(Some(repo.to_str().unwrap()));
+        assert!(
+            !result,
+            "Backend-only branch should not be flagged as frontend change"
+        );
+    }
+
+    #[test]
+    fn test_diff_detects_frontend_on_own_branch() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let repo = tmpdir.path();
+        git(repo, &["init", "-q", "-b", "main"]);
+        git(repo, &["config", "user.email", "t@t.com"]);
+        git(repo, &["config", "user.name", "Test"]);
+
+        std::fs::write(repo.join("README.md"), "hi").unwrap();
+        git(repo, &["add", "README.md"]);
+        git(repo, &["commit", "-q", "-m", "init"]);
+
+        git(repo, &["checkout", "-q", "-b", "feature/ui"]);
+        std::fs::write(repo.join("Component.tsx"), "x").unwrap();
+        git(repo, &["add", "Component.tsx"]);
+        git(repo, &["commit", "-q", "-m", "ui: new component"]);
+
+        assert!(
+            diff_has_frontend_files(Some(repo.to_str().unwrap())),
+            "Frontend change on own branch should be detected"
+        );
     }
 
     #[test]

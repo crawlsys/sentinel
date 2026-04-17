@@ -101,12 +101,46 @@ fn consume_staged(staged: &PathBuf, hash_file: &PathBuf, engine: &PathBuf) -> Re
         ));
     }
 
-    // Swap: rename staged → engine (atomic on same filesystem)
-    // On Windows, we may need to remove the old engine first if it's not locked.
-    // The launcher binary is running (not the engine), so engine should be unlocked.
+    // Swap: rename staged → engine.
+    //
+    // On Windows, a concurrent sentinel-engine process from another Claude
+    // Code session can hold `sentinel-engine.exe` open — `remove_file` then
+    // fails with "Access is denied", and the staged binary sits unconsumed
+    // indefinitely. Workaround: rename the locked engine out of the way
+    // first (Windows allows `rename` on a running .exe even though it
+    // rejects `remove_file`), then rename staged → engine. The tombstone is
+    // cleaned up on the next invocation when the lock has cleared.
     if engine.exists() {
-        std::fs::remove_file(engine)
-            .map_err(|e| format!("Failed to remove old engine binary: {e}"))?;
+        if let Err(e) = std::fs::remove_file(engine) {
+            #[cfg(windows)]
+            {
+                // Fallback: rename-aside, then rename staged in place.
+                let tombstone = engine.with_extension("old");
+                // Best-effort: clear any prior tombstone left behind.
+                let _ = std::fs::remove_file(&tombstone);
+                std::fs::rename(engine, &tombstone).map_err(|e2| {
+                    format!(
+                        "Failed to remove old engine binary ({e}) \
+                         and fallback rename-aside also failed: {e2}"
+                    )
+                })?;
+            }
+            #[cfg(not(windows))]
+            {
+                return Err(format!("Failed to remove old engine binary: {e}"));
+            }
+        }
+    }
+
+    // On Windows, sweep up tombstones from previous swaps (best-effort —
+    // if the old engine process is still running, this no-ops and we try
+    // again next invocation).
+    #[cfg(windows)]
+    {
+        let tombstone = engine.with_extension("old");
+        if tombstone.exists() {
+            let _ = std::fs::remove_file(&tombstone);
+        }
     }
 
     std::fs::rename(staged, engine)
