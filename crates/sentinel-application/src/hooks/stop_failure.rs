@@ -1,8 +1,9 @@
-//! StopFailure hook — detect API errors and rate limits
+//! StopFailure hook — detect API errors and rate limits.
 //!
 //! Called when a turn ends due to an API error rather than normal completion.
-//! Parses error_details for reset time information and advises Claude to
-//! call account_rotate with the correct cooldown_minutes.
+//! For rate limits, this hook now rotates the active Claude account
+//! immediately and requests a clean relaunch so the next account picks up
+//! without the user getting stuck in a dead session.
 //!
 //! ## Error message formats (from Claude Code 2.1.88 source)
 //!
@@ -15,7 +16,21 @@
 //! The `error` field is `"rate_limit"` and the content/error_details contains
 //! the human-readable message above.
 
+use std::path::{Path, PathBuf};
+
+use serde::Serialize;
 use sentinel_domain::events::{HookInput, HookOutput};
+
+const DEFAULT_RATE_LIMIT_COOLDOWN_MINUTES: u64 = 300;
+const RATE_LIMIT_RELAUNCH_FILE: &str = "rate-limit-relaunch.json";
+
+#[derive(Debug, Serialize)]
+struct RateLimitRelaunchRequest {
+    session_id: Option<String>,
+    cwd: Option<String>,
+    requested_at_ms: u64,
+    cooldown_minutes: u64,
+}
 
 /// Parse error_details to extract a cooldown duration in minutes.
 ///
@@ -208,11 +223,63 @@ fn parse_absolute_time_flexible(s: &str) -> Option<u64> {
     }
 }
 
+fn handler_dir(home: &Path) -> PathBuf {
+    home.join(".claude").join("claude-code-handler")
+}
+
+fn relaunch_request_path(home: &Path) -> PathBuf {
+    handler_dir(home).join(RATE_LIMIT_RELAUNCH_FILE)
+}
+
+fn persist_relaunch_request(
+    input: &HookInput,
+    ctx: &super::HookContext<'_>,
+    cooldown_minutes: u64,
+) -> anyhow::Result<()> {
+    let home = ctx
+        .fs
+        .home_dir()
+        .ok_or_else(|| anyhow::anyhow!("home directory unavailable"))?;
+    let dir = handler_dir(&home);
+    ctx.fs.create_dir_all(&dir)?;
+
+    let request = RateLimitRelaunchRequest {
+        session_id: input.session_id.clone(),
+        cwd: input.cwd.clone(),
+        requested_at_ms: chrono::Utc::now().timestamp_millis().max(0) as u64,
+        cooldown_minutes,
+    };
+    let json = serde_json::to_vec_pretty(&request)?;
+    ctx.fs.write(&relaunch_request_path(&home), &json)?;
+    Ok(())
+}
+
+fn rotate_accounts(
+    ctx: &super::HookContext<'_>,
+    cooldown_minutes: u64,
+) -> anyhow::Result<super::ProcessOutput> {
+    let cooldown_arg = format!("--cooldown-minutes={cooldown_minutes}");
+    ctx.process.run("accounts", &["rotate", cooldown_arg.as_str()], None)
+}
+
+fn summarize_process_failure(output: &super::ProcessOutput) -> String {
+    let stderr = output.stderr.trim();
+    if !stderr.is_empty() {
+        return stderr.to_string();
+    }
+
+    let stdout = output.stdout.trim();
+    if !stdout.is_empty() {
+        return stdout.to_string();
+    }
+
+    "accounts rotate exited unsuccessfully".to_string()
+}
+
 /// Process StopFailure event
 ///
-/// Logs the error, parses reset time from error_details, and injects
-/// a system message advising Claude to call account_rotate with the
-/// correct cooldown_minutes.
+/// Logs the error, rotates accounts on rate limits, and requests a clean
+/// relaunch so the handler can resume on the next account automatically.
 pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
     let error = input
         .extra
@@ -243,7 +310,7 @@ pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
         let _ = ctx.fs.append(&metrics_dir.join("errors.jsonl"), line.as_bytes());
     }
 
-    // If this is a rate limit error, parse reset time and advise rotation
+    // If this is a rate limit error, rotate immediately and stop this session
     let is_rate_limit = error.contains("rate_limit")
         || error.contains("overloaded")
         || error_details.contains("rate limit")
@@ -253,29 +320,103 @@ pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
         || error_details.contains("You've used");
 
     if is_rate_limit {
-        let parsed_minutes = parse_reset_minutes(error_details);
-        let cooldown_param = parsed_minutes
-            .map(|m| format!(", cooldown_minutes: {m}"))
-            .unwrap_or_default();
-        let cooldown_desc = parsed_minutes
-            .map(|m| format!(" (parsed reset: ~{m} minutes)"))
-            .unwrap_or_else(|| " (defaulting to 5h)".to_string());
+        let cooldown_minutes =
+            parse_reset_minutes(error_details).unwrap_or(DEFAULT_RATE_LIMIT_COOLDOWN_MINUTES);
 
-        let msg = format!(
-            "[Rate Limit] Account hit rate limit{cooldown_desc}. \
-             Call `mcp__accounts__account_rotate({cooldown_param})` to switch to the next available account, \
-             then resend your last message."
-        );
+        match rotate_accounts(ctx, cooldown_minutes) {
+            Ok(output) if output.success => {
+                let summary = output.stdout.trim();
+                let rotate_msg = if summary.is_empty() {
+                    "Auto-rotated account.".to_string()
+                } else {
+                    format!("Auto-rotated account: {}", summary.replace("**", ""))
+                };
 
-        tracing::info!(
-            parsed_minutes = parsed_minutes,
-            "Rate limit detected, advising rotation"
-        );
+                match persist_relaunch_request(input, ctx, cooldown_minutes) {
+                    Ok(()) => {
+                        tracing::info!(
+                            cooldown_minutes,
+                            session_id = input.session_id.as_deref().unwrap_or("unknown"),
+                            "Rate limit detected, account rotated, relaunch requested"
+                        );
 
-        return HookOutput {
-            system_message: Some(msg),
-            ..HookOutput::default()
-        };
+                        return HookOutput {
+                            system_message: Some(format!(
+                                "[Rate Limit] Account hit rate limit (cooldown: {cooldown_minutes}m). \
+                                 {rotate_msg} Restarting on the next available account."
+                            )),
+                            continue_: Some(false),
+                            stop_reason: Some(
+                                "Account rate-limited. Rotated to the next account and requesting relaunch."
+                                    .to_string(),
+                            ),
+                            ..HookOutput::default()
+                        };
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            cooldown_minutes,
+                            "Rate limit rotation succeeded but relaunch request could not be persisted"
+                        );
+
+                        return HookOutput {
+                            system_message: Some(format!(
+                                "[Rate Limit] Account hit rate limit (cooldown: {cooldown_minutes}m). \
+                                 {rotate_msg} Close this session and relaunch `c`."
+                            )),
+                            continue_: Some(false),
+                            stop_reason: Some(
+                                "Account rate-limited. Rotated to the next account, but relaunch setup failed."
+                                    .to_string(),
+                            ),
+                            ..HookOutput::default()
+                        };
+                    }
+                }
+            }
+            Ok(output) => {
+                let detail = summarize_process_failure(&output);
+                tracing::warn!(
+                    cooldown_minutes,
+                    detail,
+                    "Rate limit detected but account rotation command failed"
+                );
+
+                return HookOutput {
+                    system_message: Some(format!(
+                        "[Rate Limit] Account hit rate limit (cooldown: {cooldown_minutes}m), \
+                         but auto-rotation failed: {detail}. Close this session and relaunch `c`."
+                    )),
+                    continue_: Some(false),
+                    stop_reason: Some(
+                        "Account rate-limited. Auto-rotation failed and this session cannot continue."
+                            .to_string(),
+                    ),
+                    ..HookOutput::default()
+                };
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    cooldown_minutes,
+                    "Rate limit detected but accounts CLI could not be executed"
+                );
+
+                return HookOutput {
+                    system_message: Some(format!(
+                        "[Rate Limit] Account hit rate limit (cooldown: {cooldown_minutes}m), \
+                         but auto-rotation could not start: {e}. Close this session and relaunch `c`."
+                    )),
+                    continue_: Some(false),
+                    stop_reason: Some(
+                        "Account rate-limited. Auto-rotation could not start and this session cannot continue."
+                            .to_string(),
+                    ),
+                    ..HookOutput::default()
+                };
+            }
+        }
     }
 
     HookOutput::allow()
@@ -284,6 +425,71 @@ pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
+    use super::super::{FileSystemPort, GitStatusPort, HookContext, ProcessOutput, ProcessPort};
+
+    struct TestFs {
+        home: PathBuf,
+    }
+
+    impl FileSystemPort for TestFs {
+        fn home_dir(&self) -> Option<PathBuf> { Some(self.home.clone()) }
+        fn read_to_string(&self, path: &Path) -> anyhow::Result<String> { Ok(fs::read_to_string(path)?) }
+        fn write(&self, path: &Path, content: &[u8]) -> anyhow::Result<()> {
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            Ok(fs::write(path, content)?)
+        }
+        fn create_dir_all(&self, path: &Path) -> anyhow::Result<()> { Ok(fs::create_dir_all(path)?) }
+        fn read_dir(&self, path: &Path) -> anyhow::Result<Vec<PathBuf>> {
+            Ok(fs::read_dir(path)?.filter_map(|e| e.ok().map(|e| e.path())).collect())
+        }
+        fn exists(&self, path: &Path) -> bool { path.exists() }
+        fn is_dir(&self, path: &Path) -> bool { path.is_dir() }
+        fn metadata(&self, path: &Path) -> anyhow::Result<std::fs::Metadata> { Ok(fs::metadata(path)?) }
+        fn append(&self, path: &Path, content: &[u8]) -> anyhow::Result<()> {
+            use std::io::Write;
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            let mut file = fs::OpenOptions::new().create(true).append(true).open(path)?;
+            file.write_all(content)?;
+            Ok(())
+        }
+    }
+
+    struct StubGit;
+    impl GitStatusPort for StubGit {
+        fn has_uncommitted_changes(&self, _: &str) -> anyhow::Result<bool> { Ok(false) }
+        fn changed_files(&self, _: &str) -> anyhow::Result<Vec<String>> { Ok(vec![]) }
+        fn current_branch(&self, _: &str) -> anyhow::Result<String> { Ok("main".into()) }
+        fn is_worktree(&self, _: &str) -> bool { false }
+        fn has_unpushed_commits(&self, _: &str) -> anyhow::Result<bool> { Ok(false) }
+        fn repo_root(&self, _: &str) -> Option<String> { None }
+    }
+
+    enum TestProcessResult {
+        Ok(ProcessOutput),
+        Err(String),
+    }
+
+    struct TestProcess {
+        output: TestProcessResult,
+    }
+
+    impl ProcessPort for TestProcess {
+        fn run(&self, _: &str, _: &[&str], _: Option<&str>) -> anyhow::Result<ProcessOutput> {
+            match &self.output {
+                TestProcessResult::Ok(output) => Ok(output.clone()),
+                TestProcessResult::Err(message) => Err(anyhow::anyhow!(message.clone())),
+            }
+        }
+
+        fn spawn_detached(&self, _: &str, _: &[&str]) -> anyhow::Result<()> { Ok(()) }
+    }
 
     #[test]
     fn test_stop_failure_allows_non_rate_limit() {
@@ -309,9 +515,11 @@ mod tests {
 
         let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
         assert!(output.system_message.is_some());
-        let msg = output.system_message.unwrap();
-        assert!(msg.contains("account_rotate"));
-        assert!(msg.contains("defaulting to 5h"));
+        let msg = output.system_message.as_ref().unwrap();
+        assert!(msg.contains("cooldown: 300m"));
+        assert!(msg.contains("Auto-rotated"));
+        assert_eq!(output.continue_, Some(false));
+        assert!(output.stop_reason.is_some());
     }
 
     #[test]
@@ -326,8 +534,9 @@ mod tests {
         );
 
         let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
-        let msg = output.system_message.unwrap();
-        assert!(msg.contains("cooldown_minutes: 120"));
+        let msg = output.system_message.as_ref().unwrap();
+        assert!(msg.contains("cooldown: 120m"));
+        assert_eq!(output.continue_, Some(false));
     }
 
     #[test]
@@ -396,8 +605,53 @@ mod tests {
 
         let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
         assert!(output.system_message.is_some());
-        let msg = output.system_message.unwrap();
-        assert!(msg.contains("account_rotate"));
-        assert!(msg.contains("cooldown_minutes:"));
+        let msg = output.system_message.as_ref().unwrap();
+        assert!(msg.contains("cooldown:"));
+        assert_eq!(output.continue_, Some(false));
+    }
+
+    #[test]
+    fn test_stop_failure_writes_relaunch_request() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fs: &'static TestFs = Box::leak(Box::new(TestFs {
+            home: tmp.path().to_path_buf(),
+        }));
+        let git: &'static StubGit = Box::leak(Box::new(StubGit));
+        let process_port: &'static TestProcess = Box::leak(Box::new(TestProcess {
+            output: TestProcessResult::Ok(ProcessOutput {
+                success: true,
+                stdout: "Auto-rotated: **claude4** -> **claude5**".to_string(),
+                stderr: String::new(),
+            }),
+        }));
+        let ctx = HookContext {
+            git,
+            vector_store: None,
+            fs,
+            process: process_port,
+        };
+
+        let mut input = HookInput::default();
+        input.session_id = Some("session-123".to_string());
+        input.cwd = Some(r"C:\Users\garys".to_string());
+        input
+            .extra
+            .insert("error".to_string(), serde_json::json!("rate_limit"));
+        input.extra.insert(
+            "error_details".to_string(),
+            serde_json::json!("You've hit your limit · resets 1pm (America/Chicago)"),
+        );
+
+        let output = process(&input, &ctx);
+        assert_eq!(output.continue_, Some(false));
+
+        let request_path = tmp
+            .path()
+            .join(".claude")
+            .join("claude-code-handler")
+            .join(RATE_LIMIT_RELAUNCH_FILE);
+        let request_json = fs::read_to_string(request_path).unwrap();
+        assert!(request_json.contains("session-123"));
+        assert!(request_json.contains(r"C:\\Users\\garys"));
     }
 }

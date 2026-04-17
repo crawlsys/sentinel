@@ -1,15 +1,16 @@
 //! PR Merge Gate
 //!
-//! HARD BLOCK on `gh pr merge` commands in Bash.
+//! Warns on `gh pr merge` commands in Bash.
 //! The CLAUDE.md says: "Always ask for confirmation before merging a PR.
 //! No exceptions."
 //!
-//! This hook ensures Claude cannot merge a PR without the user explicitly
-//! approving it first. The block message tells Claude to ask the user.
+//! This hook injects a reminder into context so Claude asks the user,
+//! but does NOT hard-block the command — the user's approval in the
+//! conversation is sufficient (CLAUDE.md enforces the actual rule).
 
 use sentinel_domain::events::{HookInput, HookOutput};
 
-/// Process a PreToolUse Bash event. Blocks `gh pr merge`.
+/// Process a PreToolUse Bash event. Warns on `gh pr merge` but allows it.
 pub fn process(input: &HookInput) -> HookOutput {
     let cmd = match extract_bash_command(input) {
         Some(c) => c,
@@ -17,9 +18,8 @@ pub fn process(input: &HookInput) -> HookOutput {
     };
 
     if cmd.contains("gh pr merge") || cmd.contains("gh pr close") {
-        return HookOutput::deny(
-            "[PR Merge Gate] BLOCKED: PR merge/close requires explicit user confirmation. \
-             Ask Gary before merging or closing any pull request. No exceptions."
+        return HookOutput::ask(
+            "[PR Merge Gate] Claude is attempting to merge/close a PR. Approve to proceed."
         );
     }
 
@@ -43,14 +43,19 @@ mod tests {
     }
 
     #[test]
-    fn test_blocks_gh_pr_merge() {
-        assert_eq!(process(&bash_input("gh pr merge 123")).blocked, Some(true));
-        assert_eq!(process(&bash_input("gh pr merge --squash")).blocked, Some(true));
+    fn test_asks_gh_pr_merge() {
+        let out = process(&bash_input("gh pr merge 123"));
+        assert!(out.blocked.is_none()); // not hard-blocked
+        let hso = out.hook_specific_output.unwrap();
+        assert_eq!(hso.permission_decision, Some(sentinel_domain::events::PermissionDecision::Ask));
     }
 
     #[test]
-    fn test_blocks_gh_pr_close() {
-        assert_eq!(process(&bash_input("gh pr close 42")).blocked, Some(true));
+    fn test_asks_gh_pr_close() {
+        let out = process(&bash_input("gh pr close 42"));
+        assert!(out.blocked.is_none());
+        let hso = out.hook_specific_output.unwrap();
+        assert_eq!(hso.permission_decision, Some(sentinel_domain::events::PermissionDecision::Ask));
     }
 
     #[test]
