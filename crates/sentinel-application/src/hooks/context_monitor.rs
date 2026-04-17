@@ -316,4 +316,86 @@ mod tests {
         // StubFs returns error on read → expired
         assert!(cooldown_expired(ctx.fs));
     }
+    /// Regression test: cooldown stamp file is keyed on the process temp_dir
+    /// but NOT on session_id. Session A writes the stamp; Session B (different
+    /// session_id, same process, same temp_dir) must NOT be suppressed by
+    /// Session A's stamp -- but with the current code it IS suppressed.
+    ///
+    /// Expected (correct) behaviour: `cooldown_expired` returns `true` for
+    /// Session B because it is a fresh session.
+    ///
+    /// Actual (buggy) behaviour: `cooldown_expired` returns `false` because
+    /// the stamp file path does not include a session_id, so Session A's
+    /// recently-written stamp suppresses Session B.
+    ///
+    /// This test therefore FAILS on the current codebase (red regression test).
+    #[test]
+    fn test_cross_session_cooldown_suppression_bug() {
+        use std::path::{Path, PathBuf};
+        use super::super::FileSystemPort;
+
+        // A minimal FileSystemPort that delegates to real std::fs so that
+        // `cooldown_file()` -- which calls std::env::temp_dir() directly --
+        // resolves to an actual on-disk path.
+        struct RealTestFs;
+        impl FileSystemPort for RealTestFs {
+            fn home_dir(&self) -> Option<PathBuf> { dirs::home_dir() }
+            fn read_to_string(&self, p: &Path) -> anyhow::Result<String> {
+                std::fs::read_to_string(p).map_err(Into::into)
+            }
+            fn write(&self, p: &Path, data: &[u8]) -> anyhow::Result<()> {
+                if let Some(parent) = p.parent() { std::fs::create_dir_all(parent)?; }
+                std::fs::write(p, data).map_err(Into::into)
+            }
+            fn create_dir_all(&self, p: &Path) -> anyhow::Result<()> {
+                std::fs::create_dir_all(p).map_err(Into::into)
+            }
+            fn read_dir(&self, p: &Path) -> anyhow::Result<Vec<PathBuf>> {
+                Ok(std::fs::read_dir(p)?.filter_map(|e| e.ok().map(|e| e.path())).collect())
+            }
+            fn exists(&self, p: &Path) -> bool { p.exists() }
+            fn is_dir(&self, p: &Path) -> bool { p.is_dir() }
+            fn metadata(&self, p: &Path) -> anyhow::Result<std::fs::Metadata> {
+                std::fs::metadata(p).map_err(Into::into)
+            }
+            fn append(&self, p: &Path, data: &[u8]) -> anyhow::Result<()> {
+                use std::io::Write;
+                if let Some(parent) = p.parent() { std::fs::create_dir_all(parent)?; }
+                let mut f = std::fs::OpenOptions::new().create(true).append(true).open(p)?;
+                f.write_all(data).map_err(Into::into)
+            }
+        }
+
+        let fs = RealTestFs;
+
+        // -- Session A fires: write a cooldown stamp right now
+        // This simulates session-a triggering a context warning and stamping
+        // the shared cooldown file with `now_ms()`.
+        write_cooldown(&fs);
+
+        // -- Session B arrives immediately after
+        // Session B is a completely different session (different session_id)
+        // but runs in the same process on the same machine, so it shares the
+        // same temp_dir and therefore the same stamp file path.
+        //
+        // Correct behaviour: Session B should see the cooldown as expired
+        //   (it's a fresh session; Session A's warning is irrelevant to it).
+        // Buggy behaviour:   Session B sees cooldown as NOT expired because
+        //   the stamp was just written by Session A.
+        //
+        // The assertion below expresses the CORRECT expectation. It FAILS on
+        // the current code, proving the cross-session suppression bug exists.
+        assert!(
+            cooldown_expired(&fs),
+            concat!(
+                "BUG: Session B's cooldown check is suppressed by Session A's stamp. ",
+                "The cooldown file path must include the session_id so that each ",
+                "session has its own independent cooldown window."
+            )
+        );
+
+        // Cleanup: remove the stamp file so other tests are not polluted.
+        let _ = std::fs::remove_file(cooldown_file());
+    }
+
 }
