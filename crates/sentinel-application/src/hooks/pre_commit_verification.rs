@@ -256,11 +256,40 @@ const DOCS_ONLY_EXTENSIONS: &[&str] = &[
     "LICENSE", "CHANGELOG", "SECURITY",
 ];
 
+/// Trait for running `git diff` — injectable so tests can stub it.
+trait GitDiffRunner {
+    /// Return the list of files changed (staged for commit, unpushed for push),
+    /// or None if the git command failed.
+    fn diff_names(&self, is_commit: bool) -> Option<Vec<String>>;
+}
+
+/// Production runner: shells out to `git`.
+struct RealGitDiff;
+
+impl GitDiffRunner for RealGitDiff {
+    fn diff_names(&self, is_commit: bool) -> Option<Vec<String>> {
+        let output = if is_commit {
+            std::process::Command::new("git")
+                .args(["diff", "--cached", "--name-only"])
+                .output()
+        } else {
+            std::process::Command::new("git")
+                .args(["diff", "--name-only", "origin/HEAD..HEAD"])
+                .output()
+        };
+
+        let output = match output {
+            Ok(o) if o.status.success() => o,
+            _ => return None,
+        };
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        Some(stdout.lines().filter(|l| !l.is_empty()).map(String::from).collect())
+    }
+}
+
 /// Check if a git commit/push only touches non-code files.
-/// For commits: runs `git diff --cached --name-only` to inspect staged files.
-/// For pushes: runs `git diff origin/HEAD..HEAD --name-only` to inspect unpushed changes.
 /// Returns true if ALL files have docs-only extensions.
-fn is_docs_only_commit(command: &str) -> bool {
+fn is_docs_only_commit_with(command: &str, runner: &dyn GitDiffRunner) -> bool {
     let is_commit = command.contains("commit");
     let is_push = command.contains("push");
 
@@ -268,25 +297,10 @@ fn is_docs_only_commit(command: &str) -> bool {
         return false;
     }
 
-    // Pick the right diff command based on action
-    let output = if is_commit {
-        std::process::Command::new("git")
-            .args(["diff", "--cached", "--name-only"])
-            .output()
-    } else {
-        // For push: check what's ahead of the remote
-        std::process::Command::new("git")
-            .args(["diff", "--name-only", "origin/HEAD..HEAD"])
-            .output()
+    let files = match runner.diff_names(is_commit) {
+        Some(f) => f,
+        None => return false, // Can't determine — don't skip
     };
-
-    let output = match output {
-        Ok(o) if o.status.success() => o,
-        _ => return false, // Can't determine — don't skip
-    };
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let files: Vec<&str> = stdout.lines().filter(|l| !l.is_empty()).collect();
 
     // No files — can't determine, don't skip verification
     if files.is_empty() {
@@ -316,6 +330,17 @@ fn process_with_override(
     override_path: &std::path::Path,
     session_id: &str,
     fs: &dyn super::FileSystemPort,
+) -> HookOutput {
+    process_with_override_and_git(input, override_path, session_id, fs, &RealGitDiff)
+}
+
+/// Internal: process with an injectable git-diff runner for test determinism.
+fn process_with_override_and_git(
+    input: &HookInput,
+    override_path: &std::path::Path,
+    session_id: &str,
+    fs: &dyn super::FileSystemPort,
+    git: &dyn GitDiffRunner,
 ) -> HookOutput {
     // Only act on Bash tool calls
     let tool = match &input.tool_name {
@@ -359,7 +384,7 @@ fn process_with_override(
 
     // Skip verification for docs-only commits/pushes (markdown, config, YAML, etc.)
     // These files have no tests to run — requiring evidence is nonsensical.
-    if is_docs_only_commit(command) {
+    if is_docs_only_commit_with(command, git) {
         return HookOutput::allow();
     }
 
@@ -495,7 +520,20 @@ mod tests {
             tool_input: Some(serde_json::json!({"command": "git push origin main"})),
             ..Default::default()
         };
-        let output = process_with_override(&input, &override_path, "test-sess", &crate::hooks::test_support::StubFs);
+        // Stub git: pretend there are code files changed (not docs-only)
+        struct StubCodeDiff;
+        impl GitDiffRunner for StubCodeDiff {
+            fn diff_names(&self, _is_commit: bool) -> Option<Vec<String>> {
+                Some(vec!["src/main.rs".to_string()])
+            }
+        }
+        let output = process_with_override_and_git(
+            &input,
+            &override_path,
+            "test-sess",
+            &crate::hooks::test_support::StubFs,
+            &StubCodeDiff,
+        );
         assert_eq!(output.blocked, Some(true));
         assert!(output.reason.as_ref().unwrap().contains("Pushing"));
     }
@@ -699,8 +737,14 @@ mod tests {
 
     #[test]
     fn test_is_docs_only_not_commit() {
-        // Non-commit commands should return false
-        assert!(!is_docs_only_commit("ls -la"));
-        assert!(!is_docs_only_commit("git push origin main"));
+        // Use an explicit stub so the test doesn't depend on the ambient git repo state.
+        struct NoFiles;
+        impl GitDiffRunner for NoFiles {
+            fn diff_names(&self, _is_commit: bool) -> Option<Vec<String>> { Some(vec![]) }
+        }
+        // Non-commit/push commands short-circuit before touching git.
+        assert!(!is_docs_only_commit_with("ls -la", &NoFiles));
+        // A push with no diff'd files returns false (can't determine → don't skip).
+        assert!(!is_docs_only_commit_with("git push origin main", &NoFiles));
     }
 }
