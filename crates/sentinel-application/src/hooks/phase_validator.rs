@@ -12,6 +12,21 @@ use sentinel_domain::state::SessionState;
 use sentinel_domain::workflow::{SkillSteps, SkillWorkflow, StepStatus};
 use std::collections::HashMap;
 
+/// Check whether a skill's `phases/` directory exists on disk under
+/// `~/.claude/skills/{skill}/phases/`. When a workflow is registered but
+/// the skill uses an alternate structure (e.g. `orchestration/`,
+/// `protocols/`) the validator would otherwise emit a "Phase Execution
+/// Required" warning referencing a nonexistent file.
+fn skill_has_phases_dir(skill: &str) -> bool {
+    let Some(home) = dirs::home_dir() else {
+        return true; // Fail open — don't silently suppress warnings if we can't check.
+    };
+    home.join(".claude/skills")
+        .join(skill)
+        .join("phases")
+        .is_dir()
+}
+
 /// Process a phase-validator hook event (UserPromptSubmit)
 pub fn process(
     _input: &HookInput,
@@ -30,6 +45,13 @@ pub fn process(
         None => return HookOutput::allow(),
     };
 
+    // If the skill has no phases/ directory on disk, it uses an alternate
+    // structure and the workflow config is stale. Don't emit warnings
+    // pointing at files that don't exist.
+    if !skill_has_phases_dir(skill_name) {
+        return HookOutput::allow();
+    }
+
     let total_required = workflow.phases.iter().filter(|p| p.required).count();
     let total = workflow.phases.len();
     // **Attack #76 fix**: Use per-skill count, not global. Cross-skill reads
@@ -43,10 +65,21 @@ pub fn process(
     // Find next required phase file
     let next_file = state.next_required_phase_file(workflow);
 
+    // First required phase file, used by the warning box when phases
+    // aren't being loaded at all. Falls back to `claim.md` only if the
+    // workflow has no phases configured (shouldn't happen in practice).
+    let first_phase_file = workflow
+        .phases
+        .iter()
+        .find(|p| p.required)
+        .or_else(|| workflow.phases.first())
+        .map(|p| p.file.as_str())
+        .unwrap_or("claim.md");
+
     // Build progress context
     let mut context = if state.tool_calls > 0 && loaded == 0 {
         // Tool calls happening but no phases loaded — strong warning
-        format_warning_box(skill_name, total_required, total)
+        format_warning_box(skill_name, total_required, total, first_phase_file)
     } else if let Some(ref next) = next_file {
         // Normal progress — show status and next step
         format_progress_box(skill_name, loaded, total_required, total, next)
@@ -73,7 +106,7 @@ pub fn process(
 }
 
 /// Format a warning box when phases are being skipped
-fn format_warning_box(skill: &str, required: usize, total: usize) -> String {
+fn format_warning_box(skill: &str, required: usize, total: usize, first_file: &str) -> String {
     format!(
         "\
 +============================================================+
@@ -86,9 +119,9 @@ fn format_warning_box(skill: &str, required: usize, total: usize) -> String {
 |  files. This is a violation of the skill workflow.         |
 |                                                            |
 |  MANDATORY: Read the first phase file NOW:                 |
-|  Read(\"~/.claude/skills/{}/phases/claim.md\")     |
+|  Read(\"~/.claude/skills/{}/phases/{}\")     |
 +============================================================+",
-        skill, required, total, skill
+        skill, required, total, skill, first_file
     )
 }
 
@@ -355,6 +388,29 @@ mod tests {
         let ctx = ctx.as_deref().unwrap();
         assert!(ctx.contains("WARNING"));
         assert!(ctx.contains("Phase Execution Required"));
+    }
+
+    #[test]
+    fn test_skill_without_phases_dir_suppresses_warning() {
+        // A skill whose on-disk layout has no `phases/` directory should
+        // NOT trigger the "Phase Execution Required" warning — the
+        // workflow config is stale. Use a skill name guaranteed not to
+        // exist on disk.
+        let mut state = SessionState::new("sess-nope");
+        state.set_active_skill("nonexistent-phantom-skill-xyz");
+        state.record_tool_call();
+
+        let mut workflows = HashMap::new();
+        workflows.insert(
+            "nonexistent-phantom-skill-xyz".to_string(),
+            test_workflow(),
+        );
+        let step_configs = HashMap::new();
+        let input = HookInput::default();
+
+        let output = process(&input, &state, &workflows, &step_configs);
+        // allow() means no context injection
+        assert!(output.hook_specific_output.is_none());
     }
 
     #[test]
