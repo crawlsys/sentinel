@@ -303,12 +303,17 @@ fn compact_summary(content: &str, max_chars: usize) -> String {
         .collect::<Vec<_>>()
         .join(" ");
 
-    if clean.len() <= max_chars {
+    if clean.chars().count() <= max_chars {
         return clean;
     }
 
-    // Truncate on word boundary
-    let truncated = &clean[..max_chars];
+    // Truncate on a char boundary, counting Unicode scalar values (not bytes),
+    // so max_chars behaves predictably for multi-byte content like emoji.
+    let byte_end = clean
+        .char_indices()
+        .nth(max_chars)
+        .map_or(clean.len(), |(i, _)| i);
+    let truncated = &clean[..byte_end];
     match truncated.rfind(' ') {
         Some(pos) => format!("{}...", &truncated[..pos]),
         None => format!("{truncated}..."),
@@ -1424,5 +1429,27 @@ mod tests {
         let messy = "  hello   world\n\nfoo   bar  ";
         let result = compact_summary(messy, 150);
         assert_eq!(result, "hello world foo bar");
+    }
+
+    #[test]
+    fn test_compact_summary_truncates_safely_on_multibyte_char() {
+        // Emoji are multi-byte UTF-8. Naive &s[..n] byte-slicing used to panic
+        // when n landed inside a 4-byte codepoint like 🤖 (F0 9F A4 96).
+        // Regression guard for memory_inject.rs:311.
+        let content = "abc 🤖 xyz 🐞 qrs 📋 mno";
+        // Run a range of max_chars to catch any boundary that would panic.
+        for max in 1..content.chars().count() {
+            let _ = compact_summary(content, max); // must not panic
+        }
+    }
+
+    #[test]
+    fn test_compact_summary_ascii_word_boundary_behavior_unchanged() {
+        // After the UTF-8 refactor, ASCII input should still truncate at the
+        // last space before the char-index cap and append "...".
+        let s = "the quick brown fox jumps over the lazy dog";
+        let result = compact_summary(s, 15);
+        assert!(result.ends_with("..."));
+        assert!(result.chars().count() <= 18); // 15 chars + "..."
     }
 }
