@@ -15,6 +15,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 - **`pr_merge_gate`**: hard-block on `gh pr merge` / `gh pr close` softened to an "ask" permission decision. CLAUDE.md still requires explicit user confirmation, but approval in-conversation is now sufficient without a hook-level deny.
 - **`tool_usage_gate` plan check**: falls back to a recent plan file when the `PLAN_MARKER` session-temp file is missing (happens for resumed sessions). Plan check now passes if `{cwd}/plans/*.md` contains a file modified within the last 7 days; marker still wins when present.
+- **`tool_usage_gate` plan-file walk-up**: the fallback now walks upward from `cwd` toward the repo root checking every `plans/` dir, stopping at the first `.git` entry (file or directory, handling both normal repos and worktrees). Previously only checked `{cwd}/plans/`, which broke for sessions rooted in a worktree or subdirectory whose approved plan lived at the repo root. Capped at 10 levels; 3 new unit tests cover parent-dir discovery, `.git` boundary enforcement, and the worktree case.
 - **`phase_validator`**: suppresses the "load `phases/claim.md`" warning for skills whose on-disk layout has no `phases/` directory (e.g. `todo-manager`). When phases exist, the warning now derives its first-file name from the workflow config rather than hardcoding `claim.md`.
 
 ### Fixed
