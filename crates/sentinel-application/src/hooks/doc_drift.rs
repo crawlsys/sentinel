@@ -836,4 +836,141 @@ mod tests {
 
         assert!(existing.contains("/test:README.md"));
     }
+
+
+    // -----------------------------------------------------------------------
+    // Concurrency race test -- RED (expected to fail on unpatched code)
+    // -----------------------------------------------------------------------
+    //
+    // Demonstrates the file-rewrite race between write_drift_entries (append)
+    // and resolve_drift_for_cwd (read -> filter -> full-rewrite).
+    //
+    // Timeline of the race:
+    //   Thread B (resolve): reads file  <- sees only cwd_a entries
+    //   Thread A (write):   appends cwd_b entries to file
+    //   Thread B (resolve): rewrites file <- clobbers cwd_b entries added by A
+    //
+    // The test runs 50 iterations; if any iteration loses data the assertion
+    // fails -- which it does on current unpatched code.
+
+    struct TempDirFs {
+        home: std::path::PathBuf,
+    }
+    impl TempDirFs {
+        fn new(root: &std::path::Path) -> Self {
+            Self { home: root.to_path_buf() }
+        }
+    }
+    impl super::super::FileSystemPort for TempDirFs {
+        fn home_dir(&self) -> Option<std::path::PathBuf> { Some(self.home.clone()) }
+        fn read_to_string(&self, path: &Path) -> anyhow::Result<String> {
+            Ok(std::fs::read_to_string(path)?)
+        }
+        fn write(&self, path: &Path, content: &[u8]) -> anyhow::Result<()> {
+            if let Some(p) = path.parent() { std::fs::create_dir_all(p)?; }
+            Ok(std::fs::write(path, content)?)
+        }
+        fn create_dir_all(&self, path: &Path) -> anyhow::Result<()> {
+            Ok(std::fs::create_dir_all(path)?)
+        }
+        fn read_dir(&self, path: &Path) -> anyhow::Result<Vec<std::path::PathBuf>> {
+            Ok(std::fs::read_dir(path)?.filter_map(|e| e.ok().map(|e| e.path())).collect())
+        }
+        fn exists(&self, path: &Path) -> bool { path.exists() }
+        fn is_dir(&self, path: &Path) -> bool { path.is_dir() }
+        fn metadata(&self, path: &Path) -> anyhow::Result<std::fs::Metadata> {
+            Ok(std::fs::metadata(path)?)
+        }
+        fn append(&self, path: &Path, content: &[u8]) -> anyhow::Result<()> {
+            use std::io::Write as _;
+            if let Some(p) = path.parent() { std::fs::create_dir_all(p)?; }
+            let mut f = std::fs::OpenOptions::new().create(true).append(true).open(path)?;
+            Ok(f.write_all(content)?)
+        }
+    }
+
+    #[test]
+    fn test_concurrent_write_and_resolve_loses_entries() {
+        const ITERATIONS: usize = 50;
+        let mut data_loss_seen = false;
+
+        for iteration in 0..ITERATIONS {
+            let tmp = tempfile::tempdir().unwrap();
+            let metrics = tmp.path().join(".claude").join("sentinel").join("metrics");
+            std::fs::create_dir_all(&metrics).unwrap();
+            let drift_path = metrics.join("doc-drift.jsonl");
+
+            let cwd_a = "/projects/alpha";
+            let cwd_b = "/projects/beta";
+
+            // Seed the file: 5 unresolved entries for cwd_a.
+            // resolve_drift_for_cwd(cwd_a) will rewrite the whole file to mark
+            // these resolved -- this is the window where Thread A can be clobbered.
+            let seed: String = (0..5u32).map(|i| {
+                let e = DriftEntry {
+                    doc: format!("README{i}.md"),
+                    reason: "Missing".into(),
+                    cwd: cwd_a.into(),
+                    ts: "2026-04-17".into(),
+                    resolved: false,
+                };
+                serde_json::to_string(&e).unwrap() + "
+"
+            }).collect();
+            std::fs::write(&drift_path, seed).unwrap();
+
+            // Entries Thread A will append -- different cwd so resolve should ignore them.
+            let new_entries: Vec<DriftEntry> = (0..5u32).map(|i| DriftEntry {
+                doc: format!("CHANGELOG{i}.md"),
+                reason: "New beta drift".into(),
+                cwd: cwd_b.into(),
+                ts: "2026-04-17".into(),
+                resolved: false,
+            }).collect();
+
+            use std::sync::Arc;
+            let fs_a = Arc::new(TempDirFs::new(tmp.path()));
+            let fs_b = Arc::new(TempDirFs::new(tmp.path()));
+            let entries_clone = new_entries.clone();
+
+            // Thread A: yield to give Thread B a head start inside the read window,
+            // then append the cwd_b entries.
+            let ha = std::thread::spawn(move || {
+                std::thread::yield_now();
+                write_drift_entries(fs_a.as_ref(), &entries_clone);
+            });
+            // Thread B: read -> filter -> full-rewrite for cwd_a.
+            let hb = std::thread::spawn(move || {
+                resolve_drift_for_cwd(fs_b.as_ref(), cwd_a);
+            });
+            ha.join().unwrap();
+            hb.join().unwrap();
+
+            let final_content = std::fs::read_to_string(&drift_path).unwrap_or_default();
+            let survived = new_entries.iter().filter(|exp| {
+                final_content.lines().any(|l| {
+                    serde_json::from_str::<DriftEntry>(l)
+                        .map(|e| e.cwd == exp.cwd && e.doc == exp.doc)
+                        .unwrap_or(false)
+                })
+            }).count();
+
+            if survived < new_entries.len() {
+                data_loss_seen = true;
+                eprintln!(
+                    "iteration {}: DATA LOSS -- only {}/{} cwd_b entries survived",
+                    iteration, survived, new_entries.len()
+                );
+                break;
+            }
+        }
+
+        // Fails on current code: the unlocked read->filter->rewrite clobbers
+        // concurrent appends from write_drift_entries.
+        assert!(
+            !data_loss_seen,
+            "BUG: resolve_drift_for_cwd clobbered entries written concurrently by              write_drift_entries -- the read->filter->rewrite is not protected by a lock"
+        );
+    }
+
 }
