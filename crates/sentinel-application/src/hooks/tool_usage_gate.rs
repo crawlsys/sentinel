@@ -12,9 +12,18 @@
 //!
 //! Plan-approval fallback: when a session is resumed, `ExitPlanMode` may have
 //! been called in a prior session, so no PLAN_MARKER exists. Detect this by
-//! scanning `{cwd}/plans/*.md` for a file written within the last 7 days —
-//! Claude Code writes plans there on approval, so presence of a recent plan
-//! file is evidence of an approved plan for this working directory.
+//! scanning for recently-written `*.md` files in any `plans/` directory
+//! between `{cwd}` and the containing repo root. We walk upward from cwd
+//! until we find a `.git` entry (file or directory — worktrees use a file)
+//! and check every `plans/` dir we find along the way. This handles:
+//!   - cwd is the repo root           → checks `{root}/plans/`
+//!   - cwd is a git worktree          → `.git` file in worktree lands us at
+//!                                       the worktree root, so plans authored
+//!                                       at the main repo root are still
+//!                                       reachable via the worktree's own
+//!                                       `plans/` dir (Claude Code writes
+//!                                       plans relative to cwd)
+//!   - cwd is a nested subdirectory   → walks up checking each level
 
 use sentinel_domain::events::{HookInput, HookOutput};
 use std::path::{Path, PathBuf};
@@ -44,19 +53,16 @@ fn has_marker(fs: &dyn FileSystemPort, prefix: &str, session_id: &str) -> bool {
     fs.exists(&path)
 }
 
-/// Check whether `{cwd}/plans/` contains a recently-written `*.md` file.
-/// This is the fallback for the PLAN_MARKER when a session is resumed —
-/// Claude Code persists approved plans as markdown here, so presence of a
-/// recent one is evidence of prior plan approval for this working directory.
-fn has_recent_plan_file(fs: &dyn FileSystemPort, cwd: Option<&str>, now: SystemTime) -> bool {
-    let Some(cwd) = cwd else {
-        return false;
-    };
-    let plans_dir = Path::new(cwd).join("plans");
-    if !fs.is_dir(&plans_dir) {
+/// Max directory levels to walk up from cwd looking for plans/ dirs.
+/// Prevents pathological runaway on unusual filesystems.
+const MAX_WALK_UP_DEPTH: usize = 10;
+
+/// True if `dir` contains a `plans/*.md` written inside the freshness window.
+fn plans_dir_has_recent_md(fs: &dyn FileSystemPort, dir: &Path, now: SystemTime) -> bool {
+    if !fs.is_dir(dir) {
         return false;
     }
-    let entries = match fs.read_dir(&plans_dir) {
+    let entries = match fs.read_dir(dir) {
         Ok(e) => e,
         Err(_) => return false,
     };
@@ -72,6 +78,30 @@ fn has_recent_plan_file(fs: &dyn FileSystemPort, cwd: Option<&str>, now: SystemT
             Err(_) => false,
         }
     })
+}
+
+/// Walk up from cwd toward filesystem root, returning true if any `plans/`
+/// directory along the way has a recently-written `*.md`. Stops at the first
+/// directory containing a `.git` entry (marker of the repo boundary) — that
+/// directory is still checked, but we don't ascend past it.
+fn has_recent_plan_file(fs: &dyn FileSystemPort, cwd: Option<&str>, now: SystemTime) -> bool {
+    let Some(cwd) = cwd else {
+        return false;
+    };
+    let mut current: Option<&Path> = Some(Path::new(cwd));
+    for _ in 0..MAX_WALK_UP_DEPTH {
+        let Some(dir) = current else { break };
+        if plans_dir_has_recent_md(fs, &dir.join("plans"), now) {
+            return true;
+        }
+        // Stop once we've inspected the repo root (detected by `.git`).
+        // `.git` can be either a directory (normal repo) or a file (worktree).
+        if fs.exists(&dir.join(".git")) {
+            return false;
+        }
+        current = dir.parent();
+    }
+    false
 }
 
 /// Build the temp-dir path for a marker file.
@@ -457,6 +487,84 @@ mod tests {
         // 8 days ago — past the 7-day window
         let future_now = SystemTime::now() + Duration::from_secs(8 * 24 * 60 * 60);
         assert!(!has_recent_plan_file(&fs_port, tmp.path().to_str(), future_now));
+    }
+
+    #[test]
+    fn test_walk_up_finds_plan_in_parent_dir() {
+        // cwd is a sub-dir; plans/ lives at the repo root above it.
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        fs::write(root.join(".git"), b"gitdir: /elsewhere").unwrap(); // worktree marker (file, not dir)
+        let plans = root.join("plans");
+        fs::create_dir_all(&plans).unwrap();
+        fs::write(plans.join("root-plan.md"), b"# Plan").unwrap();
+
+        let subdir = root.join("server").join("routes");
+        fs::create_dir_all(&subdir).unwrap();
+
+        let fs_port = RealishFs {};
+        assert!(
+            has_recent_plan_file(&fs_port, subdir.to_str(), SystemTime::now()),
+            "walk-up should find plans/ at repo root"
+        );
+    }
+
+    #[test]
+    fn test_walk_up_stops_at_git_boundary() {
+        // plans/ is ABOVE the repo root — walk-up should NOT reach it.
+        let tmp = TempDir::new().unwrap();
+        let outer = tmp.path();
+        let repo = outer.join("myrepo");
+        fs::create_dir_all(&repo).unwrap();
+        fs::create_dir_all(repo.join(".git")).unwrap(); // repo boundary
+
+        // Plans live OUTSIDE the repo, above the .git boundary.
+        let outer_plans = outer.join("plans");
+        fs::create_dir_all(&outer_plans).unwrap();
+        fs::write(outer_plans.join("outer-plan.md"), b"# Outer").unwrap();
+
+        let fs_port = RealishFs {};
+        assert!(
+            !has_recent_plan_file(&fs_port, repo.to_str(), SystemTime::now()),
+            "walk-up must stop at .git boundary and not find plans above repo root"
+        );
+    }
+
+    #[test]
+    fn test_walk_up_worktree_case() {
+        // Simulates the exact shape of a git worktree:
+        //   repo/.git/                  (real repo)
+        //   repo/plans/my-plan.md       (plan lives at repo root)
+        //   repo/.claude/worktrees/wt/  (worktree path = cwd)
+        //   repo/.claude/worktrees/wt/.git  (worktree gitdir file)
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(repo.join(".git")).unwrap();
+        fs::create_dir_all(repo.join("plans")).unwrap();
+        fs::write(repo.join("plans").join("fpcrm-358.md"), b"# Plan").unwrap();
+
+        let wt = repo.join(".claude").join("worktrees").join("feature");
+        fs::create_dir_all(&wt).unwrap();
+        fs::write(wt.join(".git"), b"gitdir: ../../../.git/worktrees/feature").unwrap();
+
+        let fs_port = RealishFs {};
+        // Worktree cwd has its own `.git` file (boundary) — if it also has
+        // its own plans/, it'd match. Here it doesn't, so walk must climb
+        // past the worktree's .git boundary. We intentionally DON'T — the
+        // worktree is its own boundary. Callers should put plans/ inside
+        // the worktree. This test asserts that behaviour.
+        assert!(
+            !has_recent_plan_file(&fs_port, wt.to_str(), SystemTime::now()),
+            "worktree cwd with .git file is its own boundary; plans must live inside the worktree"
+        );
+
+        // But if we seed plans/ inside the worktree, it should find it.
+        fs::create_dir_all(wt.join("plans")).unwrap();
+        fs::write(wt.join("plans").join("wt-plan.md"), b"# WT").unwrap();
+        assert!(
+            has_recent_plan_file(&fs_port, wt.to_str(), SystemTime::now()),
+            "plans/ inside the worktree itself should be found"
+        );
     }
 
     #[test]
