@@ -139,8 +139,7 @@ pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
     // 8. Build watch paths for FileChanged monitoring
     let claude_md_path = claude_dir.join("CLAUDE.md");
     let settings_path = claude_dir.join("settings.json");
-    let sentinel_settings_path = claude_dir.join("sentinel-settings.json");
-    let watch_paths: Vec<String> = [&claude_md_path, &settings_path, &sentinel_settings_path]
+    let watch_paths: Vec<String> = [&claude_md_path, &settings_path]
         .iter()
         .filter(|p| p.exists())
         .map(|p| p.to_string_lossy().to_string())
@@ -521,18 +520,6 @@ fn validate_sync(claude_dir: &Path) -> ValidationResult {
         reasons.push("settings.json missing".to_string());
     }
 
-    // 1b. sentinel-settings.json must exist and be valid JSON
-    let sentinel_settings_path = claude_dir.join("sentinel-settings.json");
-    if sentinel_settings_path.exists() {
-        if let Ok(content) = fs::read_to_string(&sentinel_settings_path) {
-            if serde_json::from_str::<serde_json::Value>(&content).is_err() {
-                reasons.push("sentinel-settings.json is invalid JSON".to_string());
-            }
-        }
-    } else {
-        reasons.push("sentinel-settings.json missing".to_string());
-    }
-
     // 2. At least MIN_SKILL_DIRS skill directories
     let skills_dir = claude_dir.join("skills");
     if skills_dir.exists() {
@@ -865,7 +852,6 @@ The Claude Code Marketplace is a modular ecosystem of components that extend Cla
 ~/.claude/
 ├── CLAUDE.md              <- Auto-generated on every session (live version)
 ├── settings.json          <- User preferences (no hooks)
-├── sentinel-settings.json <- Hook registrations (sentinel commands) + env vars
 ├── skills/                <- {skills} skill directories (SKILL.md each)
 ├── commands/              <- {commands} slash commands (.md files)
 ├── agents/                <- {agents} agent definitions (.md files)
