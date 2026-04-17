@@ -90,7 +90,10 @@ fn acquire_lock(jsonl_path: &Path) -> Option<std::fs::File> {
 }
 
 fn cooldown_file() -> PathBuf {
-    std::env::temp_dir().join("claude-doc-drift-last")
+    let session_id = std::env::var("CLAUDE_SESSION_ID")
+        .or_else(|_| std::env::var("SESSION_ID"))
+        .unwrap_or_else(|_| "default".to_string());
+    std::env::temp_dir().join(format!("claude-doc-drift-{session_id}-last"))
 }
 
 fn cooldown_expired(fs: &dyn FileSystemPort) -> bool {

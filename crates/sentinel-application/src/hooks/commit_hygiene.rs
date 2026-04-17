@@ -50,7 +50,10 @@ fn state_file(fs: &dyn FileSystemPort, repo_root: &str) -> Option<PathBuf> {
 }
 
 fn cooldown_file() -> PathBuf {
-    std::env::temp_dir().join("claude-commit-hygiene-last")
+    let session_id = std::env::var("CLAUDE_SESSION_ID")
+        .or_else(|_| std::env::var("SESSION_ID"))
+        .unwrap_or_else(|_| "default".to_string());
+    std::env::temp_dir().join(format!("claude-commit-hygiene-{session_id}-last"))
 }
 
 fn cooldown_expired(fs: &dyn FileSystemPort) -> bool {

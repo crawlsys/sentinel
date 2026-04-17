@@ -79,7 +79,10 @@ fn state_file(fs: &dyn FileSystemPort, session_id: &str) -> Option<PathBuf> {
 }
 
 fn cooldown_file() -> PathBuf {
-    std::env::temp_dir().join("claude-context-monitor-last")
+    let session_id = std::env::var("CLAUDE_SESSION_ID")
+        .or_else(|_| std::env::var("SESSION_ID"))
+        .unwrap_or_else(|_| "default".to_string());
+    std::env::temp_dir().join(format!("claude-context-monitor-{session_id}-last"))
 }
 
 fn cooldown_expired(fs: &dyn FileSystemPort) -> bool {
@@ -368,34 +371,53 @@ mod tests {
 
         let fs = RealTestFs;
 
+        // Save any pre-existing env so we can restore it after the test.
+        let prev_claude = std::env::var("CLAUDE_SESSION_ID").ok();
+        let prev_session = std::env::var("SESSION_ID").ok();
+        // Ensure SESSION_ID fallback does not leak into this test.
+        std::env::remove_var("SESSION_ID");
+
         // -- Session A fires: write a cooldown stamp right now
         // This simulates session-a triggering a context warning and stamping
-        // the shared cooldown file with `now_ms()`.
+        // its own session-scoped cooldown file with `now_ms()`.
+        std::env::set_var("CLAUDE_SESSION_ID", "session-a");
+        let session_a_path = cooldown_file();
         write_cooldown(&fs);
 
         // -- Session B arrives immediately after
         // Session B is a completely different session (different session_id)
-        // but runs in the same process on the same machine, so it shares the
-        // same temp_dir and therefore the same stamp file path.
-        //
-        // Correct behaviour: Session B should see the cooldown as expired
-        //   (it's a fresh session; Session A's warning is irrelevant to it).
-        // Buggy behaviour:   Session B sees cooldown as NOT expired because
-        //   the stamp was just written by Session A.
-        //
-        // The assertion below expresses the CORRECT expectation. It FAILS on
-        // the current code, proving the cross-session suppression bug exists.
+        // but runs in the same process on the same machine. With the fix,
+        // each session has its own stamp file keyed by session_id, so Session
+        // A's stamp does NOT suppress Session B's cooldown check.
+        std::env::set_var("CLAUDE_SESSION_ID", "session-b");
+        let session_b_path = cooldown_file();
+
+        assert_ne!(
+            session_a_path, session_b_path,
+            "cooldown_file() must produce distinct paths for distinct session_ids"
+        );
+
         assert!(
             cooldown_expired(&fs),
             concat!(
-                "BUG: Session B's cooldown check is suppressed by Session A's stamp. ",
+                "Session B's cooldown check must not be suppressed by Session A's stamp. ",
                 "The cooldown file path must include the session_id so that each ",
                 "session has its own independent cooldown window."
             )
         );
 
-        // Cleanup: remove the stamp file so other tests are not polluted.
-        let _ = std::fs::remove_file(cooldown_file());
+        // Cleanup: remove both stamp files so other tests are not polluted.
+        let _ = std::fs::remove_file(&session_a_path);
+        let _ = std::fs::remove_file(&session_b_path);
+
+        // Restore env.
+        match prev_claude {
+            Some(v) => std::env::set_var("CLAUDE_SESSION_ID", v),
+            None => std::env::remove_var("CLAUDE_SESSION_ID"),
+        }
+        if let Some(v) = prev_session {
+            std::env::set_var("SESSION_ID", v);
+        }
     }
 
 }
