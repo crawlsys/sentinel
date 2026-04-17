@@ -20,6 +20,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- **`doc_drift` write race**: `resolve_drift_for_cwd` did a lock-free read->filter->rewrite of `~/.claude/sentinel/metrics/doc-drift.jsonl`, which could clobber concurrent appends from `write_drift_entries` in parallel sessions/threads. Both paths now take an exclusive advisory lock on a sidecar `doc-drift.jsonl.lock` (via `fs2::FileExt::lock_exclusive`) before touching the file. Previously-red 50-iteration concurrency test `test_concurrent_write_and_resolve_loses_entries` now passes.
 - **`session_init` validator**: removed the `sentinel-settings.json missing` false-positive. All hook registrations live in `~/.claude/settings.json`; the separate file was never actually loaded, but the validator flagged it on every SessionStart. Validator block, watch-path entry, and the stale `CLAUDE.md` tree row all deleted.
 - **`pre_commit_verification` tests**: `test_blocks_git_push_without_evidence` and `test_is_docs_only_not_commit` were non-deterministic because `is_docs_only_commit` shelled out to `git diff` against the ambient cwd. Extracted a `GitDiffRunner` trait with production (`RealGitDiff`) and test-stub impls so the tests are hermetic.
 
