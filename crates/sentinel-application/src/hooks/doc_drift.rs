@@ -61,6 +61,34 @@ fn drift_file(fs: &dyn FileSystemPort) -> Option<PathBuf> {
     Some(metrics_dir(fs)?.join("doc-drift.jsonl"))
 }
 
+/// Open (or create) the sidecar lock file alongside `doc-drift.jsonl` and
+/// acquire an exclusive advisory lock.
+///
+/// The returned `File` holds the lock for as long as it is in scope; dropping
+/// it (or explicit unlock) releases the lock. This serializes the
+/// read-modify-write in `resolve_drift_for_cwd` against concurrent appends
+/// from `write_drift_entries`, preventing data loss when both run in parallel.
+///
+/// Uses a sidecar lockfile (`.lock` suffix) opened directly via `std::fs` —
+/// we intentionally bypass the `FileSystemPort` abstraction here because
+/// advisory file locks require a real OS `File` handle that lives across
+/// the read+write operations.
+fn acquire_lock(jsonl_path: &Path) -> Option<std::fs::File> {
+    use fs2::FileExt;
+    if let Some(parent) = jsonl_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let lock_path = jsonl_path.with_extension("jsonl.lock");
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .ok()?;
+    file.lock_exclusive().ok()?;
+    Some(file)
+}
+
 fn cooldown_file() -> PathBuf {
     std::env::temp_dir().join("claude-doc-drift-last")
 }
@@ -409,6 +437,11 @@ fn write_drift_entries(fs_port: &dyn FileSystemPort, entries: &[DriftEntry]) {
         None => return,
     };
 
+    // Serialize against resolve_drift_for_cwd's read-modify-write.
+    // The lock is held for the duration of this scope; the returned File is
+    // dropped (releasing the lock) when this function returns.
+    let _lock = acquire_lock(&path);
+
     // Read existing unresolved entries to avoid duplicates
     let existing: HashSet<String> = fs_port
         .read_to_string(&path)
@@ -515,6 +548,12 @@ fn resolve_drift_for_cwd(fs_port: &dyn FileSystemPort, cwd_str: &str) {
         Some(p) => p,
         None => return,
     };
+
+    // Serialize the read-modify-write against concurrent appends from
+    // write_drift_entries. Without this lock, Thread A's appended bytes get
+    // clobbered by the final rewrite in this function.
+    let _lock = acquire_lock(&path);
+
     let content = match fs_port.read_to_string(&path) {
         Ok(c) => c,
         Err(_) => return,

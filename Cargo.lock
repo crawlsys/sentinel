@@ -2112,6 +2112,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "dirs",
+ "fs2",
  "hmac",
  "regex",
  "reqwest 0.12.28",

@@ -25,6 +25,7 @@ hmac = { workspace = true }
 toml = { workspace = true }
 reqwest = { workspace = true }
 uuid = { workspace = true }
+fs2 = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
