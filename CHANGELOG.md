@@ -20,6 +20,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- **`session_init` validator**: removed the `sentinel-settings.json missing` false-positive. All hook registrations live in `~/.claude/settings.json`; the separate file was never actually loaded, but the validator flagged it on every SessionStart. Validator block, watch-path entry, and the stale `CLAUDE.md` tree row all deleted.
 - **`pre_commit_verification` tests**: `test_blocks_git_push_without_evidence` and `test_is_docs_only_not_commit` were non-deterministic because `is_docs_only_commit` shelled out to `git diff` against the ambient cwd. Extracted a `GitDiffRunner` trait with production (`RealGitDiff`) and test-stub impls so the tests are hermetic.
 
 ## [0.4.1] - 2026-04-16
