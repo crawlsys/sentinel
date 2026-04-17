@@ -22,6 +22,8 @@ const MIN_FILES: usize = constants::COMMIT_HYGIENE_MIN_FILES;
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 struct CommitState {
     cwd: String,
+    #[serde(default)]
+    session_id: String,
     file_count: usize,
     files: Vec<String>,
     ts: String,
@@ -49,10 +51,14 @@ fn state_file(fs: &dyn FileSystemPort, repo_root: &str) -> Option<PathBuf> {
     Some(dir.join(format!("commit-hygiene-{}.json", repo_hash(repo_root))))
 }
 
-fn cooldown_file() -> PathBuf {
-    let session_id = std::env::var("CLAUDE_SESSION_ID")
+fn current_session_id() -> String {
+    std::env::var("CLAUDE_SESSION_ID")
         .or_else(|_| std::env::var("SESSION_ID"))
-        .unwrap_or_else(|_| "default".to_string());
+        .unwrap_or_else(|_| "default".to_string())
+}
+
+fn cooldown_file() -> PathBuf {
+    let session_id = current_session_id();
     std::env::temp_dir().join(format!("claude-commit-hygiene-{session_id}-last"))
 }
 
@@ -101,6 +107,7 @@ pub fn process_stop(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
 
     let state = CommitState {
         cwd: cwd.to_string(),
+        session_id: current_session_id(),
         file_count: files.len(),
         files: files.into_iter().take(20).collect(), // Cap at 20 for readability
         ts: chrono::Utc::now().to_rfc3339(),
@@ -140,8 +147,12 @@ pub fn process_prompt(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
         Err(_) => return HookOutput::allow(),
     };
 
-    // Only remind for the current project
-    if state.cwd != cwd {
+    // Only remind for the current project AND current session.
+    // Including session_id prevents cross-session suppression when two
+    // sessions share the same repo (non-worktree case): session A writes
+    // state, session B must not treat it as its own.
+    let session_id = current_session_id();
+    if state.session_id != session_id || state.cwd != cwd {
         return HookOutput::allow();
     }
 
@@ -288,5 +299,38 @@ mod tests {
         let ctx = test_support::stub_ctx();
         // StubFs.read_to_string returns error → cooldown_expired returns true
         assert!(cooldown_expired(ctx.fs));
+    }
+
+    #[test]
+    fn test_state_gate_distinguishes_sessions() {
+        // Simulate the equality gate used in process_prompt.
+        // Session A writes state; Session B reads it. Even though cwd
+        // matches, the session_id differs, so the gate must NOT treat
+        // it as "my own state" (which would suppress the reminder).
+        let state = CommitState {
+            cwd: "/repo".to_string(),
+            session_id: "session-a".to_string(),
+            file_count: 5,
+            files: vec!["a.rs".into()],
+            ts: "2026-04-17T00:00:00Z".to_string(),
+        };
+
+        let cwd = "/repo";
+        let my_session = "session-b";
+
+        // Gate logic: treat as fresh if session_id OR cwd differs.
+        let treat_as_fresh = state.session_id != my_session || state.cwd != cwd;
+        assert!(
+            treat_as_fresh,
+            "cross-session state must not short-circuit the gate"
+        );
+
+        // Sanity: matching session + cwd means gate considers it our state.
+        let same_session = "session-a";
+        let treat_as_fresh_same = state.session_id != same_session || state.cwd != cwd;
+        assert!(
+            !treat_as_fresh_same,
+            "matching session_id and cwd should be treated as own state"
+        );
     }
 }
