@@ -944,4 +944,125 @@ mod tests {
         let output = process(&input, &fs_port);
         assert!(output.blocked.is_none(), "plan-file fallback should allow write");
     }
+
+    // ── Edge-case tests for detect_plan_mode_from_transcript ────────
+
+    #[test]
+    fn test_detect_plan_mode_handles_malformed_json_lines() {
+        // Mix valid JSON lines with garbage. The last valid plan signal
+        // (EnterPlanMode) must win despite invalid lines interspersed.
+        use std::io::Write;
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        // Line 1: valid — ExitPlanMode
+        writeln!(f, "{}", serde_json::to_string(&assistant_tool_use("ExitPlanMode")).unwrap()).unwrap();
+        // Line 2: garbage
+        writeln!(f, "not valid json {{{{").unwrap();
+        // Line 3: valid — EnterPlanMode (most recent valid signal)
+        writeln!(f, "{}", serde_json::to_string(&assistant_tool_use("EnterPlanMode")).unwrap()).unwrap();
+        // Line 4: more garbage after the last valid signal
+        writeln!(f, "{{broken").unwrap();
+        // Walking backwards: line 4 is skipped (malformed), line 3 is
+        // EnterPlanMode → returns true without reading further.
+        assert!(
+            detect_plan_mode_from_transcript(f.path()),
+            "malformed lines must be skipped; last valid signal (EnterPlanMode) must win"
+        );
+    }
+
+    #[test]
+    fn test_detect_plan_mode_handles_empty_file() {
+        // A zero-byte transcript must not panic and must return false.
+        use std::io::Write;
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        // Write nothing — empty file.
+        f.flush().unwrap();
+        assert!(
+            !detect_plan_mode_from_transcript(f.path()),
+            "empty transcript must return false without panicking"
+        );
+    }
+
+    #[test]
+    fn test_detect_plan_mode_multiple_tool_uses_in_same_message() {
+        // An assistant message whose content array contains BOTH a Read
+        // tool_use AND an EnterPlanMode tool_use. The function should detect
+        // the plan-mode signal even when it shares a message with other tools.
+        let entry = serde_json::json!({
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {"type": "tool_use", "name": "Read", "input": {}},
+                    {"type": "tool_use", "name": "EnterPlanMode", "input": {}}
+                ]
+            }
+        });
+        let t = write_transcript(&[entry]);
+        assert!(
+            detect_plan_mode_from_transcript(t.path()),
+            "EnterPlanMode in a multi-tool-use message must be detected"
+        );
+    }
+
+    #[test]
+    fn test_detect_plan_mode_ignores_unrelated_tool_names() {
+        // Transcript contains only Bash, Read, and Edit tool_uses — no plan
+        // signal at all. Must return false.
+        let t = write_transcript(&[
+            assistant_tool_use("Bash"),
+            assistant_tool_use("Read"),
+            assistant_tool_use("Edit"),
+        ]);
+        assert!(
+            !detect_plan_mode_from_transcript(t.path()),
+            "unrelated tool names must not trigger plan-mode detection"
+        );
+    }
+
+    #[test]
+    fn test_detect_plan_mode_handles_very_long_transcript() {
+        // Generate 1000+ lines. EnterPlanMode appears at line ~500,
+        // ExitPlanMode appears as the very LAST line. Walking backwards the
+        // function must find ExitPlanMode first and return false.
+        use std::io::Write;
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+
+        // Lines 1–499: unrelated Read tool_uses
+        for _ in 0..499 {
+            writeln!(
+                f,
+                "{}",
+                serde_json::to_string(&assistant_tool_use("Read")).unwrap()
+            )
+            .unwrap();
+        }
+        // Line 500: EnterPlanMode
+        writeln!(
+            f,
+            "{}",
+            serde_json::to_string(&assistant_tool_use("EnterPlanMode")).unwrap()
+        )
+        .unwrap();
+        // Lines 501–999: more unrelated tool_uses
+        for _ in 0..499 {
+            writeln!(
+                f,
+                "{}",
+                serde_json::to_string(&assistant_tool_use("Bash")).unwrap()
+            )
+            .unwrap();
+        }
+        // Line 1000 (last): ExitPlanMode — this must win because we walk backwards
+        writeln!(
+            f,
+            "{}",
+            serde_json::to_string(&assistant_tool_use("ExitPlanMode")).unwrap()
+        )
+        .unwrap();
+
+        assert!(
+            !detect_plan_mode_from_transcript(f.path()),
+            "last line is ExitPlanMode so result must be false (last signal wins)"
+        );
+    }
 }
