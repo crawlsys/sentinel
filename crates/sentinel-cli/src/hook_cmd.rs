@@ -707,6 +707,32 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
             if source == "skills" {
                 tracing::info!(file_path, "Skill file changed");
             }
+
+            // Plan-mode transition — mark plan-approved when entering plan mode
+            // via any mechanism (Shift+Tab UI cycle, --permission-mode plan CLI
+            // flag, SDK set_permission_mode RPC, or the EnterPlanMode tool).
+            // ConfigChange is the authoritative signal since all permission-mode
+            // transitions route through Claude Code's config layer; previously
+            // we only detected this via PostToolUse on EnterPlanMode/ExitPlanMode,
+            // missing the UI and CLI entry paths.
+            //
+            // The ConfigChange payload shape (from claude-code-2.1.114):
+            //   { source: "user_settings" | ..., field: "permissionMode",
+            //     old_value: "<mode>", new_value: "<mode>", ... }
+            // We read `new_value` (or fall back to `value`) and compare to "plan".
+            let changed_field = input.extra.get("field").and_then(|v| v.as_str()).unwrap_or("");
+            if changed_field == "permissionMode" || changed_field == "permission_mode" {
+                let new_mode = input.extra.get("new_value")
+                    .or_else(|| input.extra.get("value"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                if new_mode == "plan" {
+                    if let Some(sid) = input.session_id.as_deref() {
+                        hooks::tool_usage_gate::mark_plan_approved(ctx.fs, sid);
+                        tracing::info!(source, "Plan mode entered via ConfigChange — plan-approved marker written");
+                    }
+                }
+            }
         }
 
         HookEvent::InstructionsLoaded => {
