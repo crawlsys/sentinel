@@ -3,12 +3,19 @@
 //! PreToolUse hook that blocks Edit/Write if required preconditions aren't met:
 //! 1. Sequential thinking must have been used this session
 //! 2. At least one task must have been created this session
-//! 3. A plan must have been approved this session (ExitPlanMode called)
+//! 3. A plan must have been approved this session (ExitPlanMode/EnterPlanMode
+//!    called, OR a recent `plans/*.md` exists)
 //! 4. A task must be actively in_progress
 //!
 //! State is tracked via marker files in the temp directory, keyed by session ID.
 //! Marker files are written by the PostToolUse dispatcher when it detects
 //! the relevant tool calls.
+//!
+//! Autopilot bypass: when `SENTINEL_AUTOPILOT=1` is set, the plan-approval
+//! check (#3) is skipped. The user has explicitly opted into autonomous
+//! execution and `EnterPlanMode`/`ExitPlanMode` aren't always deferred-
+//! registered in every harness session — blocking there would deadlock the
+//! session with no path to unblock. The other three checks still apply.
 //!
 //! Plan-approval fallback: when a session is resumed, `ExitPlanMode` may have
 //! been called in a prior session, so no PLAN_MARKER exists. Detect this by
@@ -30,6 +37,14 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use super::FileSystemPort;
+
+/// True when the user has opted into autonomous execution via
+/// `SENTINEL_AUTOPILOT=1`. Mirrors the bypass used in `pr_merge_gate`.
+fn is_autopilot() -> bool {
+    std::env::var("SENTINEL_AUTOPILOT")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
 
 /// How recent a plan file must be to count as "approved this session".
 /// 7 days covers resumed sessions while still requiring a plan per week.
@@ -172,19 +187,28 @@ pub fn process(input: &HookInput, fs: &dyn FileSystemPort) -> HookOutput {
     // Check 3: A plan must have been approved this session, OR a recent plan
     // file exists in {cwd}/plans/ (resumed-session fallback).
     //
-    // Plan mode is entered by: (a) Shift+Tab in the UI, (b) env var
-    // `CLAUDE_CODE_PLAN_MODE_REQUIRED=1`, (c) Agent tool with `mode: "plan"`,
-    // or (d) agent YAML frontmatter `permissionMode: "plan"`. There is no
-    // `EnterPlanMode` tool — only `ExitPlanMode` (the exit/approval step).
-    if !has_marker(fs, PLAN_MARKER_PREFIX, session_id)
+    // Plan mode entry paths (2.1.114): (a) Shift+Tab in the UI, (b) the
+    // `EnterPlanMode` tool (real in the compiled binary — handler `r7H` —
+    // though omitted from `sdk-tools.d.ts`; rejects inside agent contexts),
+    // (c) env var `CLAUDE_CODE_PLAN_MODE_REQUIRED=1`, (d) `Agent` tool with
+    // `mode: "plan"`, (e) agent YAML frontmatter `permissionMode: "plan"`, or
+    // (f) CLI flag `--permission-mode plan`. `ExitPlanMode` is the approval
+    // step that commits the plan.
+    //
+    // Autopilot bypass: skip this check entirely when `SENTINEL_AUTOPILOT=1`
+    // (harness sessions may not deferred-register `EnterPlanMode`/`ExitPlanMode`,
+    // which would otherwise deadlock the model with no path to satisfy the gate).
+    if !is_autopilot()
+        && !has_marker(fs, PLAN_MARKER_PREFIX, session_id)
         && !has_recent_plan_file(fs, input.cwd.as_deref(), SystemTime::now())
     {
         return HookOutput::deny(
             "🔴 [Tool Usage Gate] BLOCKED: Plan Mode is required. Enter plan mode via \
-             Shift+Tab (or set CLAUDE_CODE_PLAN_MODE_REQUIRED=1, or spawn an Agent \
-             with mode:\"plan\"). Then call `ExitPlanMode` with the plan content for \
-             approval. Alternatively, place a recent `.md` plan file under \
-             `{cwd}/plans/` (resumed-session fallback)."
+             `EnterPlanMode` (or Shift+Tab, `CLAUDE_CODE_PLAN_MODE_REQUIRED=1`, \
+             `Agent(mode:\"plan\")`, or `--permission-mode plan`). Then call \
+             `ExitPlanMode` with the plan content for approval. Alternatively, \
+             place a recent `.md` plan file under `{cwd}/plans/` (resumed-session \
+             fallback). Or set `SENTINEL_AUTOPILOT=1` to bypass this check."
         );
     }
 
@@ -340,6 +364,11 @@ mod tests {
 
     #[test]
     fn test_blocks_edit_without_plan_approval() {
+        // Take the autopilot lock so a parallel test can't leak
+        // `SENTINEL_AUTOPILOT=1` into this one (which would bypass check #3
+        // and flow to check #4, producing a different deny message).
+        let _guard = AUTOPILOT_LOCK.lock().unwrap();
+        std::env::remove_var("SENTINEL_AUTOPILOT");
         let fs = MockFs::with_markers("test-session", &[
             SEQUENTIAL_MARKER_PREFIX,
             TASK_MARKER_PREFIX,
@@ -348,14 +377,19 @@ mod tests {
         assert_eq!(output.blocked, Some(true));
         let reason = output.hook_specific_output.as_ref()
             .and_then(|h| h.permission_decision_reason.as_deref()).unwrap_or("");
-        // Message references the real mechanism: Shift+Tab or ExitPlanMode.
-        // There is no `EnterPlanMode` tool — plan mode is entered via UI or env.
+        // Message references the real entry paths: EnterPlanMode (real tool
+        // per 2.1.114 binary handler `r7H`, though hidden from sdk-tools.d.ts),
+        // Shift+Tab, env var, Agent mode, or CLI flag; and ExitPlanMode as the
+        // approval step.
         assert!(reason.contains("Plan Mode") && reason.contains("ExitPlanMode"));
-        assert!(!reason.contains("EnterPlanMode"), "must not reference fake tool");
+        assert!(reason.contains("EnterPlanMode"),
+            "deny message must reference EnterPlanMode — real tool per 2.1.114 audit");
     }
 
     #[test]
     fn test_blocks_edit_without_active_task() {
+        let _guard = AUTOPILOT_LOCK.lock().unwrap();
+        std::env::remove_var("SENTINEL_AUTOPILOT");
         let fs = MockFs::with_markers("test-session", &[
             SEQUENTIAL_MARKER_PREFIX,
             TASK_MARKER_PREFIX,
@@ -419,6 +453,46 @@ mod tests {
         let fs = MockFs::with_all_markers("session-a");
         let output = process(&edit_input("session-b"), &fs);
         assert_eq!(output.blocked, Some(true));
+    }
+
+    /// Tests touch SENTINEL_AUTOPILOT env var — serialize them to avoid
+    /// interference with other tests running in parallel (cargo test
+    /// defaults to parallel execution).
+    static AUTOPILOT_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn test_autopilot_bypasses_plan_gate() {
+        let _guard = AUTOPILOT_LOCK.lock().unwrap();
+        std::env::set_var("SENTINEL_AUTOPILOT", "1");
+        // All markers EXCEPT the plan marker.
+        let fs = MockFs::with_markers("test-session", &[
+            SEQUENTIAL_MARKER_PREFIX,
+            TASK_MARKER_PREFIX,
+            TASK_ACTIVE_PREFIX,
+        ]);
+        let output = process(&edit_input("test-session"), &fs);
+        std::env::remove_var("SENTINEL_AUTOPILOT");
+        assert!(output.blocked.is_none(),
+            "SENTINEL_AUTOPILOT=1 must skip the plan-approval check");
+    }
+
+    #[test]
+    fn test_autopilot_does_not_bypass_task_active_check() {
+        let _guard = AUTOPILOT_LOCK.lock().unwrap();
+        std::env::set_var("SENTINEL_AUTOPILOT", "1");
+        // Plan marker missing AND task-active marker missing.
+        let fs = MockFs::with_markers("test-session", &[
+            SEQUENTIAL_MARKER_PREFIX,
+            TASK_MARKER_PREFIX,
+        ]);
+        let output = process(&edit_input("test-session"), &fs);
+        std::env::remove_var("SENTINEL_AUTOPILOT");
+        // Plan check skipped, but task-active still blocks.
+        assert_eq!(output.blocked, Some(true));
+        let reason = output.hook_specific_output.as_ref()
+            .and_then(|h| h.permission_decision_reason.as_deref()).unwrap_or("");
+        assert!(reason.contains("in_progress"),
+            "autopilot must still enforce the active-task check");
     }
 
     // ── has_recent_plan_file fallback ───────────────────────────────
