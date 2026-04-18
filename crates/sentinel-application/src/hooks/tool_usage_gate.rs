@@ -66,9 +66,11 @@ fn is_autopilot() -> bool {
 /// `name: "ExitPlanMode"`. Between those two calls the permission context
 /// carries `mode: "plan"`.
 ///
-/// We walk from the end of the file to avoid parsing the whole transcript
-/// for long sessions. The first plan-related tool_use we encounter going
-/// backwards is the current state.
+/// We parse lines lazily from the end — the file is read fully into memory,
+/// but JSON parsing short-circuits on the first plan-related `tool_use`
+/// encountered going backwards, which is the current state. The inner block
+/// iteration also runs in reverse so the latest `tool_use` within a single
+/// assistant message wins when multiple plan signals appear in one message.
 pub fn detect_plan_mode_from_transcript(transcript_path: &Path) -> bool {
     let content = match std::fs::read_to_string(transcript_path) {
         Ok(c) => c,
@@ -92,7 +94,7 @@ pub fn detect_plan_mode_from_transcript(transcript_path: &Path) -> bool {
             continue;
         };
 
-        for block in blocks {
+        for block in blocks.iter().rev() {
             if block.get("type").and_then(|v| v.as_str()) != Some("tool_use") {
                 continue;
             }
@@ -1001,6 +1003,28 @@ mod tests {
         assert!(
             detect_plan_mode_from_transcript(t.path()),
             "EnterPlanMode in a multi-tool-use message must be detected"
+        );
+    }
+
+    #[test]
+    fn test_detect_plan_mode_in_message_ordering_last_wins() {
+        // Single assistant message whose content array lists ExitPlanMode
+        // before EnterPlanMode. Chronologically, EnterPlanMode is the later
+        // action within this message, so the current state is plan mode.
+        let entry = serde_json::json!({
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {"type": "tool_use", "name": "ExitPlanMode", "input": {}},
+                    {"type": "tool_use", "name": "EnterPlanMode", "input": {}}
+                ]
+            }
+        });
+        let t = write_transcript(&[entry]);
+        assert!(
+            detect_plan_mode_from_transcript(t.path()),
+            "within a single message the latest tool_use must win — EnterPlanMode after ExitPlanMode should yield plan mode"
         );
     }
 
