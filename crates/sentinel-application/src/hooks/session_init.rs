@@ -1150,9 +1150,9 @@ The sentinel `skill_router` hook runs on every message and uses Claude Opus 4.6 
 
 ## Plans & Documentation
 
-### Built-in Plan Mode (ENFORCED)
+### Built-in Plan Mode (OPT-IN)
 
-Claude Code's built-in Plan Mode is **required** for all non-trivial implementation work. `CLAUDE_CODE_PLAN_MODE_REQUIRED=1` is set in `~/.claude/settings.json`.
+Claude Code's built-in Plan Mode is available for non-trivial implementation work but is not enforced. Use it when the task benefits from an explicit design phase.
 
 **Workflow:**
 1. Enter plan mode — press **Shift+Tab** in the UI, OR set `CLAUDE_CODE_PLAN_MODE_REQUIRED=1`, OR spawn an Agent with `mode: "plan"`. (There is no `EnterPlanMode` tool — the 2.1.88 `sdk-tools.d.ts` schema only defines the exit side.)
@@ -1170,7 +1170,6 @@ Claude Code's built-in Plan Mode is **required** for all non-trivial implementat
 The `slug` is Claude Code's random-word format (e.g. `bright-EAGLE-river`). Sentinel auto-copies the file with incrementing `-v1`, `-v2`, etc. every time you exit plan mode for the same slug.
 
 **Rules:**
-- NEVER bypass plan mode for complex work — `CLAUDE_CODE_PLAN_MODE_REQUIRED` blocks ExitPlanMode without a plan file
 - The archive copy is immutable — update plans via `/plan` which edits the original
 - NEVER delete files in `~/.claude/plans/` — they are the historical record
 
@@ -1249,11 +1248,10 @@ prepend `🚀`; if `Planned`, prepend `📋`.
 followed when you are in the `Planned` mode state.*
 
 Unless I say so, **EVERYTHING** you do must be planned first. Use Claude Code's
-built-in Plan Mode — enter it via **Shift+Tab** (or with `CLAUDE_CODE_PLAN_MODE_REQUIRED=1`
-already set in `~/.claude/settings.json`, most code-changing tools are gated until
-a plan is approved). Explore read-only, ask me questions about anything you're
-not 100% sure about, then call `ExitPlanMode` with the plan for my approval. Do
-**NOT** proceed without my approval first.
+built-in Plan Mode — enter it via **Shift+Tab** in the UI (or set
+`CLAUDE_CODE_PLAN_MODE_REQUIRED=1` to auto-enter). Explore read-only, ask me
+questions about anything you're not 100% sure about, then call `ExitPlanMode`
+with the plan for my approval. Do **NOT** proceed without my approval first.
 
 Once I approve a plan, **ANY** deviations or changes from that plan **MUST**
 have my separate approval.
