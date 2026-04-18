@@ -1,0 +1,9 @@
+* text=auto eol=lf
+*.rs text diff=rust
+*.toml text diff=toml
+*.md text diff=markdown
+*.lock -diff
+*.exe binary
+*.dll binary
+*.so binary
+*.dylib binary
