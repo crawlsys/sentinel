@@ -392,15 +392,36 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
                     if tool.contains("sequentialthinking") {
                         hooks::tool_usage_gate::mark_sequential_thinking_used(ctx.fs, session_id);
                     }
-                    if tool == "TaskCreate" {
+                    // Task creation: agent-team `TaskCreate` OR core Claude Code `TodoWrite`
+                    // (per claude-code-2.1.88 `sdk-tools.d.ts`: the real core tool is TodoWrite —
+                    // previously the gate blocked core sessions forever because this branch
+                    // only matched "TaskCreate").
+                    if tool == "TaskCreate" || tool == "TodoWrite" {
                         hooks::tool_usage_gate::mark_task_created(ctx.fs, session_id);
                     }
                     if tool == "ExitPlanMode" {
                         hooks::tool_usage_gate::mark_plan_approved(ctx.fs, session_id);
                     }
+                    // Active-task marker: agent-team `TaskUpdate(status="in_progress")` OR
+                    // core `TodoWrite` payload where any todo item has status "in_progress".
                     if tool == "TaskUpdate" {
                         if let Some(ti) = input.tool_input.as_ref() {
                             if ti.get("status").and_then(|v| v.as_str()) == Some("in_progress") {
+                                hooks::tool_usage_gate::mark_task_active(ctx.fs, session_id);
+                            }
+                        }
+                    }
+                    if tool == "TodoWrite" {
+                        if let Some(todos) = input
+                            .tool_input
+                            .as_ref()
+                            .and_then(|ti| ti.get("todos"))
+                            .and_then(|v| v.as_array())
+                        {
+                            let has_active = todos.iter().any(|t| {
+                                t.get("status").and_then(|s| s.as_str()) == Some("in_progress")
+                            });
+                            if has_active {
                                 hooks::tool_usage_gate::mark_task_active(ctx.fs, session_id);
                             }
                         }
