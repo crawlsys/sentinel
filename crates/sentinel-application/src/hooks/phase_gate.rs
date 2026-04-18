@@ -1358,9 +1358,11 @@ fn check_post_merge_skip(
     // workflow.rs `should_block()` — see that function's comment for rationale.
     //
     // Notable changes from earlier revisions:
-    //   * Removed `EnterPlanMode` — no such tool exists in Claude Code
-    //     (verified against claude-code-2.1.88 sdk-tools.d.ts). Plan mode is
-    //     entered via Shift+Tab, env var, or Agent mode:"plan".
+    //   * Re-added `EnterPlanMode` after a wrong removal: it IS a real callable
+    //     tool in Claude Code 2.1.114 (binary handler `r7H` at decompiled line
+    //     1666), just omitted from the public `sdk-tools.d.ts` type union.
+    //     Gating it would prevent the model from entering plan mode after
+    //     partial phase progress.
     //   * Added `TodoWrite` — it's the real core todo tool; sessions using it
     //     were getting blocked by a gate that thought they hadn't done task
     //     management.
@@ -1372,6 +1374,7 @@ fn check_post_merge_skip(
         "WebSearch",
         "WebFetch",
         "AskUserQuestion",
+        "EnterPlanMode",
         "ExitPlanMode",
         "TodoWrite",
         "TaskCreate",

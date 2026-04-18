@@ -301,11 +301,14 @@ impl WorkflowState {
         //   Read/Glob/Grep — filesystem discovery, read-only
         //   WebSearch/WebFetch — external read-only
         //   AskUserQuestion — prompts the user, no code execution
+        //   EnterPlanMode — transitions the session into plan mode (a permission-mode
+        //     change, not code execution). This tool is omitted from the public
+        //     `package/sdk-tools.d.ts` type declaration but IS a real callable tool
+        //     in the compiled binary (confirmed in claude-code-2.1.114 decompile:
+        //     handler `r7H` at line 1666; rejects inside agent contexts). Keeping
+        //     it exempt so the model can always opt into plan mode without being
+        //     gated by phase progress.
         //   ExitPlanMode — writes a plan file + requests approval, no side-effectful work
-        //     (note: there is no `EnterPlanMode` tool — plan mode is entered via
-        //     Shift+Tab, CLAUDE_CODE_PLAN_MODE_REQUIRED env var, Agent with
-        //     mode:"plan", or agent-YAML permissionMode:"plan"; verified against
-        //     claude-code-2.1.88 package/sdk-tools.d.ts)
         //   TodoWrite — core Claude Code todo list, metadata-only
         //   TaskCreate/TaskUpdate/TaskList/TaskGet/TaskOutput/TaskStop — agent-team
         //     task management, metadata-only
@@ -317,6 +320,7 @@ impl WorkflowState {
             "WebSearch",
             "WebFetch",
             "AskUserQuestion",
+            "EnterPlanMode",
             "ExitPlanMode",
             "TodoWrite",
             "TaskCreate",
@@ -644,11 +648,12 @@ mod tests {
         assert!(state.should_block(&wf, "Skill").is_some());
         assert!(state.should_block(&wf, "SendMessage").is_some());
 
-        // Fake tool names MUST NOT sneak back in. `EnterPlanMode` does not
-        // exist in claude-code-2.1.88 — this regression test ensures the
-        // exempt list doesn't grow it back.
-        assert!(state.should_block(&wf, "EnterPlanMode").is_some(),
-            "EnterPlanMode is not a real tool — must be gated (treated as unknown)");
+        // `EnterPlanMode` IS a real callable tool in the compiled Claude Code
+        // binary (2.1.114 decompile: handler `r7H` at line 1666), despite being
+        // omitted from the public `sdk-tools.d.ts` type union. Must be exempt
+        // so plan-mode entry isn't phase-gated.
+        assert!(state.should_block(&wf, "EnterPlanMode").is_none(),
+            "EnterPlanMode must be exempt — real tool in compiled binary, just hidden from sdk-tools.d.ts");
     }
 
     #[test]

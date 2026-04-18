@@ -407,6 +407,14 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
                     if tool == "ExitPlanMode" {
                         hooks::tool_usage_gate::mark_plan_approved(ctx.fs, session_id);
                     }
+                    // Entering plan mode also satisfies the plan-approval precondition:
+                    // the model has explicitly transitioned into design/plan territory,
+                    // and ExitPlanMode will fire separately when the plan is approved.
+                    // EnterPlanMode is hidden from sdk-tools.d.ts but real in the binary
+                    // (2.1.114 decompile handler `r7H`).
+                    if tool == "EnterPlanMode" {
+                        hooks::tool_usage_gate::mark_plan_approved(ctx.fs, session_id);
+                    }
                     // Active-task marker: agent-team `TaskUpdate(status="in_progress")` OR
                     // core `TodoWrite` payload where any todo item has status "in_progress".
                     if tool == "TaskUpdate" {
