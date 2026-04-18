@@ -26,6 +26,7 @@ pub mod hygiene_override;
 pub mod hygiene_reminders;
 pub mod linear_lifecycle;
 pub mod mcp_health;
+pub mod orchestration_nudge;
 pub mod memory_extract;
 pub mod memory_feedback;
 pub mod memory_inject;

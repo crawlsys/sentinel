@@ -155,7 +155,7 @@ pub fn process(input: &HookInput, fs: &dyn FileSystemPort) -> HookOutput {
     // Check 1: Sequential thinking must have been used this session
     if !has_marker(fs, SEQUENTIAL_MARKER_PREFIX, session_id) {
         return HookOutput::deny(
-            "[Tool Usage Gate] BLOCKED: Use `mcp__sequential-thinking__sequentialthinking` \
+            "🔴 [Tool Usage Gate] BLOCKED: Use `mcp__sequential-thinking__sequentialthinking` \
              to think through your approach before making code changes."
         );
     }
@@ -163,7 +163,7 @@ pub fn process(input: &HookInput, fs: &dyn FileSystemPort) -> HookOutput {
     // Check 2: At least one task must exist this session
     if !has_marker(fs, TASK_MARKER_PREFIX, session_id) {
         return HookOutput::deny(
-            "[Tool Usage Gate] BLOCKED: Create a task with `TaskCreate` (agent-team \
+            "🔴 [Tool Usage Gate] BLOCKED: Create a task with `TaskCreate` (agent-team \
              harness) or `TodoWrite` (core Claude Code) before making code changes. \
              All work must be tracked as a task."
         );
@@ -180,7 +180,7 @@ pub fn process(input: &HookInput, fs: &dyn FileSystemPort) -> HookOutput {
         && !has_recent_plan_file(fs, input.cwd.as_deref(), SystemTime::now())
     {
         return HookOutput::deny(
-            "[Tool Usage Gate] BLOCKED: Plan Mode is required. Enter plan mode via \
+            "🔴 [Tool Usage Gate] BLOCKED: Plan Mode is required. Enter plan mode via \
              Shift+Tab (or set CLAUDE_CODE_PLAN_MODE_REQUIRED=1, or spawn an Agent \
              with mode:\"plan\"). Then call `ExitPlanMode` with the plan content for \
              approval. Alternatively, place a recent `.md` plan file under \
@@ -191,7 +191,7 @@ pub fn process(input: &HookInput, fs: &dyn FileSystemPort) -> HookOutput {
     // Check 4: A task must be actively in_progress
     if !has_marker(fs, TASK_ACTIVE_PREFIX, session_id) {
         return HookOutput::deny(
-            "[Tool Usage Gate] BLOCKED: Mark a task as `in_progress` before making \
+            "🔴 [Tool Usage Gate] BLOCKED: Mark a task as `in_progress` before making \
              code changes. Use `TaskUpdate(taskId, status: \"in_progress\")` \
              (agent-team harness) or update a `TodoWrite` entry's status to \
              `in_progress`. No work should happen without an active task."

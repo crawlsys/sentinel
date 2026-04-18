@@ -83,7 +83,7 @@ pub fn process(input: &HookInput) -> HookOutput {
     // Auth0 — block ALL tools (it's an auth system, everything is sensitive)
     if tool.starts_with("mcp__auth0__") {
         return HookOutput::deny(
-            "[Doppler/Auth0 Gate] BLOCKED: Auth0 operations require explicit user permission. \
+            "🔴 [Doppler/Auth0 Gate] BLOCKED: Auth0 operations require explicit user permission. \
              Ask Gary before making ANY changes to Auth0. NO EXCEPTIONS."
         );
     }
@@ -99,7 +99,7 @@ pub fn process(input: &HookInput) -> HookOutput {
 
         // Block everything else (mutations)
         return HookOutput::deny(format!(
-            "[Doppler/Auth0 Gate] BLOCKED: Doppler mutation `{op}` requires explicit user permission. \
+            "🔴 [Doppler/Auth0 Gate] BLOCKED: Doppler mutation `{op}` requires explicit user permission. \
              Ask Gary before making ANY changes to Doppler secrets or configuration. NO EXCEPTIONS."
         ));
     }

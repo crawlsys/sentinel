@@ -247,6 +247,11 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
             let worktree_output = hooks::worktree_reminder::process(&input, &ctx);
             output.merge(&worktree_output);
 
+            // Orchestration nudge — suggest agent teams / Explore subagents /
+            // skill invocation based on prompt heuristics.
+            let orchestration_output = hooks::orchestration_nudge::process(&input, &ctx);
+            output.merge(&orchestration_output);
+
             // Todo loader — inject active todos into context
             let todo_output = hooks::todo_loader::process(&input, &ctx);
             output.merge(&todo_output);

@@ -51,7 +51,7 @@ pub fn process(input: &HookInput) -> HookOutput {
     // Check for production indicators
     if PROD_INDICATOR.is_match(cmd) {
         return HookOutput::deny(
-            "[Database Gate] BLOCKED: Database operation targeting PRODUCTION detected. \
+            "🔴 [Database Gate] BLOCKED: Database operation targeting PRODUCTION detected. \
              NEVER run database migrations or destructive operations in production. \
              NO EXCEPTIONS — even if Gary says it's okay."
         );
