@@ -70,16 +70,35 @@ pub fn process_stop(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
         state.unpushed_commits = has_unpushed;
     }
 
-    // 2. Stale worktrees — only dirs inside THIS repo's .claude/worktrees/.
-    //    We only report dirs that exist on disk; git worktree registration state
-    //    is not available through the port, but orphaned dirs are the real problem.
+    // 2. Stale worktrees — dirs inside this repo's `.claude/worktrees/` that
+    //    are NOT registered in `git worktree list`. A registered worktree is
+    //    actively in use (possibly by a parallel agent session) — flagging it
+    //    as stale produces the repeating "N stale worktrees" noise that
+    //    never clears on its own. True staleness is: directory present on
+    //    disk, absent from git's registry (orphaned by a failed removal or
+    //    aborted session).
+    //
+    //    `list_worktree_names()` returns the basename of every registered
+    //    worktree path. If the git call fails (empty Vec), we skip the
+    //    staleness check entirely — false-positiving every real worktree
+    //    is worse than silently skipping once.
     let worktree_dir = PathBuf::from(&repo_root).join(".claude").join("worktrees");
     if ctx.fs.is_dir(&worktree_dir) {
-        if let Ok(entries) = ctx.fs.read_dir(&worktree_dir) {
-            for entry in entries {
-                if ctx.fs.is_dir(&entry) {
-                    if let Some(name) = entry.file_name().and_then(|n| n.to_str()) {
-                        state.stale_worktrees.push(name.to_string());
+        let registered: std::collections::HashSet<String> = ctx
+            .git
+            .list_worktree_names(&repo_root)
+            .into_iter()
+            .collect();
+
+        if !registered.is_empty() {
+            if let Ok(entries) = ctx.fs.read_dir(&worktree_dir) {
+                for entry in entries {
+                    if ctx.fs.is_dir(&entry) {
+                        if let Some(name) = entry.file_name().and_then(|n| n.to_str()) {
+                            if !registered.contains(name) {
+                                state.stale_worktrees.push(name.to_string());
+                            }
+                        }
                     }
                 }
             }

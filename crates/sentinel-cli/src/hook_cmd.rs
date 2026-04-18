@@ -45,6 +45,10 @@ impl hooks::GitStatusPort for RealGit {
     fn repo_root(&self, path: &str) -> Option<String> {
         sentinel_infrastructure::git::repo_root(path).ok()
     }
+
+    fn list_worktree_names(&self, repo_path: &str) -> Vec<String> {
+        sentinel_infrastructure::git::list_worktree_names(repo_path)
+    }
 }
 
 pub async fn run(event: &str, matcher: Option<&str>, standalone: bool) -> Result<()> {

@@ -34,6 +34,19 @@ pub trait GitStatusPort {
     /// Get the repository root (absolute path) for the given working path.
     /// Returns `None` if the path is not inside any git repo.
     fn repo_root(&self, path: &str) -> Option<String>;
+
+    /// List the directory basenames of every worktree registered in this repo's
+    /// `git worktree list`. Returns just the trailing path segment of each
+    /// worktree path so callers can compare against directory names inside
+    /// `.claude/worktrees/`. The primary (main) worktree is included too, though
+    /// callers typically only care about secondary worktrees.
+    ///
+    /// Returns an empty Vec on error (e.g. not a git repo, or git unavailable) —
+    /// callers should treat that as "trust nothing" rather than "everything is
+    /// orphaned". Used by `hygiene_reminders` to distinguish orphaned dirs (no
+    /// git registry entry — truly stale) from actively-used worktrees
+    /// (registered, possibly in another agent session).
+    fn list_worktree_names(&self, repo_path: &str) -> Vec<String>;
 }
 
 // ---------------------------------------------------------------------------

@@ -219,6 +219,9 @@ mod tests {
         fn has_unpushed_commits(&self, _: &str) -> anyhow::Result<bool> {
             Ok(false)
         }
+        fn list_worktree_names(&self, _: &str) -> Vec<String> {
+            Vec::new()
+        }
         fn repo_root(&self, _: &str) -> Option<String> {
             None
         }

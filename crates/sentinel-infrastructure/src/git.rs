@@ -108,3 +108,36 @@ pub fn repo_root(start_path: &str) -> Result<String> {
 
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
+
+/// List directory basenames of all registered worktrees for this repo.
+///
+/// Parses `git worktree list --porcelain` and returns the trailing path segment
+/// of each `worktree <path>` line. Callers compare these against directory
+/// entries in `.claude/worktrees/` to distinguish orphaned directories (no
+/// registry entry — truly stale) from actively-used worktrees (registered,
+/// possibly in use by a parallel agent session).
+///
+/// Returns an empty Vec on error — callers should treat that as a signal to
+/// skip the staleness check rather than assuming everything is orphaned.
+pub fn list_worktree_names(repo_path: &str) -> Vec<String> {
+    let Ok(output) = run_git(
+        &["worktree", "list", "--porcelain"],
+        repo_path,
+        "Failed to list worktrees",
+    ) else {
+        return Vec::new();
+    };
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    text.lines()
+        .filter_map(|line| line.strip_prefix("worktree "))
+        .filter_map(|path| {
+            // Take the trailing directory name — compare to entries inside
+            // .claude/worktrees/ which are basenames.
+            std::path::Path::new(path.trim())
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(std::string::ToString::to_string)
+        })
+        .collect()
+}

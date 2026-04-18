@@ -168,6 +168,9 @@ mod tests {
         fn repo_root(&self, _path: &str) -> Option<String> {
             self.repo_root.clone()
         }
+        fn list_worktree_names(&self, _: &str) -> Vec<String> {
+            Vec::new()
+        }
     }
 
     #[test]
