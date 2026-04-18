@@ -7,8 +7,21 @@
 //! This hook injects a reminder into context so Claude asks the user,
 //! but does NOT hard-block the command — the user's approval in the
 //! conversation is sufficient (CLAUDE.md enforces the actual rule).
+//!
+//! Autopilot bypass: if `SENTINEL_AUTOPILOT=1` is set, the ask prompt is
+//! downgraded to an `allow` with a context-only reminder, so `gh pr merge`
+//! doesn't interrupt the loop with a Yes/No dialog. Gary's CLAUDE.md still
+//! requires in-conversation confirmation before hitting merge — this just
+//! prevents the harness-level dialog in autopilot mode.
 
-use sentinel_domain::events::{HookInput, HookOutput};
+use sentinel_domain::events::{HookEvent, HookInput, HookOutput};
+
+/// Check if autopilot mode is active via env var.
+fn is_autopilot() -> bool {
+    std::env::var("SENTINEL_AUTOPILOT")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
 
 /// Process a PreToolUse Bash event. Warns on `gh pr merge` but allows it.
 pub fn process(input: &HookInput) -> HookOutput {
@@ -18,6 +31,15 @@ pub fn process(input: &HookInput) -> HookOutput {
     };
 
     if cmd.contains("gh pr merge") || cmd.contains("gh pr close") {
+        if is_autopilot() {
+            // Autopilot: inject a reminder via context, do not open the Yes/No dialog.
+            return HookOutput::inject_context(
+                HookEvent::PreToolUse,
+                "[PR Merge Gate] AUTOPILOT: allowing `gh pr merge/close` without a \
+                 Yes/No dialog. Verify the in-conversation confirmation was given before \
+                 proceeding.",
+            );
+        }
         return HookOutput::ask(
             "[PR Merge Gate] Claude is attempting to merge/close a PR. Approve to proceed."
         );
@@ -33,6 +55,11 @@ fn extract_bash_command(input: &HookInput) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    // Tests touch SENTINEL_AUTOPILOT env var — serialize them to avoid
+    // races with parallel test threads reading stale values.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn bash_input(cmd: &str) -> HookInput {
         HookInput {
@@ -77,5 +104,51 @@ mod tests {
     #[test]
     fn test_allows_no_tool_input() {
         assert!(process(&HookInput::default()).blocked.is_none());
+    }
+
+    #[test]
+    fn test_autopilot_downgrades_ask_to_context_inject() {
+        let _g = ENV_LOCK.lock().unwrap();
+        std::env::set_var("SENTINEL_AUTOPILOT", "1");
+        let out = process(&bash_input("gh pr merge 123 --squash"));
+        std::env::remove_var("SENTINEL_AUTOPILOT");
+
+        assert!(out.blocked.is_none());
+        let hso = out.hook_specific_output.expect("output should have hso");
+        // Should NOT be asking for permission.
+        assert_ne!(
+            hso.permission_decision,
+            Some(sentinel_domain::events::PermissionDecision::Ask),
+            "autopilot must not trigger the Yes/No dialog"
+        );
+        // Should inject a context reminder instead.
+        let ctx = hso.additional_context.unwrap_or_default();
+        assert!(ctx.contains("AUTOPILOT"), "expected AUTOPILOT reminder in context, got: {ctx}");
+    }
+
+    #[test]
+    fn test_autopilot_false_still_asks() {
+        let _g = ENV_LOCK.lock().unwrap();
+        std::env::set_var("SENTINEL_AUTOPILOT", "0");
+        let out = process(&bash_input("gh pr merge 7"));
+        std::env::remove_var("SENTINEL_AUTOPILOT");
+
+        let hso = out.hook_specific_output.unwrap();
+        assert_eq!(
+            hso.permission_decision,
+            Some(sentinel_domain::events::PermissionDecision::Ask)
+        );
+    }
+
+    #[test]
+    fn test_no_autopilot_env_still_asks() {
+        let _g = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("SENTINEL_AUTOPILOT");
+        let out = process(&bash_input("gh pr close 42"));
+        let hso = out.hook_specific_output.unwrap();
+        assert_eq!(
+            hso.permission_decision,
+            Some(sentinel_domain::events::PermissionDecision::Ask)
+        );
     }
 }
