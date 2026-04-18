@@ -79,7 +79,9 @@ pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
         HookEvent::UserPromptSubmit,
         "[Worktree Reminder] You are in a git repository. \
          Use `EnterWorktree` to create an isolated worktree before making code changes. \
-         This is a user preference that applies to ALL repos.",
+         This is a user preference that applies to ALL repos. \
+         While working, use `AskUserQuestion` whenever you hit a decision point or \
+         unclear requirement — do not guess.",
     )
 }
 

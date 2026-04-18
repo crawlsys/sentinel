@@ -163,29 +163,38 @@ pub fn process(input: &HookInput, fs: &dyn FileSystemPort) -> HookOutput {
     // Check 2: At least one task must exist this session
     if !has_marker(fs, TASK_MARKER_PREFIX, session_id) {
         return HookOutput::deny(
-            "[Tool Usage Gate] BLOCKED: Create a task with `TaskCreate` before making \
-             code changes. All work must be tracked as a task."
+            "[Tool Usage Gate] BLOCKED: Create a task with `TaskCreate` (agent-team \
+             harness) or `TodoWrite` (core Claude Code) before making code changes. \
+             All work must be tracked as a task."
         );
     }
 
     // Check 3: A plan must have been approved this session, OR a recent plan
     // file exists in {cwd}/plans/ (resumed-session fallback).
+    //
+    // Plan mode is entered by: (a) Shift+Tab in the UI, (b) env var
+    // `CLAUDE_CODE_PLAN_MODE_REQUIRED=1`, (c) Agent tool with `mode: "plan"`,
+    // or (d) agent YAML frontmatter `permissionMode: "plan"`. There is no
+    // `EnterPlanMode` tool — only `ExitPlanMode` (the exit/approval step).
     if !has_marker(fs, PLAN_MARKER_PREFIX, session_id)
         && !has_recent_plan_file(fs, input.cwd.as_deref(), SystemTime::now())
     {
         return HookOutput::deny(
-            "[Tool Usage Gate] BLOCKED: Use `EnterPlanMode` to design your approach, \
-             then `ExitPlanMode` to get approval before making code changes. \
-             Plan Mode is required for all implementation work."
+            "[Tool Usage Gate] BLOCKED: Plan Mode is required. Enter plan mode via \
+             Shift+Tab (or set CLAUDE_CODE_PLAN_MODE_REQUIRED=1, or spawn an Agent \
+             with mode:\"plan\"). Then call `ExitPlanMode` with the plan content for \
+             approval. Alternatively, place a recent `.md` plan file under \
+             `{cwd}/plans/` (resumed-session fallback)."
         );
     }
 
     // Check 4: A task must be actively in_progress
     if !has_marker(fs, TASK_ACTIVE_PREFIX, session_id) {
         return HookOutput::deny(
-            "[Tool Usage Gate] BLOCKED: Mark a task as `in_progress` with \
-             `TaskUpdate(taskId, status: \"in_progress\")` before making code changes. \
-             No work should happen without an active task."
+            "[Tool Usage Gate] BLOCKED: Mark a task as `in_progress` before making \
+             code changes. Use `TaskUpdate(taskId, status: \"in_progress\")` \
+             (agent-team harness) or update a `TodoWrite` entry's status to \
+             `in_progress`. No work should happen without an active task."
         );
     }
 
@@ -339,7 +348,10 @@ mod tests {
         assert_eq!(output.blocked, Some(true));
         let reason = output.hook_specific_output.as_ref()
             .and_then(|h| h.permission_decision_reason.as_deref()).unwrap_or("");
-        assert!(reason.contains("EnterPlanMode"));
+        // Message references the real mechanism: Shift+Tab or ExitPlanMode.
+        // There is no `EnterPlanMode` tool — plan mode is entered via UI or env.
+        assert!(reason.contains("Plan Mode") && reason.contains("ExitPlanMode"));
+        assert!(!reason.contains("EnterPlanMode"), "must not reference fake tool");
     }
 
     #[test]
