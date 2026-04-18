@@ -280,46 +280,54 @@ impl WorkflowState {
     /// Check if a tool call should be blocked based on workflow state
     #[must_use]
     pub fn should_block(&self, workflow: &SkillWorkflow, tool_name: &str) -> Option<WorkflowBlock> {
-        // Never block read-only or meta tools
-        // **Attack #69 fix**: Removed "Task" and "Agent" from safe tools.
-        // These spawn sub-agents that can execute ANY tool (Bash, Write, MCP)
-        // in a separate context that may not inherit the same sentinel hooks.
-        // Claude should use Task/Agent only after completing required phases.
+        // Phase-exempt tools: discovery, metadata, and plan-approval calls that
+        // don't count as workflow phase execution. Calling one of these does NOT
+        // count as "doing the work" — no code runs, no files are written, no
+        // subprocesses spawn. Tools that CAN execute arbitrary code (Bash, Edit,
+        // Write, Task, Agent, Skill, SendMessage, MCP tools) are deliberately
+        // NOT in this list — they get gated by phase progress.
         //
-        // **Attack #107 fix**: Removed "Skill" from safe tools. The Skill tool
-        // can invoke arbitrary skills that may trigger nested workflow activations,
-        // potentially confusing the state machine (e.g., activating a second skill
-        // mid-workflow to clear the active_skill). Blocked until phases loaded.
+        // **Attack #69**: Task/Agent are blocked — they spawn subcontexts that
+        //   may not inherit the same sentinel hooks.
+        // **Attack #107**: Skill is blocked — nested workflow activations can
+        //   confuse the state machine.
+        // **Attack #108**: SendMessage is blocked — can leak phase content to
+        //   teammate contexts without sentinel enforcement.
+        // **Attack #99**: ToolSearch is exempt — it only fetches JSON schemas,
+        //   no execution.
+        // **Attack #101**: NotebookEdit is NOT exempt — can modify code cells.
         //
-        // **Attack #108 fix**: Removed "SendMessage" from safe tools. SendMessage
-        // sends messages to other agents/teammates, potentially leaking skill context,
-        // phase file contents, or workflow state to contexts without sentinel enforcement.
-        // **Attack #99 note**: ToolSearch is safe — it only fetches tool schemas
-        // (no execution). It's a deferred-tool loader that returns JSON definitions.
-        //
-        // Safe tools rationale:
-        //   Read/Glob/Grep/WebSearch/WebFetch — read-only, no side effects
-        //   AskUserQuestion — prompts user, no execution
-        //   EnterPlanMode/ExitPlanMode — plan mode toggle, no execution
-        //   TaskCreate/TaskUpdate/TaskList/TaskGet/TaskOutput — task management metadata
+        // Per-tool rationale:
+        //   Read/Glob/Grep — filesystem discovery, read-only
+        //   WebSearch/WebFetch — external read-only
+        //   AskUserQuestion — prompts the user, no code execution
+        //   ExitPlanMode — writes a plan file + requests approval, no side-effectful work
+        //     (note: there is no `EnterPlanMode` tool — plan mode is entered via
+        //     Shift+Tab, CLAUDE_CODE_PLAN_MODE_REQUIRED env var, Agent with
+        //     mode:"plan", or agent-YAML permissionMode:"plan"; verified against
+        //     claude-code-2.1.88 package/sdk-tools.d.ts)
+        //   TodoWrite — core Claude Code todo list, metadata-only
+        //   TaskCreate/TaskUpdate/TaskList/TaskGet/TaskOutput/TaskStop — agent-team
+        //     task management, metadata-only
         //   ToolSearch — schema fetcher, read-only
-        let safe_tools = [
+        let phase_exempt_tools = [
             "Read",
             "Glob",
             "Grep",
             "WebSearch",
             "WebFetch",
             "AskUserQuestion",
-            "EnterPlanMode",
             "ExitPlanMode",
+            "TodoWrite",
             "TaskCreate",
             "TaskUpdate",
             "TaskList",
             "TaskGet",
             "TaskOutput",
+            "TaskStop",
             "ToolSearch",
         ];
-        if safe_tools.contains(&tool_name) {
+        if phase_exempt_tools.contains(&tool_name) {
             return None;
         }
 
@@ -614,19 +622,33 @@ mod tests {
     }
 
     #[test]
-    fn test_allow_safe_tools() {
+    fn test_phase_exempt_tools_not_blocked() {
         let wf = linear_workflow();
         let state = WorkflowState::new("linear", "sess-1");
 
+        // Discovery and metadata tools — no workflow execution, never gated.
         assert!(state.should_block(&wf, "Read").is_none());
         assert!(state.should_block(&wf, "Glob").is_none());
+        assert!(state.should_block(&wf, "Grep").is_none());
+        assert!(state.should_block(&wf, "WebSearch").is_none());
+        assert!(state.should_block(&wf, "AskUserQuestion").is_none());
+        assert!(state.should_block(&wf, "ExitPlanMode").is_none());
+        assert!(state.should_block(&wf, "TodoWrite").is_none());
         assert!(state.should_block(&wf, "ToolSearch").is_none());
-        // Task and Agent removed from safe tools (Attack #69)
+
+        // Code-executing and context-spawning tools — always gated.
+        // Attack #69: Task/Agent spawn subcontexts that may skip sentinel.
         assert!(state.should_block(&wf, "Task").is_some());
         assert!(state.should_block(&wf, "Agent").is_some());
-        // Skill and SendMessage removed from safe tools (Attacks #107, #108)
+        // Attacks #107/#108: Skill/SendMessage can nest workflows or leak phase content.
         assert!(state.should_block(&wf, "Skill").is_some());
         assert!(state.should_block(&wf, "SendMessage").is_some());
+
+        // Fake tool names MUST NOT sneak back in. `EnterPlanMode` does not
+        // exist in claude-code-2.1.88 — this regression test ensures the
+        // exempt list doesn't grow it back.
+        assert!(state.should_block(&wf, "EnterPlanMode").is_some(),
+            "EnterPlanMode is not a real tool — must be gated (treated as unknown)");
     }
 
     #[test]

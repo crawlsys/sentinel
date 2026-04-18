@@ -1059,7 +1059,7 @@ Slash commands are user-invocable shortcuts. Invoke them with the `Skill` tool:
 | `/test` | Run tests with coverage | `Skill(skill: "test")` |
 | `/review` | 6-layer code review pipeline | `Skill(skill: "review")` |
 | `/explore` | Explore codebase structure | `Skill(skill: "explore")` |
-| `/plan` | Enter built-in Plan Mode (EnterPlanMode → design → ExitPlanMode) | `Skill(skill: "plan")` |
+| `/plan` | Enter built-in Plan Mode (Shift+Tab → design → `ExitPlanMode`) | `Skill(skill: "plan")` |
 | `/debug` | Debug with root cause analysis | `Skill(skill: "debug")` |
 | `/pr` | Create pull request | `Skill(skill: "pr")` |
 | `/skills` | List all available skills | `Skill(skill: "skills")` |
@@ -1155,8 +1155,8 @@ The sentinel `skill_router` hook runs on every message and uses Claude Opus 4.6 
 Claude Code's built-in Plan Mode is **required** for all non-trivial implementation work. `CLAUDE_CODE_PLAN_MODE_REQUIRED=1` is set in `~/.claude/settings.json`.
 
 **Workflow:**
-1. Call `EnterPlanMode` — enters read-only exploration mode
-2. Explore: `Read`, `Glob`, `Grep`, `Task(subagent_type: "Explore")`, `mcp__sequential-thinking__sequentialthinking`
+1. Enter plan mode — press **Shift+Tab** in the UI, OR set `CLAUDE_CODE_PLAN_MODE_REQUIRED=1`, OR spawn an Agent with `mode: "plan"`. (There is no `EnterPlanMode` tool — the 2.1.88 `sdk-tools.d.ts` schema only defines the exit side.)
+2. Explore read-only: `Read`, `Glob`, `Grep`, `Task(subagent_type: "Explore")`, `mcp__sequential-thinking__sequentialthinking`
 3. Call `ExitPlanMode` with plan content — Claude Code saves the plan to disk and asks for user approval
 4. After approval, implement
 
@@ -1249,11 +1249,11 @@ prepend `🚀`; if `Planned`, prepend `📋`.
 followed when you are in the `Planned` mode state.*
 
 Unless I say so, **EVERYTHING** you do must be planned first. Use Claude Code's
-built-in Plan Mode (`EnterPlanMode` / `ExitPlanMode`) — it's enforced via the
-`CLAUDE_CODE_PLAN_MODE_REQUIRED=1` env var, so bypassing it will fail. Enter plan
-mode, explore read-only, ask me questions about anything you're not 100% sure
-about, then call `ExitPlanMode` with the plan for my approval. Do **NOT** proceed
-without my approval first.
+built-in Plan Mode — enter it via **Shift+Tab** (or with `CLAUDE_CODE_PLAN_MODE_REQUIRED=1`
+already set in `~/.claude/settings.json`, most code-changing tools are gated until
+a plan is approved). Explore read-only, ask me questions about anything you're
+not 100% sure about, then call `ExitPlanMode` with the plan for my approval. Do
+**NOT** proceed without my approval first.
 
 Once I approve a plan, **ANY** deviations or changes from that plan **MUST**
 have my separate approval.

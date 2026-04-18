@@ -1353,29 +1353,36 @@ fn check_post_merge_skip(
     input: &HookInput,
     tool_name: &str,
 ) -> Option<HookOutput> {
-    // Only check safe-tool-exempt tools
-    // **Attack #78 fix**: Removed "Task" and "Agent" from safe tools here too.
-    // **Attack #101 fix**: NotebookEdit is NOT safe — it can modify code cells.
-    // **Attack #107 fix**: Removed "Skill" — can trigger nested workflow bypass.
-    // **Attack #108 fix**: Removed "SendMessage" — can leak context to teammates.
-    // This list MUST stay in sync with workflow.rs should_block() safe_tools.
-    let safe_tools = [
+    // Phase-exempt tools: calls that don't count as workflow execution
+    // (discovery, metadata, plan-approval). MUST stay in sync with
+    // workflow.rs `should_block()` — see that function's comment for rationale.
+    //
+    // Notable changes from earlier revisions:
+    //   * Removed `EnterPlanMode` — no such tool exists in Claude Code
+    //     (verified against claude-code-2.1.88 sdk-tools.d.ts). Plan mode is
+    //     entered via Shift+Tab, env var, or Agent mode:"plan".
+    //   * Added `TodoWrite` — it's the real core todo tool; sessions using it
+    //     were getting blocked by a gate that thought they hadn't done task
+    //     management.
+    //   * Added `TaskStop` — stopping an agent task is metadata-only.
+    let phase_exempt_tools = [
         "Read",
         "Glob",
         "Grep",
         "WebSearch",
         "WebFetch",
         "AskUserQuestion",
-        "EnterPlanMode",
         "ExitPlanMode",
+        "TodoWrite",
         "TaskCreate",
         "TaskUpdate",
         "TaskList",
         "TaskGet",
         "TaskOutput",
+        "TaskStop",
         "ToolSearch",
     ];
-    if safe_tools.contains(&tool_name) {
+    if phase_exempt_tools.contains(&tool_name) {
         return None;
     }
 
@@ -1548,18 +1555,24 @@ mod tests {
     }
 
     #[test]
-    fn test_allows_safe_tools() {
+    fn test_allows_phase_exempt_tools() {
         let mut state = SessionState::new("sess-1");
         state.set_active_skill("linear");
         let mut workflows = HashMap::new();
         workflows.insert("linear".to_string(), test_workflow());
 
-        let input = HookInput {
-            tool_name: Some("Glob".to_string()),
-            ..Default::default()
-        };
-        let output = process(&input, &mut state, &workflows, &test_fs());
-        assert!(output.blocked.is_none());
+        for exempt in ["Glob", "Read", "Grep", "WebSearch", "AskUserQuestion",
+                       "ExitPlanMode", "TodoWrite", "TaskCreate", "ToolSearch"] {
+            let input = HookInput {
+                tool_name: Some((*exempt).to_string()),
+                ..Default::default()
+            };
+            let output = process(&input, &mut state, &workflows, &test_fs());
+            assert!(
+                output.blocked.is_none(),
+                "phase-exempt tool `{exempt}` should not be blocked"
+            );
+        }
     }
 
     #[test]
