@@ -11,18 +11,26 @@
 //! Marker files are written by the PostToolUse dispatcher when it detects
 //! the relevant tool calls.
 //!
-//! Autopilot bypass: when `SENTINEL_AUTOPILOT=1` is set, the plan-approval
-//! check (#3) is skipped. The user has explicitly opted into autonomous
-//! execution and `EnterPlanMode`/`ExitPlanMode` aren't always deferred-
-//! registered in every harness session — blocking there would deadlock the
-//! session with no path to unblock. The other three checks still apply.
+//! Plan-mode detection (primary): read the session transcript at
+//! `input.transcript_path` and walk it to find the last `EnterPlanMode` or
+//! `ExitPlanMode` `tool_use` entry. If `EnterPlanMode` appears after the
+//! last `ExitPlanMode` (or there is no ExitPlanMode), the session is
+//! currently in plan mode and check #3 is satisfied directly by the real
+//! Claude Code 2.1.114 signal. This replaces the old `SENTINEL_AUTOPILOT`
+//! env-var bypass — see `detect_plan_mode_from_transcript`.
 //!
-//! Plan-approval fallback: when a session is resumed, `ExitPlanMode` may have
-//! been called in a prior session, so no PLAN_MARKER exists. Detect this by
-//! scanning for recently-written `*.md` files in any `plans/` directory
-//! between `{cwd}` and the containing repo root. We walk upward from cwd
-//! until we find a `.git` entry (file or directory — worktrees use a file)
-//! and check every `plans/` dir we find along the way. This handles:
+//! Autopilot fallback: `SENTINEL_AUTOPILOT=1` is retained only as a
+//! last-resort escape hatch for the rare case where the hook fires with
+//! no transcript path at all (e.g. malformed harness input). In normal
+//! operation the transcript is authoritative and this env var is ignored.
+//!
+//! Plan-file fallback: when a session is resumed, `ExitPlanMode` may have
+//! been called in a prior session and the transcript may not be available,
+//! so no PLAN_MARKER exists. Detect this by scanning for recently-written
+//! `*.md` files in any `plans/` directory between `{cwd}` and the
+//! containing repo root. We walk upward from cwd until we find a `.git`
+//! entry (file or directory — worktrees use a file) and check every
+//! `plans/` dir we find along the way. This handles:
 //!   - cwd is the repo root           → checks `{root}/plans/`
 //!   - cwd is a git worktree          → `.git` file in worktree lands us at
 //!                                       the worktree root, so plans authored
@@ -38,12 +46,65 @@ use std::time::{Duration, SystemTime};
 
 use super::FileSystemPort;
 
-/// True when the user has opted into autonomous execution via
-/// `SENTINEL_AUTOPILOT=1`. Mirrors the bypass used in `pr_merge_gate`.
+/// Last-resort escape hatch for when the hook fires with no transcript
+/// path at all. In normal 2.1.114 operation the transcript is the
+/// authoritative signal and this env var is ignored.
 fn is_autopilot() -> bool {
     std::env::var("SENTINEL_AUTOPILOT")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false)
+}
+
+/// Walk the transcript newest-to-oldest looking for the most recent
+/// `EnterPlanMode` or `ExitPlanMode` `tool_use` entry. Returns `true` iff
+/// the last one is `EnterPlanMode` — meaning the session is currently in
+/// plan mode.
+///
+/// Claude Code 2.1.114 records plan-mode entry as an assistant tool_use
+/// block with `name: "EnterPlanMode"` (real tool — binary handler `r7H` —
+/// though omitted from `sdk-tools.d.ts`). Exit is a tool_use with
+/// `name: "ExitPlanMode"`. Between those two calls the permission context
+/// carries `mode: "plan"`.
+///
+/// We walk from the end of the file to avoid parsing the whole transcript
+/// for long sessions. The first plan-related tool_use we encounter going
+/// backwards is the current state.
+pub fn detect_plan_mode_from_transcript(transcript_path: &Path) -> bool {
+    let content = match std::fs::read_to_string(transcript_path) {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+
+    for line in content.lines().rev() {
+        let entry: serde_json::Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+
+        if entry.get("type").and_then(|v| v.as_str()) != Some("assistant") {
+            continue;
+        }
+        let Some(blocks) = entry
+            .get("message")
+            .and_then(|m| m.get("content"))
+            .and_then(|c| c.as_array())
+        else {
+            continue;
+        };
+
+        for block in blocks {
+            if block.get("type").and_then(|v| v.as_str()) != Some("tool_use") {
+                continue;
+            }
+            match block.get("name").and_then(|v| v.as_str()) {
+                Some("EnterPlanMode") => return true,
+                Some("ExitPlanMode") => return false,
+                _ => {}
+            }
+        }
+    }
+
+    false
 }
 
 /// How recent a plan file must be to count as "approved this session".
@@ -184,8 +245,9 @@ pub fn process(input: &HookInput, fs: &dyn FileSystemPort) -> HookOutput {
         );
     }
 
-    // Check 3: A plan must have been approved this session, OR a recent plan
-    // file exists in {cwd}/plans/ (resumed-session fallback).
+    // Check 3: The session must be in plan mode (real 2.1.114 signal), OR the
+    // plan-approved marker is set (ExitPlanMode fired during this session), OR
+    // a recent plan file exists in `{cwd}/plans/` (resumed-session fallback).
     //
     // Plan mode entry paths (2.1.114): (a) Shift+Tab in the UI, (b) the
     // `EnterPlanMode` tool (real in the compiled binary — handler `r7H` —
@@ -195,20 +257,43 @@ pub fn process(input: &HookInput, fs: &dyn FileSystemPort) -> HookOutput {
     // (f) CLI flag `--permission-mode plan`. `ExitPlanMode` is the approval
     // step that commits the plan.
     //
-    // Autopilot bypass: skip this check entirely when `SENTINEL_AUTOPILOT=1`
-    // (harness sessions may not deferred-register `EnterPlanMode`/`ExitPlanMode`,
-    // which would otherwise deadlock the model with no path to satisfy the gate).
-    if !is_autopilot()
-        && !has_marker(fs, PLAN_MARKER_PREFIX, session_id)
-        && !has_recent_plan_file(fs, input.cwd.as_deref(), SystemTime::now())
-    {
+    // Primary signal: `detect_plan_mode_from_transcript` reads the live
+    // transcript and returns true when the last plan-related tool_use is
+    // `EnterPlanMode` (not yet followed by `ExitPlanMode`). This is the
+    // authoritative source.
+    //
+    // SENTINEL_AUTOPILOT is intentionally *only* consulted when no
+    // transcript path was provided — it's a last-resort escape hatch for
+    // malformed harness input, not a user-facing bypass.
+    let in_plan_mode = input
+        .transcript_path
+        .as_deref()
+        .filter(|p| !p.is_empty())
+        .map(|p| detect_plan_mode_from_transcript(Path::new(p)));
+
+    let plan_check_ok = match in_plan_mode {
+        Some(true) => true,
+        Some(false) => {
+            has_marker(fs, PLAN_MARKER_PREFIX, session_id)
+                || has_recent_plan_file(fs, input.cwd.as_deref(), SystemTime::now())
+        }
+        None => {
+            // No transcript available — fall back to markers, the plan-file
+            // heuristic, and finally the SENTINEL_AUTOPILOT escape hatch.
+            is_autopilot()
+                || has_marker(fs, PLAN_MARKER_PREFIX, session_id)
+                || has_recent_plan_file(fs, input.cwd.as_deref(), SystemTime::now())
+        }
+    };
+
+    if !plan_check_ok {
         return HookOutput::deny(
             "🔴 [Tool Usage Gate] BLOCKED: Plan Mode is required. Enter plan mode via \
              `EnterPlanMode` (or Shift+Tab, `CLAUDE_CODE_PLAN_MODE_REQUIRED=1`, \
              `Agent(mode:\"plan\")`, or `--permission-mode plan`). Then call \
              `ExitPlanMode` with the plan content for approval. Alternatively, \
              place a recent `.md` plan file under `{cwd}/plans/` (resumed-session \
-             fallback). Or set `SENTINEL_AUTOPILOT=1` to bypass this check."
+             fallback)."
         );
     }
 
@@ -461,19 +546,51 @@ mod tests {
     static AUTOPILOT_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
-    fn test_autopilot_bypasses_plan_gate() {
+    fn test_autopilot_fallback_when_no_transcript() {
+        // SENTINEL_AUTOPILOT is only consulted when no transcript_path is
+        // available in the hook input — it's a last-resort escape hatch,
+        // not a user-facing bypass.
         let _guard = AUTOPILOT_LOCK.lock().unwrap();
         std::env::set_var("SENTINEL_AUTOPILOT", "1");
-        // All markers EXCEPT the plan marker.
         let fs = MockFs::with_markers("test-session", &[
             SEQUENTIAL_MARKER_PREFIX,
             TASK_MARKER_PREFIX,
             TASK_ACTIVE_PREFIX,
         ]);
+        // `edit_input` omits transcript_path, so the None-branch fallback
+        // kicks in and honours SENTINEL_AUTOPILOT.
         let output = process(&edit_input("test-session"), &fs);
         std::env::remove_var("SENTINEL_AUTOPILOT");
         assert!(output.blocked.is_none(),
-            "SENTINEL_AUTOPILOT=1 must skip the plan-approval check");
+            "autopilot env var must still work when no transcript is available");
+    }
+
+    #[test]
+    fn test_autopilot_ignored_when_transcript_present_without_plan_signal() {
+        // Once a transcript is available, it is authoritative. Autopilot
+        // env var does NOT bypass the check — the model must actually
+        // enter plan mode.
+        let _guard = AUTOPILOT_LOCK.lock().unwrap();
+        std::env::set_var("SENTINEL_AUTOPILOT", "1");
+        let t = write_transcript(&[assistant_tool_use("Read")]);
+        let fs = MockFs::with_markers("test-session", &[
+            SEQUENTIAL_MARKER_PREFIX,
+            TASK_MARKER_PREFIX,
+            TASK_ACTIVE_PREFIX,
+        ]);
+        let input = HookInput {
+            tool_name: Some("Edit".into()),
+            session_id: Some("test-session".into()),
+            transcript_path: Some(t.path().to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+        let output = process(&input, &fs);
+        std::env::remove_var("SENTINEL_AUTOPILOT");
+        assert_eq!(
+            output.blocked,
+            Some(true),
+            "SENTINEL_AUTOPILOT must NOT bypass when transcript provides the real signal"
+        );
     }
 
     #[test]
@@ -650,6 +767,127 @@ mod tests {
         assert!(
             has_recent_plan_file(&fs_port, wt.to_str(), SystemTime::now()),
             "plans/ inside the worktree itself should be found"
+        );
+    }
+
+    // ── detect_plan_mode_from_transcript ────────────────────────────
+
+    fn write_transcript(entries: &[serde_json::Value]) -> tempfile::NamedTempFile {
+        use std::io::Write;
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        for e in entries {
+            writeln!(f, "{}", serde_json::to_string(e).unwrap()).unwrap();
+        }
+        f
+    }
+
+    fn assistant_tool_use(name: &str) -> serde_json::Value {
+        serde_json::json!({
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "tool_use", "name": name, "input": {}}]
+            }
+        })
+    }
+
+    #[test]
+    fn test_detect_plan_mode_returns_true_after_enter_plan_mode() {
+        let t = write_transcript(&[assistant_tool_use("EnterPlanMode")]);
+        assert!(detect_plan_mode_from_transcript(t.path()));
+    }
+
+    #[test]
+    fn test_detect_plan_mode_returns_false_after_exit_plan_mode() {
+        let t = write_transcript(&[
+            assistant_tool_use("EnterPlanMode"),
+            assistant_tool_use("ExitPlanMode"),
+        ]);
+        assert!(!detect_plan_mode_from_transcript(t.path()));
+    }
+
+    #[test]
+    fn test_detect_plan_mode_returns_false_when_no_signal_present() {
+        let t = write_transcript(&[assistant_tool_use("Read")]);
+        assert!(!detect_plan_mode_from_transcript(t.path()));
+    }
+
+    #[test]
+    fn test_detect_plan_mode_returns_false_when_file_missing() {
+        assert!(!detect_plan_mode_from_transcript(Path::new("/does/not/exist")));
+    }
+
+    #[test]
+    fn test_detect_plan_mode_uses_last_occurrence() {
+        let t = write_transcript(&[
+            assistant_tool_use("ExitPlanMode"),
+            assistant_tool_use("Read"),
+            assistant_tool_use("EnterPlanMode"),
+        ]);
+        assert!(detect_plan_mode_from_transcript(t.path()));
+    }
+
+    #[test]
+    fn test_detect_plan_mode_ignores_user_messages() {
+        let user_entry = serde_json::json!({
+            "type": "user",
+            "message": {
+                "role": "user",
+                "content": [{"type": "tool_result", "content": "Entered plan mode."}]
+            }
+        });
+        let t = write_transcript(&[user_entry]);
+        assert!(!detect_plan_mode_from_transcript(t.path()));
+    }
+
+    #[test]
+    fn test_transcript_plan_mode_allows_edit() {
+        // Transcript shows EnterPlanMode — check #3 is satisfied by the
+        // real 2.1.114 signal without any markers or env vars.
+        let _guard = AUTOPILOT_LOCK.lock().unwrap();
+        std::env::remove_var("SENTINEL_AUTOPILOT");
+        let t = write_transcript(&[assistant_tool_use("EnterPlanMode")]);
+
+        let fs = MockFs::with_markers("sess-plan", &[
+            SEQUENTIAL_MARKER_PREFIX,
+            TASK_MARKER_PREFIX,
+            TASK_ACTIVE_PREFIX,
+        ]);
+        let input = HookInput {
+            tool_name: Some("Edit".into()),
+            session_id: Some("sess-plan".into()),
+            transcript_path: Some(t.path().to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+        let output = process(&input, &fs);
+        assert!(
+            output.blocked.is_none(),
+            "transcript EnterPlanMode signal must satisfy plan check #3"
+        );
+    }
+
+    #[test]
+    fn test_transcript_without_plan_signal_blocks_edit() {
+        let _guard = AUTOPILOT_LOCK.lock().unwrap();
+        std::env::remove_var("SENTINEL_AUTOPILOT");
+        let t = write_transcript(&[assistant_tool_use("Read")]);
+
+        let fs = MockFs::with_markers("sess-noplan", &[
+            SEQUENTIAL_MARKER_PREFIX,
+            TASK_MARKER_PREFIX,
+            TASK_ACTIVE_PREFIX,
+        ]);
+        let input = HookInput {
+            tool_name: Some("Edit".into()),
+            session_id: Some("sess-noplan".into()),
+            transcript_path: Some(t.path().to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+        let output = process(&input, &fs);
+        assert_eq!(
+            output.blocked,
+            Some(true),
+            "without plan-mode signal, marker, or plan file, edit must be blocked"
         );
     }
 
