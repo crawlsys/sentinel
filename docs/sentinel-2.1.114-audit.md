@@ -67,7 +67,7 @@ Was `string`, now `string | null`. No sentinel impact.
 
 All 27 hook events in 2.1.88 are present in 2.1.114's `_V` array. Full set: `PreToolUse, PostToolUse, PostToolUseFailure, Notification, UserPromptSubmit, SessionStart, SessionEnd, Stop, StopFailure, SubagentStart, SubagentStop, PreCompact, PostCompact, PermissionRequest, PermissionDenied, Setup, TeammateIdle, TaskCreated, TaskCompleted, Elicitation, ElicitationResult, ConfigChange, WorktreeCreate, WorktreeRemove, InstructionsLoaded, CwdChanged, FileChanged`.
 
-Sentinel still does not dispatch: `Notification, PermissionRequest, Elicitation, ElicitationResult, ConfigChange, InstructionsLoaded, FileChanged` — highest-leverage addition remains `ConfigChange` (for authoritative plan-mode-transition detection, which would supersede both `EnterPlanMode` PostToolUse and the env-var check).
+**Resolved.** `hook_cmd.rs` now dispatches all 27 events. `ConfigChange` reads `field == "permissionMode"` and writes the plan-approved marker when `new_value == "plan"`, giving an authoritative plan-mode-transition signal that catches every entry path (UI cycle, CLI flag, SDK RPC, tool call) — this supersedes the PostToolUse-based detection for `EnterPlanMode`/`ExitPlanMode`. `Notification`, `PermissionRequest`, `Elicitation`, `ElicitationResult`, `InstructionsLoaded`, `FileChanged`, `WorktreeCreate`, `WorktreeRemove` have observational handlers (log, or `system_message` on CLAUDE.md / settings.json changes). No blocking behavior, but the dispatch surface is complete.
 
 ### 9. `TodoWrite` / `AskUserQuestion` schemas unchanged
 
@@ -77,10 +77,16 @@ Byte-identical between 2.1.88 and 2.1.114. Sentinel's detection code in `hook_cm
 
 Otherwise byte-identical. No impact on `phase_gate` / `orchestration_nudge`.
 
-## Corrections applied in this commit
+## Corrections applied in commit 8f1032e
 
 - `workflow.rs::should_block` exempt list: re-added `EnterPlanMode` with citation to binary handler
 - `phase_gate.rs::process` exempt list: same
 - `workflow.rs::test_phase_exempt_tools_not_blocked` regression test: flipped assertion to require `EnterPlanMode` is exempt (not gated)
 - `hook_cmd.rs` PostToolUse dispatcher: `EnterPlanMode` now marks plan-approved (alongside `ExitPlanMode`)
 - `session_init.rs` CLAUDE.md template: Plan Mode workflow step 1 now lists `EnterPlanMode` as an entry path, along with all other 2.1.114 entry mechanisms including `--permission-mode plan` CLI flag
+
+## Follow-up fix in commit 282c9fa
+
+- `tool_usage_gate.rs`: added `SENTINEL_AUTOPILOT=1` bypass for the plan-approval check (#3 of the four gates). `EnterPlanMode`/`ExitPlanMode` aren't always deferred-registered in every harness session, and without the bypass the gate deadlocked autonomous runs. Mirrors the pattern already used in `pr_merge_gate.rs`. The other three gates (sequential thinking, task created, task active) still apply under autopilot.
+- Same file: cleaned up stale comments and an assertion that still described `EnterPlanMode` as a hidden/fake tool — the 2.1.114 audit confirmed handler `r7H` is real.
+- Tests accessing `SENTINEL_AUTOPILOT` are serialized via `AUTOPILOT_LOCK: Mutex<()>` to prevent env-var leakage across parallel test threads.
