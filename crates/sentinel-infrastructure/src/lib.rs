@@ -14,6 +14,7 @@ pub mod git;
 pub mod interceptor;
 pub mod ipc;
 pub mod mcp_transport;
+pub mod memory_mcp_client;
 pub mod proof_store;
 pub mod rate_limit;
 pub mod rig_classifier;

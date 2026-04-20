@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added
+
+- **`sentinel_infrastructure::memory_mcp_client` — stdio client for the Memory engine MCP (F1-PRE-3b)**: thin JSON-RPC client that spawns `mcp-router --single memory-mcp` as a subprocess per call, performs the MCP handshake (`initialize` → `notifications/initialized` → `tools/call`), and returns the decoded tool payload. `MemoryMcpClient::search(query, project, top_k, session)` wraps the `memory_search` tool; every call now writes `RetrievalEvent` rows to `memory-retrieval-log` server-side (Phase 11/12's Loop 4 fuel, gated on memory-mcp @ a108f26). Configurable via `MEMORY_MCP_CMD` and `MEMORY_MCP_TIMEOUT_SECS` env vars; defaults to `mcp-router --single memory-mcp` with a 10s timeout. Intended for sentinel hooks that need to call the Memory engine without taking a direct crate dependency on `memory-application` / `memory-adapters` — preserves hexagonal boundary. 6 unit tests cover shell-split parsing, env-var config fallback, response payload extraction, error surfacing, hit deserialisation, and the spawn-failure smoke path.
+
 ### Fixed
 
 - **`hook-internal` startup hang on Windows (3 root causes)**: (1) `RigClassifier::from_env()` was called unconditionally in `UserPromptSubmit` — `openrouter::Client::new()` makes a blocking ~1-4s TLS/DNS network call during init (rig-core v0.35) before the 8s tokio timeout guard. Guard classifier init behind `has_prompt` check so no-prompt invocations skip it entirely. (2) Step configs for all 47 skills were loaded eagerly on every invocation — each `load_skill_steps()` call is a filesystem stat + read (~100ms/file × 47 ≈ 5s on Windows). Moved to lazy load: only loads the single active-skill file after session state is read. (3) Tokio multi-thread runtime shutdown was delayed 10-15s by reqwest connection-pool threads; added `std::process::exit(0)` after `write_hook_output` since hook processes are short-lived. Tests `test_hook_internal_exits_within_timeout` and `test_hook_stdout_is_valid_json` timeout raised to 15s on Windows (was 3s) to accommodate git subprocess latency. See commit 403a17c.
