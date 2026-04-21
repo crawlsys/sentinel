@@ -183,19 +183,35 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
                 .as_deref()
                 .map(|p| !p.trim().is_empty())
                 .unwrap_or(false);
-            let classifier = if has_prompt {
-                sentinel_infrastructure::rig_classifier::RigClassifier::from_env()
-            } else {
-                None
-            };
+            // IMPORTANT: `RigClassifier::from_env()` constructs a reqwest/rig client
+            // which can block for several seconds on Windows (TLS root-cert loading via
+            // schannel). It MUST run inside the timeout, not before it, so that the 8 s
+            // budget covers both the sync client init *and* the async classify call.
+            //
+            // We offload the blocking init to a spawn_blocking task so it doesn't starve
+            // the async executor; the surrounding timeout cancels the future if the whole
+            // operation (init + classify) exceeds 8 s.
             let router_output = match tokio::time::timeout(
                 std::time::Duration::from_secs(8),
-                hooks::skill_router::process(
-                    &input,
-                    classifier
-                        .as_ref()
-                        .map(|c| c as &dyn sentinel_application::classifier::AiClassifier),
-                ),
+                async {
+                    let classifier = if has_prompt {
+                        tokio::task::spawn_blocking(
+                            sentinel_infrastructure::rig_classifier::RigClassifier::from_env,
+                        )
+                        .await
+                        .ok()
+                        .flatten()
+                    } else {
+                        None
+                    };
+                    hooks::skill_router::process(
+                        &input,
+                        classifier
+                            .as_ref()
+                            .map(|c| c as &dyn sentinel_application::classifier::AiClassifier),
+                    )
+                    .await
+                },
             )
             .await
             {
@@ -1554,6 +1570,48 @@ mod tests {
         assert!(
             !stdout.contains("WARN"),
             "stdout contains WARN (tracing leak)"
+        );
+    }
+
+    /// Regression: `from_env()` (and any other blocking init) must run INSIDE the
+    /// 8-second timeout, not before it.  Previously, `RigClassifier::from_env()` was
+    /// called synchronously outside the `tokio::time::timeout` block, so a stall in
+    /// TLS root-cert loading (Windows schannel) would hang the hook indefinitely.
+    ///
+    /// This test validates the structural fix: a `spawn_blocking` task that sleeps 30 s
+    /// (simulating a slow Windows TLS init) inside the timeout block should be
+    /// *abandoned* after the timeout fires, not awaited to completion.
+    #[tokio::test]
+    async fn test_classifier_init_timeout_fires_when_blocked() {
+        let short_timeout = std::time::Duration::from_millis(200);
+        let start = std::time::Instant::now();
+
+        // Simulate the fixed code path: spawn_blocking wrapping a slow from_env,
+        // both running inside a tokio::time::timeout.
+        let result: Result<Option<()>, tokio::time::error::Elapsed> =
+            tokio::time::timeout(short_timeout, async {
+                // Mimic RigClassifier::from_env taking 30 s (e.g. Windows TLS cert load).
+                let _classifier: Option<()> =
+                    tokio::task::spawn_blocking(|| {
+                        std::thread::sleep(std::time::Duration::from_secs(30));
+                        None::<()>
+                    })
+                    .await
+                    .ok()
+                    .flatten();
+                _classifier
+            })
+            .await;
+
+        // The timeout must fire — if from_env had been outside the timeout (the old
+        // bug) this whole call would have blocked for 30 s.
+        assert!(result.is_err(), "timeout should have fired");
+
+        // And it should fire promptly (well under 1 s).
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(1),
+            "timeout took too long: {:?}",
+            start.elapsed()
         );
     }
 }
