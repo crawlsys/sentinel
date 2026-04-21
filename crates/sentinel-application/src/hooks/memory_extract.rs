@@ -253,6 +253,231 @@ fn upsert_memory(fs: &dyn FileSystemPort, config: &QdrantConfig, path: &PathBuf)
 }
 
 // ---------------------------------------------------------------------------
+// F1-PRE-3e: unified Memory-engine capture path
+// ---------------------------------------------------------------------------
+
+/// `MEMORY_ENGINE_UNIFIED=1`/`true`/`yes`/`on` flips memory_extract to
+/// route flat-file memories through the Memory engine's `memory_capture`
+/// MCP tool — i.e. through the dual-judge gate — instead of upserting
+/// directly into the legacy `claude-memory` Qdrant collection. Mirrors
+/// the flag used by memory_inject (F1-PRE-3c) and memory_feedback
+/// (F1-PRE-3d) so all three hooks stay coherent.
+fn memory_engine_unified() -> bool {
+    matches!(
+        std::env::var("MEMORY_ENGINE_UNIFIED")
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
+/// Read a flat-file memory, project it into the Memory engine's
+/// subject/predicate/value shape, and submit via `memory_capture`.
+/// Returns true when the server accepted the write (committed OR
+/// reinforced OR amended OR quarantined — anything except dropped).
+fn capture_memory_via_mcp(fs: &dyn FileSystemPort, path: &PathBuf) -> bool {
+    use tracing::warn;
+
+    let content = match fs.read_to_string(path) {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    let (name, description, mem_type, body) = match parse_frontmatter(&content) {
+        Some(fm) => fm,
+        None => return false,
+    };
+
+    // Project memory_extract's shape (name/description/memory_type/body)
+    // into memory_capture's shape (subject/predicate/value/project). The
+    // mapping is lossy-but-principled:
+    //   - subject   = name            (the fact's head entity)
+    //   - predicate = memory_type     (falls back to "describes")
+    //   - value     = description     (+ first 500 chars of body)
+    //   - project   = "auto-extract"  (same as legacy default)
+    // If either side's schema evolves, revisit here first.
+    let subject = if name.is_empty() {
+        path.file_stem().and_then(|s| s.to_str()).unwrap_or("unnamed").to_string()
+    } else {
+        name
+    };
+    let predicate = if mem_type.is_empty() { "describes".to_string() } else { mem_type };
+    let value = if body.is_empty() {
+        description
+    } else {
+        // Cap the value at a reasonable payload size — the MCP input
+        // validator imposes 64 KiB, but atoms shouldn't be prose dumps.
+        let body_excerpt: String = body.chars().take(500).collect();
+        format!("{description}\n\n{body_excerpt}")
+    };
+
+    let source_path = path.to_string_lossy().to_string();
+
+    let out = match super::run_async(async move {
+        call_memory_capture(&subject, &predicate, &value, "auto-extract", &source_path).await
+    }) {
+        Some(v) => v,
+        None => {
+            warn!(file = %path.display(), "memory_capture returned no payload — treating as failure");
+            return false;
+        }
+    };
+
+    // Response shape: `{ "branch": "written"|"reinforced"|"superseded"|
+    //                             "quarantined"|"dropped", "atom_id"?: "..." }`
+    // `dropped` (both judges rejected) is still a successful sync — it
+    // means the file has been seen and judged; we just don't write an
+    // atom. Return true so the sync-state advances past it and we don't
+    // re-submit on every cron cycle.
+    let branch = out.get("branch").and_then(|v| v.as_str()).unwrap_or("");
+    matches!(
+        branch,
+        "written" | "reinforced" | "superseded" | "quarantined" | "dropped"
+    )
+}
+
+/// Call `memory_capture` on the Memory engine MCP via stdio. Mirror of
+/// the inlined transport in memory_inject.rs + memory_feedback.rs; see
+/// `sentinel-infrastructure::memory_mcp_client::tests` for the source
+/// of truth on JSON-RPC framing.
+async fn call_memory_capture(
+    subject: &str,
+    predicate: &str,
+    value: &str,
+    project: &str,
+    source_path: &str,
+) -> Option<serde_json::Value> {
+    use std::process::Stdio;
+    use std::time::Duration;
+    use tokio::io::BufReader;
+    use tokio::process::Command;
+    use tokio::time::timeout as tokio_timeout;
+    use tracing::warn;
+
+    const PROTOCOL_VERSION: &str = "2024-11-05";
+    let timeout_secs: u64 = std::env::var("MEMORY_MCP_TIMEOUT_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(10);
+    let cmd_str = std::env::var("MEMORY_MCP_CMD")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "mcp-router --single memory-mcp".to_string());
+    let argv: Vec<String> = cmd_str.split_whitespace().map(String::from).collect();
+    if argv.is_empty() {
+        warn!("MEMORY_MCP_CMD is empty — skipping capture");
+        return None;
+    }
+
+    let subject = subject.to_string();
+    let predicate = predicate.to_string();
+    let value = value.to_string();
+    let project = project.to_string();
+    let source_path = source_path.to_string();
+
+    let call = async move {
+        let mut cmd = Command::new(&argv[0]);
+        cmd.args(&argv[1..])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .kill_on_drop(true);
+        let mut child = cmd.spawn().ok()?;
+        let mut stdin = child.stdin.take()?;
+        let stdout = child.stdout.take()?;
+        let mut reader = BufReader::new(stdout);
+
+        let init_req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {
+                "protocolVersion": PROTOCOL_VERSION,
+                "capabilities": {},
+                "clientInfo": { "name": "sentinel-memory-extract", "version": env!("CARGO_PKG_VERSION") }
+            }
+        });
+        capture_write_line(&mut stdin, &init_req).await.ok()?;
+        capture_read_json_line(&mut reader).await.ok()?;
+
+        let initialized = serde_json::json!({
+            "jsonrpc": "2.0", "method": "notifications/initialized", "params": {}
+        });
+        capture_write_line(&mut stdin, &initialized).await.ok()?;
+
+        // Tag the qualifier with the source file path so memory_audit
+        // can correlate atoms back to the .md they came from.
+        let call_req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+            "params": {
+                "name": "memory_capture",
+                "arguments": {
+                    "subject": subject,
+                    "predicate": predicate,
+                    "value": value,
+                    "project": project,
+                    "qualifier": format!("source_file={source_path}"),
+                }
+            }
+        });
+        capture_write_line(&mut stdin, &call_req).await.ok()?;
+        let resp = capture_read_json_line(&mut reader).await.ok()?;
+
+        drop(stdin);
+        let _ = child.wait().await;
+
+        if resp.get("error").is_some() {
+            warn!("memory_capture returned error: {resp}");
+            return None;
+        }
+        let text = resp
+            .get("result")?
+            .get("content")?
+            .get(0)?
+            .get("text")?
+            .as_str()?;
+        serde_json::from_str::<serde_json::Value>(text).ok()
+    };
+
+    match tokio_timeout(Duration::from_secs(timeout_secs), call).await {
+        Ok(v) => v,
+        Err(_) => {
+            warn!("memory_capture call timed out");
+            None
+        }
+    }
+}
+
+async fn capture_write_line<T: serde::Serialize>(
+    stdin: &mut tokio::process::ChildStdin,
+    value: &T,
+) -> anyhow::Result<()> {
+    use tokio::io::AsyncWriteExt;
+    let mut line = serde_json::to_vec(value)?;
+    line.push(b'\n');
+    stdin.write_all(&line).await?;
+    stdin.flush().await?;
+    Ok(())
+}
+
+async fn capture_read_json_line(
+    reader: &mut tokio::io::BufReader<tokio::process::ChildStdout>,
+) -> anyhow::Result<serde_json::Value> {
+    use tokio::io::AsyncBufReadExt;
+    let mut buf = String::new();
+    loop {
+        buf.clear();
+        let n = reader.read_line(&mut buf).await?;
+        if n == 0 {
+            return Err(anyhow::anyhow!("memory-mcp stdout closed before response"));
+        }
+        let trimmed = buf.trim();
+        if trimmed.is_empty() || !trimmed.starts_with('{') {
+            continue;
+        }
+        return Ok(serde_json::from_str(trimmed)?);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Periodic session re-index — every ~50 tool calls
 // ---------------------------------------------------------------------------
 
@@ -611,16 +836,29 @@ pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
         }
     };
 
-    // Sync each changed file and update state
+    // Sync each changed file and update state. When MEMORY_ENGINE_UNIFIED=1,
+    // route through the Memory engine's `memory_capture` dual-judge gate
+    // (F1-PRE-3e) instead of the raw Qdrant upsert. Legacy path preserved
+    // for the F1-PRE-3f A/B window.
+    let unified = memory_engine_unified();
     let mut state = load_sync_state(fs);
     let mut synced = 0;
     for path in &unsynced {
-        if upsert_memory(fs, &config, path) {
+        let ok = if unified {
+            capture_memory_via_mcp(fs, path)
+        } else {
+            upsert_memory(fs, &config, path)
+        };
+        if ok {
             synced += 1;
             let key = path.to_string_lossy().to_string();
             let mtime = file_mtime(fs, path).unwrap_or(0);
             state.insert(key, mtime);
-            debug!(file = %path.display(), "Synced memory to Qdrant");
+            debug!(
+                file = %path.display(),
+                unified,
+                "Synced memory (unified={unified})"
+            );
         }
     }
 
