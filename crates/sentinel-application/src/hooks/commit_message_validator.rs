@@ -123,8 +123,18 @@ fn frontmatter_prefixes(frontmatter: &str) -> Vec<String> {
 }
 
 fn cwd_matches_tokens(cwd: &str, tokens: &[String]) -> bool {
-    let cwd_lower = cwd.to_lowercase();
-    tokens.iter().any(|t| cwd_lower.contains(t))
+    // Match tokens against path segments (not substrings) so that
+    // e.g. token "gary" does not falsely match the "garys" home dir
+    // segment on Windows/macOS. Normalize both separators, lowercase,
+    // and require exact segment equality.
+    let segments: Vec<String> = cwd
+        .replace('\\', "/")
+        .to_lowercase()
+        .split('/')
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .collect();
+    tokens.iter().any(|t| segments.iter().any(|s| s == t))
 }
 
 fn detect_prefixes_for_cwd(cwd: &str) -> Option<(String, Vec<String>)> {
@@ -497,7 +507,7 @@ mod tests {
     }
 
     #[test]
-    fn test_cwd_matches_tokens_substring() {
+    fn test_cwd_matches_tokens_path_segment() {
         let tokens = vec!["firefly".into(), "firefly-pro-crm".into()];
         assert!(cwd_matches_tokens(
             "C:/Users/garys/Documents/GitHub/firefly-pro-crm",
@@ -505,5 +515,49 @@ mod tests {
         ));
         assert!(cwd_matches_tokens("/home/g/firefly", &tokens));
         assert!(!cwd_matches_tokens("/home/g/some-other-repo", &tokens));
+    }
+
+    #[test]
+    fn test_cwd_matches_tokens_windows_backslash() {
+        let tokens = vec!["hookdeck-mcp-rust".into()];
+        assert!(cwd_matches_tokens(
+            r"C:\Users\garys\Documents\GitHub\hookdeck-mcp-rust",
+            &tokens
+        ));
+        assert!(cwd_matches_tokens(
+            r"C:\Users\garys\Documents\GitHub\hookdeck-mcp-rust\.claude\worktrees\foo",
+            &tokens
+        ));
+    }
+
+    #[test]
+    fn test_cwd_matches_tokens_rejects_substring_of_segment() {
+        // Regression: token "gary" must NOT match segment "garys" in the
+        // home directory. Previously (substring match) every repo under
+        // /users/garys/ falsely matched the `personal` project which has
+        // "gary" as an alias.
+        let tokens = vec!["gary".into(), "personal".into()];
+        assert!(!cwd_matches_tokens(
+            "C:/Users/garys/Documents/GitHub/hookdeck-mcp-rust",
+            &tokens
+        ));
+        assert!(!cwd_matches_tokens(
+            "/home/garys/repos/unrelated-project",
+            &tokens
+        ));
+        // But an exact "personal" segment still matches.
+        assert!(cwd_matches_tokens(
+            "/home/garys/repos/personal",
+            &tokens
+        ));
+    }
+
+    #[test]
+    fn test_cwd_matches_tokens_case_insensitive() {
+        let tokens = vec!["firefly-pro".into()];
+        assert!(cwd_matches_tokens(
+            "C:/Users/garys/Documents/GitHub/Firefly-Pro",
+            &tokens
+        ));
     }
 }

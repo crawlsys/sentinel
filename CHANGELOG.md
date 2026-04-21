@@ -18,6 +18,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- **`commit_message_validator` false-positive `personal` project detection
+  on every repo under `/users/garys/`**: `cwd_matches_tokens` used
+  substring `.contains()` so token `gary` (an alias in `personal.md`,
+  lowercased) matched the `garys` segment in the home directory of
+  every cwd on this machine — turning the Linear-ref requirement into a
+  "must include `GS-XXX`" hard block on every single commit repo-wide,
+  regardless of which project the cwd actually belonged to. Replaced
+  with path-segment equality: cwd is normalised (`\`→`/`, lowercased,
+  non-empty segments), and a token matches only if it equals one of
+  those segments. Three new regression tests lock in the invariant —
+  (a) Windows backslash paths match correctly, (b) token `gary` does
+  NOT match segment `garys`, (c) case-insensitive segment match still
+  works. Ref GS-related: unblocks commits in `hookdeck-mcp-rust`,
+  `sentinel` itself, and every other repo in `~/Documents/GitHub/`
+  that was being mis-attributed to `personal`. 32 tests pass in the
+  module.
+
 - **`skill_router` hook classifier init outside timeout guard (Windows schannel hang)**: `RigClassifier::from_env()` can block for several seconds on Windows while schannel loads TLS root certificates. The classifier was constructed *before* entering `tokio::time::timeout`, so the 8 s budget never covered the sync init — a slow cert load hung the hook indefinitely. Moved the init inside the timeout block and offloaded it to `tokio::task::spawn_blocking` so the async executor isn't starved; the surrounding timeout now cancels the whole (init + classify) operation if it exceeds 8 s. Regression test simulates a 30 s blocking from_env via `spawn_blocking` and asserts a 200 ms timeout fires promptly. See commit ea86616.
 - **`hook-internal` startup hang on Windows (3 root causes)**: (1) `RigClassifier::from_env()` was called unconditionally in `UserPromptSubmit` — `openrouter::Client::new()` makes a blocking ~1-4s TLS/DNS network call during init (rig-core v0.35) before the 8s tokio timeout guard. Guard classifier init behind `has_prompt` check so no-prompt invocations skip it entirely. (2) Step configs for all 47 skills were loaded eagerly on every invocation — each `load_skill_steps()` call is a filesystem stat + read (~100ms/file × 47 ≈ 5s on Windows). Moved to lazy load: only loads the single active-skill file after session state is read. (3) Tokio multi-thread runtime shutdown was delayed 10-15s by reqwest connection-pool threads; added `std::process::exit(0)` after `write_hook_output` since hook processes are short-lived. Tests `test_hook_internal_exits_within_timeout` and `test_hook_stdout_is_valid_json` timeout raised to 15s on Windows (was 3s) to accommodate git subprocess latency. See commit 403a17c.
 
