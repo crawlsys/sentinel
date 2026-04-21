@@ -26,7 +26,7 @@ use sentinel_domain::events::{HookEvent, HookInput, HookOutput};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::path::PathBuf;
-use tracing::debug;
+use tracing::{debug, warn};
 
 // ---------------------------------------------------------------------------
 // Precomputed memories (non-blocking strategy — Phase 6)
@@ -800,6 +800,32 @@ pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
         return HookOutput::allow();
     }
 
+    // F1-PRE-3c: when MEMORY_ENGINE_UNIFIED=1, route through the Memory
+    // engine MCP (writes retrieval-log events, feeds Loop 4) instead of
+    // hitting the legacy claude-memory + claude-sessions collections.
+    // Precomputed cache is bypassed in unified mode — live MCP calls are
+    // cheap (single subprocess, cold start <1s) AND each call generates
+    // Loop 4 fuel, so we want every prompt to log a retrieval event.
+    //
+    // Legacy path stays the default until F1-PRE-3f cutover. Per-release
+    // flag so we can A/B the two systems during the verification window.
+    if memory_engine_unified() {
+        let cwd = input.cwd.as_deref().unwrap_or(".");
+        match search_memory_engine(prompt, cwd) {
+            Some(context) => {
+                debug!(
+                    memories = context.lines().count(),
+                    "Injecting Memory engine atoms (unified mode)"
+                );
+                return HookOutput::inject_context(HookEvent::UserPromptSubmit, &context);
+            }
+            None => {
+                debug!("Memory engine returned no hits (unified mode)");
+                return HookOutput::allow();
+            }
+        }
+    }
+
     // Phase 6: Try precomputed results first (near-instant)
     if let Some(precomputed) = read_precomputed() {
         debug!("Using precomputed memories from Stop phase");
@@ -836,6 +862,261 @@ pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
             debug!("No relevant memories found");
             HookOutput::allow()
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// F1-PRE-3c: unified Memory-engine path
+// ---------------------------------------------------------------------------
+
+/// `MEMORY_ENGINE_UNIFIED=1` (or `true`/`yes`/`on`) flips memory_inject to
+/// call the Memory engine MCP instead of the legacy claude-memory /
+/// claude-sessions collections. Default: off until F1-PRE-3f cutover.
+fn memory_engine_unified() -> bool {
+    matches!(
+        std::env::var("MEMORY_ENGINE_UNIFIED")
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
+/// Derive a project name from cwd that satisfies memory-mcp's
+/// `validate_project` regex `[A-Za-z0-9_-]{1,128}`. Falls back to
+/// `"global"` when nothing usable can be extracted — matches the
+/// convention the Retriever uses for non-project-scoped atoms.
+fn project_from_cwd(cwd: &str) -> String {
+    let basename = std::path::Path::new(cwd)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("");
+    let cleaned: String = basename
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let trimmed = cleaned.trim_matches('-');
+    if trimmed.is_empty() {
+        "global".to_string()
+    } else if trimmed.len() > 128 {
+        trimmed[..128].to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+/// Memory-engine search-hit shape. Mirrors the JSON `hits[i]` emitted by
+/// memory-mcp's `memory_search` tool; extra fields are ignored so server
+/// additions stay backwards-compatible.
+#[derive(Debug, Clone, serde::Deserialize)]
+struct UnifiedHit {
+    #[serde(default)]
+    atom_id: String,
+    #[serde(default)]
+    subject: String,
+    #[serde(default)]
+    predicate: String,
+    #[serde(default)]
+    value: String,
+    #[serde(default)]
+    project: String,
+    #[serde(default)]
+    final_score: f64,
+}
+
+/// Unified-mode search: call `memory_search` via the Memory MCP stdio
+/// protocol, format hits into a context block, and return the injection
+/// string. Layer-boundary note — sentinel-application can't depend on
+/// sentinel-infrastructure (would cycle), and this hook already inlines
+/// raw reqwest Qdrant calls, so we inline a ~80-line subprocess stdio
+/// client here. Keep `memory_mcp_client.rs` in
+/// sentinel-infrastructure as the out-of-hook caller; this is the
+/// in-hook twin. If either copy drifts, the tests in
+/// sentinel-infrastructure::memory_mcp_client::tests are the source of
+/// truth for JSON-RPC framing.
+fn search_memory_engine(prompt: &str, cwd: &str) -> Option<String> {
+    let project = project_from_cwd(cwd);
+
+    // run_async requires T: Default; using Option preserves graceful
+    // degradation (None == don't inject this turn) without forcing the
+    // caller to handle an anyhow::Error across the run_async boundary.
+    let payload: serde_json::Value = match run_async(async {
+        match call_memory_mcp_search(prompt, &project).await {
+            Ok(p) => Some(p),
+            Err(e) => {
+                warn!(
+                    project = %project,
+                    error = %e,
+                    "memory-mcp search failed — skipping injection this turn"
+                );
+                None
+            }
+        }
+    }) {
+        Some(p) => p,
+        None => return None,
+    };
+
+    let hits: Vec<UnifiedHit> = payload
+        .get("hits")
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_default();
+    if hits.is_empty() {
+        return None;
+    }
+
+    let mut output = format!(
+        "[Memory] {} relevant atom(s) (unified mode):\n",
+        hits.len()
+    );
+    for h in &hits {
+        let short = compact_summary(&h.value, 150);
+        output.push_str(&format!(
+            "\n- [{:.2}] **{}/{}={}** ({}):\n  {}\n",
+            h.final_score, h.subject, h.predicate, h.value, h.project, short
+        ));
+        // atom_id is surfaced into injected state for memory_feedback
+        // (wired in F1-PRE-3d) — not rendered in the visible context.
+        let _ = &h.atom_id;
+    }
+    Some(output)
+}
+
+/// Spawn `mcp-router --single memory-mcp`, perform the MCP handshake,
+/// call `memory_search`, and return the parsed tool payload.
+///
+/// See `sentinel-infrastructure::memory_mcp_client` for the non-hook
+/// version of this plus unit tests; the logic is intentionally identical.
+async fn call_memory_mcp_search(
+    query: &str,
+    project: &str,
+) -> anyhow::Result<serde_json::Value> {
+    use std::process::Stdio;
+    use std::time::Duration;
+    use tokio::io::BufReader;
+    use tokio::process::Command;
+    use tokio::time::timeout as tokio_timeout;
+
+    const PROTOCOL_VERSION: &str = "2024-11-05";
+    let timeout_secs: u64 = std::env::var("MEMORY_MCP_TIMEOUT_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(10);
+
+    let cmd_str = std::env::var("MEMORY_MCP_CMD")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "mcp-router --single memory-mcp".to_string());
+    let argv: Vec<String> = cmd_str.split_whitespace().map(String::from).collect();
+    if argv.is_empty() {
+        return Err(anyhow::anyhow!("MEMORY_MCP_CMD is empty"));
+    }
+
+    let call = async move {
+        let mut cmd = Command::new(&argv[0]);
+        cmd.args(&argv[1..])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .kill_on_drop(true);
+        let mut child = cmd.spawn()?;
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("child stdin missing"))?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("child stdout missing"))?;
+        let mut reader = BufReader::new(stdout);
+
+        // initialize -> initialized -> tools/call
+        let init_req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {
+                "protocolVersion": PROTOCOL_VERSION,
+                "capabilities": {},
+                "clientInfo": { "name": "sentinel-memory-inject", "version": env!("CARGO_PKG_VERSION") }
+            }
+        });
+        write_line(&mut stdin, &init_req).await?;
+        let _ = read_json_line(&mut reader).await?;
+
+        let initialized = serde_json::json!({
+            "jsonrpc": "2.0", "method": "notifications/initialized", "params": {}
+        });
+        write_line(&mut stdin, &initialized).await?;
+
+        let call_req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+            "params": {
+                "name": "memory_search",
+                "arguments": {
+                    "query": query,
+                    "project": project,
+                    "top_k": 5,
+                }
+            }
+        });
+        write_line(&mut stdin, &call_req).await?;
+        let resp = read_json_line(&mut reader).await?;
+
+        drop(stdin);
+        let _ = child.wait().await;
+
+        if let Some(err) = resp.get("error") {
+            return Err(anyhow::anyhow!("memory-mcp error: {err}"));
+        }
+        let text = resp
+            .get("result")
+            .and_then(|r| r.get("content"))
+            .and_then(|c| c.get(0))
+            .and_then(|c| c.get("text"))
+            .and_then(|t| t.as_str())
+            .ok_or_else(|| anyhow::anyhow!("memory-mcp missing content[0].text"))?;
+        let payload: serde_json::Value = serde_json::from_str(text)?;
+        Ok::<_, anyhow::Error>(payload)
+    };
+
+    tokio_timeout(Duration::from_secs(timeout_secs), call)
+        .await
+        .map_err(|_| anyhow::anyhow!("memory-mcp call timed out"))?
+}
+
+async fn write_line<T: serde::Serialize>(
+    stdin: &mut tokio::process::ChildStdin,
+    value: &T,
+) -> anyhow::Result<()> {
+    use tokio::io::AsyncWriteExt;
+    let mut line = serde_json::to_vec(value)?;
+    line.push(b'\n');
+    stdin.write_all(&line).await?;
+    stdin.flush().await?;
+    Ok(())
+}
+
+async fn read_json_line(
+    reader: &mut tokio::io::BufReader<tokio::process::ChildStdout>,
+) -> anyhow::Result<serde_json::Value> {
+    use tokio::io::AsyncBufReadExt;
+    let mut buf = String::new();
+    loop {
+        buf.clear();
+        let n = reader.read_line(&mut buf).await?;
+        if n == 0 {
+            return Err(anyhow::anyhow!("memory-mcp stdout closed before response"));
+        }
+        let trimmed = buf.trim();
+        if trimmed.is_empty() || !trimmed.starts_with('{') {
+            continue;
+        }
+        return Ok(serde_json::from_str(trimmed)?);
     }
 }
 
@@ -1452,4 +1733,39 @@ mod tests {
         assert!(result.ends_with("..."));
         assert!(result.chars().count() <= 18); // 15 chars + "..."
     }
+
+    // ── F1-PRE-3c (GS-62): unified Memory-engine path helpers ─────────
+
+    #[test]
+    fn project_from_cwd_handles_posix_and_windows_paths() {
+        assert_eq!(super::project_from_cwd("/Users/gary/code/firefly-pro"), "firefly-pro");
+        assert_eq!(super::project_from_cwd(r"C:\Users\gary\code\firefly-pro"), "firefly-pro");
+    }
+
+    #[test]
+    fn project_from_cwd_strips_invalid_chars() {
+        // memory-mcp validates project as `[A-Za-z0-9_-]{1,128}`. Dots and
+        // spaces in a basename must be replaced with '-' and the leading/
+        // trailing fences trimmed.
+        assert_eq!(super::project_from_cwd("/a/b/my.repo"), "my-repo");
+        assert_eq!(super::project_from_cwd("/a/b/my repo"), "my-repo");
+    }
+
+    #[test]
+    fn project_from_cwd_falls_back_to_global_on_empty_basename() {
+        assert_eq!(super::project_from_cwd(""), "global");
+        assert_eq!(super::project_from_cwd("/"), "global");
+    }
+
+    #[test]
+    fn project_from_cwd_caps_at_128_chars() {
+        let long = format!("/{}", "x".repeat(200));
+        let project = super::project_from_cwd(&long);
+        assert!(project.len() <= 128, "got {} chars", project.len());
+    }
+
+    // NOTE: memory_engine_unified() reads a process-wide env var. Testing
+    // it cleanly requires exclusive access across parallel tests, which
+    // the current test layout doesn't provide. We rely on manual toggling
+    // during the F1-PRE-3f verification window to exercise both modes.
 }
