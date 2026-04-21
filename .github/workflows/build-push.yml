@@ -7,7 +7,7 @@ on:
 
 jobs:
   build:
-    runs-on: self-hosted
+    runs-on: kvncrw-sentinel
     permissions:
       contents: read
       packages: write
@@ -39,7 +39,7 @@ jobs:
 
   deploy:
     needs: [build]
-    runs-on: self-hosted
+    runs-on: kvncrw-sentinel
     steps:
       - name: Update homelab image tag
         run: |
