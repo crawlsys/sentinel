@@ -722,7 +722,18 @@ fn generate_claude_md(
             .collect::<Vec<_>>()
             .join("\n");
         format!(
-            "\n### Linear Multi-Account\n\nSwitch between Linear workspaces using `mcp__linear__switch_account(account_name: \"<name>\")`.\n\n**Available accounts:**\n{}\n\nEach project config specifies its `linear_account` — the skill router auto-switches when detecting issue prefixes.\n",
+            "\n### Linear Multi-Account\n\nSwitch between Linear workspaces using `mcp__linear__switch_account(account_name: \"<name>\")`.\n\n**Available accounts:**\n{}\n\nEach project config specifies its `linear_account` — the skill router auto-switches when detecting issue prefixes.
+
+### Linear Workflow Automation
+
+Firefly Pro repos (and any project adopting the convention) use a fixed Linear pipeline: **Backlog / Todo → In Progress → Code Review → QA Testing → Completed**.
+
+1. **Open PR** — move ticket to **Code Review**, stay as assignee (review is on you, not the QA tester). Use `Ref FPCRM-XXX` in the PR body. **Never** `Fixes`/`Closes`/`Resolves` — those trigger Linear's native auto-Done integration, and we need QA first.
+2. **Merge PR** — `.github/workflows/linear-on-merge.yml` (per repo) parses every FPCRM ticket ref from the merged PR's title + body. For each referenced ticket currently in **Code Review**, it transitions to **QA Testing** and reassigns to the QA tester. Other states (Completed, Canceled, In Progress tracking longer work, QA Failed awaiting a new attempt) are preserved — the automation only catches the clean-hop case so partial fixes and multi-PR tickets keep explicit ownership.
+3. **QA pass** — tester moves to **Completed**.
+4. **QA fail** — tester moves to **QA Failed** and reassigns to whoever owns the next attempt.
+
+The workflow needs a `LINEAR_API_KEY` repo secret (workspace-scoped). Assignee and target-state UUIDs are hardcoded per repo for stability — new repos copy `.github/workflows/linear-on-merge.yml` from the reference implementation in `firefly-pro-crm` and adjust those two constants for their Linear workspace + QA tester.\n",
             list
         )
     };
