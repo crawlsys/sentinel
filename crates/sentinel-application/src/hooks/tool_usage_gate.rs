@@ -294,8 +294,11 @@ pub fn process(input: &HookInput, fs: &dyn FileSystemPort) -> HookOutput {
              `EnterPlanMode` (or Shift+Tab, `CLAUDE_CODE_PLAN_MODE_REQUIRED=1`, \
              `Agent(mode:\"plan\")`, or `--permission-mode plan`). Then call \
              `ExitPlanMode` with the plan content for approval. Alternatively, \
-             place a recent `.md` plan file under `{cwd}/plans/` (resumed-session \
-             fallback)."
+             place a recent `.md` plan file under `plans/` in your CURRENT shell \
+             cwd (resumed-session fallback) — if you're inside a git worktree, \
+             the walk-up stops at the worktree's `.git` file, so the plan MUST \
+             live inside the worktree itself (e.g. `{worktree}/plans/foo.md`), \
+             not at the main repo root."
         );
     }
 
@@ -471,6 +474,10 @@ mod tests {
         assert!(reason.contains("Plan Mode") && reason.contains("ExitPlanMode"));
         assert!(reason.contains("EnterPlanMode"),
             "deny message must reference EnterPlanMode — real tool per 2.1.114 audit");
+        assert!(reason.contains("worktree"),
+            "deny message must warn that walk-up stops at worktree .git boundary");
+        assert!(reason.contains("current shell cwd") || reason.contains("CURRENT shell cwd"),
+            "deny message must clarify cwd means the current shell directory, not repo root");
     }
 
     #[test]
