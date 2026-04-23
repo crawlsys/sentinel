@@ -4,9 +4,11 @@
 //! Reads JSON-RPC requests from stdin, writes responses to stdout.
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::SystemTime;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use chrono::Utc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::RwLock;
@@ -20,6 +22,274 @@ use sentinel_domain::judge::JudgeModel;
 use sentinel_domain::state::SessionState;
 use sentinel_domain::workflow::{SkillSteps, StepStatus, WorkflowState};
 use sentinel_infrastructure::mcp_transport::{JsonRpcRequest, JsonRpcResponse};
+
+// ── Session id detection ────────────────────────────────────────────
+//
+// The MCP server is a long-lived process that outlives any single Claude
+// Code session — one sentinel-mcp.exe is shared across every session on
+// the machine. Pinning a `session_id` at process startup (the old
+// design) meant `get_session_stats` etc. reported stale state from
+// whichever session happened to launch the server first.
+//
+// Single source of truth: the live transcript files Claude Code writes
+// at `~/.claude/projects/{project-key}/{session-id}.jsonl`. The filename
+// stem IS the session id; Claude Code appends a line to the transcript
+// on every assistant message and tool call, so mtime tracks activity
+// tighter than sentinel's own state dir (which only updates on hook
+// firings). Resolve the live session by scanning for the newest-mtime
+// `.jsonl` under `~/.claude/projects/`.
+//
+// We do this per-request, not per-process, so a long-running MCP daemon
+// self-corrects as the user starts new Claude Code sessions.
+
+/// Walk `~/.claude/projects/*/*.jsonl` and return the filename stem of
+/// the most-recently-modified transcript. That stem IS the session id
+/// (UUID-shaped).
+///
+/// Returns `None` if no transcripts exist — in that case the caller
+/// should surface an explicit "no active session" error rather than
+/// fabricating a timestamped id that won't match any real state.
+fn detect_live_session_id() -> Option<String> {
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .ok()?;
+    let projects = PathBuf::from(home).join(".claude").join("projects");
+    if !projects.exists() {
+        return None;
+    }
+    let mut newest: Option<(SystemTime, String)> = None;
+    let project_dirs = std::fs::read_dir(&projects).ok()?;
+    for project in project_dirs.flatten() {
+        let Ok(jsonl_entries) = std::fs::read_dir(project.path()) else {
+            continue;
+        };
+        for entry in jsonl_entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                continue;
+            }
+            let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            // Accept only UUID-shaped stems (8-4-4-4-12 = 36 chars, 4 hyphens).
+            if stem.len() != 36 || stem.matches('-').count() != 4 {
+                continue;
+            }
+            let Ok(meta) = entry.metadata() else { continue };
+            let Ok(mtime) = meta.modified() else { continue };
+            if newest.as_ref().is_none_or(|(t, _)| mtime > *t) {
+                newest = Some((mtime, stem.to_string()));
+            }
+        }
+    }
+    newest.map(|(_, id)| id)
+}
+
+/// Look up the transcript that recorded a specific `toolUseId`. Claude Code
+/// tags every `H.callTool({..., _meta: {"claudecode/toolUseId": j}, ...})`
+/// call with a unique id; that id also appears as the `id` of the assistant
+/// `tool_use` block in the session's transcript JSONL. Finding the
+/// transcript where a given toolUseId is the LATEST tool_use gives us the
+/// specific session that issued the MCP call — even when multiple Claude
+/// Code windows are open concurrently.
+///
+/// Strategy: check the newest-mtime transcript first (covers 99%+ of cases
+/// since the tool call just happened). If not found there, fall back to
+/// scanning all transcripts.
+///
+/// Returns `None` if no transcript contains the id — treat that as "fall
+/// back to newest-mtime" (the id may be too fresh for the transcript
+/// writer to have flushed, though this race is vanishingly rare since
+/// Claude Code flushes after each message).
+fn session_id_by_tool_use_id(tool_use_id: &str) -> Option<String> {
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .ok()?;
+    let projects = PathBuf::from(home).join(".claude").join("projects");
+    if !projects.exists() {
+        return None;
+    }
+
+    // Collect all valid transcript paths with mtime, sort newest-first.
+    let mut transcripts: Vec<(SystemTime, PathBuf, String)> = Vec::new();
+    let Ok(project_dirs) = std::fs::read_dir(&projects) else {
+        return None;
+    };
+    for project in project_dirs.flatten() {
+        let Ok(jsonl_entries) = std::fs::read_dir(project.path()) else {
+            continue;
+        };
+        for entry in jsonl_entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                continue;
+            }
+            let stem = match path.file_stem().and_then(|s| s.to_str()) {
+                Some(s) => s.to_string(),
+                None => continue,
+            };
+            if stem.len() != 36 || stem.matches('-').count() != 4 {
+                continue;
+            }
+            let Ok(meta) = entry.metadata() else { continue };
+            let Ok(mtime) = meta.modified() else { continue };
+            transcripts.push((mtime, path, stem));
+        }
+    }
+    transcripts.sort_by(|a, b| b.0.cmp(&a.0)); // newest first
+
+    for (_, path, session_id) in transcripts {
+        if transcript_contains_tool_use_id(&path, tool_use_id) {
+            return Some(session_id);
+        }
+    }
+    None
+}
+
+/// Scan a single transcript JSONL for an assistant tool_use whose `id`
+/// matches the given tool_use_id. Reads the file fully into memory and
+/// walks lines backwards — tool_use ids are overwhelmingly at the tail.
+fn transcript_contains_tool_use_id(transcript: &Path, tool_use_id: &str) -> bool {
+    let Ok(content) = std::fs::read_to_string(transcript) else {
+        return false;
+    };
+    for line in content.lines().rev() {
+        let Ok(entry) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if entry.get("type").and_then(|v| v.as_str()) != Some("assistant") {
+            continue;
+        }
+        let Some(blocks) = entry
+            .get("message")
+            .and_then(|m| m.get("content"))
+            .and_then(|c| c.as_array())
+        else {
+            continue;
+        };
+        for block in blocks {
+            if block.get("type").and_then(|v| v.as_str()) != Some("tool_use") {
+                continue;
+            }
+            if block.get("id").and_then(|v| v.as_str()) == Some(tool_use_id) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Resolve the session id for an incoming JSON-RPC request.
+///
+/// Preference order (highest confidence first):
+///   1. `params._meta["claudecode/toolUseId"]` → cross-reference against
+///      transcript JSONLs. Disambiguates when multiple Claude Code
+///      windows are open; this is the only fully reliable signal.
+///   2. Newest-mtime transcript under `~/.claude/projects/`. Used for
+///      requests without a toolUseId (e.g. `initialize`, `ping`, internal
+///      calls) and as a safety fallback if the toolUseId lookup misses
+///      (e.g. due to transcript-flush timing).
+///
+/// Returns an error if neither source yields a session id, so callers
+/// can surface an explicit "no active Claude Code session" rather than
+/// silently operating on a fabricated id.
+fn resolve_session_id(params: &serde_json::Value) -> Result<String> {
+    // 1. Prefer toolUseId lookup — unambiguous across concurrent sessions.
+    if let Some(tool_use_id) = params
+        .get("_meta")
+        .and_then(|m| m.get("claudecode/toolUseId"))
+        .and_then(|v| v.as_str())
+    {
+        if let Some(sid) = session_id_by_tool_use_id(tool_use_id) {
+            debug!(tool_use_id, session_id = %sid, "Resolved session via toolUseId");
+            return Ok(sid);
+        }
+        // toolUseId present but not yet in any transcript — fall through to
+        // newest-mtime heuristic. Logged so the race is visible.
+        debug!(
+            tool_use_id,
+            "toolUseId not found in any transcript; falling back to newest-mtime"
+        );
+    }
+
+    // 2. Fallback: newest-mtime transcript.
+    detect_live_session_id().context(
+        "no active Claude Code session found — no transcripts under \
+         ~/.claude/projects/. MCP tools require a running Claude Code session.",
+    )
+}
+
+/// Perform one load-mutate-save transaction against the session state on
+/// disk, under an exclusive file lock.
+///
+/// The same `Arc<RwLock<SessionState>>` is reused across calls to satisfy
+/// existing handler signatures (McpHandler and friends hold it by Arc).
+/// Its contents are OVERWRITTEN at the start of each transaction and
+/// saved back at the end, so no stale in-memory state survives between
+/// calls. This keeps handlers oblivious to the per-call session
+/// resolution while guaranteeing single-writer semantics via the file
+/// lock.
+///
+/// Ordering: file lock → overwrite in-memory state → run handler →
+/// save to disk → drop lock. Other processes (hooks, parallel MCP
+/// calls) block on the file lock until we drop it, so there's no
+/// window for a torn read or a lost update.
+async fn with_session_state<F, Fut, R>(
+    session_id: &str,
+    state_handle: &Arc<RwLock<SessionState>>,
+    handler_fn: F,
+) -> Result<R>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = R>,
+{
+    // Acquire the exclusive per-session file lock. `acquire_session_lock`
+    // returns a `std::fs::File` whose fd holds the OS-level lock; dropping
+    // it releases the lock. We run it via spawn_blocking because it can
+    // wait on file I/O, and we hold the lock across the handler's await
+    // points without blocking the reactor (the only blocking calls are
+    // load/save, which are fast file ops — async wrapping would just
+    // add noise).
+    let session_id_owned = session_id.to_string();
+    let _lock = tokio::task::spawn_blocking(move || {
+        sentinel_infrastructure::state_store::acquire_session_lock(&session_id_owned)
+    })
+    .await
+    .context("session lock task panicked")?
+    .context("failed to acquire session lock")?;
+
+    // Load the current state from disk. If nothing persisted, seed a
+    // fresh SessionState for this session.
+    let loaded = match sentinel_infrastructure::state_store::load(session_id) {
+        Ok(Some(s)) => s,
+        Ok(None) => SessionState::new(session_id),
+        Err(e) => {
+            return Err(e).context("state_store::load failed");
+        }
+    };
+
+    // Install the loaded state into the shared Arc. Handlers see exactly
+    // the on-disk state for this session; the Arc itself is just a
+    // transport for existing handler signatures.
+    {
+        let mut guard = state_handle.write().await;
+        *guard = loaded;
+    }
+
+    // Run the handler.
+    let response = handler_fn().await;
+
+    // Save the mutated state back under the same lock.
+    {
+        let mut guard = state_handle.write().await;
+        if let Err(e) = sentinel_infrastructure::state_store::save(&mut *guard) {
+            error!(session_id, error = %e, "Failed to save session state");
+        }
+    }
+
+    // Lock drops here, releasing it for other callers.
+    Ok(response)
+}
 
 /// MCP tool definitions — what we advertise to Claude Code
 fn tool_definitions() -> serde_json::Value {
@@ -180,22 +450,13 @@ fn server_info() -> serde_json::Value {
 }
 
 pub async fn run() -> Result<()> {
-    // Use real session ID from environment, falling back to timestamped ID
-    let session_id = std::env::var("SESSION_ID")
-        .or_else(|_| std::env::var("CLAUDE_SESSION_ID"))
-        .unwrap_or_else(|_| format!("mcp-{}", Utc::now().timestamp()));
-
-    // Try loading existing state from disk (so MCP and hooks share state)
-    let state = match sentinel_infrastructure::state_store::load(&session_id) {
-        Ok(Some(existing)) => {
-            info!(session_id = %session_id, "Loaded existing session state from disk");
-            Arc::new(RwLock::new(existing))
-        }
-        _ => {
-            info!(session_id = %session_id, "Creating new session state");
-            Arc::new(RwLock::new(SessionState::new(&session_id)))
-        }
-    };
+    // The MCP server no longer pins a session id at startup. Each request
+    // resolves its own session id via `resolve_session_id` (toolUseId
+    // cross-reference → newest-mtime fallback) and the `with_session_state`
+    // transaction handles lock/load/save. The Arc<RwLock<SessionState>>
+    // here is a placeholder whose contents are overwritten on every call.
+    // See the header comment above `detect_live_session_id` for rationale.
+    let state = Arc::new(RwLock::new(SessionState::new("uninitialized")));
 
     let judge: Arc<dyn sentinel_application::judge_service::JudgeService> = {
         let multi = sentinel_infrastructure::rig_judge::MultiModelJudge::from_env();
@@ -237,7 +498,43 @@ pub async fn run() -> Result<()> {
             }
         };
 
-        let response = handle_request(&request, &handler, &state, &proof_engine).await;
+        // Methods that don't read/write session state: dispatch directly.
+        // Everything else: resolve session id, take the file lock, load
+        // state into the shared Arc, run the handler, save and release.
+        let needs_session = matches!(
+            request.method.as_str(),
+            "tools/call"
+        );
+
+        let response = if needs_session {
+            match resolve_session_id(&request.params) {
+                Ok(session_id) => {
+                    let handler_ref = &handler;
+                    let state_ref = &state;
+                    let proof_ref = &proof_engine;
+                    let req_ref = &request;
+                    match with_session_state(&session_id, state_ref, move || async move {
+                        handle_request(req_ref, handler_ref, state_ref, proof_ref).await
+                    })
+                    .await
+                    {
+                        Ok(r) => r,
+                        Err(e) => JsonRpcResponse::error(
+                            request.id.clone(),
+                            -32000,
+                            format!("Session state transaction failed: {e}"),
+                        ),
+                    }
+                }
+                Err(e) => JsonRpcResponse::error(
+                    request.id.clone(),
+                    -32000,
+                    format!("Failed to resolve active Claude Code session: {e}"),
+                ),
+            }
+        } else {
+            handle_request(&request, &handler, &state, &proof_engine).await
+        };
 
         let json = serde_json::to_string(&response)?;
         stdout.write_all(json.as_bytes()).await?;
@@ -919,4 +1216,328 @@ fn mcp_tool_result(success: bool, data: serde_json::Value) -> serde_json::Value 
         }],
         "isError": !success
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::io::Write;
+
+    /// Write a UUID-shaped stem for a given suffix char to make fixture
+    /// session ids easy to tell apart.
+    fn uuid_like(suffix: char) -> String {
+        format!("11111111-2222-3333-4444-55555555555{suffix}")
+    }
+
+    /// Make a project dir under `.claude/projects/<project>/` and write
+    /// a transcript JSONL file named `<session_id>.jsonl` with the given
+    /// JSON lines. Returns the transcript path.
+    fn seed_transcript(
+        home: &Path,
+        project: &str,
+        session_id: &str,
+        lines: &[serde_json::Value],
+    ) -> PathBuf {
+        let dir = home.join(".claude").join("projects").join(project);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(format!("{session_id}.jsonl"));
+        let mut f = fs::File::create(&path).unwrap();
+        for line in lines {
+            writeln!(f, "{}", serde_json::to_string(line).unwrap()).unwrap();
+        }
+        path
+    }
+
+    /// Run a closure with HOME (or USERPROFILE on win) pointed at a temp
+    /// directory so the session detection code reads fixtures instead of
+    /// the real user profile.
+    fn with_fake_home<F: FnOnce(&Path) -> R, R>(f: F) -> R {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let prev_home = std::env::var_os("HOME");
+        let prev_userprofile = std::env::var_os("USERPROFILE");
+        std::env::set_var("HOME", tmp.path());
+        std::env::set_var("USERPROFILE", tmp.path());
+        let result = f(tmp.path());
+        match prev_home {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+        match prev_userprofile {
+            Some(v) => std::env::set_var("USERPROFILE", v),
+            None => std::env::remove_var("USERPROFILE"),
+        }
+        result
+    }
+
+    #[test]
+    fn detect_live_session_picks_newest_mtime() {
+        // Two sessions, b is newer → should win.
+        let lock = ENV_LOCK.lock().unwrap();
+        with_fake_home(|home| {
+            let id_a = uuid_like('a');
+            let id_b = uuid_like('b');
+            seed_transcript(home, "proj1", &id_a, &[serde_json::json!({"type": "user"})]);
+            // Sleep briefly so mtimes differ even on coarse FS clocks.
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            seed_transcript(home, "proj1", &id_b, &[serde_json::json!({"type": "user"})]);
+            assert_eq!(detect_live_session_id(), Some(id_b));
+        });
+        drop(lock);
+    }
+
+    #[test]
+    fn detect_live_session_returns_none_without_transcripts() {
+        let lock = ENV_LOCK.lock().unwrap();
+        with_fake_home(|_home| {
+            assert_eq!(detect_live_session_id(), None);
+        });
+        drop(lock);
+    }
+
+    #[test]
+    fn detect_live_session_ignores_non_uuid_stems() {
+        let lock = ENV_LOCK.lock().unwrap();
+        with_fake_home(|home| {
+            // A bogus filename that is NOT a UUID — must be skipped even
+            // if it's the newest file.
+            let dir = home.join(".claude").join("projects").join("p");
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join("not-a-uuid.jsonl"), b"{}").unwrap();
+            let id = uuid_like('c');
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            seed_transcript(home, "p", &id, &[serde_json::json!({"type": "user"})]);
+            assert_eq!(detect_live_session_id(), Some(id));
+        });
+        drop(lock);
+    }
+
+    #[test]
+    fn session_id_by_tool_use_id_matches_correct_transcript() {
+        // Two sessions, each with its own tool_use id. The lookup must
+        // return the session whose transcript actually recorded the id
+        // — not just the newest one.
+        let lock = ENV_LOCK.lock().unwrap();
+        with_fake_home(|home| {
+            let id_a = uuid_like('a');
+            let id_b = uuid_like('b');
+            let tool_use_in_a = "toolu_A_only_this_one";
+            let tool_use_in_b = "toolu_B_only_this_one";
+            seed_transcript(
+                home,
+                "p",
+                &id_a,
+                &[serde_json::json!({
+                    "type": "assistant",
+                    "message": {"role": "assistant", "content": [
+                        {"type": "tool_use", "id": tool_use_in_a, "name": "Read", "input": {}}
+                    ]}
+                })],
+            );
+            // Make B newer, so newest-mtime would otherwise pick it —
+            // we assert the toolUseId match overrides that heuristic.
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            seed_transcript(
+                home,
+                "p",
+                &id_b,
+                &[serde_json::json!({
+                    "type": "assistant",
+                    "message": {"role": "assistant", "content": [
+                        {"type": "tool_use", "id": tool_use_in_b, "name": "Read", "input": {}}
+                    ]}
+                })],
+            );
+
+            // Looking up A's id → A must win, not B (even though B is newer).
+            assert_eq!(session_id_by_tool_use_id(tool_use_in_a), Some(id_a.clone()));
+            // And B's id still works.
+            assert_eq!(session_id_by_tool_use_id(tool_use_in_b), Some(id_b));
+        });
+        drop(lock);
+    }
+
+    #[test]
+    fn session_id_by_tool_use_id_returns_none_when_not_found() {
+        let lock = ENV_LOCK.lock().unwrap();
+        with_fake_home(|home| {
+            let id = uuid_like('a');
+            seed_transcript(
+                home,
+                "p",
+                &id,
+                &[serde_json::json!({
+                    "type": "assistant",
+                    "message": {"role": "assistant", "content": [
+                        {"type": "tool_use", "id": "toolu_real", "name": "Read", "input": {}}
+                    ]}
+                })],
+            );
+            assert_eq!(session_id_by_tool_use_id("toolu_nonexistent"), None);
+        });
+        drop(lock);
+    }
+
+    #[test]
+    fn resolve_session_id_prefers_tool_use_id_over_newest_mtime() {
+        // toolUseId points at an older session; newest-mtime is a different
+        // one. The toolUseId signal must win because it's unambiguous.
+        let lock = ENV_LOCK.lock().unwrap();
+        with_fake_home(|home| {
+            let older_id = uuid_like('a');
+            let newer_id = uuid_like('b');
+            let tool_use_id = "toolu_owned_by_older";
+            seed_transcript(
+                home,
+                "p",
+                &older_id,
+                &[serde_json::json!({
+                    "type": "assistant",
+                    "message": {"role": "assistant", "content": [
+                        {"type": "tool_use", "id": tool_use_id, "name": "Read", "input": {}}
+                    ]}
+                })],
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            seed_transcript(home, "p", &newer_id, &[serde_json::json!({"type": "user"})]);
+
+            let params = serde_json::json!({
+                "_meta": {"claudecode/toolUseId": tool_use_id}
+            });
+            let resolved = resolve_session_id(&params).unwrap();
+            assert_eq!(resolved, older_id, "toolUseId must win over newest-mtime");
+        });
+        drop(lock);
+    }
+
+    #[test]
+    fn resolve_session_id_falls_back_to_newest_when_no_tool_use_id() {
+        // No _meta — use newest-mtime.
+        let lock = ENV_LOCK.lock().unwrap();
+        with_fake_home(|home| {
+            let id_a = uuid_like('a');
+            let id_b = uuid_like('b');
+            seed_transcript(home, "p", &id_a, &[serde_json::json!({"type": "user"})]);
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            seed_transcript(home, "p", &id_b, &[serde_json::json!({"type": "user"})]);
+
+            let params = serde_json::json!({});
+            let resolved = resolve_session_id(&params).unwrap();
+            assert_eq!(resolved, id_b);
+        });
+        drop(lock);
+    }
+
+    #[test]
+    fn resolve_session_id_falls_back_to_newest_when_tool_use_id_unknown() {
+        // toolUseId supplied but not in any transcript (race: model called
+        // tool, transcript writer hasn't flushed yet). Must fall back to
+        // newest-mtime rather than error out.
+        let lock = ENV_LOCK.lock().unwrap();
+        with_fake_home(|home| {
+            let id = uuid_like('a');
+            seed_transcript(home, "p", &id, &[serde_json::json!({"type": "user"})]);
+
+            let params = serde_json::json!({
+                "_meta": {"claudecode/toolUseId": "toolu_never_recorded"}
+            });
+            let resolved = resolve_session_id(&params).unwrap();
+            assert_eq!(resolved, id, "must fall back to newest-mtime on missing toolUseId");
+        });
+        drop(lock);
+    }
+
+    #[test]
+    fn resolve_session_id_errors_when_no_session_at_all() {
+        let lock = ENV_LOCK.lock().unwrap();
+        with_fake_home(|_home| {
+            let params = serde_json::json!({});
+            assert!(resolve_session_id(&params).is_err());
+        });
+        drop(lock);
+    }
+
+    #[test]
+    fn transcript_contains_tool_use_id_finds_nested_ids() {
+        // Multiple tool_use blocks in one assistant message — the target
+        // id may not be the first. Must still be detected.
+        let lock = ENV_LOCK.lock().unwrap();
+        with_fake_home(|home| {
+            let id = uuid_like('a');
+            let path = seed_transcript(
+                home,
+                "p",
+                &id,
+                &[serde_json::json!({
+                    "type": "assistant",
+                    "message": {"role": "assistant", "content": [
+                        {"type": "text", "text": "thinking..."},
+                        {"type": "tool_use", "id": "toolu_first", "name": "Read", "input": {}},
+                        {"type": "tool_use", "id": "toolu_target", "name": "Edit", "input": {}}
+                    ]}
+                })],
+            );
+            assert!(transcript_contains_tool_use_id(&path, "toolu_target"));
+            assert!(transcript_contains_tool_use_id(&path, "toolu_first"));
+            assert!(!transcript_contains_tool_use_id(&path, "toolu_absent"));
+        });
+        drop(lock);
+    }
+
+    #[tokio::test]
+    async fn with_session_state_loads_and_saves_through_lock() {
+        // End-to-end: inside the lock, the handler sees state loaded for
+        // the session; mutations are persisted and visible on a follow-up
+        // call. Two sequential calls prove save+load round-trip across the
+        // transaction boundary. state_store reads HOME via dirs::home_dir,
+        // so redirecting HOME reroutes state too.
+        let env_guard = ENV_LOCK.lock().unwrap();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let prev_home = std::env::var_os("HOME");
+        let prev_userprofile = std::env::var_os("USERPROFILE");
+        std::env::set_var("HOME", tmp.path());
+        std::env::set_var("USERPROFILE", tmp.path());
+        std::fs::create_dir_all(tmp.path().join(".claude").join("sentinel").join("state")).unwrap();
+
+        let session_id = uuid_like('z');
+        let handle = Arc::new(RwLock::new(SessionState::new("placeholder")));
+
+        // First transaction: set active_skill.
+        let handle1 = handle.clone();
+        with_session_state(&session_id, &handle, move || {
+            let h = handle1.clone();
+            async move {
+                let mut s = h.write().await;
+                s.set_active_skill("my-skill");
+            }
+        })
+        .await
+        .unwrap();
+
+        // Second transaction: expect active_skill to have persisted.
+        let handle2 = handle.clone();
+        with_session_state(&session_id, &handle, move || {
+            let h = handle2.clone();
+            async move {
+                let s = h.read().await;
+                assert_eq!(s.active_skill.as_deref(), Some("my-skill"));
+            }
+        })
+        .await
+        .unwrap();
+
+        match prev_home {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+        match prev_userprofile {
+            Some(v) => std::env::set_var("USERPROFILE", v),
+            None => std::env::remove_var("USERPROFILE"),
+        }
+        drop(env_guard);
+    }
+
+    /// Tests mutate process env (HOME/USERPROFILE/SENTINEL_STATE_DIR) and
+    /// must serialize — cargo test runs in parallel by default.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 }
