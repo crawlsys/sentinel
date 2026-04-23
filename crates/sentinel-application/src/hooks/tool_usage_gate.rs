@@ -44,6 +44,7 @@ use sentinel_domain::events::{HookInput, HookOutput};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
+use super::hygiene_override::is_signed_override_active;
 use super::FileSystemPort;
 
 /// Last-resort escape hatch for when the hook fires with no transcript
@@ -229,6 +230,25 @@ pub fn process(input: &HookInput, fs: &dyn FileSystemPort) -> HookOutput {
         Some(id) if !id.is_empty() => id.as_str(),
         _ => return HookOutput::allow(),
     };
+
+    // Universal bypass: a signed `verification` override (activated this
+    // session via the user saying "override verification") unblocks ALL four
+    // preconditions below for the override TTL. Previously this override only
+    // affected pre_commit_verification — that was confusing ("why didn't my
+    // override work?"). Now it's a consistent 60-second escape hatch for the
+    // whole gate stack. The verification_override_path + is_signed_override_active
+    // check still requires the hygiene_override hook to have written a
+    // cryptographically-signed token (Attack #47 defence), so `touch`-based
+    // bypass is still blocked.
+    if is_signed_override_active(
+        fs,
+        &super::hygiene_override::verification_override_path(fs, session_id),
+        "verification",
+        session_id,
+    ) {
+        eprintln!("[sentinel] tool_usage_gate: allowed via active 'override verification'");
+        return HookOutput::allow();
+    }
 
     // Check 1: Sequential thinking must have been used this session
     if !has_marker(fs, SEQUENTIAL_MARKER_PREFIX, session_id) {
@@ -547,6 +567,72 @@ mod tests {
         let fs = MockFs::with_all_markers("session-a");
         let output = process(&edit_input("session-b"), &fs);
         assert_eq!(output.blocked, Some(true));
+    }
+
+    #[test]
+    fn test_active_verification_override_bypasses_all_checks() {
+        // An active signed verification override (user said "override verification")
+        // must bypass the whole precondition stack — seq-thinking, task, plan,
+        // active-task — so users have one escape hatch that actually works across
+        // every gate this hook enforces. Needs a filesystem-backed port because
+        // the signed-override check does real reads + signature verification.
+        use super::super::hygiene_override::write_signed_override_for_test;
+
+        let tmp = TempDir::new().unwrap();
+        let session = "override-sess";
+        let override_dir = tmp.path()
+            .join(".claude")
+            .join("sentinel")
+            .join("overrides");
+        fs::create_dir_all(&override_dir).unwrap();
+
+        struct HomeFs {
+            home: PathBuf,
+        }
+        impl FileSystemPort for HomeFs {
+            fn home_dir(&self) -> Option<PathBuf> { Some(self.home.clone()) }
+            fn read_to_string(&self, p: &Path) -> anyhow::Result<String> {
+                Ok(fs::read_to_string(p)?)
+            }
+            fn write(&self, p: &Path, b: &[u8]) -> anyhow::Result<()> {
+                fs::write(p, b)?;
+                Ok(())
+            }
+            fn create_dir_all(&self, p: &Path) -> anyhow::Result<()> {
+                fs::create_dir_all(p)?;
+                Ok(())
+            }
+            fn read_dir(&self, p: &Path) -> anyhow::Result<Vec<PathBuf>> {
+                Ok(fs::read_dir(p)?.filter_map(|e| e.ok().map(|e| e.path())).collect())
+            }
+            fn exists(&self, p: &Path) -> bool { p.exists() }
+            fn is_dir(&self, p: &Path) -> bool { p.is_dir() }
+            fn metadata(&self, p: &Path) -> anyhow::Result<fs::Metadata> { Ok(fs::metadata(p)?) }
+            fn append(&self, p: &Path, b: &[u8]) -> anyhow::Result<()> {
+                use std::io::Write;
+                let mut f = fs::OpenOptions::new().append(true).create(true).open(p)?;
+                f.write_all(b)?;
+                Ok(())
+            }
+        }
+
+        let fs_port = HomeFs { home: tmp.path().to_path_buf() };
+        let override_path =
+            super::super::hygiene_override::verification_override_path(&fs_port, session);
+        write_signed_override_for_test(&fs_port, &override_path, "verification", session);
+
+        // No markers set at all — normally every check would fire. With an
+        // active override, all checks must be skipped and the edit is allowed.
+        let input = HookInput {
+            tool_name: Some("Edit".into()),
+            session_id: Some(session.into()),
+            ..Default::default()
+        };
+        let output = process(&input, &fs_port);
+        assert!(
+            output.blocked.is_none(),
+            "active signed verification override must bypass the tool_usage_gate"
+        );
     }
 
     /// Tests touch SENTINEL_AUTOPILOT env var — serialize them to avoid
