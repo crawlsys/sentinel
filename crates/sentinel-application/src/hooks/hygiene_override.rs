@@ -260,15 +260,17 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     }
 
     if doppler {
-        if let Err(e) = write_signed_override(
-            ctx.fs,
-            &doppler_override_path(ctx.fs, session_id),
-            "doppler",
+        let path = doppler_override_path(ctx.fs, session_id);
+        eprintln!(
+            "[sentinel][doppler_override_write] session={}, path={}",
             session_id,
-        ) {
+            path.display()
+        );
+        if let Err(e) = write_signed_override(ctx.fs, &path, "doppler", session_id) {
             eprintln!("Failed to set doppler override: {e}");
             return HookOutput::allow();
         }
+        eprintln!("[sentinel][doppler_override_write] wrote successfully");
         eprintln!(
             "\
 +-------------------------------------------------------------+\n\

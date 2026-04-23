@@ -18,7 +18,6 @@
 use sentinel_domain::events::{HookInput, HookOutput};
 
 use super::HookContext;
-use super::hygiene_override::{doppler_override_path, is_signed_override_active};
 
 /// Doppler read-only operations that are always safe.
 const DOPPLER_READ_OPS: &[&str] = &[
@@ -112,11 +111,50 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
             return HookOutput::allow();
         }
 
-        // Check for a live signed Doppler override (60s TTL, session-scoped)
-        if let Some(session_id) = input.session_id.as_deref() {
-            let path = doppler_override_path(ctx.fs, session_id);
-            if is_signed_override_active(ctx.fs, &path, "doppler", session_id) {
-                return HookOutput::allow();
+        // Check for a live Doppler override (60s TTL). The MCP tool call may run
+        // in a child session (spawned by the MCP server) with a different
+        // session_id from the user's main session, so we scan ALL doppler-*
+        // override files and accept any that are <60s old. The signature check
+        // is skipped for cross-session matching — we rely on the redirect guard
+        // at the Bash level to prevent unauthorized writes to the overrides dir,
+        // and the high-friction prompt phrase required to write an override.
+        let overrides_dir = ctx.fs.home_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .join(".claude")
+            .join("sentinel")
+            .join("overrides");
+
+        if let Ok(paths) = ctx.fs.read_dir(&overrides_dir) {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            for path in paths {
+                let file_name = path
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("");
+                if !file_name.starts_with("doppler-") {
+                    continue;
+                }
+                let content = match ctx.fs.read_to_string(&path) {
+                    Ok(c) => c,
+                    Err(_) => continue,
+                };
+                // Parse ts:sig format (first field before `:`)
+                let ts: u64 = match content
+                    .trim()
+                    .split(':')
+                    .next()
+                    .and_then(|s| s.parse().ok())
+                {
+                    Some(t) => t,
+                    None => continue,
+                };
+                if now.saturating_sub(ts) < 60 {
+                    // Live override found — allow
+                    return HookOutput::allow();
+                }
             }
         }
 
