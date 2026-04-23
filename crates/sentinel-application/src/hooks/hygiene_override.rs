@@ -46,6 +46,11 @@ pub fn verification_override_path(fs: &dyn FileSystemPort, session_id: &str) -> 
     override_dir(fs).join(format!("verification-{hash}"))
 }
 
+pub fn doppler_override_path(fs: &dyn FileSystemPort, session_id: &str) -> PathBuf {
+    let hash = sha256_hash(session_id);
+    override_dir(fs).join(format!("doppler-{hash}"))
+}
+
 /// SHA-256 hash of input, truncated to 32 hex chars (128 bits)
 fn sha256_hash(input: &str) -> String {
     let mut hasher = Sha256::new();
@@ -124,6 +129,20 @@ fn is_verification_override(prompt: &str) -> bool {
         .any(|p| Regex::new(p).map(|re| re.is_match(prompt)).unwrap_or(false))
 }
 
+/// Check if prompt matches Doppler override patterns.
+/// Requires explicit high-friction language because Doppler writes touch secrets.
+fn is_doppler_override(prompt: &str) -> bool {
+    let patterns = [
+        r"override\s+doppler",
+        r"doppler\s+override",
+        r"allow\s+doppler\s+(write|writes|mutation|mutations)",
+        r"authorize\s+doppler\s+(write|writes|mutation|mutations)",
+    ];
+    patterns
+        .iter()
+        .any(|p| Regex::new(p).map(|re| re.is_match(prompt)).unwrap_or(false))
+}
+
 /// Write a signed override file.
 /// Content format: `{timestamp}:{signature}` — a simple `touch` won't produce valid content.
 ///
@@ -192,6 +211,7 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
 
     let hygiene = is_hygiene_override(&prompt);
     let verification = is_verification_override(&prompt);
+    let doppler = is_doppler_override(&prompt);
 
     if hygiene {
         if let Err(e) = write_signed_override(
@@ -234,6 +254,29 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
 |  git commit/push unblocked for {OVERRIDE_TTL_SECS} seconds.                    |\n\
 |                                                             |\n\
 |  Run tests before your next commit!                         |\n\
+|  The gate will re-engage after timeout.                     |\n\
++-------------------------------------------------------------+"
+        );
+    }
+
+    if doppler {
+        if let Err(e) = write_signed_override(
+            ctx.fs,
+            &doppler_override_path(ctx.fs, session_id),
+            "doppler",
+            session_id,
+        ) {
+            eprintln!("Failed to set doppler override: {e}");
+            return HookOutput::allow();
+        }
+        eprintln!(
+            "\
++-------------------------------------------------------------+\n\
+|  DOPPLER OVERRIDE ACTIVATED                                 |\n\
++-------------------------------------------------------------+\n\
+|  Doppler mutation tools unblocked for {OVERRIDE_TTL_SECS} seconds.              |\n\
+|                                                             |\n\
+|  Secrets ops are high-risk — verify target config!          |\n\
 |  The gate will re-engage after timeout.                     |\n\
 +-------------------------------------------------------------+"
         );
