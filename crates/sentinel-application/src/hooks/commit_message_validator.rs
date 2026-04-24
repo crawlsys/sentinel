@@ -170,6 +170,46 @@ fn detect_prefixes_for_cwd(cwd: &str) -> Option<(String, Vec<String>)> {
     None
 }
 
+/// If the bash command starts with `cd <path> &&` (or `;`), return that path —
+/// that's the effective cwd where `git commit` actually runs. Falls back to
+/// None so callers use the session cwd.
+///
+/// Motivating case: `cd ~/Documents/GitHub/sentinel/.worktrees/fix && git commit ...`
+/// runs from the session's cwd (which may be a different project) but the
+/// commit lands in the sentinel repo. The prior implementation used session
+/// cwd and mis-applied the wrong project's Linear-ref rule.
+fn effective_cwd_from_command(command: &str) -> Option<String> {
+    // Match `cd <path> &&` or `cd <path> ;` (allow optional trailing space).
+    // Path may be quoted with ' or ", or bare. We do NOT try to evaluate
+    // variables or tildes here — just strip quotes and surface the literal.
+    let trimmed = command.trim_start();
+    if !trimmed.starts_with("cd ") && !trimmed.starts_with("cd\t") {
+        return None;
+    }
+    let after_cd = trimmed[3..].trim_start();
+    // Find end of path: either `&&`, `;`, or end-of-string.
+    let end = after_cd
+        .find("&&")
+        .or_else(|| after_cd.find(';'))
+        .unwrap_or(after_cd.len());
+    let path_raw = after_cd[..end].trim();
+    if path_raw.is_empty() {
+        return None;
+    }
+    // Strip matched surrounding quotes.
+    let path = if (path_raw.starts_with('\'') && path_raw.ends_with('\''))
+        || (path_raw.starts_with('"') && path_raw.ends_with('"'))
+    {
+        &path_raw[1..path_raw.len() - 1]
+    } else {
+        path_raw
+    };
+    if path.is_empty() {
+        return None;
+    }
+    Some(path.to_string())
+}
+
 fn has_linear_ref(message: &str, prefixes: &[String]) -> bool {
     for prefix in prefixes {
         let pat = format!(r"(?i)\b{}-\d+\b", regex::escape(prefix));
@@ -229,7 +269,14 @@ pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
         return HookOutput::block(reason);
     }
 
-    if let Some(cwd) = input.cwd.as_deref() {
+    // Prefer the cwd the command actually commits in: `cd <path> && git commit`
+    // → use <path>, not the session's input.cwd. Falls back to session cwd.
+    let effective_cwd = effective_cwd_from_command(command);
+    let cwd_for_lookup: Option<&str> = effective_cwd
+        .as_deref()
+        .or(input.cwd.as_deref());
+
+    if let Some(cwd) = cwd_for_lookup {
         if let Some((project, prefixes)) = detect_prefixes_for_cwd(cwd) {
             if !has_linear_ref(&message, &prefixes) {
                 let list = prefixes
@@ -559,5 +606,64 @@ mod tests {
             "C:/Users/garys/Documents/GitHub/Firefly-Pro",
             &tokens
         ));
+    }
+
+    #[test]
+    fn test_effective_cwd_unchained() {
+        assert_eq!(effective_cwd_from_command("git commit -m 'x'"), None);
+        assert_eq!(effective_cwd_from_command("  git commit"), None);
+    }
+
+    #[test]
+    fn test_effective_cwd_with_cd_leader_and_and() {
+        assert_eq!(
+            effective_cwd_from_command("cd /path/to/repo && git commit -m 'x'"),
+            Some("/path/to/repo".into())
+        );
+        assert_eq!(
+            effective_cwd_from_command("cd ~/Documents/GitHub/sentinel && git commit"),
+            Some("~/Documents/GitHub/sentinel".into())
+        );
+    }
+
+    #[test]
+    fn test_effective_cwd_with_cd_leader_and_semicolon() {
+        assert_eq!(
+            effective_cwd_from_command("cd /other/repo; git commit"),
+            Some("/other/repo".into())
+        );
+    }
+
+    #[test]
+    fn test_effective_cwd_strips_single_quotes() {
+        assert_eq!(
+            effective_cwd_from_command("cd '/path with spaces/repo' && git commit"),
+            Some("/path with spaces/repo".into())
+        );
+    }
+
+    #[test]
+    fn test_effective_cwd_strips_double_quotes() {
+        assert_eq!(
+            effective_cwd_from_command("cd \"C:/Users/garys/Documents/GitHub/sentinel\" && git commit"),
+            Some("C:/Users/garys/Documents/GitHub/sentinel".into())
+        );
+    }
+
+    #[test]
+    fn test_effective_cwd_leading_whitespace() {
+        assert_eq!(
+            effective_cwd_from_command("   cd /foo && git commit"),
+            Some("/foo".into())
+        );
+    }
+
+    #[test]
+    fn test_effective_cwd_not_cd_prefixed_command() {
+        // `cdk deploy && git commit` must NOT match — command doesn't start with `cd ` or `cd\t`.
+        assert_eq!(
+            effective_cwd_from_command("cdk deploy && git commit"),
+            None
+        );
     }
 }
