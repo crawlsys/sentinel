@@ -349,7 +349,7 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
             }
 
             // Doppler/Auth0 gate — block mutation tools (any tool type)
-            let doppler_output = hooks::doppler_auth0_gate::process(&input);
+            let doppler_output = hooks::doppler_auth0_gate::process(&input, &ctx);
             output.merge(&doppler_output);
 
             // Pre-commit verification — block git commit/push without test evidence (Bash only)
