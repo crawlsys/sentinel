@@ -1,15 +1,33 @@
 name: test
 
+# Gated on the `CI_ENABLED` repo variable. Default = skip, because the repo
+# currently sits on a Free plan and GitHub Actions refuses to start jobs on
+# private repos when Actions billing is in a failed / over-limit state.
+# Every push then posts a red "FAIL" check whose only annotation is the
+# billing message — not useful signal. Local `cargo test -p
+# sentinel-application --lib` is the source of truth until Actions is
+# restored.
+#
+# To re-enable: set `CI_ENABLED=true` at
+#   https://github.com/garysomerhalder/sentinel/settings/variables/actions
+# (or run `gh variable set CI_ENABLED --body true`). Unset / any other value
+# leaves CI dormant.
+#
+# Manual runs via `workflow_dispatch` always execute regardless of the var,
+# so CI can still be kicked by hand when needed.
+
 on:
   push:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
 
 jobs:
   unit:
     name: cargo test -p sentinel-application --lib
     runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'workflow_dispatch' || vars.CI_ENABLED == 'true' }}
     steps:
       - uses: actions/checkout@v4
 
