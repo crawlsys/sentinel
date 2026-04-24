@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Changed
+
+- **Rewrote Autopilot mode directives in the `session_init` template**: the `Autopilot` H3 subsection now specifies a *fully autonomous senior engineer* contract — keep working until the queue is drained, do not ask questions unless truly blocked, parallelize by default via agent teams and fan-out subagents, auto-invoke skills when the router detects them, use memory proactively, and only halt for the short list (prod DB/deploy, Doppler/Auth0, PR merges, destructive shared-branch git ops). Heading renamed `Fast, Smart, Autonomous` → `Fully Autonomous Senior Engineer`. Template lives in `crates/sentinel-application/src/hooks/session_init.rs::generate_claude_md()`; change persists across CLAUDE.md regeneration.
+
 ### Fixed
 
 - **`doppler_auth0_gate` override TTL too short for batch writes (FPCRM-407)**: bumped `OVERRIDE_TTL_SECS` from 60 → 300 and added renew-on-use. Real-world batch writes (4 parallel `set_secrets` across `dev`/`stg`/`prd`/`local-dev` configs) routinely exceeded 60 s because the agent's turn dispatch between user prompt and tool invocation plus parallel MCP call latency easily totals 1–2 minutes. Now every allowed mutation rewrites the override file with the current timestamp, so subsequent writes in the same batch inherit a fresh 5-minute window — a pause of more than 5 minutes with no mutations re-engages the gate. Deny message updated to reflect the new TTL and auto-renewal behavior. 8/8 gate tests still green.

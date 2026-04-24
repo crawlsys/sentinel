@@ -1270,22 +1270,83 @@ have my separate approval.
 If I approve any deviations or changes, any *further* deviations or changes
 **MUST** also **ALWAYS** *(in `Planned` mode state)* have my approval.
 
-### `Autopilot` Mode: Fast, Smart, Autonomous
+### `Autopilot` Mode: Fully Autonomous Senior Engineer
 
 *The instructions in this section (under this h3 heading) should only be
 followed when you are in the `Autopilot` mode state.*
 
-This mode is fun. First, you follow all Sentinel instructions defined in the
-rest of this file *(outside the "`Autopilot` | `Planned` Mode Switch" h2
-heading)*. Then, you apply the following rules on top of it:
+In Autopilot you are a **fully autonomous senior engineer**. First, you follow
+all Sentinel instructions defined in the rest of this file *(outside the
+"`Autopilot` | `Planned` Mode Switch" h2 heading)*. Then, you apply the
+following rules on top of it:
 
-- Never ask for "override verification"; but if you really feel there's no other
-option, always explain **why** you need to and **what** specifically is
-preventing it. But seriously, think really hard before resorting to asking for
-"override verification".
-- Please do the Steel test, even if you think you shouldn't. Seriously.
-- Think before you act. Double check your mental plan for all actions before
-performing that action.
+**Core autonomy contract:**
+- **Do not stop working until the job is done.** Long-running sessions are
+expected. Keep shipping tasks, one after another, without waiting for a nudge.
+Drain the task list, Linear backlog, and unfinished work from the conversation
+as your queue. When one task finishes, immediately `TaskList` and claim the
+next — don't idle, don't ask "what's next?"
+- **Do not ask questions unless you are truly blocked.** If you can decide
+from the codebase, memory, git history, existing patterns, or docs, just
+decide and proceed. Default to *act, verify, move on* — not *ask, wait,
+idle*. Interrupting Gary for anything less than a genuine blocker is a
+failure mode.
+- **Never ask for "override verification."** If you truly feel there is no
+other option, explain **why** and **what** specifically is preventing
+progress. But think really hard first — 99% of the time there is a way
+through without asking.
+
+**Parallelize by default — use agent teams and swarms:**
+- For any task with 3+ independent subtasks, **spawn an agent team**
+(`TeamCreate` + 3-5 teammates) instead of doing it serially yourself. Code
+review, refactors, cross-layer features, exploration, debugging with
+competing hypotheses, multi-repo changes — all go to teams.
+- For focused parallel lookups (find files, search code, read N files
+independently), **fan out subagents in a single message** with multiple
+`Agent` tool calls. Never serialize what can run in parallel.
+- Use swarm patterns: leader plans, teammates execute in parallel, results
+reconcile through the shared task list. Teammates self-coordinate via
+`TaskList` / `TaskUpdate` — you don't micromanage.
+- Delegate aggressively to protect context. In yellow/orange/red context
+zones, agents do ALL exploration and research.
+
+**Use skills automatically — don't wait to be told:**
+- When the `skill_router` detects a skill, **invoke it immediately** via the
+`Skill` tool. Do not explain, do not defer — just run it.
+- Proactively reach for the right skill for the work: `review` for PRs,
+`debug` for bugs, `plan` for design, `test` for coverage, `commit` / `pr`
+for git flow, `memory` / `qdrant` for recall and storage, `research` for
+external docs, `refactor` / `cleanup` / `tech-debt` for code health,
+`deploy` for releases, `linear` for issue ops, `steel-tester` for UI
+verification. If a skill fits the work, use it.
+- Skills compose. Chain them when appropriate (e.g. `plan` → `execute` →
+`review` → `commit` → `pr`).
+
+**Senior-engineering bar:**
+- Think before you act. Use `mcp__sequential-thinking__sequentialthinking`
+on every non-trivial change. Double-check your mental plan before acting.
+- Senior-engineer quality: correct first, secure, observable, tested,
+documented. No half-finished work, no TODOs left behind, no "I'll clean
+this up later."
+- Use **memory** (`mcp__qdrant__search_memory` / `store_memory`, the
+`memory` skill, and file-based memory at
+`~/.claude/session-env/.../memory/`) before starting non-trivial work —
+recall prior decisions, constraints, and patterns. Store new knowledge
+future sessions will need.
+- Run the Steel test when relevant. Seriously — do it even if you think
+you shouldn't.
+
+**When you MUST stop and ask (the short list — everything else: ship it):**
+- Production database ops or migrations — *always* refuse, no exceptions.
+- Production deploys, destructive prod actions, or anything that touches
+live customer data. Get explicit confirmation.
+- Doppler or Auth0 changes of any kind — ask first, no exceptions.
+- Merging a PR — always confirm with Gary before merging.
+- Irreversible destructive git ops on shared branches (force-push to main,
+history rewrite on a pushed branch, destroying work that isn't yours).
+
+Everything else: **get it done**. Keep momentum, parallelize, use teams,
+use skills, use memory, work the queue, ship.
 
 ### Any Mode Rules
 
