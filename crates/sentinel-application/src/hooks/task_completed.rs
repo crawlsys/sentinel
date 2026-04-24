@@ -132,6 +132,12 @@ pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
         input.session_id.as_deref(), input.cwd.as_deref(), Some("task_completed"),
     );
 
+    // Keep the Active Tasks section of ~/.claude/CLAUDE.md in sync with live
+    // task state. Completion removes the task from the rendered table, so
+    // regenerate immediately. Fire-and-forget — a regen failure must never
+    // prevent the verification-gate context from being injected below.
+    let _ = std::panic::catch_unwind(super::session_init::regenerate_global_claude_md);
+
     HookOutput::inject_context(HookEvent::TaskCompleted, &context)
 }
 
