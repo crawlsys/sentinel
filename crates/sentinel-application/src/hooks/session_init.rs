@@ -171,10 +171,26 @@ pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
         .and_then(|v| v.as_str())
         .unwrap_or("startup");
 
+    // Autoheal MCP connections on every session start.
+    //
+    // Why: Claude Code spawns MCP children at session start and never re-probes mid-session
+    // if the binary is rebuilt, the config changes, or a child crashes. The only supported
+    // in-session refresh is the `/reload-plugins` slash command, which calls
+    // `refreshActivePlugins` → bumps `pluginReconnectKey` → re-runs `DF(name, config)` for
+    // every registered MCP. Running it once per session guarantees that fresh sessions
+    // always pick up the latest binaries and clean up any zombie connections.
+    //
+    // How: Claude Code's `SessionStart` hook contract supports an `initialUserMessage`
+    // field that is stored in `nn6`, retrieved via `mTK()`, and piped through
+    // `prependUserMessage()` onto the input stream. When the user submits their first
+    // prompt, the prepended string (starting with `/`) is dispatched via
+    // `processSlashCommand` — same path as if the user typed it. Reverse-engineered from
+    // claude.exe v2.1.114; see ~/.claude/projects/.../memory/mcp_reconnect_research.md.
+    let autoheal_prefix = "/reload-plugins";
     let initial_message = if source == "resume" {
-        Some("What was I working on? Give me a brief summary.".to_string())
+        Some(format!("{autoheal_prefix}\nWhat was I working on? Give me a brief summary."))
     } else {
-        None
+        Some(autoheal_prefix.to_string())
     };
 
     use sentinel_domain::events::HookSpecificOutput;
