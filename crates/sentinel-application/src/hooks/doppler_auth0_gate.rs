@@ -1,23 +1,63 @@
 //! Doppler & Auth0 Mutation Gate
 //!
-//! HARD BLOCK on all Doppler and Auth0 write/mutation operations.
-//! The CLAUDE.md says: "ALWAYS ask for permission before changing anything
-//! regarding Doppler or Auth0. NO EXCEPTIONS."
+//! Default (Planned mode): HARD BLOCK on Doppler and Auth0 write/mutation
+//! operations. The CLAUDE.md rule is "ALWAYS ask for permission before
+//! changing anything regarding Doppler or Auth0" — but only production
+//! configs / tenants are the real concern.
 //!
-//! Read-only operations (list, get, download) are allowed.
+//! Read-only operations (list, get, download) are always allowed.
 //! All mutations (set, create, delete, update, lock, unlock, clone, rollback)
-//! are blocked with a message telling Claude to ask the user first.
+//! are blocked with a message telling Claude to ask the user first — unless
+//! one of the bypasses below applies.
 //!
-//! **Override**: The user can unblock Doppler mutations for 60 seconds by
-//! typing an explicit phrase matched by `hygiene_override::is_doppler_override`
+//! **Autopilot bypass**: when `SENTINEL_AUTOPILOT=1`, non-prod Doppler and
+//! Auth0 mutations are allowed without asking. A prod config (`prd`, `prod`,
+//! `production` — case-insensitive substring in the tool's `config` / `project`
+//! / `domain` argument) is still hard-blocked even in Autopilot. When the
+//! arguments don't name a config at all, Autopilot is conservative and falls
+//! back to the override path (prod might be implied).
+//!
+//! **Explicit override**: The user can unblock Doppler mutations for 5 minutes
+//! by typing a phrase matched by `hygiene_override::is_doppler_override`
 //! (e.g. "override doppler", "authorize doppler write"). The override writes a
 //! signed token under `~/.claude/sentinel/overrides/doppler-{hash}` with
 //! signature validation (same scheme as hygiene + verification overrides).
-//! Auth0 mutations are NOT subject to this override — always hard-blocked.
+//! Auth0 mutations are NOT subject to this override.
 
 use sentinel_domain::events::{HookInput, HookOutput};
 
 use super::HookContext;
+
+/// True iff `SENTINEL_AUTOPILOT` is set to `1` or `true` (case-insensitive).
+fn is_autopilot() -> bool {
+    std::env::var("SENTINEL_AUTOPILOT")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+/// Case-insensitive scan for prod markers inside a tool-input value. Returns
+/// true if any top-level string field named `config`, `project`, `domain`,
+/// `tenant`, or `name` contains the substring `prd`, `prod`, or `production`.
+///
+/// Conservative: returns **true** when the input is `None` (no args to
+/// inspect → assume prod to stay safe). In Autopilot this forces a fall-back
+/// to the override path rather than a silent allow.
+fn targets_production(tool_input: Option<&serde_json::Value>) -> bool {
+    let Some(v) = tool_input else { return true };
+    const FIELDS: &[&str] = &["config", "project", "domain", "tenant", "name"];
+    const PROD_MARKERS: &[&str] = &["prd", "prod", "production"];
+    for field in FIELDS {
+        let Some(s) = v.get(*field).and_then(|x| x.as_str()) else {
+            continue;
+        };
+        let lower = s.to_ascii_lowercase();
+        if PROD_MARKERS.iter().any(|m| lower.contains(m)) {
+            return true;
+        }
+    }
+    // No prod marker found in any relevant field — treat as non-prod.
+    false
+}
 
 /// Doppler read-only operations that are always safe.
 const DOPPLER_READ_OPS: &[&str] = &[
@@ -93,12 +133,17 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
         return HookOutput::allow();
     }
 
-    // Auth0 — block ALL tools (it's an auth system, everything is sensitive)
-    // No override path; Auth0 changes always need Gary to run them himself.
+    // Auth0 — hard-block against production tenants. In Autopilot, non-prod
+    // tenants are allowed (the Autopilot directive in CLAUDE.md explicitly
+    // permits non-prod Auth0 changes).
     if tool.starts_with("mcp__auth0__") {
+        if is_autopilot() && !targets_production(input.tool_input.as_ref()) {
+            return HookOutput::allow();
+        }
         return HookOutput::deny(
-            "🔴 [Doppler/Auth0 Gate] BLOCKED: Auth0 operations require explicit user permission. \
-             Ask Gary before making ANY changes to Auth0. NO EXCEPTIONS."
+            "🔴 [Doppler/Auth0 Gate] BLOCKED: Auth0 operations require explicit user permission \
+             in Planned mode, or a non-prod tenant in Autopilot. Production Auth0 changes always \
+             require Gary's explicit approval — no exceptions, even in Autopilot."
         );
     }
 
@@ -108,6 +153,14 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
 
         // Allow read-only operations
         if DOPPLER_READ_OPS.iter().any(|&read_op| op == read_op) {
+            return HookOutput::allow();
+        }
+
+        // Autopilot bypass — allow Doppler mutations against non-prod configs
+        // without requiring an override. Prod configs (config/project name
+        // contains `prd`/`prod`/`production`) still require the explicit
+        // override path below.
+        if is_autopilot() && !targets_production(input.tool_input.as_ref()) {
             return HookOutput::allow();
         }
 
@@ -182,10 +235,33 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
 mod tests {
     use super::*;
     use crate::hooks::test_support::stub_ctx;
+    use std::sync::Mutex;
+
+    // Tests read/mutate SENTINEL_AUTOPILOT via process env — serialise to
+    // avoid races with parallel test threads seeing stale values.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Acquire ENV_LOCK (recovering from poisoning) and force autopilot off
+    /// for the duration of the test. Guards every test that assumes the
+    /// default deny-by-default gate behaviour against an inherited
+    /// `SENTINEL_AUTOPILOT=1` from the caller's shell.
+    fn clear_autopilot() -> std::sync::MutexGuard<'static, ()> {
+        let g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("SENTINEL_AUTOPILOT");
+        g
+    }
 
     fn input_with_tool(tool: &str) -> HookInput {
         HookInput {
             tool_name: Some(tool.to_string()),
+            ..Default::default()
+        }
+    }
+
+    fn input_with_tool_and_args(tool: &str, args: serde_json::Value) -> HookInput {
+        HookInput {
+            tool_name: Some(tool.to_string()),
+            tool_input: Some(args),
             ..Default::default()
         }
     }
@@ -200,6 +276,7 @@ mod tests {
 
     #[test]
     fn test_allows_non_doppler_auth0_tools() {
+        let _g = clear_autopilot();
         let ctx = stub_ctx();
         assert!(process(&input_with_tool("Edit"), &ctx).blocked.is_none());
         assert!(process(&input_with_tool("Bash"), &ctx).blocked.is_none());
@@ -208,12 +285,14 @@ mod tests {
 
     #[test]
     fn test_blocks_auth0_mutation_tools() {
+        let _g = clear_autopilot();
         let ctx = stub_ctx();
         assert_eq!(process(&input_with_tool("mcp__auth0__authenticate"), &ctx).blocked, Some(true));
     }
 
     #[test]
     fn test_allows_mcp_router_tools_on_all_servers() {
+        let _g = clear_autopilot();
         let ctx = stub_ctx();
         assert!(process(&input_with_tool("mcp__auth0__mcp_health_check"), &ctx).blocked.is_none());
         assert!(process(&input_with_tool("mcp__auth0__mcp_list_servers"), &ctx).blocked.is_none());
@@ -225,6 +304,7 @@ mod tests {
 
     #[test]
     fn test_allows_doppler_read_ops() {
+        let _g = clear_autopilot();
         let ctx = stub_ctx();
         assert!(process(&input_with_tool("mcp__doppler__get_secret"), &ctx).blocked.is_none());
         assert!(process(&input_with_tool("mcp__doppler__list_projects"), &ctx).blocked.is_none());
@@ -235,6 +315,7 @@ mod tests {
 
     #[test]
     fn test_blocks_doppler_mutations() {
+        let _g = clear_autopilot();
         let ctx = stub_ctx();
         assert_eq!(process(&input_with_tool("mcp__doppler__set_secret"), &ctx).blocked, Some(true));
         assert_eq!(process(&input_with_tool("mcp__doppler__set_secrets"), &ctx).blocked, Some(true));
@@ -244,6 +325,167 @@ mod tests {
         assert_eq!(process(&input_with_tool("mcp__doppler__lock_config"), &ctx).blocked, Some(true));
         assert_eq!(process(&input_with_tool("mcp__doppler__rollback_config"), &ctx).blocked, Some(true));
         assert_eq!(process(&input_with_tool("mcp__doppler__create_service_token"), &ctx).blocked, Some(true));
+    }
+
+    // ───────────────────────── Autopilot bypass ─────────────────────────
+
+    #[test]
+    fn test_autopilot_allows_doppler_mutation_on_nonprod_config() {
+        let g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("SENTINEL_AUTOPILOT", "1");
+        let ctx = stub_ctx();
+        let input = input_with_tool_and_args(
+            "mcp__doppler__set_secret",
+            serde_json::json!({
+                "project": "firefly-pro-crm",
+                "config": "dev",
+                "name": "FOO",
+                "value": "bar"
+            }),
+        );
+        let out = process(&input, &ctx);
+        std::env::remove_var("SENTINEL_AUTOPILOT");
+        drop(g);
+        assert!(
+            out.blocked.is_none(),
+            "autopilot + non-prod config should allow doppler mutation"
+        );
+    }
+
+    #[test]
+    fn test_autopilot_blocks_doppler_mutation_on_prod_config() {
+        let g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("SENTINEL_AUTOPILOT", "1");
+        let ctx = stub_ctx();
+        let input = input_with_tool_and_args(
+            "mcp__doppler__set_secret",
+            serde_json::json!({
+                "project": "firefly-pro-crm",
+                "config": "prd",
+                "name": "FOO",
+                "value": "bar"
+            }),
+        );
+        let out = process(&input, &ctx);
+        std::env::remove_var("SENTINEL_AUTOPILOT");
+        drop(g);
+        assert_eq!(
+            out.blocked,
+            Some(true),
+            "autopilot must NOT bypass the gate when config is prod"
+        );
+    }
+
+    #[test]
+    fn test_autopilot_blocks_doppler_mutation_on_production_substring() {
+        let g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("SENTINEL_AUTOPILOT", "1");
+        let ctx = stub_ctx();
+        // A config literally named "production" — should still block.
+        let input = input_with_tool_and_args(
+            "mcp__doppler__set_secret",
+            serde_json::json!({"project": "x", "config": "production"}),
+        );
+        let out = process(&input, &ctx);
+        std::env::remove_var("SENTINEL_AUTOPILOT");
+        drop(g);
+        assert_eq!(out.blocked, Some(true));
+    }
+
+    #[test]
+    fn test_autopilot_blocks_doppler_mutation_when_no_args_present() {
+        // Conservative fallback: no `tool_input` → assume prod → still block.
+        // This matters because the hook can't otherwise distinguish a
+        // "set_secret without a config" from a prod call.
+        let g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("SENTINEL_AUTOPILOT", "1");
+        let ctx = stub_ctx();
+        let out = process(&input_with_tool("mcp__doppler__set_secret"), &ctx);
+        std::env::remove_var("SENTINEL_AUTOPILOT");
+        drop(g);
+        assert_eq!(out.blocked, Some(true));
+    }
+
+    #[test]
+    fn test_autopilot_allows_auth0_mutation_on_nonprod_tenant() {
+        let g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("SENTINEL_AUTOPILOT", "1");
+        let ctx = stub_ctx();
+        let input = input_with_tool_and_args(
+            "mcp__auth0__update_rule",
+            serde_json::json!({"domain": "dev-fireflypro.us.auth0.com"}),
+        );
+        let out = process(&input, &ctx);
+        std::env::remove_var("SENTINEL_AUTOPILOT");
+        drop(g);
+        assert!(
+            out.blocked.is_none(),
+            "autopilot + non-prod Auth0 tenant should allow the mutation"
+        );
+    }
+
+    #[test]
+    fn test_autopilot_blocks_auth0_mutation_on_prod_tenant() {
+        let g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("SENTINEL_AUTOPILOT", "1");
+        let ctx = stub_ctx();
+        let input = input_with_tool_and_args(
+            "mcp__auth0__update_rule",
+            serde_json::json!({"domain": "fireflypro-production.us.auth0.com"}),
+        );
+        let out = process(&input, &ctx);
+        std::env::remove_var("SENTINEL_AUTOPILOT");
+        drop(g);
+        assert_eq!(
+            out.blocked,
+            Some(true),
+            "autopilot must NOT bypass the gate when Auth0 tenant is production"
+        );
+    }
+
+    #[test]
+    fn test_autopilot_blocks_auth0_mutation_when_no_args() {
+        let g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("SENTINEL_AUTOPILOT", "1");
+        let ctx = stub_ctx();
+        let out = process(&input_with_tool("mcp__auth0__create_user"), &ctx);
+        std::env::remove_var("SENTINEL_AUTOPILOT");
+        drop(g);
+        assert_eq!(
+            out.blocked,
+            Some(true),
+            "conservative fallback: no args → assume prod → block"
+        );
+    }
+
+    #[test]
+    fn targets_production_matches_common_prod_markers() {
+        let prod = serde_json::json!({"config": "PROD"});
+        assert!(targets_production(Some(&prod)));
+
+        let prd = serde_json::json!({"config": "prd"});
+        assert!(targets_production(Some(&prd)));
+
+        let production = serde_json::json!({"config": "production"});
+        assert!(targets_production(Some(&production)));
+
+        let domain_prod = serde_json::json!({"domain": "app.production.example.com"});
+        assert!(targets_production(Some(&domain_prod)));
+
+        let dev = serde_json::json!({"config": "dev"});
+        assert!(!targets_production(Some(&dev)));
+
+        let stg = serde_json::json!({"config": "stg"});
+        assert!(!targets_production(Some(&stg)));
+
+        let no_match = serde_json::json!({"config": "local-dev"});
+        assert!(!targets_production(Some(&no_match)));
+
+        let missing = serde_json::json!({"unrelated": "prod"});
+        assert!(!targets_production(Some(&missing)));
+
+        // None input → conservative true.
+        assert!(targets_production(None));
     }
 
     // NOTE: We cannot unit-test the happy path of "override unblocks mutation"
@@ -258,6 +500,7 @@ mod tests {
         // Even if a Doppler override were active (verified at integration level),
         // Auth0 mutations must remain hard-blocked. The gate checks Auth0 first,
         // before any override lookup, so this test verifies the control-flow order.
+        let _g = clear_autopilot();
         let ctx = stub_ctx();
         let input = input_with_session("mcp__auth0__update_user", "any-session");
         assert_eq!(
@@ -269,6 +512,7 @@ mod tests {
 
     #[test]
     fn test_doppler_mutation_without_override_still_blocked() {
+        let _g = clear_autopilot();
         let ctx = stub_ctx();
         let input = input_with_session("mcp__doppler__set_secret", "no-override-session");
         assert_eq!(process(&input, &ctx).blocked, Some(true));
@@ -276,6 +520,7 @@ mod tests {
 
     #[test]
     fn test_allows_no_tool_name() {
+        let _g = clear_autopilot();
         let ctx = stub_ctx();
         assert!(process(&HookInput::default(), &ctx).blocked.is_none());
     }

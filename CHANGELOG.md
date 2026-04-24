@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Changed
+
+- **Expanded Autopilot scope — non-prod work is free rein, prod is still gated**: updated the `Autopilot` section of the CLAUDE.md template (`session_init.rs::generate_claude_md`) so that in Autopilot I can merge PRs, change Doppler configs, change Auth0 tenants, and run dev/staging DB ops **without asking**, as long as the target is non-production. Prod configs (`prd`/`prod`/`production` — in Doppler config names, Auth0 tenant domains, or the `production` word anywhere in the tool arguments) still require explicit approval, and prod DB ops remain a hard refuse. The "Any Mode Rules" section is now explicitly overridable by the Autopilot section above it, so Autopilot isn't fighting against the generic deny-by-default text.
+
+- **`doppler_auth0_gate` honors `SENTINEL_AUTOPILOT=1` with a prod-config guard**: when Autopilot is on, the gate inspects `tool_input` for a `config` / `project` / `domain` / `tenant` / `name` string containing any of `prd` / `prod` / `production` (case-insensitive). Non-prod → allow; prod or no-args (conservative fallback) → keep blocking. Auth0 now has the same structure — non-prod tenant domains allowed in Autopilot, production domains always blocked. Planned-mode behaviour is unchanged: every mutation still requires an explicit override phrase or user confirmation. 8 new unit tests cover: autopilot allows non-prod Doppler, blocks prod Doppler, blocks on missing args (fallback), allows non-prod Auth0, blocks prod Auth0, blocks Auth0 with no args, plus `targets_production` matrix across PROD/prd/production/domain/dev/stg/local-dev/missing-field/None. Every pre-existing test now acquires `ENV_LOCK` and clears `SENTINEL_AUTOPILOT` at entry so running `cargo test` from inside an Autopilot shell no longer flips gate behaviour.
+
 ### Fixed
 
 - **`pr_merge_gate` tests leaked inherited `SENTINEL_AUTOPILOT=1` env var**: `test_asks_gh_pr_merge` and `test_asks_gh_pr_close` asserted `process()` returns `Ask`, but when `SENTINEL_AUTOPILOT=1` was present in the shell that ran `cargo test` (e.g. running tests inside a Claude Code autopilot session), the gate took the autopilot branch and returned `inject_context` instead — failing both tests. Fix: acquire `ENV_LOCK` and explicitly `remove_var("SENTINEL_AUTOPILOT")` at the top of each, mirroring the pattern already used by `test_no_autopilot_env_still_asks`. Tests now pass regardless of caller env.

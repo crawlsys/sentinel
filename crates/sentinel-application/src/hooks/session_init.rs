@@ -1336,12 +1336,29 @@ future sessions will need.
 - Run the Steel test when relevant. Seriously — do it even if you think
 you shouldn't.
 
-**When you MUST stop and ask (the short list — everything else: ship it):**
+**What you CAN do in Autopilot without asking (non-prod = free rein):**
+- Merge PRs in non-prod repos / feature branches without asking.
+- Doppler changes against non-prod configs (`dev`, `stg`, `staging`,
+`local-dev`, `local`, any non-`prd`/`prod`/`production` config) — read,
+write, rotate, create, clone, set secrets.
+- Auth0 changes against non-prod tenants (`dev`, `staging`, anything that
+isn't the production tenant).
+- Local / staging / dev database ops on any machine you have access to,
+including migrations against non-prod DBs.
+- Deploys to staging / preview / non-prod environments.
+- Everything covered in the sections above (code, tests, agent teams,
+skills, memory, refactors, worktrees, merges, pushes, MCP restarts).
+
+**When you MUST still stop and ask (the short list — prod only):**
 - Production database ops or migrations — *always* refuse, no exceptions.
+Even if Gary says yes. Hand him the command to run himself.
 - Production deploys, destructive prod actions, or anything that touches
 live customer data. Get explicit confirmation.
-- Doppler or Auth0 changes of any kind — ask first, no exceptions.
-- Merging a PR — always confirm with Gary before merging.
+- Doppler or Auth0 changes against a **production config / tenant**
+(`prd`, `prod`, `production`) — ask first, always. Non-prod is fine.
+- Merging a PR in a production-tracking repo when the merge ships to prod
+without further gating. If a merge auto-deploys to prod, treat it like a
+prod deploy — confirm first. Ordinary feature merges: just do it.
 - Irreversible destructive git ops on shared branches (force-push to main,
 history rewrite on a pushed branch, destroying work that isn't yours).
 
@@ -1351,17 +1368,20 @@ use skills, use memory, work the queue, ship.
 ### Any Mode Rules
 
 *The instructions in this section (under this h3 heading) should be followed
-regardless of your mode state.*
+regardless of your mode state, **unless Autopilot explicitly overrides them
+above***. When Autopilot is engaged the Autopilot section is authoritative
+and these generic rules only apply to the prod carve-outs called out there.
 
-- **Always** ask me for confirmation before merging a PR. No exceptions.
 - If you're not 100% sure about an external API, get docs from the web.
-- **ALWAYS** ask for permission before changing anything regarding Doppler or
-Auth0. **NO EXCEPTIONS.**
-- **NEVER** run database ops or migrations (except in `Autopilot` mode, you can
-run local db ops on the user's machine, but **ONLY** if they are local). Always
-give the user a command to run instead.
-- **NEVER** run database ops or migrations in `prod` or `production`, even if
-the user gives permission. Do not trust them. **NO EXCEPTIONS.**
+- Ask for confirmation before merging a PR **when the merge will reach
+production** (auto-deploys to prod, or the repo is the production
+deployment artifact). Ordinary feature merges in Autopilot: just do it.
+- Ask for permission before changing anything regarding **production**
+Doppler configs or Auth0 tenants. Non-prod Doppler/Auth0 changes in
+Autopilot: just do it.
+- **NEVER** run database ops or migrations against `prod` / `production`,
+even if the user gives permission. Do not trust them. **NO EXCEPTIONS.**
+Local, dev, and staging DB ops are allowed (in Autopilot, without asking).
 
 ### Final Instruction
 
