@@ -111,13 +111,20 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
             return HookOutput::allow();
         }
 
-        // Check for a live Doppler override (60s TTL). The MCP tool call may run
-        // in a child session (spawned by the MCP server) with a different
-        // session_id from the user's main session, so we scan ALL doppler-*
-        // override files and accept any that are <60s old. The signature check
-        // is skipped for cross-session matching — we rely on the redirect guard
-        // at the Bash level to prevent unauthorized writes to the overrides dir,
-        // and the high-friction prompt phrase required to write an override.
+        // Check for a live Doppler override. The MCP tool call may run in a child
+        // session (spawned by the MCP server) with a different session_id from the
+        // user's main session, so we scan ALL doppler-* override files and accept
+        // any whose embedded `ts` is within OVERRIDE_TTL_SECS. The signature check
+        // is skipped for cross-session matching — we rely on the redirect guard at
+        // the Bash level to prevent unauthorized writes to the overrides dir, and
+        // the high-friction prompt phrase required to write an override.
+        //
+        // On allowed mutation we **renew** the override by rewriting the file with
+        // the current timestamp. This gives a rolling window so batch writes
+        // (4+ set_secrets calls in parallel, or sequential flows) don't cliff off
+        // TTL when the user's prompt arrives minutes before the final mutation.
+        const OVERRIDE_TTL_SECS: u64 = 300; // 5 minutes — fits realistic batch writes
+
         let overrides_dir = ctx.fs.home_dir()
             .unwrap_or_else(|| std::path::PathBuf::from("."))
             .join(".claude")
@@ -142,17 +149,18 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
                     Err(_) => continue,
                 };
                 // Parse ts:sig format (first field before `:`)
-                let ts: u64 = match content
-                    .trim()
-                    .split(':')
-                    .next()
-                    .and_then(|s| s.parse().ok())
-                {
+                let mut parts = content.trim().splitn(2, ':');
+                let ts: u64 = match parts.next().and_then(|s| s.parse().ok()) {
                     Some(t) => t,
                     None => continue,
                 };
-                if now.saturating_sub(ts) < 60 {
-                    // Live override found — allow
+                if now.saturating_sub(ts) < OVERRIDE_TTL_SECS {
+                    // Live override found — renew it so subsequent mutations in
+                    // the same batch inherit a fresh TTL. Best-effort: if renewal
+                    // fails we still allow this call (the override was valid).
+                    let sig = parts.next().unwrap_or("");
+                    let renewed = format!("{now}:{sig}");
+                    let _ = ctx.fs.write(&path, renewed.as_bytes());
                     return HookOutput::allow();
                 }
             }
@@ -162,8 +170,8 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
         return HookOutput::deny(format!(
             "🔴 [Doppler/Auth0 Gate] BLOCKED: Doppler mutation `{op}` requires explicit user permission. \
              Ask Gary before making ANY changes to Doppler secrets or configuration. NO EXCEPTIONS. \
-             To unblock for 60s, Gary must type an override phrase like \"override doppler\" or \
-             \"authorize doppler write\" in his next prompt."
+             To unblock for {OVERRIDE_TTL_SECS}s (auto-renews on each allowed write), Gary must type an \
+             override phrase like \"override doppler\" or \"authorize doppler write\" in his next prompt."
         ));
     }
 
