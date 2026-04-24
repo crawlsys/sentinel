@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **`pr_merge_gate` tests leaked inherited `SENTINEL_AUTOPILOT=1` env var**: `test_asks_gh_pr_merge` and `test_asks_gh_pr_close` asserted `process()` returns `Ask`, but when `SENTINEL_AUTOPILOT=1` was present in the shell that ran `cargo test` (e.g. running tests inside a Claude Code autopilot session), the gate took the autopilot branch and returned `inject_context` instead — failing both tests. Fix: acquire `ENV_LOCK` and explicitly `remove_var("SENTINEL_AUTOPILOT")` at the top of each, mirroring the pattern already used by `test_no_autopilot_env_still_asks`. Tests now pass regardless of caller env.
+
+- **`tool_usage_gate` walk-up tests polluted by real ancestor `plans/` dirs**: `test_no_plan_file_means_no_fallback`, `test_missing_plans_dir_means_no_fallback`, and `test_stale_plan_file_does_not_satisfy` all created a `TempDir` cwd and asserted `has_recent_plan_file` returns false. But the walk-up stops only at a `.git` marker — so on any dev machine where an ancestor of `TEMP` has a `plans/` dir with recent `.md` files (e.g. `C:/Users/garys/plans/` populated by Claude Code's plan organiser), the walk found those real plans and the tests failed. Fix: seed each tempdir with an empty `.git` sentinel file so the walk-up stops at the tempdir boundary, matching production usage where the hook is always called from inside a repo.
+
 ### Added
 
 - **CLI subcommands + MCP tools for managing `~/.claude/CLAUDE.md`**: the global CLAUDE.md has advertised three sentinel MCP tools (`regenerate_claude_md`, `edit_claude_md_template`, `restart_all_mcps`) for a while, but none were actually wired into the MCP server or the CLI — the helpers in `session_init::regenerate_global_claude_md()` + `template_source_path()` existed as dead library functions. New `crates/sentinel-cli/src/claude_md_cmd.rs` hosts the shared implementation for both surfaces:

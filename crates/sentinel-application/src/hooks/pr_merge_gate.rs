@@ -71,6 +71,12 @@ mod tests {
 
     #[test]
     fn test_asks_gh_pr_merge() {
+        // Must clear SENTINEL_AUTOPILOT — an inherited `=1` from the caller's
+        // shell (e.g. running tests inside a Claude Code autopilot session)
+        // would route `process` through the autopilot branch and return
+        // inject_context instead of ask.
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("SENTINEL_AUTOPILOT");
         let out = process(&bash_input("gh pr merge 123"));
         assert!(out.blocked.is_none()); // not hard-blocked
         let hso = out.hook_specific_output.unwrap();
@@ -79,6 +85,8 @@ mod tests {
 
     #[test]
     fn test_asks_gh_pr_close() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("SENTINEL_AUTOPILOT");
         let out = process(&bash_input("gh pr close 42"));
         assert!(out.blocked.is_none());
         let hso = out.hook_specific_output.unwrap();

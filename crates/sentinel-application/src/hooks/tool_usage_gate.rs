@@ -761,6 +761,10 @@ mod tests {
     #[test]
     fn test_no_plan_file_means_no_fallback() {
         let tmp = TempDir::new().unwrap();
+        // Seed a `.git` marker so the walk-up stops at the tempdir boundary
+        // and doesn't bleed into real ancestor directories (e.g. ~/plans/)
+        // that would accidentally satisfy the check on a dev machine.
+        fs::write(tmp.path().join(".git"), b"gitdir: /fake").unwrap();
         fs::create_dir_all(tmp.path().join("plans")).unwrap();
 
         let fs_port = RealishFs {};
@@ -770,6 +774,7 @@ mod tests {
     #[test]
     fn test_missing_plans_dir_means_no_fallback() {
         let tmp = TempDir::new().unwrap();
+        fs::write(tmp.path().join(".git"), b"gitdir: /fake").unwrap();
         let fs_port = RealishFs {};
         assert!(!has_recent_plan_file(&fs_port, tmp.path().to_str(), SystemTime::now()));
     }
@@ -777,6 +782,7 @@ mod tests {
     #[test]
     fn test_stale_plan_file_does_not_satisfy() {
         let tmp = TempDir::new().unwrap();
+        fs::write(tmp.path().join(".git"), b"gitdir: /fake").unwrap();
         let plans = tmp.path().join("plans");
         fs::create_dir_all(&plans).unwrap();
         fs::write(plans.join("old.md"), b"# Old").unwrap();
