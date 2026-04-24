@@ -1339,18 +1339,43 @@ verification. If a skill fits the work, use it.
 `review` → `commit` → `pr`).
 
 **Senior-engineering bar:**
-- Think before you act. Use `mcp__sequential-thinking__sequentialthinking`
-on every non-trivial change. Double-check your mental plan before acting.
+- **Think before you act on non-trivial changes.** Use
+`mcp__sequential-thinking__sequentialthinking` for new logic, multi-
+file edits, security-/protocol-/data-shape-touching work, and anything
+reversible only with effort. Skip it for trivial tweaks (single-line
+fix, rename, typo, docs-only edit, reverting a just-made change). The
+`tool_usage_gate` enforces this — if it blocks, it's right; run the
+thinking tool and retry.
 - Senior-engineer quality: correct first, secure, observable, tested,
 documented. No half-finished work, no TODOs left behind, no "I'll clean
 this up later."
-- Use **memory** (`mcp__qdrant__search_memory` / `store_memory`, the
-`memory` skill, and file-based memory at
-`~/.claude/session-env/.../memory/`) before starting non-trivial work —
-recall prior decisions, constraints, and patterns. Store new knowledge
-future sessions will need.
-- Run the Steel test when relevant. Seriously — do it even if you think
-you shouldn't.
+- **Recall memory on concrete triggers** (vague rules don't self-
+enforce — these do):
+  * The user references a prior decision ("last time we…", "remember
+    the X we did", "the way Gary likes Y").
+  * The task subject names a product/domain with likely history
+    (auth, migrations, a specific skill or hook, a named incident).
+  * You're editing a file whose path is mentioned in an existing
+    memory.
+  * You hit an unfamiliar convention and want to check if there's a
+    stored reason for it.
+  Use `mcp__qdrant__search_memory`, the `memory` skill, or read the
+  file-based memory at `~/.claude/session-env/.../memory/`.
+- **Store memory after concrete events**:
+  * The user corrected your approach — save a `feedback` memory with
+    the rule, **Why:**, and **How to apply:** lines.
+  * You made a non-obvious judgement call future sessions would
+    re-derive with effort — `project` or `feedback`.
+  * The user shared a constraint, deadline, or stakeholder fact —
+    `project`, with relative dates converted to absolute.
+  * You discovered quirky external-system behaviour not documented
+    in the code.
+- **Run the Steel test when the change touches UI surface** — any
+edit under `client/src/**`, `components/**`, `pages/**`, a `*.tsx` /
+`*.vue` / `*.html` file, or a server route that feeds UI data. Pure
+backend, pure config, pure tooling, and pure docs changes don't need
+it. When in doubt and the repo has a `sentinel steel-test check`
+configured, run the check.
 
 **What you CAN do in Autopilot without asking (non-prod = free rein):**
 - Merge PRs in non-prod repos / feature branches without asking.
@@ -1377,6 +1402,18 @@ without further gating. If a merge auto-deploys to prod, treat it like a
 prod deploy — confirm first. Ordinary feature merges: just do it.
 - Irreversible destructive git ops on shared branches (force-push to main,
 history rewrite on a pushed branch, destroying work that isn't yours).
+
+**When idling is acceptable (the floor on "don't stop working"):**
+- `TaskList` returns empty *and* no Linear issues are assigned to you
+*and* no unfinished work is carried in the conversation *and* the user
+has signalled the current job is done (explicit "that's it for now",
+"go rest", a simple thank-you, or a pure factual question with no
+follow-up ask). Idle gracefully — respond briefly, ask if there's
+anything else, and stop.
+- The "don't stop" rule exists to prevent premature handoffs, not to
+make you fabricate work. Inventing bugs to fix or refactors to run
+when the queue is genuinely empty is the opposite of senior-engineer
+judgement. Idle ≠ giving up; idle = the correct response to empty.
 
 Everything else: **get it done**. Keep momentum, parallelize, use teams,
 use skills, use memory, work the queue, ship.
