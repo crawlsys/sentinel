@@ -430,6 +430,42 @@ fn tool_definitions() -> serde_json::Value {
                     },
                     "required": ["skill"]
                 }
+            },
+            {
+                "name": "sentinel__regenerate_claude_md",
+                "description": "Regenerate ~/.claude/CLAUDE.md from the compiled template. Re-counts components, refreshes project list and Linear accounts. Takes no arguments.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                }
+            },
+            {
+                "name": "sentinel__edit_claude_md_template",
+                "description": "Find-and-replace on the CLAUDE.md template source (session_init.rs), then auto-regenerate the live mirror. `find` must appear exactly once in the template — the tool refuses ambiguous or missing substrings. Requires a rebuild + `sentinel stage` for the compiled template to pick up the change.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "find": {
+                            "type": "string",
+                            "description": "Unique substring to replace in the template source"
+                        },
+                        "replace": {
+                            "type": "string",
+                            "description": "Replacement text"
+                        }
+                    },
+                    "required": ["find", "replace"]
+                }
+            },
+            {
+                "name": "sentinel__restart_all_mcps",
+                "description": "Touch every mcp-router-wrapped MCP binary registered in ~/.claude.json so mcp-router's file watcher triggers a mass restart. Returns a per-server touched/skipped list.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                }
             }
         ]
     })
@@ -586,6 +622,41 @@ async fn handle_request(
             }
             if tool_name == "sentinel__get_workflow_progress" {
                 return handle_get_workflow_progress(request, &arguments, state).await;
+            }
+
+            // CLAUDE.md management — shared implementation with the CLI
+            // subcommands lives in `crate::claude_md_cmd`.
+            if tool_name == "sentinel__regenerate_claude_md" {
+                return match crate::claude_md_cmd::regenerate() {
+                    Ok(v) => JsonRpcResponse::success(request.id.clone(), mcp_tool_result(true, v)),
+                    Err(e) => JsonRpcResponse::success(
+                        request.id.clone(),
+                        mcp_tool_result(false, serde_json::json!({"error": e.to_string()})),
+                    ),
+                };
+            }
+            if tool_name == "sentinel__edit_claude_md_template" {
+                let find = arguments.get("find").and_then(|v| v.as_str()).unwrap_or("");
+                let replace = arguments
+                    .get("replace")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                return match crate::claude_md_cmd::edit_template(find, replace) {
+                    Ok(v) => JsonRpcResponse::success(request.id.clone(), mcp_tool_result(true, v)),
+                    Err(e) => JsonRpcResponse::success(
+                        request.id.clone(),
+                        mcp_tool_result(false, serde_json::json!({"error": e.to_string()})),
+                    ),
+                };
+            }
+            if tool_name == "sentinel__restart_all_mcps" {
+                return match crate::claude_md_cmd::restart_all_mcps() {
+                    Ok(v) => JsonRpcResponse::success(request.id.clone(), mcp_tool_result(true, v)),
+                    Err(e) => JsonRpcResponse::success(
+                        request.id.clone(),
+                        mcp_tool_result(false, serde_json::json!({"error": e.to_string()})),
+                    ),
+                };
             }
 
             // Handle get_session_stats specially

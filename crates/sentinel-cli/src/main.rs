@@ -13,6 +13,7 @@ use tracing_subscriber::EnvFilter;
 
 mod api;
 mod break_cmd;
+mod claude_md_cmd;
 mod config_cmd;
 mod daemon_cmd;
 mod hook_cmd;
@@ -158,6 +159,22 @@ enum Commands {
         action: ConfigAction,
     },
 
+    /// Regenerate `~/.claude/CLAUDE.md` from the compiled template
+    RegenerateClaudeMd,
+
+    /// Find-and-replace in the CLAUDE.md template source, then regenerate
+    EditClaudeMdTemplate {
+        /// Unique substring to replace
+        #[arg(long)]
+        find: String,
+        /// Replacement text
+        #[arg(long)]
+        replace: String,
+    },
+
+    /// Touch every mcp-router-wrapped MCP binary to trigger mass restart
+    RestartAllMcps,
+
     /// Glass break — emergency workflow override (interactive terminal only)
     Break {
         /// Reason for the break (required for initiation)
@@ -280,6 +297,21 @@ async fn main() -> anyhow::Result<()> {
             ConfigAction::Set { key, value } => config_cmd::set(&key, &value),
             ConfigAction::Show => config_cmd::show(),
         },
+        Commands::RegenerateClaudeMd => {
+            let result = claude_md_cmd::regenerate()?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
+            Ok(())
+        }
+        Commands::EditClaudeMdTemplate { find, replace } => {
+            let result = claude_md_cmd::edit_template(&find, &replace)?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
+            Ok(())
+        }
+        Commands::RestartAllMcps => {
+            let result = claude_md_cmd::restart_all_mcps()?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
+            Ok(())
+        }
         Commands::Break {
             reason,
             duration,
