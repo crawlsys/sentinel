@@ -239,6 +239,23 @@ fn merge_base(dir: &str, base_ref: &str) -> Option<String> {
     if sha.is_empty() { None } else { Some(sha) }
 }
 
+/// Count commits between `from` and HEAD (exclusive `from`, inclusive HEAD-path).
+/// Returns None if the range can't be evaluated. Used to pick the candidate
+/// base ref that is *most recent* (shortest HEAD-ward distance), so that after
+/// a rebase + force-push, `origin/main` (merge-base = my first commit) beats a
+/// stale `@{upstream}` (merge-base = whatever main was at last push).
+fn distance_from_head(dir: &str, from: &str) -> Option<u32> {
+    let out = std::process::Command::new("git")
+        .args(["rev-list", "--count", &format!("{from}..HEAD")])
+        .current_dir(dir)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&out.stdout).trim().parse().ok()
+}
+
 /// Check if the git diff (staged or branch) includes frontend file changes.
 /// Uses the working directory from the hook input.
 ///
@@ -247,11 +264,18 @@ fn merge_base(dir: &str, base_ref: &str) -> Option<String> {
 /// backend-only branch got blamed for `.tsx`/`.css` files in earlier PRs.
 /// The merge-base approach is fetch-agnostic and always scoped to *this*
 /// branch's own changes.
+///
+/// We pick the candidate base whose merge-base is **most recent** (fewest
+/// commits between base and HEAD), not simply the first that resolves. Reason:
+/// after `git rebase origin/main && git push --force-with-lease`, `@{upstream}`
+/// still points at the pre-rebase remote SHA; its merge-base with HEAD is far
+/// older than `origin/main`'s. Preferring the nearer base correctly scopes the
+/// diff to only the commits that are truly "new" on this branch vs. main.
 fn diff_has_frontend_files(cwd: Option<&str>) -> bool {
     let dir = cwd.unwrap_or(".");
 
-    // Candidate base refs, in preference order. First one that yields a
-    // merge-base with HEAD wins.
+    // Candidate base refs. We evaluate ALL of them and pick the one whose
+    // merge-base is closest to HEAD (shortest commit distance).
     let candidates = [
         "@{upstream}",
         "main",
@@ -260,7 +284,18 @@ fn diff_has_frontend_files(cwd: Option<&str>) -> bool {
         "origin/master",
     ];
 
-    let Some(base) = candidates.iter().find_map(|r| merge_base(dir, r)) else {
+    let best_base = candidates
+        .iter()
+        .filter_map(|r| {
+            let base = merge_base(dir, r)?;
+            let distance = distance_from_head(dir, &base)?;
+            Some((distance, base))
+        })
+        // Smallest distance = most recent common ancestor = tightest scope.
+        .min_by_key(|(d, _)| *d)
+        .map(|(_, base)| base);
+
+    let Some(base) = best_base else {
         // No base resolved — allow push.
         return false;
     };
@@ -637,6 +672,113 @@ mod tests {
         assert!(
             !result,
             "Backend-only branch should not be flagged as frontend change"
+        );
+    }
+
+    #[test]
+    fn test_diff_scoped_ignores_stale_upstream_after_rebase() {
+        // Regression for Apr 24 2026: a backend-only branch, after `git rebase
+        // origin/main` + `git push --force-with-lease`, is blocked because
+        // `@{upstream}` still points at the pre-rebase SHA. The merge-base
+        // against that stale upstream is far older than the merge-base against
+        // `origin/main`, so picking the first-resolving candidate incorrectly
+        // scopes the diff to include upstream frontend commits.
+        //
+        // Fix: pick the candidate whose merge-base is *closest* to HEAD.
+        let tmpdir = tempfile::tempdir().unwrap();
+        let repo = tmpdir.path();
+        git(repo, &["init", "-q", "-b", "main"]);
+        git(repo, &["config", "user.email", "t@t.com"]);
+        git(repo, &["config", "user.name", "Test"]);
+
+        // Initial commit on main
+        std::fs::write(repo.join("README.md"), "hi").unwrap();
+        git(repo, &["add", "README.md"]);
+        git(repo, &["commit", "-q", "-m", "init"]);
+
+        // Cut feature branch here — this is the "old" base of the branch.
+        git(repo, &["checkout", "-q", "-b", "feature/backend"]);
+        std::fs::write(repo.join("first-backend.ts"), "export {}").unwrap();
+        git(repo, &["add", "first-backend.ts"]);
+        git(repo, &["commit", "-q", "-m", "feat: first backend commit"]);
+
+        // Set up a fake origin that mirrors this feature branch as its upstream.
+        // We simulate "upstream is the pre-rebase SHA" by creating an
+        // `origin/feature/backend` ref pointing at the current HEAD.
+        let pre_rebase_head = {
+            let out = std::process::Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(repo)
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        // Create a fake remote-tracking ref and point branch.feature/backend's
+        // upstream at it. We skip the `git branch --set-upstream-to` path
+        // because it requires a real refs/heads/... on the remote; the two
+        // `git config` lines below are exactly what it would write.
+        git(
+            repo,
+            &[
+                "update-ref",
+                "refs/remotes/origin/feature/backend",
+                &pre_rebase_head,
+            ],
+        );
+        git(
+            repo,
+            &["config", "branch.feature/backend.remote", "origin"],
+        );
+        git(
+            repo,
+            &[
+                "config",
+                "branch.feature/backend.merge",
+                "refs/heads/feature/backend",
+            ],
+        );
+
+        // Now main advances with a frontend PR (simulating another PR merging
+        // while our branch was in flight).
+        git(repo, &["checkout", "-q", "main"]);
+        std::fs::write(repo.join("App.tsx"), "x").unwrap();
+        git(repo, &["add", "App.tsx"]);
+        git(repo, &["commit", "-q", "-m", "ui: frontend PR lands on main"]);
+        // Mirror it into origin/main so the hook's candidate resolves.
+        let new_main = {
+            let out = std::process::Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(repo)
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        git(
+            repo,
+            &["update-ref", "refs/remotes/origin/main", &new_main],
+        );
+
+        // Rebase feature branch onto the new main — our commit replays on top.
+        git(repo, &["checkout", "-q", "feature/backend"]);
+        git(repo, &["rebase", "-q", "main"]);
+        // Add a second backend commit, the CI fix.
+        std::fs::write(repo.join("ci-fix.ts"), "export {}").unwrap();
+        git(repo, &["add", "ci-fix.ts"]);
+        git(repo, &["commit", "-q", "-m", "fix: ci backend"]);
+
+        // Now simulate the push. @{upstream} (origin/feature/backend) is still
+        // at pre_rebase_head. merge-base(HEAD, @{upstream}) is pre-rebase,
+        // which is BEFORE main advanced with App.tsx. merge-base(HEAD, origin/main)
+        // is the new_main SHA, which is AFTER App.tsx landed.
+        //
+        // The old "first resolving" logic picks @{upstream} → sees App.tsx →
+        // falsely blocks. The fixed "most recent merge-base" logic picks
+        // origin/main → sees only backend files → allows.
+        let result = diff_has_frontend_files(Some(repo.to_str().unwrap()));
+        assert!(
+            !result,
+            "Rebased backend-only branch must not be flagged because \
+             @{{upstream}} still points at pre-rebase SHA",
         );
     }
 
