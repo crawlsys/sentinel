@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **`git_hygiene` falsely blocked worktree edits from sessions with cwd on main**: when Claude's session cwd is the primary repo checkout (typically on `main`) and an Edit/Write targets a file under `.claude/worktrees/*` or `.worktrees/*`, the hook resolved `current_branch` from the session cwd rather than the target file's own repo root — so it always reported `main` and blocked the edit, even though the file lives on a feature branch in a worktree. Four edits were falsely blocked in a single turn before the bug was traced. Fix: when a target `file_path` is extracted from the hook input, resolve the effective repo via `git.repo_root(&file_path)` and call `current_branch` + `is_worktree` on that root; fall back to the session cwd only when `file_path` is absent or outside any repo. Two new regression tests (`test_worktree_edit_from_main_cwd_not_blocked` — session cwd on main but file path inside a worktree on `feat/wt`, must allow; `test_direct_main_edit_still_blocked` — session cwd and file path both on main, must still block) lock in the behaviour. All 594 sentinel-application tests pass.
+
 ### Changed
 
 - **`session_index` hook migrated to hex ports**: the PreCompact hook that indexes session transcripts into Qdrant's `claude-sessions` collection now goes through `ctx.vector_store.upsert_points` + `ctx.fs.read_to_string` instead of constructing `reqwest::Client` and calling `std::fs::read_to_string` + `dirs::home_dir` directly. Dropped the local `QdrantConfig` struct + `load_config` helper — Qdrant config now lives entirely in the `sentinel-infrastructure` adapter, accessed only through the port. Net -40 lines in the hook, one more file off the D-batch port-migration list. 16 unit tests (including a new `InMemoryFs` stub for `parse_transcript` coverage) continue to pass.
