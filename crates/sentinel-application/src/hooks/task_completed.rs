@@ -37,7 +37,7 @@ fn extract_linear_id(subject: &str) -> Option<&str> {
 ///
 /// Injects context reminding the teammate to verify before marking complete.
 /// If the task subject contains `@linear:{ID}`, also injects Linear sync instructions.
-pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
+pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
     let task_subject = input
         .extra
         .get("task_subject")
@@ -128,6 +128,7 @@ pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
         serde_json::Value::String(teammate_name.to_string()),
     );
     crate::channel_events::emit(
+        ctx.fs, ctx.env,
         "task_completed", &summary, meta,
         input.session_id.as_deref(), input.cwd.as_deref(), Some("task_completed"),
     );

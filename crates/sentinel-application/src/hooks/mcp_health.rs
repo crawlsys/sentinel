@@ -159,6 +159,7 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
         meta.insert("tool".into(), serde_json::Value::String(tool_name.to_string()));
         meta.insert("severity".into(), serde_json::Value::String(severity.to_string()));
         crate::channel_events::emit(
+            ctx.fs, ctx.env,
             "mcp_server_failure",
             &format!("MCP server `{server_name}` failed: {error_detail}. Try `mcp__sentinel__mcp_restart_server` to fix."),
             meta,

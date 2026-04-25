@@ -9,7 +9,7 @@ use sentinel_domain::events::{HookInput, HookOutput};
 ///
 /// Logs agent completion for telemetry and emits a channel event
 /// so the sentinel-mcp server can push a notification into the session.
-pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
+pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
     let agent_type = input
         .extra
         .get("agent_type")
@@ -26,6 +26,7 @@ pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
         serde_json::Value::String(agent_type.to_string()),
     );
     crate::channel_events::emit(
+        ctx.fs, ctx.env,
         "agent_completed", &summary, meta,
         input.session_id.as_deref(), input.cwd.as_deref(), Some(agent_type),
     );

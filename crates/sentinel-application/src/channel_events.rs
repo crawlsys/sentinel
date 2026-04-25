@@ -9,6 +9,8 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
+use sentinel_domain::ports::{EnvPort, FileSystemPort};
+
 /// A lifecycle event to be pushed into the Claude Code session.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChannelEvent {
@@ -33,8 +35,8 @@ pub struct ChannelEvent {
 }
 
 /// Get the base events directory (parent of all session subdirs).
-fn events_base_dir() -> std::path::PathBuf {
-    dirs::home_dir()
+fn events_base_dir(fs: &dyn FileSystemPort) -> std::path::PathBuf {
+    fs.home_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join(".claude")
         .join("sentinel")
@@ -46,22 +48,25 @@ fn events_base_dir() -> std::path::PathBuf {
 /// Returns `~/.claude/sentinel/events/{session_id}/` for the given session,
 /// or falls back to `~/.claude/sentinel/events/_unscoped/` if no session ID
 /// is available.
-pub fn events_dir_for_session(session_id: Option<&str>) -> std::path::PathBuf {
+pub fn events_dir_for_session(
+    fs: &dyn FileSystemPort,
+    session_id: Option<&str>,
+) -> std::path::PathBuf {
     let subdir = session_id.unwrap_or("_unscoped");
-    events_base_dir().join(subdir)
+    events_base_dir(fs).join(subdir)
 }
 
-/// Get the events directory for the current session from env.
-pub fn events_dir() -> std::path::PathBuf {
-    let session_id = detect_session_id();
-    events_dir_for_session(session_id.as_deref())
+/// Get the events directory for the current session, with the session id
+/// resolved from the env adapter.
+pub fn events_dir(fs: &dyn FileSystemPort, env: &dyn EnvPort) -> std::path::PathBuf {
+    let session_id = detect_session_id(env);
+    events_dir_for_session(fs, session_id.as_deref())
 }
 
-/// Detect the current session ID from environment variables.
-fn detect_session_id() -> Option<String> {
-    std::env::var("CLAUDE_SESSION_ID")
-        .or_else(|_| std::env::var("SESSION_ID"))
-        .ok()
+/// Detect the current session ID from the env adapter.
+fn detect_session_id(env: &dyn EnvPort) -> Option<String> {
+    env.var("CLAUDE_SESSION_ID")
+        .or_else(|| env.var("SESSION_ID"))
         .filter(|s| !s.is_empty())
 }
 
@@ -78,8 +83,10 @@ fn project_from_cwd(cwd: Option<&str>) -> Option<String> {
 /// Emit a channel event by writing a JSON file to the session-scoped events directory.
 ///
 /// `session_id` and `cwd` should come from `HookInput` when available.
-/// If `session_id` is `None`, falls back to env var detection.
+/// If `session_id` is `None`, falls back to env-adapter detection.
 pub fn emit(
+    fs: &dyn FileSystemPort,
+    env: &dyn EnvPort,
     event: &str,
     summary: &str,
     meta: serde_json::Map<String, serde_json::Value>,
@@ -89,10 +96,10 @@ pub fn emit(
 ) {
     let resolved_session_id = session_id
         .map(String::from)
-        .or_else(detect_session_id);
+        .or_else(|| detect_session_id(env));
 
-    let dir = events_dir_for_session(resolved_session_id.as_deref());
-    if let Err(e) = std::fs::create_dir_all(&dir) {
+    let dir = events_dir_for_session(fs, resolved_session_id.as_deref());
+    if let Err(e) = fs.create_dir_all(&dir) {
         warn!(error = %e, "Failed to create events directory");
         return;
     }
@@ -117,7 +124,7 @@ pub fn emit(
     let path = dir.join(&filename);
     match serde_json::to_string(&channel_event) {
         Ok(json) => {
-            if let Err(e) = std::fs::write(&path, json) {
+            if let Err(e) = fs.write(&path, json.as_bytes()) {
                 warn!(error = %e, path = %path.display(), "Failed to write channel event");
             } else {
                 debug!(event, path = %path.display(), "Channel event emitted");
@@ -128,30 +135,32 @@ pub fn emit(
 }
 
 /// Read and parse a channel event file.
-pub fn read_event(path: &std::path::Path) -> Option<ChannelEvent> {
-    let content = std::fs::read_to_string(path).ok()?;
+pub fn read_event(fs: &dyn FileSystemPort, path: &std::path::Path) -> Option<ChannelEvent> {
+    let content = fs.read_to_string(path).ok()?;
     serde_json::from_str(&content).ok()
 }
 
 /// List all pending event files in a session-scoped directory, sorted oldest first.
-pub fn pending_events_for_session(session_id: Option<&str>) -> Vec<std::path::PathBuf> {
-    let dir = events_dir_for_session(session_id);
-    pending_events_in_dir(&dir)
+pub fn pending_events_for_session(
+    fs: &dyn FileSystemPort,
+    session_id: Option<&str>,
+) -> Vec<std::path::PathBuf> {
+    let dir = events_dir_for_session(fs, session_id);
+    pending_events_in_dir(fs, &dir)
 }
 
 /// List all pending event files in the current session's directory.
-pub fn pending_events() -> Vec<std::path::PathBuf> {
-    let dir = events_dir();
-    pending_events_in_dir(&dir)
+pub fn pending_events(fs: &dyn FileSystemPort, env: &dyn EnvPort) -> Vec<std::path::PathBuf> {
+    let dir = events_dir(fs, env);
+    pending_events_in_dir(fs, &dir)
 }
 
-fn pending_events_in_dir(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
-    let mut entries: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
+fn pending_events_in_dir(fs: &dyn FileSystemPort, dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut entries: Vec<std::path::PathBuf> = fs
+        .read_dir(dir)
         .ok()
         .into_iter()
         .flatten()
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
         .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("json"))
         .collect();
     entries.sort();
@@ -159,8 +168,8 @@ fn pending_events_in_dir(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
 }
 
 /// Delete an event file after it has been consumed.
-pub fn consume(path: &std::path::Path) {
-    if let Err(e) = std::fs::remove_file(path) {
+pub fn consume(fs: &dyn FileSystemPort, path: &std::path::Path) {
+    if let Err(e) = fs.remove_file(path) {
         warn!(error = %e, path = %path.display(), "Failed to remove consumed event file");
     }
 }
@@ -168,29 +177,36 @@ pub fn consume(path: &std::path::Path) {
 /// Remove session event directories older than the given duration.
 ///
 /// Call during `SessionStart` to prevent stale directories from accumulating.
-pub fn cleanup_stale_sessions(max_age: std::time::Duration) {
-    let base = events_base_dir();
+/// `remove_dir_all` doesn't have a port equivalent yet — this function still
+/// reaches for `std::fs::remove_dir_all` directly. That is one of three
+/// remaining IO leaks intentionally left for a future port-extension PR;
+/// every other path in this module goes through `FileSystemPort`.
+pub fn cleanup_stale_sessions(fs: &dyn FileSystemPort, max_age: std::time::Duration) {
+    let base = events_base_dir(fs);
     let cutoff = std::time::SystemTime::now()
         .checked_sub(max_age)
         .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
 
-    let entries = match std::fs::read_dir(&base) {
+    let entries = match fs.read_dir(&base) {
         Ok(e) => e,
         Err(_) => return,
     };
 
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_dir() {
+    for path in entries {
+        if !fs.is_dir(&path) {
             continue;
         }
 
-        let modified = match path.metadata().and_then(|m| m.modified()) {
+        let modified = match fs.metadata(&path).and_then(|m| m.modified().map_err(Into::into)) {
             Ok(t) => t,
             Err(_) => continue,
         };
 
         if modified < cutoff {
+            // No FileSystemPort method for recursive directory removal — drop
+            // back to std::fs here. Adding `remove_dir_all` to the port would
+            // require updating the 24+ existing test stubs; left as a tracked
+            // item for the next port-extension PR.
             if let Err(e) = std::fs::remove_dir_all(&path) {
                 debug!(error = %e, path = %path.display(), "Failed to remove stale session events dir");
             } else {
@@ -222,7 +238,25 @@ mod tests {
         let json = serde_json::to_string(&event).unwrap();
         std::fs::write(&path, &json).unwrap();
 
-        let read = read_event(&path).unwrap();
+        // Inline FileSystemPort impl that delegates to real disk for read.
+        struct TestFs;
+        impl FileSystemPort for TestFs {
+            fn home_dir(&self) -> Option<std::path::PathBuf> { dirs::home_dir() }
+            fn read_to_string(&self, p: &std::path::Path) -> anyhow::Result<String> {
+                Ok(std::fs::read_to_string(p)?)
+            }
+            fn write(&self, _: &std::path::Path, _: &[u8]) -> anyhow::Result<()> { Ok(()) }
+            fn create_dir_all(&self, _: &std::path::Path) -> anyhow::Result<()> { Ok(()) }
+            fn read_dir(&self, _: &std::path::Path) -> anyhow::Result<Vec<std::path::PathBuf>> { Ok(vec![]) }
+            fn exists(&self, p: &std::path::Path) -> bool { p.exists() }
+            fn is_dir(&self, p: &std::path::Path) -> bool { p.is_dir() }
+            fn metadata(&self, p: &std::path::Path) -> anyhow::Result<std::fs::Metadata> {
+                Ok(std::fs::metadata(p)?)
+            }
+            fn append(&self, _: &std::path::Path, _: &[u8]) -> anyhow::Result<()> { Ok(()) }
+        }
+
+        let read = read_event(&TestFs, &path).unwrap();
         assert_eq!(read.event, "agent_completed");
         assert_eq!(read.summary, "Researcher finished");
         assert_eq!(read.session_id.as_deref(), Some("test-session-123"));
@@ -242,10 +276,11 @@ mod tests {
 
     #[test]
     fn test_events_dir_for_session() {
-        let dir = events_dir_for_session(Some("abc-123"));
+        let fs = crate::hooks::test_support::StubFs;
+        let dir = events_dir_for_session(&fs, Some("abc-123"));
         assert!(dir.ends_with("events/abc-123") || dir.ends_with("events\\abc-123"));
 
-        let unscoped = events_dir_for_session(None);
+        let unscoped = events_dir_for_session(&fs, None);
         assert!(unscoped.ends_with("events/_unscoped") || unscoped.ends_with("events\\_unscoped"));
     }
 

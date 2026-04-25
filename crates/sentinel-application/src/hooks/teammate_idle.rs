@@ -8,7 +8,7 @@ use sentinel_domain::events::{HookEvent, HookInput, HookOutput};
 /// Process TeammateIdle event
 ///
 /// Injects context reminding the teammate to check for remaining work.
-pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
+pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
     let teammate_name = input
         .extra
         .get("teammate_name")
@@ -45,6 +45,7 @@ pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
         serde_json::Value::String(team_name.to_string()),
     );
     crate::channel_events::emit(
+        ctx.fs, ctx.env,
         "teammate_idle", &summary, meta,
         input.session_id.as_deref(), input.cwd.as_deref(), Some(teammate_name),
     );

@@ -139,6 +139,7 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
         serde_json::Value::String(target_path.display().to_string()),
     );
     crate::channel_events::emit(
+        ctx.fs, ctx.env,
         "plan_organized", &summary, meta,
         input.session_id.as_deref(), input.cwd.as_deref(), Some("plan_organizer"),
     );

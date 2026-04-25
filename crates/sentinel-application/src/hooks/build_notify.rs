@@ -32,7 +32,7 @@ const DEPLOY_PATTERNS: &[&str] = &[
 ];
 
 /// Process PostToolUse — emit channel events for builds and deploys.
-pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
+pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
     // Only care about Bash tool completions
     if input.tool_name.as_deref() != Some("Bash") {
         return HookOutput::allow();
@@ -81,6 +81,7 @@ pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
             serde_json::Value::Bool(succeeded),
         );
         crate::channel_events::emit(
+            ctx.fs, ctx.env,
             "build_completed", &summary, meta,
             input.session_id.as_deref(), input.cwd.as_deref(), Some("build_notify"),
         );
@@ -130,6 +131,7 @@ pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
             );
         }
         crate::channel_events::emit(
+            ctx.fs, ctx.env,
             "deploy_completed", &summary, meta,
             input.session_id.as_deref(), input.cwd.as_deref(), Some("build_notify"),
         );
