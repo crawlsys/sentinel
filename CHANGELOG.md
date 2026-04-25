@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Changed
+
+- **`session_index` hook migrated to hex ports**: the PreCompact hook that indexes session transcripts into Qdrant's `claude-sessions` collection now goes through `ctx.vector_store.upsert_points` + `ctx.fs.read_to_string` instead of constructing `reqwest::Client` and calling `std::fs::read_to_string` + `dirs::home_dir` directly. Dropped the local `QdrantConfig` struct + `load_config` helper — Qdrant config now lives entirely in the `sentinel-infrastructure` adapter, accessed only through the port. Net -40 lines in the hook, one more file off the D-batch port-migration list. 16 unit tests (including a new `InMemoryFs` stub for `parse_transcript` coverage) continue to pass.
+
 ### Added
 
 - **Live `Active Tasks` section in generated `~/.claude/CLAUDE.md`**: new `render_tasks_section(cwd)` helper reads `~/.claude/persistent-tasks/{project_hash}/tasks.json` (same schema `task_persist.rs` writes) and renders a compact markdown table of non-completed tasks (ID, subject, status, priority, blocked-by) at the top of the generated CLAUDE.md. Auto-regenerated after every `TaskCreated` and `TaskCompleted` hook event so the snapshot is always current — no drift between what `TaskList` shows and what CLAUDE.md says is live. Pure filesystem read on the hot path; graceful empty-section fallback when no persisted tasks exist for the current project.
