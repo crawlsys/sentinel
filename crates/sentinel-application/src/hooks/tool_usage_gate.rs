@@ -72,8 +72,8 @@ fn is_autopilot(env: &dyn EnvPort) -> bool {
 /// encountered going backwards, which is the current state. The inner block
 /// iteration also runs in reverse so the latest `tool_use` within a single
 /// assistant message wins when multiple plan signals appear in one message.
-pub fn detect_plan_mode_from_transcript(transcript_path: &Path) -> bool {
-    let content = match std::fs::read_to_string(transcript_path) {
+pub fn detect_plan_mode_from_transcript(fs: &dyn FileSystemPort, transcript_path: &Path) -> bool {
+    let content = match fs.read_to_string(transcript_path) {
         Ok(c) => c,
         Err(_) => return false,
     };
@@ -347,7 +347,7 @@ pub fn process(input: &HookInput, fs: &dyn FileSystemPort, env: &dyn EnvPort) ->
         .transcript_path
         .as_deref()
         .filter(|p| !p.is_empty())
-        .map(|p| detect_plan_mode_from_transcript(Path::new(p)));
+        .map(|p| detect_plan_mode_from_transcript(fs, Path::new(p)));
 
     let plan_check_ok = match in_plan_mode {
         Some(true) => true,
@@ -459,7 +459,16 @@ mod tests {
 
     impl FileSystemPort for MockFs {
         fn home_dir(&self) -> Option<PathBuf> { Some(PathBuf::from("/mock/home")) }
-        fn read_to_string(&self, _: &Path) -> anyhow::Result<String> { anyhow::bail!("not found") }
+        fn read_to_string(&self, p: &Path) -> anyhow::Result<String> {
+            // Pass-through to real disk for transcript files (used by
+            // `detect_plan_mode_from_transcript`); other reads are not used
+            // by the gate logic that exercises MockFs.
+            if p.exists() {
+                Ok(std::fs::read_to_string(p)?)
+            } else {
+                anyhow::bail!("not found")
+            }
+        }
         fn write(&self, path: &Path, _: &[u8]) -> anyhow::Result<()> {
             self.existing_files.lock().unwrap().insert(path.to_path_buf());
             Ok(())
@@ -471,6 +480,27 @@ mod tests {
         }
         fn is_dir(&self, _: &Path) -> bool { false }
         fn metadata(&self, _: &Path) -> anyhow::Result<std::fs::Metadata> { anyhow::bail!("no") }
+        fn append(&self, _: &Path, _: &[u8]) -> anyhow::Result<()> { Ok(()) }
+    }
+
+    /// FileSystemPort that delegates to the real disk — needed by tests that
+    /// exercise `detect_plan_mode_from_transcript` against a real `tempfile`.
+    /// Only `read_to_string` is wired up; the rest fall through to defaults
+    /// (the function under test only reads).
+    struct RealTestFs;
+    impl FileSystemPort for RealTestFs {
+        fn home_dir(&self) -> Option<PathBuf> { dirs::home_dir() }
+        fn read_to_string(&self, path: &Path) -> anyhow::Result<String> {
+            Ok(std::fs::read_to_string(path)?)
+        }
+        fn write(&self, _: &Path, _: &[u8]) -> anyhow::Result<()> { Ok(()) }
+        fn create_dir_all(&self, _: &Path) -> anyhow::Result<()> { Ok(()) }
+        fn read_dir(&self, _: &Path) -> anyhow::Result<Vec<PathBuf>> { Ok(vec![]) }
+        fn exists(&self, path: &Path) -> bool { path.exists() }
+        fn is_dir(&self, path: &Path) -> bool { path.is_dir() }
+        fn metadata(&self, path: &Path) -> anyhow::Result<std::fs::Metadata> {
+            Ok(std::fs::metadata(path)?)
+        }
         fn append(&self, _: &Path, _: &[u8]) -> anyhow::Result<()> { Ok(()) }
     }
 
@@ -954,7 +984,7 @@ mod tests {
     #[test]
     fn test_detect_plan_mode_returns_true_after_enter_plan_mode() {
         let t = write_transcript(&[assistant_tool_use("EnterPlanMode")]);
-        assert!(detect_plan_mode_from_transcript(t.path()));
+        assert!(detect_plan_mode_from_transcript(&RealTestFs, t.path()));
     }
 
     #[test]
@@ -963,18 +993,18 @@ mod tests {
             assistant_tool_use("EnterPlanMode"),
             assistant_tool_use("ExitPlanMode"),
         ]);
-        assert!(!detect_plan_mode_from_transcript(t.path()));
+        assert!(!detect_plan_mode_from_transcript(&RealTestFs, t.path()));
     }
 
     #[test]
     fn test_detect_plan_mode_returns_false_when_no_signal_present() {
         let t = write_transcript(&[assistant_tool_use("Read")]);
-        assert!(!detect_plan_mode_from_transcript(t.path()));
+        assert!(!detect_plan_mode_from_transcript(&RealTestFs, t.path()));
     }
 
     #[test]
     fn test_detect_plan_mode_returns_false_when_file_missing() {
-        assert!(!detect_plan_mode_from_transcript(Path::new("/does/not/exist")));
+        assert!(!detect_plan_mode_from_transcript(&RealTestFs, Path::new("/does/not/exist")));
     }
 
     #[test]
@@ -984,7 +1014,7 @@ mod tests {
             assistant_tool_use("Read"),
             assistant_tool_use("EnterPlanMode"),
         ]);
-        assert!(detect_plan_mode_from_transcript(t.path()));
+        assert!(detect_plan_mode_from_transcript(&RealTestFs, t.path()));
     }
 
     #[test]
@@ -997,7 +1027,7 @@ mod tests {
             }
         });
         let t = write_transcript(&[user_entry]);
-        assert!(!detect_plan_mode_from_transcript(t.path()));
+        assert!(!detect_plan_mode_from_transcript(&RealTestFs, t.path()));
     }
 
     #[test]
@@ -1120,7 +1150,7 @@ mod tests {
         // Walking backwards: line 4 is skipped (malformed), line 3 is
         // EnterPlanMode → returns true without reading further.
         assert!(
-            detect_plan_mode_from_transcript(f.path()),
+            detect_plan_mode_from_transcript(&RealTestFs, f.path()),
             "malformed lines must be skipped; last valid signal (EnterPlanMode) must win"
         );
     }
@@ -1133,7 +1163,7 @@ mod tests {
         // Write nothing — empty file.
         f.flush().unwrap();
         assert!(
-            !detect_plan_mode_from_transcript(f.path()),
+            !detect_plan_mode_from_transcript(&RealTestFs, f.path()),
             "empty transcript must return false without panicking"
         );
     }
@@ -1155,7 +1185,7 @@ mod tests {
         });
         let t = write_transcript(&[entry]);
         assert!(
-            detect_plan_mode_from_transcript(t.path()),
+            detect_plan_mode_from_transcript(&RealTestFs, t.path()),
             "EnterPlanMode in a multi-tool-use message must be detected"
         );
     }
@@ -1177,7 +1207,7 @@ mod tests {
         });
         let t = write_transcript(&[entry]);
         assert!(
-            detect_plan_mode_from_transcript(t.path()),
+            detect_plan_mode_from_transcript(&RealTestFs, t.path()),
             "within a single message the latest tool_use must win — EnterPlanMode after ExitPlanMode should yield plan mode"
         );
     }
@@ -1192,7 +1222,7 @@ mod tests {
             assistant_tool_use("Edit"),
         ]);
         assert!(
-            !detect_plan_mode_from_transcript(t.path()),
+            !detect_plan_mode_from_transcript(&RealTestFs, t.path()),
             "unrelated tool names must not trigger plan-mode detection"
         );
     }
@@ -1239,7 +1269,7 @@ mod tests {
         .unwrap();
 
         assert!(
-            !detect_plan_mode_from_transcript(f.path()),
+            !detect_plan_mode_from_transcript(&RealTestFs, f.path()),
             "last line is ExitPlanMode so result must be false (last signal wins)"
         );
     }

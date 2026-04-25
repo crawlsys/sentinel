@@ -36,7 +36,7 @@ const FRONTEND_EXTENSIONS: &[&str] = &[".tsx", ".jsx", ".css", ".scss", ".styled
 /// Path to the Steel test state file for a given session.
 /// **Attack #61 fix**: Moved from world-writable temp_dir() to sentinel's
 /// protected directory. Also sanitizes session_id to prevent path traversal.
-fn state_file_path(session_id: &str) -> PathBuf {
+fn state_file_path(fs: &dyn super::FileSystemPort, session_id: &str) -> PathBuf {
     // Sanitize session_id — only allow alphanumeric, hyphen, underscore
     let safe_id: String = session_id
         .chars()
@@ -49,7 +49,7 @@ fn state_file_path(session_id: &str) -> PathBuf {
         safe_id
     };
 
-    dirs::home_dir()
+    fs.home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".claude")
         .join("sentinel")
@@ -58,15 +58,15 @@ fn state_file_path(session_id: &str) -> PathBuf {
 }
 
 /// Check if a passing Steel test exists for this session within the validity window
-/// (Public wrapper for CLI access)
-pub fn has_recent_steel_test_pub(session_id: &str) -> bool {
-    has_recent_steel_test(session_id)
+/// (Public wrapper for CLI access — caller injects the FS adapter).
+pub fn has_recent_steel_test_pub(fs: &dyn super::FileSystemPort, session_id: &str) -> bool {
+    has_recent_steel_test(fs, session_id)
 }
 
 /// Check if a passing Steel test exists for this session within the validity window
-fn has_recent_steel_test(session_id: &str) -> bool {
-    let path = state_file_path(session_id);
-    let content = match std::fs::read_to_string(&path) {
+fn has_recent_steel_test(fs: &dyn super::FileSystemPort, session_id: &str) -> bool {
+    let path = state_file_path(fs, session_id);
+    let content = match fs.read_to_string(&path) {
         Ok(c) => c,
         Err(_) => return false,
     };
@@ -121,13 +121,13 @@ fn repo_name_from_cwd(cwd: &str) -> Option<String> {
 /// AND that project has steel_test_email configured.
 ///
 /// Accepts an optional override path for testing; uses ~/.claude/skills/linear/projects/ by default.
-fn repo_has_steel_config_in(cwd: Option<&str>, projects_dir: Option<&std::path::Path>) -> bool {
+fn repo_has_steel_config_in(fs: &dyn super::FileSystemPort, cwd: Option<&str>, projects_dir: Option<&std::path::Path>) -> bool {
     let repo = match cwd.and_then(repo_name_from_cwd) {
         Some(r) => r,
         None => return false, // No cwd → can't determine repo → allow
     };
 
-    let default_dir = dirs::home_dir().map(|h| {
+    let default_dir = fs.home_dir().map(|h| {
         h.join(".claude")
             .join("skills")
             .join("linear")
@@ -137,22 +137,21 @@ fn repo_has_steel_config_in(cwd: Option<&str>, projects_dir: Option<&std::path::
     let projects_dir = match projects_dir {
         Some(d) => d.to_path_buf(),
         None => match default_dir {
-            Some(d) if d.is_dir() => d,
+            Some(d) if fs.is_dir(&d) => d,
             _ => return false,
         },
     };
 
-    if !projects_dir.is_dir() {
+    if !fs.is_dir(&projects_dir) {
         return false;
     }
 
-    let entries = match std::fs::read_dir(&projects_dir) {
+    let entries = match fs.read_dir(&projects_dir) {
         Ok(e) => e,
         Err(_) => return false,
     };
 
-    for entry in entries.flatten() {
-        let path = entry.path();
+    for path in entries {
         if path.extension().map_or(true, |e| e != "md") {
             continue;
         }
@@ -163,7 +162,7 @@ fn repo_has_steel_config_in(cwd: Option<&str>, projects_dir: Option<&std::path::
             continue;
         }
 
-        if let Ok(content) = std::fs::read_to_string(&path) {
+        if let Ok(content) = fs.read_to_string(&path) {
             // Must have steel_test_email to be a Steel-configured project
             if !content.contains("steel_test_email") {
                 continue;
@@ -221,8 +220,8 @@ fn repo_matches_project(repo: &str, content_lower: &str) -> bool {
 }
 
 /// Check if the current repo has Steel test config (default projects path)
-fn repo_has_steel_config(cwd: Option<&str>) -> bool {
-    repo_has_steel_config_in(cwd, None)
+fn repo_has_steel_config(fs: &dyn super::FileSystemPort, cwd: Option<&str>) -> bool {
+    repo_has_steel_config_in(fs, cwd, None)
 }
 
 /// Check if the git diff (staged or branch) includes frontend file changes.
@@ -281,18 +280,18 @@ fn diff_has_frontend_files(git: &dyn super::GitStatusPort, cwd: Option<&str>) ->
 
 /// Write the Steel test state file after a successful Steel session.
 /// Called from the PostToolUse handler when `mcp__steel__release_session` succeeds.
-pub fn record_steel_test_passed(session_id: &str) {
-    let path = state_file_path(session_id);
+pub fn record_steel_test_passed(fs: &dyn super::FileSystemPort, session_id: &str) {
+    let path = state_file_path(fs, session_id);
     // Ensure parent directory exists (Attack #61: now in ~/.claude/sentinel/steel-test/)
     if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+        let _ = fs.create_dir_all(parent);
     }
     let state = serde_json::json!({
         "passed": true,
         "sessionId": session_id,
         "timestamp": Utc::now().to_rfc3339()
     });
-    if let Err(e) = std::fs::write(&path, serde_json::to_string(&state).unwrap_or_default()) {
+    if let Err(e) = fs.write(&path, serde_json::to_string(&state).unwrap_or_default().as_bytes()) {
         tracing::warn!("Failed to write Steel test state file: {e}");
     } else {
         tracing::debug!("Steel test state recorded at {}", path.display());
@@ -305,7 +304,7 @@ pub fn record_steel_test_passed(session_id: &str) {
 /// 2. Bash tool result containing `STEEL_TEST_PASS` — CDP/Puppeteer test completed
 ///
 /// Should be called from the PostToolUse event dispatch in hook_cmd.rs.
-pub fn process_post_tool(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
+pub fn process_post_tool(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
     let tool = match &input.tool_name {
         Some(name) => name.as_str(),
         None => return HookOutput::allow(),
@@ -315,7 +314,7 @@ pub fn process_post_tool(input: &HookInput, _ctx: &super::HookContext<'_>) -> Ho
 
     // Path 1: Steel MCP release_session
     if tool == "mcp__steel__release_session" {
-        record_steel_test_passed(session_id);
+        record_steel_test_passed(ctx.fs, session_id);
         return HookOutput::allow();
     }
 
@@ -329,7 +328,7 @@ pub fn process_post_tool(input: &HookInput, _ctx: &super::HookContext<'_>) -> Ho
             .and_then(|r| r.as_str())
             .map_or(false, |s| s.contains("STEEL_TEST_PASS"));
         if has_marker {
-            record_steel_test_passed(session_id);
+            record_steel_test_passed(ctx.fs, session_id);
         }
     }
 
@@ -365,7 +364,7 @@ pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
 
     // Check if THIS repo's project has Steel test config (not all projects globally)
     let cwd = input.cwd.as_deref();
-    if !repo_has_steel_config(cwd) {
+    if !repo_has_steel_config(ctx.fs, cwd) {
         return HookOutput::allow();
     }
 
@@ -379,7 +378,7 @@ pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
     let session_id = input.session_id.as_deref().unwrap_or("unknown");
 
     // Check if Steel test passed recently
-    if has_recent_steel_test(session_id) {
+    if has_recent_steel_test(ctx.fs, session_id) {
         return HookOutput::allow();
     }
 
@@ -410,6 +409,51 @@ mod tests {
     use super::*;
     use std::io::Write as IoWrite;
 
+    /// Real-disk FileSystemPort stub for tests that use tempfile-backed
+    /// directories. Only the methods actually exercised here are wired up;
+    /// the rest fall through to default behaviour.
+    struct RealFsTest;
+    impl super::super::FileSystemPort for RealFsTest {
+        fn home_dir(&self) -> Option<std::path::PathBuf> { dirs::home_dir() }
+        fn read_to_string(&self, p: &std::path::Path) -> anyhow::Result<String> {
+            Ok(std::fs::read_to_string(p)?)
+        }
+        fn write(&self, p: &std::path::Path, c: &[u8]) -> anyhow::Result<()> {
+            if let Some(parent) = p.parent() { let _ = std::fs::create_dir_all(parent); }
+            Ok(std::fs::write(p, c)?)
+        }
+        fn create_dir_all(&self, p: &std::path::Path) -> anyhow::Result<()> {
+            Ok(std::fs::create_dir_all(p)?)
+        }
+        fn read_dir(&self, p: &std::path::Path) -> anyhow::Result<Vec<std::path::PathBuf>> {
+            Ok(std::fs::read_dir(p)?.filter_map(|e| e.ok().map(|e| e.path())).collect())
+        }
+        fn exists(&self, p: &std::path::Path) -> bool { p.exists() }
+        fn is_dir(&self, p: &std::path::Path) -> bool { p.is_dir() }
+        fn metadata(&self, p: &std::path::Path) -> anyhow::Result<std::fs::Metadata> {
+            Ok(std::fs::metadata(p)?)
+        }
+        fn append(&self, p: &std::path::Path, c: &[u8]) -> anyhow::Result<()> {
+            use std::io::Write;
+            if let Some(parent) = p.parent() { let _ = std::fs::create_dir_all(parent); }
+            let mut f = std::fs::OpenOptions::new().create(true).append(true).open(p)?;
+            f.write_all(c)?;
+            Ok(())
+        }
+    }
+
+    /// Build a `HookContext` whose `fs` is the real-disk adapter so
+    /// tests of `record_steel_test_passed` actually persist a file.
+    fn real_fs_ctx() -> super::super::HookContext<'static> {
+        use crate::hooks::test_support::*;
+        let git: &'static StubGit = Box::leak(Box::new(StubGit));
+        let fs: &'static RealFsTest = Box::leak(Box::new(RealFsTest));
+        let process: &'static StubProcess = Box::leak(Box::new(StubProcess));
+        let memory_mcp: &'static StubMemoryMcp = Box::leak(Box::new(StubMemoryMcp));
+        let env: &'static StubEnv = Box::leak(Box::new(StubEnv::new()));
+        super::super::HookContext { git, vector_store: None, fs, process, llm: None, memory_mcp, env }
+    }
+
     #[test]
     fn test_allows_non_bash_tool() {
         let input = HookInput {
@@ -435,7 +479,7 @@ mod tests {
     fn test_allows_push_when_no_steel_config() {
         // Use an empty temp dir — no project config files with steel settings
         let tmpdir = tempfile::tempdir().unwrap();
-        let result = repo_has_steel_config_in(Some("/fake/path/some-repo"), Some(tmpdir.path()));
+        let result = repo_has_steel_config_in(&RealFsTest, Some("/fake/path/some-repo"), Some(tmpdir.path()));
         assert!(!result, "Empty directory should have no steel config");
     }
 
@@ -450,7 +494,7 @@ mod tests {
         .unwrap();
         // Repo name "firefly-pro-crm" contains alias "crm" → match
         let result =
-            repo_has_steel_config_in(Some("/fake/path/firefly-pro-crm"), Some(tmpdir.path()));
+            repo_has_steel_config_in(&RealFsTest, Some("/fake/path/firefly-pro-crm"), Some(tmpdir.path()));
         assert!(
             result,
             "Should match repo 'firefly-pro-crm' against alias 'crm'"
@@ -467,7 +511,7 @@ mod tests {
         )
         .unwrap();
         // Repo name "sentinel" doesn't match any alias → no block
-        let result = repo_has_steel_config_in(Some("/fake/path/sentinel"), Some(tmpdir.path()));
+        let result = repo_has_steel_config_in(&RealFsTest, Some("/fake/path/sentinel"), Some(tmpdir.path()));
         assert!(
             !result,
             "Should NOT match repo 'sentinel' against firefly aliases"
@@ -484,7 +528,7 @@ mod tests {
             "name: myproject\naliases: [\"myapp\"]\nstaging_url: https://staging.example.com",
         )
         .unwrap();
-        let result = repo_has_steel_config_in(Some("/fake/path/myproject"), Some(tmpdir.path()));
+        let result = repo_has_steel_config_in(&RealFsTest, Some("/fake/path/myproject"), Some(tmpdir.path()));
         assert!(!result, "Should NOT match project without steel_test_email");
     }
 
@@ -503,7 +547,7 @@ mod tests {
     #[test]
     fn test_allows_push_with_recent_steel_test() {
         let session_id = "test-steel-recent";
-        let state_path = state_file_path(session_id);
+        let state_path = state_file_path(&RealFsTest, session_id);
 
         // Write a valid recent state file
         if let Some(parent) = state_path.parent() {
@@ -533,14 +577,14 @@ mod tests {
     #[test]
     fn test_expired_steel_test_not_valid() {
         let session_id = "test-steel-expired";
-        let result = has_recent_steel_test(session_id);
+        let result = has_recent_steel_test(&RealFsTest, session_id);
         assert!(!result);
     }
 
     #[test]
     fn test_mismatched_session_not_valid() {
         let session_id = "test-steel-mismatch";
-        let state_path = state_file_path(session_id);
+        let state_path = state_file_path(&RealFsTest, session_id);
         if let Some(parent) = state_path.parent() {
             std::fs::create_dir_all(parent).unwrap();
         }
@@ -552,7 +596,7 @@ mod tests {
         });
         std::fs::write(&state_path, serde_json::to_string(&state).unwrap()).unwrap();
 
-        let result = has_recent_steel_test(session_id);
+        let result = has_recent_steel_test(&RealFsTest, session_id);
         assert!(!result);
 
         let _ = std::fs::remove_file(&state_path);
@@ -813,12 +857,12 @@ mod tests {
     #[test]
     fn test_record_steel_test_passed_writes_state_file() {
         let session_id = "test-record-steel";
-        let state_path = state_file_path(session_id);
+        let state_path = state_file_path(&RealFsTest, session_id);
 
         // Ensure clean state
         let _ = std::fs::remove_file(&state_path);
 
-        record_steel_test_passed(session_id);
+        record_steel_test_passed(&RealFsTest, session_id);
 
         assert!(state_path.exists(), "State file should be created");
         let content = std::fs::read_to_string(&state_path).unwrap();
@@ -828,7 +872,7 @@ mod tests {
         assert!(state["timestamp"].is_string());
 
         // Verify it's recognized as a recent test
-        assert!(has_recent_steel_test(session_id));
+        assert!(has_recent_steel_test(&RealFsTest, session_id));
 
         // Cleanup
         let _ = std::fs::remove_file(&state_path);
@@ -837,7 +881,7 @@ mod tests {
     #[test]
     fn test_process_post_tool_records_on_release() {
         let session_id = "test-post-tool-release";
-        let state_path = state_file_path(session_id);
+        let state_path = state_file_path(&RealFsTest, session_id);
         let _ = std::fs::remove_file(&state_path);
 
         // Claude Code does NOT populate tool_result for MCP tools —
@@ -848,10 +892,11 @@ mod tests {
             session_id: Some(session_id.to_string()),
             ..Default::default()
         };
-        let ctx = crate::hooks::test_support::stub_ctx(); let output = process_post_tool(&input, &ctx);
+        let ctx = real_fs_ctx();
+        let output = process_post_tool(&input, &ctx);
         assert!(output.blocked.is_none());
         assert!(
-            has_recent_steel_test(session_id),
+            has_recent_steel_test(&RealFsTest, session_id),
             "State file should be written after release"
         );
 
@@ -861,7 +906,7 @@ mod tests {
     #[test]
     fn test_process_post_tool_ignores_bash_without_marker() {
         let session_id = "test-post-tool-no-marker";
-        let state_path = state_file_path(session_id);
+        let state_path = state_file_path(&RealFsTest, session_id);
         let _ = std::fs::remove_file(&state_path);
 
         let input = HookInput {
@@ -870,7 +915,8 @@ mod tests {
             session_id: Some(session_id.to_string()),
             ..Default::default()
         };
-        let ctx = crate::hooks::test_support::stub_ctx(); let output = process_post_tool(&input, &ctx);
+        let ctx = real_fs_ctx();
+        let output = process_post_tool(&input, &ctx);
         assert!(output.blocked.is_none());
         assert!(
             !state_path.exists(),
@@ -881,7 +927,7 @@ mod tests {
     #[test]
     fn test_process_post_tool_records_on_cdp_marker() {
         let session_id = "test-post-tool-cdp";
-        let state_path = state_file_path(session_id);
+        let state_path = state_file_path(&RealFsTest, session_id);
         let _ = std::fs::remove_file(&state_path);
 
         let input = HookInput {
@@ -890,10 +936,11 @@ mod tests {
             session_id: Some(session_id.to_string()),
             ..Default::default()
         };
-        let ctx = crate::hooks::test_support::stub_ctx(); let output = process_post_tool(&input, &ctx);
+        let ctx = real_fs_ctx();
+        let output = process_post_tool(&input, &ctx);
         assert!(output.blocked.is_none());
         assert!(
-            has_recent_steel_test(session_id),
+            has_recent_steel_test(&RealFsTest, session_id),
             "State file should be written after CDP test with STEEL_TEST_PASS marker"
         );
 
@@ -903,7 +950,7 @@ mod tests {
     #[test]
     fn test_process_post_tool_ignores_non_bash_non_steel() {
         let session_id = "test-post-tool-read";
-        let state_path = state_file_path(session_id);
+        let state_path = state_file_path(&RealFsTest, session_id);
         let _ = std::fs::remove_file(&state_path);
 
         let input = HookInput {
@@ -912,7 +959,8 @@ mod tests {
             session_id: Some(session_id.to_string()),
             ..Default::default()
         };
-        let ctx = crate::hooks::test_support::stub_ctx(); let output = process_post_tool(&input, &ctx);
+        let ctx = real_fs_ctx();
+        let output = process_post_tool(&input, &ctx);
         assert!(output.blocked.is_none());
         assert!(
             !state_path.exists(),

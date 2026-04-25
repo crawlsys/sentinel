@@ -54,7 +54,7 @@ struct PhaseFileInfo {
 /// - Skill name and file name contain only safe ASCII characters
 /// - Symlinks resolve to a path still under `~/.claude/skills/` (PathBuf API)
 /// - `trusted` flag indicates whether canonical validation passed
-fn extract_phase_file(tool_input: &serde_json::Value) -> Option<PhaseFileInfo> {
+fn extract_phase_file(fs: &dyn super::FileSystemPort, tool_input: &serde_json::Value) -> Option<PhaseFileInfo> {
     use std::path::{Component, Path};
 
     // tool_input for Read is { "file_path": "..." }
@@ -134,7 +134,8 @@ fn extract_phase_file(tool_input: &serde_json::Value) -> Option<PhaseFileInfo> {
             // Empty PathBuf makes skills_dir ".claude/skills" (relative),
             // which never matches canonical absolute paths — all files
             // become "untrusted" but phases_read is still recorded.
-            let skills_dir = dirs::home_dir()
+            let skills_dir = fs
+                .home_dir()
                 .expect("[sentinel] FATAL: Cannot determine home directory")
                 .join(".claude")
                 .join("skills");
@@ -261,7 +262,7 @@ pub fn process(
     // If this is a Bash call, check if the command matches any blocked patterns
     // from the active workflow. This closes the CLI escape vector.
     if tool_name == "Bash" {
-        if let Some(block) = check_blocked_bash_patterns(state, workflows, input) {
+        if let Some(block) = check_blocked_bash_patterns(fs, state, workflows, input) {
             return block;
         }
     }
@@ -269,7 +270,7 @@ pub fn process(
     // If this is a Read() call, check if it's reading a phase file
     if tool_name == "Read" {
         if let Some(ref tool_input) = input.tool_input {
-            if let Some(info) = extract_phase_file(tool_input) {
+            if let Some(info) = extract_phase_file(fs, tool_input) {
                 // Only record phase reads AND advance workflow for trusted files
                 // (exist on disk, canonicalize to ~/.claude/skills/).
                 // Untrusted files are NOT recorded — prevents phantom phase
@@ -414,7 +415,7 @@ pub fn process(
     //   5. ~/.claude.json — MCP server registrations
     // Active when ANY workflow has been touched in this session.
     if tool_name == "Write" || tool_name == "Edit" || tool_name == "NotebookEdit" {
-        if let Some(block) = check_protected_path_write(state, workflows, input) {
+        if let Some(block) = check_protected_path_write(fs, state, workflows, input) {
             return block;
         }
     }
@@ -477,6 +478,7 @@ pub fn process(
 /// Checks patterns across ALL workflows with active state (not just
 /// `active_skill`), preventing the skill-switch bypass.
 fn check_blocked_bash_patterns(
+    fs: &dyn super::FileSystemPort,
     state: &SessionState,
     workflows: &HashMap<String, SkillWorkflow>,
     input: &HookInput,
@@ -489,7 +491,7 @@ fn check_blocked_bash_patterns(
     // are protected but `echo '{}' > ~/.claude/sentinel/state/sess.json`
     // can tamper with state files directly (Attack #37).
     if !state.workflows.is_empty() || state.active_skill.is_some() {
-        if let Some(block) = check_bash_redirect_to_protected(cmd, input) {
+        if let Some(block) = check_bash_redirect_to_protected(fs, cmd, input) {
             return Some(block);
         }
     }
@@ -920,7 +922,7 @@ fn normalize_shell_quoting(cmd: &str) -> String {
 ///
 /// Catches: `> path`, `>> path`, `tee path`, `tee -a path`, `cp src path`.
 /// Uses the same textual check as Write/Edit protection.
-fn check_bash_redirect_to_protected(cmd: &str, input: &HookInput) -> Option<HookOutput> {
+fn check_bash_redirect_to_protected(fs: &dyn super::FileSystemPort, cmd: &str, input: &HookInput) -> Option<HookOutput> {
     // Extract all potential file targets from redirects and tee commands.
     // Pattern: anything followed by > or >> followed by a path
     // **Attack #70 fix**: Extended to catch mv, ln, install, dd of=, curl -o, wget -O
@@ -940,7 +942,7 @@ fn check_bash_redirect_to_protected(cmd: &str, input: &HookInput) -> Option<Hook
                 // **Attack #90 fix**: Panic instead of empty fallback — empty PathBuf
                 // makes all ~/‐prefixed protected path checks silently pass.
                 let home =
-                    dirs::home_dir().expect("[sentinel] FATAL: Cannot determine home directory");
+                    fs.home_dir().expect("[sentinel] FATAL: Cannot determine home directory");
                 format!(
                     "{}/{}",
                     home.to_string_lossy().replace('\\', "/"),
@@ -983,7 +985,7 @@ fn check_bash_redirect_to_protected(cmd: &str, input: &HookInput) -> Option<Hook
                 // **Attack #90 fix**: Panic instead of empty fallback — empty PathBuf
                 // makes all ~/‐prefixed protected path checks silently pass.
                 let home =
-                    dirs::home_dir().expect("[sentinel] FATAL: Cannot determine home directory");
+                    fs.home_dir().expect("[sentinel] FATAL: Cannot determine home directory");
                 format!(
                     "{}/{}",
                     home.to_string_lossy().replace('\\', "/"),
@@ -1027,6 +1029,7 @@ fn check_bash_redirect_to_protected(cmd: &str, input: &HookInput) -> Option<Hook
 ///
 /// Uses both textual and canonical path checks to defeat symlink/junction bypass.
 fn check_protected_path_write(
+    fs: &dyn super::FileSystemPort,
     state: &SessionState,
     workflows: &HashMap<String, SkillWorkflow>,
     input: &HookInput,
@@ -1057,7 +1060,8 @@ fn check_protected_path_write(
 
     // Build protected directory list
     // **Attack #91 fix**: Panic instead of empty fallback
-    let claude_dir = dirs::home_dir()
+    let claude_dir = fs
+        .home_dir()
         .expect("[sentinel] FATAL: Cannot determine home directory")
         .join(".claude");
 
@@ -1065,7 +1069,7 @@ fn check_protected_path_write(
     let reason = check_protected_textual(&normalized);
 
     // Check canonical match (catches symlinks/junctions)
-    let canonical_reason = check_protected_canonical(file_path, &claude_dir);
+    let canonical_reason = check_protected_canonical(fs, file_path, &claude_dir);
 
     let block_reason = reason.or(canonical_reason);
 
@@ -1276,6 +1280,7 @@ fn check_protected_textual(normalized: &str) -> Option<&'static str> {
 /// Canonical path check for protected paths.
 /// Resolves symlinks/junctions and checks if real path is in protected areas.
 fn check_protected_canonical(
+    fs: &dyn super::FileSystemPort,
     file_path: &str,
     claude_dir: &std::path::Path,
 ) -> Option<&'static str> {
@@ -1331,7 +1336,7 @@ fn check_protected_canonical(
     // .claude.json at HOME root (parent of ~/.claude/)
     // canonical_parent is HOME dir, filename is .claude.json
     // **Attack #92 fix**: Panic instead of empty fallback
-    let home_dir = dirs::home_dir().expect("[sentinel] FATAL: Cannot determine home directory");
+    let home_dir = fs.home_dir().expect("[sentinel] FATAL: Cannot determine home directory");
     let home_canonical = home_dir.canonicalize().unwrap_or(home_dir);
     if canonical_parent == home_canonical {
         let filename = target.file_name()?.to_str()?;

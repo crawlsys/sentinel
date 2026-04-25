@@ -8,7 +8,7 @@ use sentinel_domain::events::{HookEvent, HookInput, HookOutput};
 /// Process SubagentStart event
 ///
 /// Injects active skill and project context into the spawned agent.
-pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
+pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
     let agent_type = input
         .extra
         .get("agent_type")
@@ -16,7 +16,9 @@ pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
         .unwrap_or("unknown");
 
     // Read active skill from session state if available
-    let state_dir = dirs::home_dir()
+    let state_dir = ctx
+        .fs
+        .home_dir()
         .map(|h| h.join(".claude").join("sentinel").join("state"));
 
     let active_skill = state_dir
@@ -24,7 +26,7 @@ pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
         .and_then(|dir| {
             let session_id = input.session_id.as_deref()?;
             let state_path = dir.join(format!("{session_id}.json"));
-            let content = std::fs::read_to_string(&state_path).ok()?;
+            let content = ctx.fs.read_to_string(&state_path).ok()?;
             let state: serde_json::Value = serde_json::from_str(&content).ok()?;
             state
                 .get("active_skill")

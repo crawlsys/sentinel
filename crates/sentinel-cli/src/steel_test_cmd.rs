@@ -13,12 +13,13 @@
 use sentinel_application::hooks::pre_push_steel_test::{
     has_recent_steel_test_pub, record_steel_test_passed,
 };
+use sentinel_infrastructure::filesystem::RealFileSystem;
 
 /// Record a passing browser test for the given session.
 /// If no session ID is provided, reads CLAUDE_SESSION_ID from env.
 pub async fn record(session: Option<String>) -> anyhow::Result<()> {
     let session_id = resolve_session(session)?;
-    record_steel_test_passed(&session_id);
+    record_steel_test_passed(&RealFileSystem, &session_id);
     println!("Steel test recorded for session {session_id}");
     Ok(())
 }
@@ -26,7 +27,7 @@ pub async fn record(session: Option<String>) -> anyhow::Result<()> {
 /// Check if a valid browser test exists for the given session.
 pub async fn check(session: Option<String>) -> anyhow::Result<()> {
     let session_id = resolve_session(session)?;
-    if has_recent_steel_test_pub(&session_id) {
+    if has_recent_steel_test_pub(&RealFileSystem, &session_id) {
         println!("PASS — valid Steel test found for session {session_id}");
         Ok(())
     } else {
