@@ -198,7 +198,7 @@ where
 
 pub use sentinel_domain::ports::{
     FileSystemPort, GitStatusPort, ProcessOutput, ProcessPort, VectorPoint, VectorScrollResult,
-    VectorSearchHit, VectorStorePort,
+    VectorStorePort,
 };
 
 // ---------------------------------------------------------------------------

@@ -11,7 +11,6 @@
 //! Boost: increments `access_count` and updates `accessed_at` via Qdrant `set_payload`.
 //! Corrections: appended to `~/.claude/sentinel/state/memory-corrections.jsonl`.
 
-use chrono::Utc;
 use sentinel_domain::events::{HookInput, HookOutput};
 use std::path::{Path, PathBuf};
 use tracing::{debug, warn};

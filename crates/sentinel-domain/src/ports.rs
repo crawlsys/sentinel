@@ -63,15 +63,6 @@ pub trait GitStatusPort {
 /// Hook callers must wrap in a tokio runtime (or use `run_async`).
 #[async_trait::async_trait]
 pub trait VectorStorePort: Send + Sync {
-    /// Semantic search by text query. Returns (score, payload_json) pairs.
-    async fn query(
-        &self,
-        collection: &str,
-        query_text: &str,
-        limit: u32,
-        min_score: f64,
-    ) -> anyhow::Result<Vec<VectorSearchHit>>;
-
     /// Upsert points with server-side embedding. Each point has an id,
     /// text (for embedding), and a JSON payload.
     async fn upsert_points(
@@ -96,21 +87,6 @@ pub trait VectorStorePort: Send + Sync {
         payload: serde_json::Value,
     ) -> anyhow::Result<()>;
 
-    /// Get points by IDs with payload.
-    async fn get_points(
-        &self,
-        collection: &str,
-        ids: &[String],
-        payload_fields: &[&str],
-    ) -> anyhow::Result<Vec<VectorScrollResult>>;
-}
-
-/// A single search result from a vector query.
-#[derive(Debug, Clone)]
-pub struct VectorSearchHit {
-    pub id: String,
-    pub score: f64,
-    pub payload: serde_json::Value,
 }
 
 /// A point to upsert (with server-side embedding).

@@ -4,7 +4,7 @@
 //! server-side embedding model configuration.
 
 use anyhow::{Context, Result};
-use sentinel_domain::ports::{VectorPoint, VectorScrollResult, VectorSearchHit, VectorStorePort};
+use sentinel_domain::ports::{VectorPoint, VectorScrollResult, VectorStorePort};
 use tracing::debug;
 
 /// Qdrant Cloud configuration.
@@ -56,62 +56,6 @@ impl QdrantAdapter {
 
 #[async_trait::async_trait]
 impl VectorStorePort for QdrantAdapter {
-    async fn query(
-        &self,
-        collection: &str,
-        query_text: &str,
-        limit: u32,
-        min_score: f64,
-    ) -> Result<Vec<VectorSearchHit>> {
-        let body = serde_json::json!({
-            "query": { "text": query_text, "model": self.config.model },
-            "using": "text-dense",
-            "limit": limit,
-            "with_payload": true,
-            "params": { "hnsw_ef": 64 }
-        });
-
-        let resp = self
-            .client
-            .post(&self.url(collection, "points/query"))
-            .header("api-key", &self.config.api_key)
-            .json(&body)
-            .send()
-            .await
-            .context("Qdrant query request failed")?;
-
-        let json: serde_json::Value = resp.json().await.context("Qdrant query parse failed")?;
-
-        let points = json
-            .get("result")
-            .and_then(|r| r.get("points"))
-            .and_then(|p| p.as_array())
-            .cloned()
-            .unwrap_or_default();
-
-        let hits = points
-            .iter()
-            .filter_map(|p| {
-                let score = p.get("score")?.as_f64()?;
-                if score < min_score {
-                    return None;
-                }
-                let id = p
-                    .get("id")
-                    .map(|v| match v {
-                        serde_json::Value::String(s) => s.clone(),
-                        other => other.to_string(),
-                    })
-                    .unwrap_or_default();
-                let payload = p.get("payload").cloned().unwrap_or(serde_json::json!({}));
-                Some(VectorSearchHit { id, score, payload })
-            })
-            .collect();
-
-        debug!(collection, hits = points.len(), "Qdrant query complete");
-        Ok(hits)
-    }
-
     async fn upsert_points(&self, collection: &str, points: Vec<VectorPoint>) -> Result<()> {
         let qdrant_points: Vec<serde_json::Value> = points
             .iter()
@@ -216,47 +160,4 @@ impl VectorStorePort for QdrantAdapter {
         Ok(())
     }
 
-    async fn get_points(
-        &self,
-        collection: &str,
-        ids: &[String],
-        payload_fields: &[&str],
-    ) -> Result<Vec<VectorScrollResult>> {
-        let body = serde_json::json!({
-            "ids": ids,
-            "with_payload": if payload_fields.is_empty() {
-                serde_json::json!(true)
-            } else {
-                serde_json::json!(payload_fields)
-            }
-        });
-
-        let resp = self
-            .client
-            .post(&self.url(collection, "points"))
-            .header("api-key", &self.config.api_key)
-            .json(&body)
-            .send()
-            .await
-            .context("Qdrant get_points failed")?;
-
-        let json: serde_json::Value = resp.json().await?;
-
-        let points = json
-            .get("result")
-            .and_then(|p| p.as_array())
-            .cloned()
-            .unwrap_or_default();
-
-        let results = points
-            .iter()
-            .filter_map(|p| {
-                let id = p.get("id")?.as_str()?.to_string();
-                let payload = p.get("payload").cloned().unwrap_or(serde_json::json!({}));
-                Some(VectorScrollResult { id, payload })
-            })
-            .collect();
-
-        Ok(results)
-    }
 }
