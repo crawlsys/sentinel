@@ -13,14 +13,10 @@
 
 use chrono::Utc;
 use sentinel_domain::events::{HookInput, HookOutput};
-use sentinel_domain::ports::VectorStorePort;
 use std::path::{Path, PathBuf};
 use tracing::{debug, warn};
 
 use super::{FileSystemPort, HookContext};
-
-/// Qdrant collection used by memory_inject / memory_extract / memory_feedback.
-const COLLECTION: &str = "claude-memory";
 
 // ---------------------------------------------------------------------------
 // State file types
@@ -43,16 +39,6 @@ struct InjectedState {
     user_prompt: Option<String>,
 }
 
-/// A single correction log entry written to the JSONL file.
-#[derive(Debug, serde::Serialize)]
-struct CorrectionEntry {
-    timestamp: String,
-    memory_id: String,
-    memory_name: String,
-    correction_signal: String,
-    user_prompt: String,
-}
-
 // ---------------------------------------------------------------------------
 // Paths
 // ---------------------------------------------------------------------------
@@ -65,9 +51,6 @@ fn injected_state_path(fs: &dyn FileSystemPort) -> Option<PathBuf> {
     state_dir(fs).map(|d| d.join("last-injected-memories.json"))
 }
 
-fn corrections_path(fs: &dyn FileSystemPort) -> Option<PathBuf> {
-    state_dir(fs).map(|d| d.join("memory-corrections.jsonl"))
-}
 
 // ---------------------------------------------------------------------------
 // Correction detection
@@ -131,87 +114,13 @@ fn detect_used_memories<'a>(
 // Qdrant boost — increment access_count, update accessed_at
 // ---------------------------------------------------------------------------
 
-fn boost_memory(vector_store: &dyn VectorStorePort, memory_id: &str) -> bool {
-    super::run_async(async {
-        // Step 1: fetch current access_count via VectorStorePort::get_points.
-        let ids = [memory_id.to_string()];
-        let current_count: u64 = match vector_store
-            .get_points(COLLECTION, &ids, &["access_count"])
-            .await
-        {
-            Ok(points) => points
-                .first()
-                .and_then(|p| p.payload.get("access_count"))
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0),
-            Err(_) => 0,
-        };
-
-        // Step 2: set_payload with incremented count + fresh accessed_at.
-        let payload = serde_json::json!({
-            "access_count": current_count + 1,
-            "accessed_at": Utc::now().to_rfc3339(),
-        });
-        let ids_owned: Vec<String> = vec![memory_id.to_string()];
-        vector_store
-            .set_payload(COLLECTION, &ids_owned, payload)
-            .await
-            .is_ok()
-    })
-}
-
 // ---------------------------------------------------------------------------
 // Correction logging
 // ---------------------------------------------------------------------------
 
-fn log_correction(
-    fs: &dyn FileSystemPort,
-    memory: &InjectedMemory,
-    signal: &str,
-    user_prompt: &str,
-) {
-    let path = match corrections_path(fs) {
-        Some(p) => p,
-        None => return,
-    };
-
-    // Ensure parent dir exists
-    if let Some(parent) = path.parent() {
-        let _ = fs.create_dir_all(parent);
-    }
-
-    let entry = CorrectionEntry {
-        timestamp: Utc::now().to_rfc3339(),
-        memory_id: memory.id.clone(),
-        memory_name: memory.name.clone(),
-        correction_signal: signal.to_string(),
-        user_prompt: user_prompt.chars().take(500).collect(),
-    };
-
-    if let Ok(line) = serde_json::to_string(&entry) {
-        let mut bytes = line.into_bytes();
-        bytes.push(b'\n');
-        let _ = fs.append(&path, &bytes);
-    }
-}
-
 // ---------------------------------------------------------------------------
-// F1-PRE-3d: unified-mode outcome recording
+// Loop 4 outcome recording via memory-mcp
 // ---------------------------------------------------------------------------
-
-/// `MEMORY_ENGINE_UNIFIED=1` (or `true`/`yes`/`on`) flips memory_feedback
-/// to call the Memory engine's `memory_record_outcome` MCP tool instead
-/// of boosting access_count on the legacy claude-memory collection.
-/// Mirrors the flag used by memory_inject so both hooks stay coherent.
-fn memory_engine_unified() -> bool {
-    matches!(
-        std::env::var("MEMORY_ENGINE_UNIFIED")
-            .unwrap_or_default()
-            .to_ascii_lowercase()
-            .as_str(),
-        "1" | "true" | "yes" | "on"
-    )
-}
 
 /// Classify each injected memory into a Loop 4 outcome label and send
 /// them to the Memory engine in a single batch of MCP calls.
@@ -397,9 +306,11 @@ async fn read_json_line(
 // Public entry point
 // ---------------------------------------------------------------------------
 
-/// Process Stop — check if injected memories were used or corrected.
+/// Process Stop — classify each injected memory into a Loop 4 outcome and
+/// record via memory-mcp. Unconditional — there is no "legacy" path.
 pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
-    // 1. Read the state file
+    // 1. Read the state file written by memory_inject on the matching
+    //    UserPromptSubmit turn.
     let state_path = match injected_state_path(ctx.fs) {
         Some(p) if ctx.fs.exists(&p) => p,
         _ => {
@@ -425,79 +336,12 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
         return HookOutput::allow();
     }
 
-    // F1-PRE-3d: unified-mode feedback writes outcomes into the Memory
-    // engine's retrieval log via the `memory_record_outcome` MCP tool
-    // (added in GS-63). `RelevanceUpdater::apply_window` — run on the
-    // `memory learn` cron — then EMA-folds them into per-atom utility.
-    // Legacy boost + corrections.jsonl path is preserved when the flag
-    // is off, unchanged, for the F1-PRE-3f A/B window.
-    if memory_engine_unified() {
-        let response = input.last_assistant_message.as_deref().unwrap_or("");
-        let used = detect_used_memories(&state.memories, response);
-        let correction = state.user_prompt.as_deref().and_then(detect_correction);
-        record_outcomes_unified(&state.memories, &used, correction.is_some());
-        return HookOutput::allow();
-    }
-
-    // 2. Read the last assistant message
-    let response = match input.last_assistant_message.as_deref() {
-        Some(r) if !r.is_empty() => r,
-        _ => {
-            debug!("No assistant message available — skipping feedback");
-            return HookOutput::allow();
-        }
-    };
-
-    // 3. Detect which memories were used
+    // 2. Classify + record. record_outcomes_unified is fire-and-forget;
+    //    a failing memory-mcp call must not block the Stop hook.
+    let response = input.last_assistant_message.as_deref().unwrap_or("");
     let used = detect_used_memories(&state.memories, response);
-
-    // 4. Detect correction patterns (from user prompt stored in state file)
-    let correction = state
-        .user_prompt
-        .as_deref()
-        .and_then(detect_correction);
-
-    // Early exit if nothing to do
-    if used.is_empty() && correction.is_none() {
-        debug!(
-            injected = state.memories.len(),
-            "No usage or correction detected — skipping feedback"
-        );
-        return HookOutput::allow();
-    }
-
-    // 5. Boost used memories via VectorStorePort (if configured)
-    let mut boosted = 0;
-    if let Some(vs) = ctx.vector_store {
-        for memory in &used {
-            if boost_memory(vs, &memory.id) {
-                boosted += 1;
-                debug!(id = %memory.id, name = %memory.name, "Boosted memory access_count");
-            }
-        }
-    }
-
-    // 6. Log corrections via FileSystemPort
-    if let Some(signal) = correction {
-        let user_prompt = state.user_prompt.as_deref().unwrap_or("");
-        for memory in &state.memories {
-            log_correction(ctx.fs, memory, signal, user_prompt);
-            debug!(
-                id = %memory.id,
-                name = %memory.name,
-                signal,
-                "Flagged memory for correction review"
-            );
-        }
-    }
-
-    if boosted > 0 || correction.is_some() {
-        debug!(
-            boosted,
-            corrected = correction.is_some(),
-            "Memory feedback complete"
-        );
-    }
+    let correction = state.user_prompt.as_deref().and_then(detect_correction);
+    record_outcomes_unified(&state.memories, &used, correction.is_some());
 
     // Never block
     HookOutput::allow()
@@ -607,20 +451,6 @@ mod tests {
         };
         let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
         assert!(output.blocked.is_none());
-    }
-
-    #[test]
-    fn test_correction_entry_serializes() {
-        let entry = CorrectionEntry {
-            timestamp: "2026-04-04T12:00:00Z".to_string(),
-            memory_id: "test-id".to_string(),
-            memory_name: "Test Memory".to_string(),
-            correction_signal: "actually,".to_string(),
-            user_prompt: "actually, that's different now".to_string(),
-        };
-        let json = serde_json::to_string(&entry).unwrap();
-        assert!(json.contains("test-id"));
-        assert!(json.contains("actually,"));
     }
 
     #[test]
