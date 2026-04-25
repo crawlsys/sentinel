@@ -33,6 +33,41 @@ fn file_path_from_input(input: &HookInput) -> Option<String> {
         .map(ToString::to_string)
 }
 
+/// Returns true when the repo at `repo_dir` is mid-merge / mid-rebase /
+/// mid-cherry-pick / mid-revert. Detected by the presence of git's standard
+/// sentinel files in the gitdir:
+///   - `MERGE_HEAD`         — `git merge` with conflicts
+///   - `CHERRY_PICK_HEAD`   — `git cherry-pick` with conflicts
+///   - `REVERT_HEAD`        — `git revert` with conflicts
+///   - `rebase-merge/`      — interactive / merge-strategy rebase
+///   - `rebase-apply/`      — `git am` / classic rebase
+///
+/// Worktree-aware: when `.git` is a file (`gitdir: <abs path>`), the real
+/// gitdir is followed so the sentinel-file lookups land in the right place.
+fn is_merge_in_progress(repo_dir: &str, git: &dyn GitStatusPort) -> bool {
+    let Some(root) = git.repo_root(repo_dir) else {
+        return false;
+    };
+    let dot_git = std::path::Path::new(&root).join(".git");
+    let gitdir = if dot_git.is_file() {
+        match std::fs::read_to_string(&dot_git) {
+            Ok(content) => match content.lines().find_map(|l| l.strip_prefix("gitdir:")) {
+                Some(path) => std::path::PathBuf::from(path.trim()),
+                None => return false,
+            },
+            Err(_) => return false,
+        }
+    } else {
+        dot_git
+    };
+
+    gitdir.join("MERGE_HEAD").exists()
+        || gitdir.join("CHERRY_PICK_HEAD").exists()
+        || gitdir.join("REVERT_HEAD").exists()
+        || gitdir.join("rebase-merge").is_dir()
+        || gitdir.join("rebase-apply").is_dir()
+}
+
 /// Check whether `file_path` lives inside the git repo rooted at `cwd`.
 ///
 /// Returns `true` if we can't determine a repo root (be conservative —
@@ -105,10 +140,17 @@ pub fn process(input: &HookInput, git: &dyn GitStatusPort) -> HookOutput {
         .unwrap_or_else(|| cwd.to_string());
     let effective_repo_str = effective_repo.as_str();
 
-    // Check 1: BLOCK if on a protected branch and not in a worktree
+    // Check 1: BLOCK if on a protected branch and not in a worktree.
+    //
+    // Exception: when a merge / rebase / cherry-pick / revert is in progress,
+    // the user is *resolving conflicts*, not bypassing branch hygiene. Forcing
+    // a worktree dance mid-conflict-resolution can drop conflict markers into
+    // the merge commit (this happened in the build_notify-ntfy merge — see
+    // commit 4fc2f35 for the cleanup).
     if let Ok(branch) = git.current_branch(effective_repo_str) {
         if PROTECTED_BRANCHES.contains(&branch.as_str())
             && !git.is_worktree(effective_repo_str)
+            && !is_merge_in_progress(effective_repo_str, git)
         {
             return HookOutput::deny(format!(
                 "[Git Hygiene] BLOCKED: editing directly on `{branch}` without a worktree. \
@@ -453,5 +495,127 @@ mod tests {
         assert!(PROTECTED_BRANCHES.contains(&"main"));
         assert!(PROTECTED_BRANCHES.contains(&"master"));
         assert!(!PROTECTED_BRANCHES.contains(&"feat/my-feature"));
+    }
+
+    /// Stub that points `repo_root` at a real on-disk tempdir so
+    /// `is_merge_in_progress` can read its `.git` dir.
+    struct DiskRepoStub {
+        repo_root: String,
+        branch: String,
+        worktree: bool,
+    }
+
+    impl GitStatusPort for DiskRepoStub {
+        fn has_uncommitted_changes(&self, _: &str) -> anyhow::Result<bool> { Ok(false) }
+        fn changed_files(&self, _: &str) -> anyhow::Result<Vec<String>> { Ok(vec![]) }
+        fn current_branch(&self, _: &str) -> anyhow::Result<String> { Ok(self.branch.clone()) }
+        fn is_worktree(&self, _: &str) -> bool { self.worktree }
+        fn has_unpushed_commits(&self, _: &str) -> anyhow::Result<bool> { Ok(false) }
+        fn repo_root(&self, _: &str) -> Option<String> { Some(self.repo_root.clone()) }
+        fn list_worktree_names(&self, _: &str) -> Vec<String> { Vec::new() }
+        fn merge_base(&self, _: &str, _: &str) -> Option<String> { None }
+        fn rev_list_count(&self, _: &str, _: &str) -> Option<u32> { None }
+        fn diff_names(&self, _: &str, _: &str) -> Option<Vec<String>> { None }
+    }
+
+    fn make_repo_with(sentinel_files: &[&str]) -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().unwrap();
+        let git_dir = tmp.path().join(".git");
+        std::fs::create_dir_all(&git_dir).unwrap();
+        for name in sentinel_files {
+            // Names ending in `/` are directories (rebase-merge, rebase-apply).
+            if let Some(dir) = name.strip_suffix('/') {
+                std::fs::create_dir_all(git_dir.join(dir)).unwrap();
+            } else {
+                std::fs::write(git_dir.join(name), "ref\n").unwrap();
+            }
+        }
+        tmp
+    }
+
+    /// Bare repo with no merge-in-progress sentinels — gate should still BLOCK
+    /// Edit-on-main (existing behaviour preserved).
+    #[test]
+    fn test_main_block_still_fires_when_not_merging() {
+        let tmp = make_repo_with(&[]);
+        let git = DiskRepoStub {
+            repo_root: tmp.path().to_string_lossy().into_owned(),
+            branch: "main".to_string(),
+            worktree: false,
+        };
+        let target = tmp.path().join("CHANGELOG.md");
+        std::fs::write(&target, "x").unwrap();
+        let input = HookInput {
+            tool_name: Some("Edit".to_string()),
+            cwd: Some(tmp.path().to_string_lossy().into_owned()),
+            file_path: Some(target.to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+        assert_eq!(
+            process(&input, &git).blocked,
+            Some(true),
+            "edit on main without worktree and without merge-in-progress must still block"
+        );
+    }
+
+    /// Mid-merge edit on main is now allowed (the new exception). Repeated
+    /// for each sentinel file/dir git creates during a conflict.
+    #[test]
+    fn test_main_edit_allowed_during_active_merge() {
+        for sentinels in &[
+            &["MERGE_HEAD"][..],
+            &["CHERRY_PICK_HEAD"][..],
+            &["REVERT_HEAD"][..],
+            &["rebase-merge/"][..],
+            &["rebase-apply/"][..],
+        ] {
+            let tmp = make_repo_with(sentinels);
+            let git = DiskRepoStub {
+                repo_root: tmp.path().to_string_lossy().into_owned(),
+                branch: "main".to_string(),
+                worktree: false,
+            };
+            let target = tmp.path().join("CHANGELOG.md");
+            std::fs::write(&target, "x").unwrap();
+            let input = HookInput {
+                tool_name: Some("Edit".to_string()),
+                cwd: Some(tmp.path().to_string_lossy().into_owned()),
+                file_path: Some(target.to_string_lossy().into_owned()),
+                ..Default::default()
+            };
+            assert!(
+                process(&input, &git).blocked.is_none(),
+                "edit on main mid-merge should NOT block (sentinel: {sentinels:?})"
+            );
+        }
+    }
+
+    /// `is_merge_in_progress` must follow `.git` files (worktree gitlinks)
+    /// so the sentinel-file lookup lands in the real gitdir.
+    #[test]
+    fn test_merge_detection_follows_gitdir_pointer_files() {
+        // Real gitdir holds MERGE_HEAD.
+        let real_gitdir_holder = tempfile::tempdir().unwrap();
+        let real_gitdir = real_gitdir_holder.path().join("worktrees").join("wt1");
+        std::fs::create_dir_all(&real_gitdir).unwrap();
+        std::fs::write(real_gitdir.join("MERGE_HEAD"), "ref\n").unwrap();
+
+        // Worktree-style repo: .git is a file pointing at the real gitdir.
+        let worktree = tempfile::tempdir().unwrap();
+        std::fs::write(
+            worktree.path().join(".git"),
+            format!("gitdir: {}\n", real_gitdir.display()),
+        )
+        .unwrap();
+
+        let git = DiskRepoStub {
+            repo_root: worktree.path().to_string_lossy().into_owned(),
+            branch: "main".to_string(),
+            worktree: false,
+        };
+        assert!(
+            is_merge_in_progress(worktree.path().to_str().unwrap(), &git),
+            "should follow `.git` gitdir pointer file to the real gitdir"
+        );
     }
 }

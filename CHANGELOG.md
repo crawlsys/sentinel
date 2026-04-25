@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **`git_hygiene` allows Edit-on-main during active merge / rebase / cherry-pick / revert**: the protected-branch block now skips when `.git/MERGE_HEAD`, `.git/CHERRY_PICK_HEAD`, `.git/REVERT_HEAD`, `.git/rebase-merge/`, or `.git/rebase-apply/` exists in the cwd's repo. New helper `is_merge_in_progress(repo, &dyn GitStatusPort)` follows worktree `.git` gitdir-pointer files so the lookup lands on the real gitdir. Closes the failure mode that bit the build_notify-ntfy merge: blocking inline conflict resolution forces a worktree dance and risks leaving conflict markers in the merge commit (see commit 4fc2f35 + e11800e for the cleanups). 3 new tests: `test_main_block_still_fires_when_not_merging` (regression for the existing block), `test_main_edit_allowed_during_active_merge` (covers all 5 sentinel files), `test_merge_detection_follows_gitdir_pointer_files` (worktree gitlink resolution). 18/18 git_hygiene tests pass.
+
 ### Added
 
 - **`GitStatusPort` extended with `merge_base`, `rev_list_count`, `diff_names`** to absorb the last 5 prod-side `std::process::Command::new("git")` sites. Implemented on `RealGit` in `sentinel-infrastructure::git` (uses the same `git` invocations the inlined helpers used). All 6 stub `GitStatusPort` impls (`mod::test_support::StubGit`, `git_hygiene::StubGit`, `git_hygiene::PathAwareStubGit`, `commit_hygiene::TestGit`, `stop_failure::StubGit`, `post_compact::StubGit`) updated with `None`-returning defaults for the new methods.
