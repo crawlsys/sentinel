@@ -12,32 +12,15 @@
 //! Corrections: appended to `~/.claude/sentinel/state/memory-corrections.jsonl`.
 
 use chrono::Utc;
-use sentinel_domain::constants;
 use sentinel_domain::events::{HookInput, HookOutput};
-use std::path::PathBuf;
+use sentinel_domain::ports::VectorStorePort;
+use std::path::{Path, PathBuf};
 use tracing::{debug, warn};
 
-// ---------------------------------------------------------------------------
-// Qdrant config (same pattern as memory_inject / memory_extract)
-// ---------------------------------------------------------------------------
+use super::{FileSystemPort, HookContext};
 
-#[derive(serde::Deserialize)]
-struct QdrantConfig {
-    cluster_url: String,
-    api_key: String,
-    #[serde(default = "default_collection")]
-    collection: String,
-}
-
-fn default_collection() -> String {
-    "claude-memory".to_string()
-}
-
-fn load_config() -> Option<QdrantConfig> {
-    let path = dirs::home_dir()?.join(".qdrant").join("config.json");
-    let content = std::fs::read_to_string(&path).ok()?;
-    serde_json::from_str(&content).ok()
-}
+/// Qdrant collection used by memory_inject / memory_extract / memory_feedback.
+const COLLECTION: &str = "claude-memory";
 
 // ---------------------------------------------------------------------------
 // State file types
@@ -74,16 +57,16 @@ struct CorrectionEntry {
 // Paths
 // ---------------------------------------------------------------------------
 
-fn state_dir() -> Option<PathBuf> {
-    dirs::home_dir().map(|h| h.join(".claude").join("sentinel").join("state"))
+fn state_dir(fs: &dyn FileSystemPort) -> Option<PathBuf> {
+    fs.home_dir().map(|h| h.join(".claude").join("sentinel").join("state"))
 }
 
-fn injected_state_path() -> Option<PathBuf> {
-    state_dir().map(|d| d.join("last-injected-memories.json"))
+fn injected_state_path(fs: &dyn FileSystemPort) -> Option<PathBuf> {
+    state_dir(fs).map(|d| d.join("last-injected-memories.json"))
 }
 
-fn corrections_path() -> Option<PathBuf> {
-    state_dir().map(|d| d.join("memory-corrections.jsonl"))
+fn corrections_path(fs: &dyn FileSystemPort) -> Option<PathBuf> {
+    state_dir(fs).map(|d| d.join("memory-corrections.jsonl"))
 }
 
 // ---------------------------------------------------------------------------
@@ -148,62 +131,30 @@ fn detect_used_memories<'a>(
 // Qdrant boost — increment access_count, update accessed_at
 // ---------------------------------------------------------------------------
 
-fn boost_memory(config: &QdrantConfig, memory_id: &str) -> bool {
+fn boost_memory(vector_store: &dyn VectorStorePort, memory_id: &str) -> bool {
     super::run_async(async {
-        let client = match reqwest::Client::builder()
-            .timeout(constants::API_CALL_TIMEOUT_SHORT)
-            .build()
-        {
-            Ok(c) => c,
-            Err(_) => return false,
-        };
-
-        // Step 1: Get current access_count via scroll (single point)
-        let scroll_url = format!(
-            "{}/collections/{}/points/{}",
-            config.cluster_url, config.collection, memory_id
-        );
-
-        let current_count: u64 = match client
-            .get(&scroll_url)
-            .header("api-key", &config.api_key)
-            .send()
+        // Step 1: fetch current access_count via VectorStorePort::get_points.
+        let ids = [memory_id.to_string()];
+        let current_count: u64 = match vector_store
+            .get_points(COLLECTION, &ids, &["access_count"])
             .await
         {
-            Ok(resp) => {
-                let json: serde_json::Value = match resp.json().await {
-                    Ok(j) => j,
-                    Err(_) => return false,
-                };
-                json.get("result")
-                    .and_then(|r| r.get("payload"))
-                    .and_then(|p| p.get("access_count"))
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0)
-            }
+            Ok(points) => points
+                .first()
+                .and_then(|p| p.payload.get("access_count"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0),
             Err(_) => 0,
         };
 
-        // Step 2: set_payload with incremented count
-        let payload_url = format!(
-            "{}/collections/{}/points/payload",
-            config.cluster_url, config.collection
-        );
-
-        let body = serde_json::json!({
-            "points": [memory_id],
-            "payload": {
-                "access_count": current_count + 1,
-                "accessed_at": Utc::now().to_rfc3339()
-            }
+        // Step 2: set_payload with incremented count + fresh accessed_at.
+        let payload = serde_json::json!({
+            "access_count": current_count + 1,
+            "accessed_at": Utc::now().to_rfc3339(),
         });
-
-        client
-            .post(&payload_url)
-            .header("api-key", &config.api_key)
-            .header("Content-Type", "application/json")
-            .json(&body)
-            .send()
+        let ids_owned: Vec<String> = vec![memory_id.to_string()];
+        vector_store
+            .set_payload(COLLECTION, &ids_owned, payload)
             .await
             .is_ok()
     })
@@ -213,15 +164,20 @@ fn boost_memory(config: &QdrantConfig, memory_id: &str) -> bool {
 // Correction logging
 // ---------------------------------------------------------------------------
 
-fn log_correction(memory: &InjectedMemory, signal: &str, user_prompt: &str) {
-    let path = match corrections_path() {
+fn log_correction(
+    fs: &dyn FileSystemPort,
+    memory: &InjectedMemory,
+    signal: &str,
+    user_prompt: &str,
+) {
+    let path = match corrections_path(fs) {
         Some(p) => p,
         None => return,
     };
 
     // Ensure parent dir exists
     if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+        let _ = fs.create_dir_all(parent);
     }
 
     let entry = CorrectionEntry {
@@ -233,14 +189,9 @@ fn log_correction(memory: &InjectedMemory, signal: &str, user_prompt: &str) {
     };
 
     if let Ok(line) = serde_json::to_string(&entry) {
-        use std::io::Write;
-        if let Ok(mut file) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-        {
-            let _ = writeln!(file, "{line}");
-        }
+        let mut bytes = line.into_bytes();
+        bytes.push(b'\n');
+        let _ = fs.append(&path, &bytes);
     }
 }
 
@@ -447,17 +398,17 @@ async fn read_json_line(
 // ---------------------------------------------------------------------------
 
 /// Process Stop — check if injected memories were used or corrected.
-pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
+pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     // 1. Read the state file
-    let state_path = match injected_state_path() {
-        Some(p) if p.exists() => p,
+    let state_path = match injected_state_path(ctx.fs) {
+        Some(p) if ctx.fs.exists(&p) => p,
         _ => {
             debug!("No injected-memories state file — skipping feedback");
             return HookOutput::allow();
         }
     };
 
-    let state_content = match std::fs::read_to_string(&state_path) {
+    let state_content = match ctx.fs.read_to_string(Path::new(&state_path)) {
         Ok(c) => c,
         Err(_) => return HookOutput::allow(),
     };
@@ -515,25 +466,22 @@ pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
         return HookOutput::allow();
     }
 
-    // 5. Load Qdrant config for boosting
-    let config = load_config();
-
-    // 6. Boost used memories
+    // 5. Boost used memories via VectorStorePort (if configured)
     let mut boosted = 0;
-    if let Some(ref cfg) = config {
+    if let Some(vs) = ctx.vector_store {
         for memory in &used {
-            if boost_memory(cfg, &memory.id) {
+            if boost_memory(vs, &memory.id) {
                 boosted += 1;
                 debug!(id = %memory.id, name = %memory.name, "Boosted memory access_count");
             }
         }
     }
 
-    // 7. Log corrections
+    // 6. Log corrections via FileSystemPort
     if let Some(signal) = correction {
         let user_prompt = state.user_prompt.as_deref().unwrap_or("");
         for memory in &state.memories {
-            log_correction(memory, signal, user_prompt);
+            log_correction(ctx.fs, memory, signal, user_prompt);
             debug!(
                 id = %memory.id,
                 name = %memory.name,
