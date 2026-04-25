@@ -188,6 +188,7 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
                         classifier
                             .as_ref()
                             .map(|c| c as &dyn sentinel_application::classifier::AiClassifier),
+                        &real_fs,
                     )
                     .await
                 },
@@ -197,7 +198,7 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
                 Ok(output) => output,
                 Err(_) => {
                     tracing::warn!("Skill router timed out (8s) — no routing for this message");
-                    hooks::skill_router::build_no_match_output()
+                    hooks::skill_router::build_no_match_output(&real_fs)
                 }
             };
             output.merge(&router_output);

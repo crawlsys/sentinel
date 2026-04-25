@@ -10,7 +10,6 @@
 use regex::Regex;
 use sentinel_domain::constants;
 use sentinel_domain::events::{HookEvent, HookInput, HookOutput};
-use std::fs;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -82,16 +81,16 @@ fn offset_path(session_id: &str) -> PathBuf {
 }
 
 /// Read transcript offset for dedup.
-fn read_offset(session_id: &str) -> usize {
-    fs::read_to_string(offset_path(session_id))
+fn read_offset(fs: &dyn FileSystemPort, session_id: &str) -> usize {
+    fs.read_to_string(&offset_path(session_id))
         .ok()
         .and_then(|s| s.trim().parse().ok())
         .unwrap_or(0)
 }
 
 /// Write transcript offset.
-fn write_offset(session_id: &str, offset: usize) {
-    let _ = fs::write(offset_path(session_id), offset.to_string());
+fn write_offset(fs: &dyn FileSystemPort, session_id: &str, offset: usize) {
+    let _ = fs.write(&offset_path(session_id), offset.to_string().as_bytes());
 }
 
 /// Completion claim patterns.
@@ -140,20 +139,20 @@ struct TranscriptData {
     has_bash_calls: bool,
 }
 
-fn parse_transcript(transcript_path: &str, session_id: &str) -> TranscriptData {
+fn parse_transcript(fs: &dyn FileSystemPort, transcript_path: &str, session_id: &str) -> TranscriptData {
     let mut data = TranscriptData {
         assistant_text: String::new(),
         has_bash_calls: false,
     };
 
-    let content = match fs::read_to_string(transcript_path) {
+    let content = match fs.read_to_string(std::path::Path::new(transcript_path)) {
         Ok(c) => c,
         Err(_) => return data,
     };
 
     let lines: Vec<&str> = content.lines().collect();
     let total = lines.len();
-    let offset = read_offset(session_id).min(total);
+    let offset = read_offset(fs, session_id).min(total);
 
     for line in &lines[offset..] {
         let entry: serde_json::Value = match serde_json::from_str(line) {
@@ -192,7 +191,7 @@ fn parse_transcript(transcript_path: &str, session_id: &str) -> TranscriptData {
         }
     }
 
-    write_offset(session_id, total);
+    write_offset(fs, session_id, total);
     data
 }
 
@@ -208,7 +207,7 @@ pub fn process_stop(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
         _ => return HookOutput::allow(),
     };
 
-    let data = parse_transcript(&transcript_path, session_id);
+    let data = parse_transcript(ctx.fs, &transcript_path, session_id);
 
     if data.assistant_text.trim().is_empty() {
         return HookOutput::allow();
@@ -342,7 +341,7 @@ pub fn process_prompt(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     );
 
     // Clear state after injecting (one-shot reminder)
-    let _ = fs::remove_file(&path);
+    let _ = ctx.fs.remove_file(&path);
 
     HookOutput::inject_context(HookEvent::UserPromptSubmit, context)
 }
@@ -426,7 +425,7 @@ mod tests {
         let _lock = STATE_LOCK.lock().unwrap();
         let session_id = format!("test-vg-warn-{}", std::process::id());
 
-        let _ = fs::remove_file(offset_path(&session_id));
+        let _ = std::fs::remove_file(offset_path(&session_id));
 
         let transcript = make_transcript(&[json!({
             "type": "assistant",
