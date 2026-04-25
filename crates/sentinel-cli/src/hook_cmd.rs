@@ -439,8 +439,17 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
                     // (per claude-code-2.1.88 `sdk-tools.d.ts`: the real core tool is TodoWrite —
                     // previously the gate blocked core sessions forever because this branch
                     // only matched "TaskCreate").
+                    //
+                    // We also mark the task as *active* on TaskCreate — the common workflow
+                    // is "create a task and immediately start working on it", and forcing a
+                    // separate `TaskUpdate(status="in_progress")` turn before any Edit is
+                    // pure DX friction. A follow-up TaskUpdate(status="completed") clears
+                    // the task normally; the active marker persists for the session which
+                    // is correct (the session is still working on SOME task until its TaskList
+                    // is empty).
                     if tool == "TaskCreate" || tool == "TodoWrite" {
                         hooks::tool_usage_gate::mark_task_created(ctx.fs, session_id);
+                        hooks::tool_usage_gate::mark_task_active(ctx.fs, session_id);
                     }
                     if tool == "ExitPlanMode" {
                         hooks::tool_usage_gate::mark_plan_approved(ctx.fs, session_id);

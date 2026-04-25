@@ -214,6 +214,62 @@ pub fn mark_task_active(fs: &dyn FileSystemPort, session_id: &str) {
     write_marker(fs, TASK_ACTIVE_PREFIX, session_id);
 }
 
+/// Best-effort lookup for the most recent pending task ID in this project,
+/// to give the user an actionable ID in the block message. Returns
+/// `Some("Task #N is pending — …")` when a pending task file is found,
+/// `None` otherwise.
+///
+/// The persisted task store lives at
+/// `~/.claude/persistent-tasks/{project_hash}/tasks.json` (see
+/// `task_persist.rs`). We don't have the project hash here without
+/// more plumbing, so we scan the `persistent-tasks/*/tasks.json` tree
+/// and pick whichever JSON has a pending entry. This is a hint, not a
+/// source of truth — a None return degrades gracefully to the generic
+/// message.
+fn recent_pending_task_hint(fs: &dyn FileSystemPort, _session_id: &str) -> Option<String> {
+    let home = fs.home_dir()?;
+    let root = home.join(".claude").join("persistent-tasks");
+    if !fs.is_dir(&root) {
+        return None;
+    }
+    let projects = fs.read_dir(&root).ok()?;
+    for proj in projects {
+        let tasks_file = proj.join("tasks.json");
+        if !fs.exists(&tasks_file) {
+            continue;
+        }
+        let content = match fs.read_to_string(&tasks_file) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        let json: serde_json::Value = match serde_json::from_str(&content) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let tasks = match json.get("tasks").and_then(|t| t.as_array()) {
+            Some(t) => t,
+            None => continue,
+        };
+        for task in tasks {
+            let status = task.get("status").and_then(|v| v.as_str()).unwrap_or("");
+            if status != "pending" {
+                continue;
+            }
+            let id = task
+                .get("id")
+                .and_then(|v| v.as_str())
+                .or_else(|| task.get("id").and_then(|v| v.as_i64()).map(|_| "?"))
+                .unwrap_or("?");
+            let subject = task
+                .get("subject")
+                .and_then(|v| v.as_str())
+                .unwrap_or("(no subject)");
+            return Some(format!("Task #{id} is pending: \"{subject}\"."));
+        }
+    }
+    None
+}
+
 /// Process a PreToolUse event. Blocks Edit/Write if preconditions aren't met.
 pub fn process(input: &HookInput, fs: &dyn FileSystemPort) -> HookOutput {
     let tool = match &input.tool_name {
@@ -322,14 +378,29 @@ pub fn process(input: &HookInput, fs: &dyn FileSystemPort) -> HookOutput {
         );
     }
 
-    // Check 4: A task must be actively in_progress
+    // Check 4: A task must be actively in_progress.
+    //
+    // Normally satisfied by `mark_task_active` firing on a PostToolUse for
+    // TaskUpdate(status="in_progress") or a TodoWrite whose payload already
+    // has an item in_progress. As of sentinel main (late April 2026), we
+    // *also* activate on `TaskCreate` / `TodoWrite` creation — agents usually
+    // create a task and start working on it in the same turn, and forcing a
+    // dedicated TaskUpdate turn before any Edit is pure friction.
     if !has_marker(fs, TASK_ACTIVE_PREFIX, session_id) {
-        return HookOutput::deny(
-            "🔴 [Tool Usage Gate] BLOCKED: Mark a task as `in_progress` before making \
-             code changes. Use `TaskUpdate(taskId, status: \"in_progress\")` \
-             (agent-team harness) or update a `TodoWrite` entry's status to \
-             `in_progress`. No work should happen without an active task."
-        );
+        let hint = recent_pending_task_hint(fs, session_id).unwrap_or_default();
+        let msg = if hint.is_empty() {
+            "🔴 [Tool Usage Gate] BLOCKED: Create a task with `TaskCreate` (agent-team \
+             harness) or `TodoWrite` (core Claude Code) before making code changes. \
+             All work must be tracked as an active task.".to_string()
+        } else {
+            format!(
+                "🔴 [Tool Usage Gate] BLOCKED: Mark a task as `in_progress` before making \
+                 code changes. {hint} Use `TaskUpdate(taskId: \"<id>\", \
+                 status: \"in_progress\")` or update a `TodoWrite` entry's status \
+                 to `in_progress`."
+            )
+        };
+        return HookOutput::deny(msg);
     }
 
     HookOutput::allow()
@@ -513,7 +584,10 @@ mod tests {
         assert_eq!(output.blocked, Some(true));
         let reason = output.hook_specific_output.as_ref()
             .and_then(|h| h.permission_decision_reason.as_deref()).unwrap_or("");
-        assert!(reason.contains("in_progress"));
+        assert!(
+            reason.contains("in_progress") || reason.contains("TaskCreate"),
+            "block message should mention in_progress or TaskCreate — got: {reason}",
+        );
     }
 
     #[test]
@@ -703,8 +777,10 @@ mod tests {
         assert_eq!(output.blocked, Some(true));
         let reason = output.hook_specific_output.as_ref()
             .and_then(|h| h.permission_decision_reason.as_deref()).unwrap_or("");
-        assert!(reason.contains("in_progress"),
-            "autopilot must still enforce the active-task check");
+        assert!(
+            reason.contains("in_progress") || reason.contains("TaskCreate"),
+            "autopilot must still enforce the active-task check — got: {reason}",
+        );
     }
 
     // ── has_recent_plan_file fallback ───────────────────────────────
