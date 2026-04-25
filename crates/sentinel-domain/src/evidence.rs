@@ -17,7 +17,7 @@ pub struct Evidence {
     /// Files changed (from git diff)
     pub files_changed: Vec<String>,
 
-    /// Whether the phase .md file was Read()
+    /// Whether the phase .md file was `Read()`
     pub phase_file_read: bool,
 
     /// Phase-specific custom evidence (e.g., test results, PR URL, Linear issue ID)
@@ -36,7 +36,7 @@ pub struct Evidence {
 /// A tool call Claude made
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCallEvidence {
-    /// Tool name (e.g., "Bash", "Read", "mcp__linear__get_issue")
+    /// Tool name (e.g., "Bash", "Read", "`mcp__linear__get_issue`")
     pub tool: String,
 
     /// Key arguments (truncated for hashing efficiency)
@@ -154,8 +154,7 @@ impl EvidenceCollector {
         let serialized_len = serde_json::to_string(&value).map(|s| s.len()).unwrap_or(0);
         if serialized_len > 8192 {
             eprintln!(
-                "[sentinel] WARNING: Custom evidence '{}' exceeds 8KB ({} bytes), truncating to null",
-                key, serialized_len
+                "[sentinel] WARNING: Custom evidence '{key}' exceeds 8KB ({serialized_len} bytes), truncating to null"
             );
             self.entries.push(EvidenceEntry::Custom(
                 key.to_string(),

@@ -40,7 +40,8 @@ use sentinel_domain::state::SessionState;
 type HmacSha256 = Hmac<Sha256>;
 
 /// Validate that a session ID is safe for use in file paths.
-/// Rejects any session_id containing path traversal characters (`/`, `\`, `..`)
+///
+/// Rejects any `session_id` containing path traversal characters (`/`, `\`, `..`)
 /// or non-ASCII characters. Only allows: alphanumeric, hyphen, underscore, dot.
 /// Maximum length: 128 characters.
 ///
@@ -58,15 +59,14 @@ pub fn sanitize_session_id(session_id: &str) -> Result<()> {
         anyhow::bail!("Session ID too long (max 128 chars): {}", session_id.len());
     }
     if session_id.contains("..") {
-        anyhow::bail!("Session ID contains path traversal: '{}'", session_id);
+        anyhow::bail!("Session ID contains path traversal: '{session_id}'");
     }
     if !session_id
         .chars()
         .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
     {
         anyhow::bail!(
-            "Session ID contains unsafe characters (only alphanumeric, hyphen, underscore allowed): '{}'",
-            session_id
+            "Session ID contains unsafe characters (only alphanumeric, hyphen, underscore allowed): '{session_id}'"
         );
     }
     Ok(())
@@ -158,7 +158,7 @@ fn discover_key_versions() -> Vec<(u32, PathBuf)> {
 
 /// Get the current (latest) key version number.
 fn current_key_version() -> u32 {
-    discover_key_versions().last().map(|(v, _)| *v).unwrap_or(1)
+    discover_key_versions().last().map_or(1, |(v, _)| *v)
 }
 
 /// Create a new key version. Returns the new version number.
@@ -446,18 +446,18 @@ fn derive_hmac_key() -> Vec<u8> {
     hasher.finalize().to_vec()
 }
 
-/// Expose HMAC key derivation for proof_store to reuse the same signing key.
+/// Expose HMAC key derivation for `proof_store` to reuse the same signing key.
 /// **Attack #123**: Proof files need the same integrity protection as state files.
 pub fn derive_hmac_key_for_proofs() -> Vec<u8> {
     derive_hmac_key()
 }
 
-/// Compute versioned HMAC for proof_store (delegates to internal compute_hmac).
+/// Compute versioned HMAC for `proof_store` (delegates to internal `compute_hmac`).
 pub fn compute_hmac_for_proofs(data: &[u8]) -> String {
     compute_hmac(data)
 }
 
-/// Verify versioned HMAC for proof_store (delegates to internal verify_hmac).
+/// Verify versioned HMAC for `proof_store` (delegates to internal `verify_hmac`).
 pub fn verify_hmac_for_proofs(data: &[u8], sig_str: &str) -> bool {
     verify_hmac(data, sig_str)
 }
@@ -697,9 +697,10 @@ pub fn save(state: &mut SessionState) -> Result<()> {
 }
 
 /// Acquire an exclusive session lock for the entire load-process-save cycle.
+///
 /// **Attack #67 fix**: Without this, concurrent hook invocations race between
 /// load and save, causing lost updates (state regression). Hold this lock
-/// from before load() through save() to serialize access.
+/// from before `load()` through `save()` to serialize access.
 ///
 /// Returns the lock file handle — dropping it releases the lock.
 pub fn acquire_session_lock(session_id: &str) -> Result<std::fs::File> {
@@ -870,14 +871,14 @@ pub fn delete(session_id: &str) -> Result<()> {
     Ok(())
 }
 
-/// Expose compute_hmac for tests that need to forge valid-HMAC state files (legacy format).
+/// Expose `compute_hmac` for tests that need to forge valid-HMAC state files (legacy format).
 #[cfg(test)]
 #[allow(dead_code)]
 pub(crate) fn compute_hmac_for_tests(data: &[u8]) -> String {
     compute_hmac(data)
 }
 
-/// Expose encrypt_state for tests that need to forge encrypted state files.
+/// Expose `encrypt_state` for tests that need to forge encrypted state files.
 #[cfg(test)]
 pub(crate) fn encrypt_state_for_tests(plaintext: &[u8]) -> Result<Vec<u8>> {
     encrypt_state(plaintext)
@@ -1020,10 +1021,10 @@ mod tests {
         cleanup_session(&sid);
     }
 
-    /// Regression: save() must not deadlock when session lock is already held.
-    /// The bug: save() acquired its own exclusive lock on the same file that
-    /// acquire_session_lock() already held. On Windows (per-handle, non-reentrant
-    /// locks), this deadlocked every UserPromptSubmit invocation.
+    /// Regression: `save()` must not deadlock when session lock is already held.
+    /// The bug: `save()` acquired its own exclusive lock on the same file that
+    /// `acquire_session_lock()` already held. On Windows (per-handle, non-reentrant
+    /// locks), this deadlocked every `UserPromptSubmit` invocation.
     #[test]
     fn test_save_does_not_deadlock_under_session_lock() {
         let sid = test_session_id("nodeadlock");

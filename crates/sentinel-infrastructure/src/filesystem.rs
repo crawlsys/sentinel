@@ -1,13 +1,13 @@
-//! Real filesystem adapter — implements FileSystemPort.
+//! Real filesystem adapter — implements `FileSystemPort`.
 //!
-//! Thin delegation to std::fs + dirs. Exists so hooks can be tested
+//! Thin delegation to `std::fs` + dirs. Exists so hooks can be tested
 //! with a mock filesystem that doesn't touch real disk.
 
 use anyhow::{Context, Result};
 use sentinel_domain::ports::FileSystemPort;
 use std::path::{Path, PathBuf};
 
-/// Infrastructure adapter implementing `FileSystemPort` via real std::fs.
+/// Infrastructure adapter implementing `FileSystemPort` via real `std::fs`.
 pub struct RealFileSystem;
 
 impl FileSystemPort for RealFileSystem {

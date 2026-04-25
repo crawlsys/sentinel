@@ -1,6 +1,6 @@
 //! AI Skill Classifier via Rig LLM framework
 //!
-//! Uses Claude Opus 4.7 (latest) via OpenRouter for intent classification.
+//! Uses Claude Opus 4.7 (latest) via `OpenRouter` for intent classification.
 //! The classifier receives the user's message + a compact skill catalog
 //! and returns the best-matching skill name (or "none").
 
@@ -13,7 +13,7 @@ use rig_core::providers::openrouter;
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 
-/// Claude Opus 4.7 (latest) via OpenRouter
+/// Claude Opus 4.7 (latest) via `OpenRouter`
 const OPENROUTER_MODEL: &str = "anthropic/claude-opus-4-7";
 
 /// Type-erased prompt function
@@ -26,7 +26,7 @@ pub struct RigClassifier {
 }
 
 impl RigClassifier {
-    /// Initialize from environment — reads OPENROUTER_API_KEY.
+    /// Initialize from environment — reads `OPENROUTER_API_KEY`.
     /// Returns None if the key is not set.
     pub fn from_env() -> Option<Self> {
         match Self::openrouter() {
@@ -169,7 +169,7 @@ pub fn build_skill_catalog() -> String {
 
     if let Ok(read_dir) = std::fs::read_dir(&skills_dir) {
         let mut dirs: Vec<_> = read_dir
-            .filter_map(|e| e.ok())
+            .filter_map(std::result::Result::ok)
             .filter(|e| {
                 let ft = match e.file_type() {
                     Ok(ft) => ft,
@@ -190,7 +190,7 @@ pub fn build_skill_catalog() -> String {
                 }
             })
             .collect();
-        dirs.sort_by_key(|d| d.file_name());
+        dirs.sort_by_key(std::fs::DirEntry::file_name);
 
         for dir in dirs {
             let skill_md = dir.path().join("SKILL.md");

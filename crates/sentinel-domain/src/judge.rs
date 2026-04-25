@@ -9,16 +9,16 @@ use serde::{Deserialize, Serialize};
 ///
 /// Names are historical (from Anthropic model family). Actual routing:
 /// - `Haiku` → Cerebras GLM-4.7 (fast, simple phases)
-/// - `Sonnet` → OpenAI GPT-5.3 Codex (standard phases)
+/// - `Sonnet` → `OpenAI` GPT-5.3 Codex (standard phases)
 /// - `Opus` → Anthropic Opus 4.6 (critical phases — no fallback to weaker tiers)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum JudgeModel {
-    /// Standard tier — routes to OpenAI, falls back to Anthropic
+    /// Standard tier — routes to `OpenAI`, falls back to Anthropic
     Sonnet,
     /// Critical tier — routes to Anthropic only, no fallback
     Opus,
-    /// Fast tier — routes to Cerebras, falls back to OpenAI or Anthropic
+    /// Fast tier — routes to Cerebras, falls back to `OpenAI` or Anthropic
     Haiku,
 }
 

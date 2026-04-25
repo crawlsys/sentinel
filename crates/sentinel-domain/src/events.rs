@@ -40,7 +40,7 @@ pub enum HookEvent {
     Notification,
 }
 
-/// PreToolUse permission decision — maps to Claude Code's permissionDecision field.
+/// `PreToolUse` permission decision — maps to Claude Code's permissionDecision field.
 /// Priority: Deny > Ask > Defer > Allow (when merging multiple hook outputs).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -133,7 +133,7 @@ pub struct HookInput {
     #[serde(default)]
     pub session_id: Option<String>,
 
-    /// User's prompt text (UserPromptSubmit)
+    /// User's prompt text (`UserPromptSubmit`)
     #[serde(default)]
     pub prompt: Option<String>,
 
@@ -153,7 +153,7 @@ pub struct HookInput {
     #[serde(default)]
     pub file_path: Option<String>,
 
-    /// Tool result (PostToolUse)
+    /// Tool result (`PostToolUse`)
     #[serde(default)]
     pub tool_result: Option<serde_json::Value>,
 
@@ -173,15 +173,15 @@ pub struct HookInput {
     #[serde(default)]
     pub last_assistant_message: Option<String>,
 
-    /// Agent transcript path (SubagentStop)
+    /// Agent transcript path (`SubagentStop`)
     #[serde(default)]
     pub agent_transcript_path: Option<String>,
 
-    /// Compact summary text (PostCompact)
+    /// Compact summary text (`PostCompact`)
     #[serde(default)]
     pub compact_summary: Option<String>,
 
-    /// Permission suggestions (PermissionRequest)
+    /// Permission suggestions (`PermissionRequest`)
     #[serde(default)]
     pub permission_suggestions: Option<Vec<serde_json::Value>>,
 
@@ -209,7 +209,7 @@ pub struct HookOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub blocked: Option<bool>,
 
-    /// Reason for blocking (internal, cleared on output for PreToolUse)
+    /// Reason for blocking (internal, cleared on output for `PreToolUse`)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
 
@@ -240,24 +240,25 @@ pub struct HookOutput {
 }
 
 /// Claude Code's hookSpecificOutput schema (v2.1.88).
-/// For PreToolUse: permissionDecision, permissionDecisionReason, updatedInput, additionalContext
+///
+/// For `PreToolUse`: permissionDecision, permissionDecisionReason, updatedInput, additionalContext
 /// For UserPromptSubmit/PostToolUse/SubagentStart/Setup: additionalContext
-/// For SessionStart: additionalContext, initialUserMessage, watchPaths
-/// For PermissionDenied: retry
+/// For `SessionStart`: additionalContext, initialUserMessage, watchPaths
+/// For `PermissionDenied`: retry
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct HookSpecificOutput {
     #[serde(rename = "hookEventName")]
     pub hook_event_name: String,
 
-    /// Permission decision for PreToolUse (deny > ask > allow)
+    /// Permission decision for `PreToolUse` (deny > ask > allow)
     #[serde(skip_serializing_if = "Option::is_none", rename = "permissionDecision")]
     pub permission_decision: Option<PermissionDecision>,
 
-    /// String injected as if the user typed it (SessionStart only)
+    /// String injected as if the user typed it (`SessionStart` only)
     #[serde(skip_serializing_if = "Option::is_none", rename = "initialUserMessage")]
     pub initial_user_message: Option<String>,
 
-    /// File paths to monitor for FileChanged events (SessionStart only)
+    /// File paths to monitor for `FileChanged` events (`SessionStart` only)
     #[serde(skip_serializing_if = "Option::is_none", rename = "watchPaths")]
     pub watch_paths: Option<Vec<String>>,
 
@@ -268,7 +269,7 @@ pub struct HookSpecificOutput {
     )]
     pub permission_decision_reason: Option<String>,
 
-    /// Modified tool input (PreToolUse only — replaces the original input)
+    /// Modified tool input (`PreToolUse` only — replaces the original input)
     #[serde(skip_serializing_if = "Option::is_none", rename = "updatedInput")]
     pub updated_input: Option<serde_json::Value>,
 
@@ -276,14 +277,14 @@ pub struct HookSpecificOutput {
     #[serde(skip_serializing_if = "Option::is_none", rename = "additionalContext")]
     pub additional_context: Option<String>,
 
-    /// Modified MCP tool output (PostToolUse only — replaces the original result)
+    /// Modified MCP tool output (`PostToolUse` only — replaces the original result)
     #[serde(
         skip_serializing_if = "Option::is_none",
         rename = "updatedMCPToolOutput"
     )]
     pub updated_mcp_tool_output: Option<serde_json::Value>,
 
-    /// Allow the model to retry a denied tool call (PermissionDenied only)
+    /// Allow the model to retry a denied tool call (`PermissionDenied` only)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub retry: Option<bool>,
 
@@ -296,7 +297,7 @@ pub struct HookSpecificOutput {
     pub content: Option<serde_json::Value>,
 
 
-    /// WorktreeCreate output path
+    /// `WorktreeCreate` output path
     #[serde(skip_serializing_if = "Option::is_none", rename = "worktreePath")]
     pub worktree_path: Option<String>,
 }
@@ -309,7 +310,7 @@ impl HookOutput {
     }
 
     /// Block a tool call with a reason (legacy — sets internal blocked flag).
-    /// For PreToolUse, this is transformed to permissionDecision: deny on output.
+    /// For `PreToolUse`, this is transformed to permissionDecision: deny on output.
     #[must_use]
     pub fn block(reason: impl Into<String>) -> Self {
         Self {
@@ -319,7 +320,7 @@ impl HookOutput {
         }
     }
 
-    /// Hard-deny a PreToolUse tool call (platform-enforced block).
+    /// Hard-deny a `PreToolUse` tool call (platform-enforced block).
     /// Uses Claude Code's hookSpecificOutput.permissionDecision directly.
     #[must_use]
     pub fn deny(reason: impl Into<String>) -> Self {
@@ -335,7 +336,7 @@ impl HookOutput {
         }
     }
 
-    /// Prompt user for approval before allowing tool call (PreToolUse only)
+    /// Prompt user for approval before allowing tool call (`PreToolUse` only)
     #[must_use]
     pub fn ask(reason: impl Into<String>) -> Self {
         Self {
@@ -349,7 +350,7 @@ impl HookOutput {
         }
     }
 
-    /// Modify tool input before execution (PreToolUse only)
+    /// Modify tool input before execution (`PreToolUse` only)
     #[must_use]
     pub fn rewrite_input(updated: serde_json::Value) -> Self {
         Self {
@@ -376,7 +377,7 @@ impl HookOutput {
         }
     }
 
-    /// Allow the model to retry a denied tool call (PermissionDenied only).
+    /// Allow the model to retry a denied tool call (`PermissionDenied` only).
     #[must_use]
     pub fn retry_denied() -> Self {
         Self {
@@ -399,8 +400,8 @@ impl HookOutput {
         }
     }
 
-    /// Transform legacy blocked/reason into proper Claude Code PreToolUse JSON.
-    /// Called at the output boundary in hook_cmd.rs before serialization.
+    /// Transform legacy blocked/reason into proper Claude Code `PreToolUse` JSON.
+    /// Called at the output boundary in `hook_cmd.rs` before serialization.
     #[must_use]
     pub fn into_pretool_output(mut self) -> Self {
         // If already has hookSpecificOutput with permissionDecision, clear legacy fields

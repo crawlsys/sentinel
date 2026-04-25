@@ -113,7 +113,7 @@ pub enum StandardFile {
 
 impl StandardFile {
     /// Filesystem path relative to repo root
-    pub fn path(&self) -> &'static str {
+    pub const fn path(&self) -> &'static str {
         match self {
             Self::Readme => "README.md",
             Self::ClaudeMd => "CLAUDE.md",
@@ -130,7 +130,7 @@ impl StandardFile {
     }
 
     /// Whether this file is Rust-specific
-    pub fn is_rust_only(&self) -> bool {
+    pub const fn is_rust_only(&self) -> bool {
         matches!(self, Self::RustfmtToml)
     }
 

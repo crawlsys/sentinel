@@ -158,8 +158,7 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
             let has_prompt = input
                 .prompt
                 .as_deref()
-                .map(|p| !p.trim().is_empty())
-                .unwrap_or(false);
+                .is_some_and(|p| !p.trim().is_empty());
             // IMPORTANT: `RigClassifier::from_env()` constructs a reqwest/rig client
             // which can block for several seconds on Windows (TLS root-cert loading via
             // schannel). It MUST run inside the timeout, not before it, so that the 8 s
@@ -168,7 +167,7 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
             // We offload the blocking init to a spawn_blocking task so it doesn't starve
             // the async executor; the surrounding timeout cancels the future if the whole
             // operation (init + classify) exceeds 8 s.
-            let router_output = match tokio::time::timeout(
+            let router_output = if let Ok(output) = tokio::time::timeout(
                 std::time::Duration::from_secs(8),
                 async {
                     let classifier = if has_prompt {
@@ -191,13 +190,9 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
                     .await
                 },
             )
-            .await
-            {
-                Ok(output) => output,
-                Err(_) => {
-                    tracing::warn!("Skill router timed out (8s) — no routing for this message");
-                    hooks::skill_router::build_no_match_output(&real_fs)
-                }
+            .await { output } else {
+                tracing::warn!("Skill router timed out (8s) — no routing for this message");
+                hooks::skill_router::build_no_match_output(&real_fs)
             };
             output.merge(&router_output);
 
@@ -220,8 +215,7 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
                         let is_slash_command = input
                             .prompt
                             .as_deref()
-                            .map(|p: &str| p.trim().starts_with('/'))
-                            .unwrap_or(false);
+                            .is_some_and(|p: &str| p.trim().starts_with('/'));
 
                         if workflows.contains_key(&skill) && !is_slash_command {
                             // Skill has a workflow but was NOT explicitly invoked.
@@ -656,7 +650,7 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
         HookEvent::PostToolUseFailure => {
             // Tool execution failed — log for diagnostics
             let tool_name = input.tool_name.as_deref().unwrap_or("unknown");
-            let is_timeout = input.extra.get("is_timeout").and_then(|v| v.as_bool()).unwrap_or(false);
+            let is_timeout = input.extra.get("is_timeout").and_then(serde_json::Value::as_bool).unwrap_or(false);
             let error = input.extra.get("error").and_then(|v| v.as_str()).unwrap_or("");
             tracing::debug!(tool_name, is_timeout, error, "Tool execution failed");
 
@@ -676,7 +670,7 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
                     .open(metrics_dir.join("errors.jsonl"))
                 {
                     use std::io::Write;
-                    let _ = writeln!(file, "{}", entry);
+                    let _ = writeln!(file, "{entry}");
                 }
             }
         }
@@ -687,7 +681,7 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
             // will come when we add specific auto-approve rules for trusted tools
             // in certain contexts (e.g., auto-allow Edit in a known project dir).
             let tool = input.tool_name.as_deref().unwrap_or("unknown");
-            let has_suggestions = input.permission_suggestions.as_ref().map(|s| s.len()).unwrap_or(0);
+            let has_suggestions = input.permission_suggestions.as_ref().map_or(0, std::vec::Vec::len);
             tracing::debug!(tool, has_suggestions, "PermissionRequest — pass through (no auto-decisions yet)");
         }
 
@@ -712,8 +706,8 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
             tracing::debug!(source, file_path, "ConfigChange detected");
 
             // Warn if disableAllHooks is set (kill-switch that disables all enforcement)
-            if source == "user_settings" || source == "project_settings" || source == "local_settings" {
-                if !file_path.is_empty() {
+            if (source == "user_settings" || source == "project_settings" || source == "local_settings")
+                && !file_path.is_empty() {
                     if let Ok(settings_content) = std::fs::read_to_string(file_path) {
                         if settings_content.contains("\"disableAllHooks\"") && settings_content.contains("true") {
                             output.system_message = Some(
@@ -722,7 +716,6 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
                         }
                     }
                 }
-            }
 
             // Log skill file changes for telemetry
             if source == "skills" {
@@ -815,9 +808,7 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
         let title = format!("Claude blocked: {hook_event} / {tool_name}");
         let reason = output
             .reason
-            .as_deref()
-            .map(|r| if r.len() > 240 { format!("{}…", &r[..240]) } else { r.to_string() })
-            .unwrap_or_else(|| "(no reason given)".to_string());
+            .as_deref().map_or_else(|| "(no reason given)".to_string(), |r| if r.len() > 240 { format!("{}…", &r[..240]) } else { r.to_string() });
         sentinel_application::ntfy_push::push_attention(
             &real_fs,
             &real_env,
@@ -871,12 +862,12 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
     if should_attach_project_context(hook_event) {
         if let Ok(project) = std::env::var("CLAUDE_PROJECT") {
             if !project.is_empty() {
-                let project_header = format!("[Project Context] Active project: {}", project);
+                let project_header = format!("[Project Context] Active project: {project}");
                 if let Some(ref mut hso) = output.hook_specific_output {
                     match &hso.additional_context {
                         Some(existing) => {
                             hso.additional_context =
-                                Some(format!("{}\n\n{}", project_header, existing));
+                                Some(format!("{project_header}\n\n{existing}"));
                         }
                         None => {
                             hso.additional_context = Some(project_header);
@@ -906,23 +897,19 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
 }
 
 fn parse_hook_event(event: &str) -> Result<HookEvent> {
-    match HookEvent::from_arg(event) {
-        Some(e) => Ok(e),
-        None => {
-            eprintln!(
-                "[sentinel] ERROR: Unknown hook event type '{}'. \
-                 Valid events: SessionStart, SessionEnd, UserPromptSubmit, PreToolUse, \
-                 PostToolUse, PostToolUseFailure, Stop, StopFailure, PreCompact, PostCompact, \
-                 Setup, SubagentStart, SubagentStop, TeammateIdle, TaskCreated, TaskCompleted, \
-                 PermissionDenied, CwdChanged",
-                event
-            );
-            anyhow::bail!("Unknown hook event type: '{}'", event);
-        }
+    if let Some(e) = HookEvent::from_arg(event) { Ok(e) } else {
+        eprintln!(
+            "[sentinel] ERROR: Unknown hook event type '{event}'. \
+             Valid events: SessionStart, SessionEnd, UserPromptSubmit, PreToolUse, \
+             PostToolUse, PostToolUseFailure, Stop, StopFailure, PreCompact, PostCompact, \
+             Setup, SubagentStart, SubagentStop, TeammateIdle, TaskCreated, TaskCompleted, \
+             PermissionDenied, CwdChanged"
+        );
+        anyhow::bail!("Unknown hook event type: '{event}'");
     }
 }
 
-fn should_attach_project_context(hook_event: HookEvent) -> bool {
+const fn should_attach_project_context(hook_event: HookEvent) -> bool {
     matches!(
         hook_event,
         HookEvent::SessionStart
@@ -943,7 +930,7 @@ fn write_safe_allow_response() -> Result<()> {
 /// 1. **Stdin is piped** (not a terminal) — hooks are always invoked via pipe
 ///    from Claude Code's hook runner, never interactively. Hard fail unless
 ///    `SENTINEL_ALLOW_TERMINAL=1` is set.
-/// 2. **CLAUDE_CODE env marker** — Claude Code sets `CLAUDE_CODE_ENTRY_POINT`
+/// 2. **`CLAUDE_CODE` env marker** — Claude Code sets `CLAUDE_CODE_ENTRY_POINT`
 ///    when spawning hook subprocesses. Its absence is suspicious.
 ///
 /// If validation fails, a `caller_rejected` event is logged to the security
@@ -954,7 +941,7 @@ fn write_safe_allow_response() -> Result<()> {
 /// still set the env var and pipe crafted JSON, but they must:
 ///   1. Know the sentinel CLI exists and its arguments
 ///   2. Set `CLAUDE_CODE_ENTRY_POINT` in their environment
-///   3. Construct valid HookInput JSON with a real session_id
+///   3. Construct valid `HookInput` JSON with a real `session_id`
 ///   4. Pipe it correctly (not type interactively)
 fn validate_caller() -> Result<()> {
     // Escape hatch for debugging / manual testing
@@ -1021,15 +1008,13 @@ fn validate_caller() -> Result<()> {
             ];
             if !valid_parents.iter().any(|v| parent.contains(v)) {
                 eprintln!(
-                    "[sentinel] WARNING: Parent process '{}' is not a known Claude Code runtime.",
-                    parent
+                    "[sentinel] WARNING: Parent process '{parent}' is not a known Claude Code runtime."
                 );
                 let _ = sentinel_infrastructure::security_log::log_security_event(
                     "caller_rejected",
                     "unknown",
                     &format!(
-                        "Parent process '{}' is not a known Claude Code runtime",
-                        parent
+                        "Parent process '{parent}' is not a known Claude Code runtime"
                     ),
                 );
             }
@@ -1043,7 +1028,7 @@ fn validate_caller() -> Result<()> {
 ///
 /// Strategy: Use `wmic process where ProcessId=<PID> get ParentProcessId` to find
 /// the parent PID, then `tasklist /FI "PID eq <PPID>"` to get its name.
-/// Both are native Windows tools that start in ~30ms (vs PowerShell ~2s).
+/// Both are native Windows tools that start in ~30ms (vs `PowerShell` ~2s).
 ///
 /// Returns None if the check fails for any reason (fail-open for resilience).
 #[cfg(windows)]
@@ -1312,7 +1297,7 @@ mod tests {
             .join("target").join("release").join(if cfg!(windows) { "sentinel-engine.exe" } else { "sentinel-engine" });
 
         if !engine.exists() {
-            eprintln!("Skipping: sentinel-engine not found at {:?}", engine);
+            eprintln!("Skipping: sentinel-engine not found at {engine:?}");
             return;
         }
 
@@ -1341,7 +1326,7 @@ mod tests {
 
         assert!(
             result.is_ok(),
-            "sentinel-engine did not exit within {}s — possible hang", timeout_secs
+            "sentinel-engine did not exit within {timeout_secs}s — possible hang"
         );
     }
 
@@ -1355,7 +1340,7 @@ mod tests {
             .join("target").join("release").join(if cfg!(windows) { "sentinel-engine.exe" } else { "sentinel-engine" });
 
         if !engine.exists() {
-            eprintln!("Skipping: sentinel-engine not found at {:?}", engine);
+            eprintln!("Skipping: sentinel-engine not found at {engine:?}");
             return;
         }
 
@@ -1390,7 +1375,7 @@ mod tests {
         assert!(!stdout.is_empty(), "stdout should not be empty");
 
         let parsed: Result<serde_json::Value, _> = serde_json::from_str(stdout.trim());
-        assert!(parsed.is_ok(), "stdout is not valid JSON: {}", stdout);
+        assert!(parsed.is_ok(), "stdout is not valid JSON: {stdout}");
 
         assert!(
             !stdout.contains("[2m"),

@@ -1,9 +1,9 @@
-//! Real process adapter — implements ProcessPort.
+//! Real process adapter — implements `ProcessPort`.
 
 use anyhow::{Context, Result};
 use sentinel_domain::ports::{ProcessOutput, ProcessPort};
 
-/// Infrastructure adapter implementing `ProcessPort` via std::process::Command.
+/// Infrastructure adapter implementing `ProcessPort` via `std::process::Command`.
 pub struct RealProcess;
 
 impl ProcessPort for RealProcess {

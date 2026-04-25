@@ -1,7 +1,7 @@
 //! Security Audit Log
 //!
 //! Persistent, append-only security event log for sentinel.
-//! Events: hmac_failure, rate_limited, tamper_detected, caller_rejected, state_regression
+//! Events: `hmac_failure`, `rate_limited`, `tamper_detected`, `caller_rejected`, `state_regression`
 //!
 //! Format: one JSON line per event in `~/.claude/sentinel/security.jsonl`.
 //! Auto-truncates to the last 500KB when the file exceeds 1MB.

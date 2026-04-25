@@ -1,10 +1,10 @@
-//! Adversarial AI Judge via OpenRouter (GPT-5.4)
+//! Adversarial AI Judge via `OpenRouter` (GPT-5.4)
 //!
-//! Uses GPT-5.4 via OpenRouter — a DIFFERENT model family from the Anthropic
+//! Uses GPT-5.4 via `OpenRouter` — a DIFFERENT model family from the Anthropic
 //! Opus used for skill routing — to ensure adversarial evaluation. The judge
 //! should never be the same model as the defendant: no "grading your own homework".
 //!
-//! All judge tiers route through OpenRouter. Reads OPENROUTER_API_KEY.
+//! All judge tiers route through `OpenRouter`. Reads `OPENROUTER_API_KEY`.
 
 use anyhow::{Context, Result};
 use futures::future::BoxFuture;
@@ -18,10 +18,10 @@ use tracing::{debug, info};
 use sentinel_domain::evidence::Evidence;
 use sentinel_domain::judge::{JudgeModel, JudgeVerdict};
 
-/// GPT-5.4 (latest) via OpenRouter — adversarially different from Anthropic classifier
+/// GPT-5.4 (latest) via `OpenRouter` — adversarially different from Anthropic classifier
 const JUDGE_MODEL: &str = "openai/gpt-5.4";
 
-/// Type-erased prompt function: (system, user_msg) -> response text
+/// Type-erased prompt function: (system, `user_msg`) -> response text
 type PromptFn = Arc<dyn Fn(String, String) -> BoxFuture<'static, Result<String>> + Send + Sync>;
 
 /// The OpenRouter-backed adversarial judge provider
@@ -30,7 +30,7 @@ struct JudgeProvider {
 }
 
 impl JudgeProvider {
-    /// Initialize from OPENROUTER_API_KEY env var.
+    /// Initialize from `OPENROUTER_API_KEY` env var.
     fn from_env() -> Result<Self> {
         let key = std::env::var("OPENROUTER_API_KEY").context("OPENROUTER_API_KEY not set")?;
         let client = Arc::new(
@@ -63,12 +63,12 @@ impl JudgeProvider {
 
         serde_json::from_str::<JudgeVerdict>(&text)
             .or_else(|_| extract_json_from_markdown(&text))
-            .map(|v| v.sanitized()) // Attack #127: clamp confidence to [0.0, 1.0]
+            .map(sentinel_domain::JudgeVerdict::sanitized) // Attack #127: clamp confidence to [0.0, 1.0]
             .context("Failed to parse judge verdict JSON")
     }
 }
 
-/// Adversarial judge — GPT-5.4 via OpenRouter.
+/// Adversarial judge — GPT-5.4 via `OpenRouter`.
 ///
 /// GPT-5.4 is a different model family from the Anthropic Opus that generates
 /// the work being evaluated, ensuring genuinely adversarial review.
@@ -98,7 +98,7 @@ impl MultiModelJudge {
     }
 
     /// Returns `true` if the judge provider is available.
-    pub fn has_any_provider(&self) -> bool {
+    pub const fn has_any_provider(&self) -> bool {
         self.judge.is_some()
     }
 }

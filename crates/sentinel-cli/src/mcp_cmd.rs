@@ -89,7 +89,7 @@ fn detect_live_session_id() -> Option<String> {
 /// tags every `H.callTool({..., _meta: {"claudecode/toolUseId": j}, ...})`
 /// call with a unique id; that id also appears as the `id` of the assistant
 /// `tool_use` block in the session's transcript JSONL. Finding the
-/// transcript where a given toolUseId is the LATEST tool_use gives us the
+/// transcript where a given toolUseId is the LATEST `tool_use` gives us the
 /// specific session that issued the MCP call — even when multiple Claude
 /// Code windows are open concurrently.
 ///
@@ -146,9 +146,9 @@ fn session_id_by_tool_use_id(tool_use_id: &str) -> Option<String> {
     None
 }
 
-/// Scan a single transcript JSONL for an assistant tool_use whose `id`
-/// matches the given tool_use_id. Reads the file fully into memory and
-/// walks lines backwards — tool_use ids are overwhelmingly at the tail.
+/// Scan a single transcript JSONL for an assistant `tool_use` whose `id`
+/// matches the given `tool_use_id`. Reads the file fully into memory and
+/// walks lines backwards — `tool_use` ids are overwhelmingly at the tail.
 fn transcript_contains_tool_use_id(transcript: &Path, tool_use_id: &str) -> bool {
     let Ok(content) = std::fs::read_to_string(transcript) else {
         return false;
@@ -223,7 +223,7 @@ fn resolve_session_id(params: &serde_json::Value) -> Result<String> {
 /// disk, under an exclusive file lock.
 ///
 /// The same `Arc<RwLock<SessionState>>` is reused across calls to satisfy
-/// existing handler signatures (McpHandler and friends hold it by Arc).
+/// existing handler signatures (`McpHandler` and friends hold it by Arc).
 /// Its contents are OVERWRITTEN at the start of each transaction and
 /// saved back at the end, so no stale in-memory state survives between
 /// calls. This keeps handlers oblivious to the per-call session
@@ -282,7 +282,7 @@ where
     // Save the mutated state back under the same lock.
     {
         let mut guard = state_handle.write().await;
-        if let Err(e) = sentinel_infrastructure::state_store::save(&mut *guard) {
+        if let Err(e) = sentinel_infrastructure::state_store::save(&mut guard) {
             error!(session_id, error = %e, "Failed to save session state");
         }
     }
@@ -703,7 +703,7 @@ async fn handle_request(
     }
 }
 
-/// Handle sentinel__submit_phase_complete
+/// Handle `sentinel__submit_phase_complete`
 async fn handle_submit_phase(
     request: &JsonRpcRequest,
     args: &serde_json::Value,
@@ -754,7 +754,7 @@ async fn handle_submit_phase(
     }
 
     // Record phase read in state (submitting implies the phase was read)
-    let phase_file = format!("{}.md", phase_id);
+    let phase_file = format!("{phase_id}.md");
     {
         let mut s = state.write().await;
         s.set_active_skill(&skill);
@@ -765,7 +765,7 @@ async fn handle_submit_phase(
         .and_then(|wf| wf.phases.iter().find(|p| p.id == phase_id))
         .map(|phase| {
             let desc = if phase.description.is_empty() {
-                format!("Complete the {} phase", phase_id)
+                format!("Complete the {phase_id} phase")
             } else {
                 phase.description.clone()
             };
@@ -773,7 +773,7 @@ async fn handle_submit_phase(
         })
         .unwrap_or((
             JudgeModel::Sonnet,
-            format!("Complete the {} phase", phase_id),
+            format!("Complete the {phase_id} phase"),
         ));
 
     // Build evidence from the summary + state context
@@ -858,8 +858,7 @@ async fn handle_submit_phase(
             // BLOCKED — opaque error, reasoning sealed in proof store
             warn!(phase = %phase_id, error = %e, "Phase BLOCKED by AI judge");
             let error_msg = format!(
-                "Phase '{}' BLOCKED — evidence insufficient. Re-run the phase with complete outputs before re-submitting.",
-                phase_id
+                "Phase '{phase_id}' BLOCKED — evidence insufficient. Re-run the phase with complete outputs before re-submitting."
             );
             JsonRpcResponse::success(
                 request.id.clone(),
@@ -877,7 +876,7 @@ fn load_steps_config(skill: &str) -> Option<SkillSteps> {
         .flatten()
 }
 
-/// Helper: Load workflow configs as a HashMap
+/// Helper: Load workflow configs as a `HashMap`
 fn load_workflow_configs() -> HashMap<String, sentinel_domain::workflow::SkillWorkflow> {
     let config_dir = sentinel_infrastructure::config::config_dir();
     if config_dir.join("workflows.toml").exists() {
@@ -891,7 +890,7 @@ fn load_workflow_configs() -> HashMap<String, sentinel_domain::workflow::SkillWo
     }
 }
 
-/// Handle sentinel__update_step
+/// Handle `sentinel__update_step`
 async fn handle_update_step(
     request: &JsonRpcRequest,
     args: &serde_json::Value,
@@ -936,7 +935,7 @@ async fn handle_update_step(
     let summary = args
         .get("summary")
         .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
+        .map(std::string::ToString::to_string);
 
     // Parse status
     let status: StepStatus = match serde_json::from_value(serde_json::json!(status_str)) {
@@ -964,23 +963,19 @@ async fn handle_update_step(
     let phase_completed = s
         .workflows
         .get(&skill)
-        .map(|w| w.phase_steps_completed(&phase_id))
-        .unwrap_or(0);
+        .map_or(0, |w| w.phase_steps_completed(&phase_id));
 
     // Phase total: from config if available, else from tracked states
     let steps_config = load_steps_config(&skill);
     let phase_total = steps_config
         .as_ref()
-        .and_then(|sc| sc.phase_steps(&phase_id))
-        .map(|ps| ps.steps.len())
-        .unwrap_or_else(|| {
+        .and_then(|sc| sc.phase_steps(&phase_id)).map_or_else(|| {
             s.workflows
                 .get(&skill)
-                .map(|w| w.phase_step_states(&phase_id).len())
-                .unwrap_or(0)
-        });
+                .map_or(0, |w| w.phase_step_states(&phase_id).len())
+        }, |ps| ps.steps.len());
 
-    let phase_progress = format!("{}/{} steps", phase_completed, phase_total);
+    let phase_progress = format!("{phase_completed}/{phase_total} steps");
 
     // Overall progress (only if steps config exists)
     let overall_progress = steps_config.as_ref().map(|sc| {
@@ -988,9 +983,8 @@ async fn handle_update_step(
         let completed = s
             .workflows
             .get(&skill)
-            .map(|w| w.total_steps_completed())
-            .unwrap_or(0);
-        format!("{}/{} steps", completed, total)
+            .map_or(0, sentinel_domain::workflow::WorkflowState::total_steps_completed);
+        format!("{completed}/{total} steps")
     });
 
     // Save state to disk
@@ -1015,7 +1009,7 @@ async fn handle_update_step(
     JsonRpcResponse::success(request.id.clone(), mcp_tool_result(true, result))
 }
 
-/// Handle sentinel__get_phase_steps
+/// Handle `sentinel__get_phase_steps`
 async fn handle_get_phase_steps(
     request: &JsonRpcRequest,
     args: &serde_json::Value,
@@ -1100,8 +1094,7 @@ async fn handle_get_phase_steps(
     let completed = s
         .workflows
         .get(&skill)
-        .map(|w| w.phase_steps_completed(&phase_id))
-        .unwrap_or(0);
+        .map_or(0, |w| w.phase_steps_completed(&phase_id));
     let total = steps_list.len();
 
     let result = serde_json::json!({
@@ -1114,7 +1107,7 @@ async fn handle_get_phase_steps(
     JsonRpcResponse::success(request.id.clone(), mcp_tool_result(true, result))
 }
 
-/// Handle sentinel__get_workflow_progress
+/// Handle `sentinel__get_workflow_progress`
 async fn handle_get_workflow_progress(
     request: &JsonRpcRequest,
     args: &serde_json::Value,
@@ -1144,15 +1137,13 @@ async fn handle_get_workflow_progress(
     if let Some(workflow) = workflow_configs.get(&skill) {
         for phase in &workflow.phases {
             let phase_status = if wf_state
-                .map(|w| w.is_phase_complete(&phase.id))
-                .unwrap_or(false)
+                .is_some_and(|w| w.is_phase_complete(&phase.id))
             {
                 "completed"
             } else if wf_state
-                .map(|w| w.current_phase.is_some() && !w.completed_phases.contains(&phase.id))
-                .unwrap_or(false)
+                .is_some_and(|w| w.current_phase.is_some() && !w.completed_phases.contains(&phase.id))
                 && wf_state
-                    .map(|w| {
+                    .is_some_and(|w| {
                         w.completed_phases.len()
                             == workflow
                                 .phases
@@ -1160,7 +1151,6 @@ async fn handle_get_workflow_progress(
                                 .position(|p| p.id == phase.id)
                                 .unwrap_or(0)
                     })
-                    .unwrap_or(false)
             {
                 "in_progress"
             } else {
@@ -1169,18 +1159,14 @@ async fn handle_get_workflow_progress(
 
             // Step-level counts for this phase
             let steps_completed = wf_state
-                .map(|w| w.phase_steps_completed(&phase.id))
-                .unwrap_or(0);
+                .map_or(0, |w| w.phase_steps_completed(&phase.id));
 
             let steps_total = steps_config
                 .as_ref()
-                .and_then(|sc| sc.phase_steps(&phase.id))
-                .map(|ps| ps.steps.len())
-                .unwrap_or_else(|| {
+                .and_then(|sc| sc.phase_steps(&phase.id)).map_or_else(|| {
                     wf_state
-                        .map(|w| w.phase_step_states(&phase.id).len())
-                        .unwrap_or(0)
-                });
+                        .map_or(0, |w| w.phase_step_states(&phase.id).len())
+                }, |ps| ps.steps.len());
 
             overall_completed += steps_completed;
             overall_total += steps_total;
@@ -1421,7 +1407,7 @@ mod tests {
             );
 
             // Looking up A's id → A must win, not B (even though B is newer).
-            assert_eq!(session_id_by_tool_use_id(tool_use_in_a), Some(id_a.clone()));
+            assert_eq!(session_id_by_tool_use_id(tool_use_in_a), Some(id_a));
             // And B's id still works.
             assert_eq!(session_id_by_tool_use_id(tool_use_in_b), Some(id_b));
         });
@@ -1576,7 +1562,7 @@ mod tests {
         // First transaction: set active_skill.
         let handle1 = handle.clone();
         with_session_state(&session_id, &handle, move || {
-            let h = handle1.clone();
+            let h = handle1;
             async move {
                 let mut s = h.write().await;
                 s.set_active_skill("my-skill");
@@ -1588,7 +1574,7 @@ mod tests {
         // Second transaction: expect active_skill to have persisted.
         let handle2 = handle.clone();
         with_session_state(&session_id, &handle, move || {
-            let h = handle2.clone();
+            let h = handle2;
             async move {
                 let s = h.read().await;
                 assert_eq!(s.active_skill.as_deref(), Some("my-skill"));
@@ -1608,7 +1594,7 @@ mod tests {
         drop(env_guard);
     }
 
-    /// Tests mutate process env (HOME/USERPROFILE/SENTINEL_STATE_DIR) and
+    /// Tests mutate process env (`HOME/USERPROFILE/SENTINEL_STATE_DIR`) and
     /// must serialize — cargo test runs in parallel by default.
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 }

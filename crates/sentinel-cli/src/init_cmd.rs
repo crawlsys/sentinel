@@ -26,9 +26,7 @@ fn run_single(repo: &PathBuf, dry_run: bool, force: bool) -> anyhow::Result<()> 
     let audit = project_init::audit(repo);
 
     let dir_name = repo
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| repo.display().to_string());
+        .file_name().map_or_else(|| repo.display().to_string(), |n| n.to_string_lossy().to_string());
 
     eprintln!(
         "{} {} — Project Standards Audit",
@@ -43,9 +41,7 @@ fn run_single(repo: &PathBuf, dry_run: bool, force: bool) -> anyhow::Result<()> 
         audit
             .metadata
             .rust_flavor
-            .as_ref()
-            .map(|f| f.to_string())
-            .unwrap_or_else(|| "-".into())
+            .as_ref().map_or_else(|| "-".into(), std::string::ToString::to_string)
     );
     eprintln!("Name: {}", audit.metadata.name);
     eprintln!();
@@ -181,10 +177,10 @@ fn run_batch(dry_run: bool, force: bool) -> anyhow::Result<()> {
     eprintln!("{}", "Summary".bold());
     eprintln!("{}", "-".repeat(30));
     eprintln!("Repos scanned:    {}", repos.len());
-    eprintln!("Repos needing work: {}", repos_needing_work);
+    eprintln!("Repos needing work: {repos_needing_work}");
     let verb = if dry_run { "Would create" } else { "Created" };
     eprintln!("{}: {}", verb, total_created.to_string().green());
-    eprintln!("Skipped:          {}", total_skipped);
+    eprintln!("Skipped:          {total_skipped}");
     if total_errors > 0 {
         eprintln!("Errors:           {}", total_errors.to_string().red());
     }

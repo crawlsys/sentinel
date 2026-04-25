@@ -46,8 +46,7 @@ pub async fn run() -> Result<()> {
                         .hook_stats
                         .per_hook_time_ms
                         .get(hook)
-                        .map(|t| t / count)
-                        .unwrap_or(0);
+                        .map_or(0, |t| t / count);
                     println!("    {hook}: {count} calls (avg {avg_ms}ms)");
                 }
             }

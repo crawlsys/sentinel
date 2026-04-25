@@ -68,14 +68,11 @@ impl MemoryMcpConfig {
     pub fn from_env() -> Self {
         let argv = std::env::var("MEMORY_MCP_CMD")
             .ok()
-            .filter(|s| !s.trim().is_empty())
-            .map(|s| shell_split(&s))
-            .unwrap_or_else(|| shell_split(DEFAULT_CMD));
+            .filter(|s| !s.trim().is_empty()).map_or_else(|| shell_split(DEFAULT_CMD), |s| shell_split(&s));
         let timeout = std::env::var("MEMORY_MCP_TIMEOUT_SECS")
             .ok()
             .and_then(|s| s.parse::<u64>().ok())
-            .map(Duration::from_secs)
-            .unwrap_or(DEFAULT_TIMEOUT);
+            .map_or(DEFAULT_TIMEOUT, Duration::from_secs);
         Self { argv, timeout }
     }
 }
@@ -99,7 +96,7 @@ pub struct MemoryMcpClient {
 }
 
 impl MemoryMcpClient {
-    pub fn new(cfg: MemoryMcpConfig) -> Self {
+    pub const fn new(cfg: MemoryMcpConfig) -> Self {
         Self { cfg }
     }
 
@@ -336,7 +333,7 @@ impl MemoryMcpPort for MemoryMcpClient {
     ) -> Result<serde_json::Value> {
         // Delegate to the inherent method, which already wraps the call in
         // the configured timeout and handles the MCP handshake.
-        MemoryMcpClient::call_tool(self, name, arguments).await
+        Self::call_tool(self, name, arguments).await
     }
 }
 

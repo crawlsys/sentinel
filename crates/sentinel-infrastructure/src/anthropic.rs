@@ -16,7 +16,7 @@ const API_URL: &str = "https://api.anthropic.com/v1/messages";
 const API_VERSION: &str = "2023-06-01";
 
 /// Map domain model to API model ID
-fn model_id(model: JudgeModel) -> &'static str {
+const fn model_id(model: JudgeModel) -> &'static str {
     match model {
         JudgeModel::Sonnet => "claude-sonnet-4-6",
         JudgeModel::Opus => "claude-opus-4-6",
@@ -148,7 +148,7 @@ impl AnthropicClient {
     }
 }
 
-/// Implement the application layer's AiClassifier trait
+/// Implement the application layer's `AiClassifier` trait
 #[async_trait::async_trait]
 impl sentinel_application::classifier::AiClassifier for AnthropicClient {
     async fn classify(&self, message: &str, candidates: &[String]) -> Result<Option<String>> {
@@ -158,7 +158,7 @@ impl sentinel_application::classifier::AiClassifier for AnthropicClient {
 
 /// Map the domain `LlmModel` to the closest `JudgeModel` so we can reuse
 /// the existing `model_id()` mapping.
-fn llm_to_judge(model: LlmModel) -> JudgeModel {
+const fn llm_to_judge(model: LlmModel) -> JudgeModel {
     match model {
         LlmModel::Haiku => JudgeModel::Haiku,
         LlmModel::Sonnet => JudgeModel::Sonnet,

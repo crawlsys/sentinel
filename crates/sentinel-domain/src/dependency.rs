@@ -215,7 +215,7 @@ mod tests {
                     vec![format!("h{}", i - 1).as_str().to_string()]
                 };
                 HookSpec {
-                    id: HookId::new(&format!("h{i}")),
+                    id: HookId::new(format!("h{i}")),
                     event: HookEvent::UserPromptSubmit,
                     matcher: vec![],
                     depends_on: deps.into_iter().map(|d| HookId::new(&d)).collect(),

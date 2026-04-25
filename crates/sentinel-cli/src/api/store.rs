@@ -75,7 +75,7 @@ fn get_or_clone_repo(owner: &str, repo: &str) -> Result<PathBuf, String> {
     let mut rand_bytes = [0u8; 8];
     let _ = getrandom::getrandom(&mut rand_bytes);
     let rand_suffix: String = rand_bytes.iter().map(|b| format!("{b:02x}")).collect();
-    let tmp_dir = std::env::temp_dir().join(format!("skills-{}-{}-{}", owner, repo, rand_suffix));
+    let tmp_dir = std::env::temp_dir().join(format!("skills-{owner}-{repo}-{rand_suffix}"));
 
     // Verify the path doesn't already exist (extremely unlikely with random suffix)
     if tmp_dir.exists() {
@@ -133,7 +133,7 @@ fn walk_for_skills(dir: &Path, depth: usize, max_depth: usize, skills: &mut Vec<
         return;
     };
 
-    for entry in entries.filter_map(|e| e.ok()) {
+    for entry in entries.filter_map(std::result::Result::ok) {
         if !entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
             continue;
         }

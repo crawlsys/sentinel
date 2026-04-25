@@ -88,11 +88,9 @@ pub fn verify_staged() -> Result<String> {
         let _ = std::fs::remove_file(&hash_file);
         anyhow::bail!(
             "SECURITY: Staged binary hash mismatch!\n\
-             Expected: {}\n\
-             Got:      {}\n\
+             Expected: {expected_hash}\n\
+             Got:      {actual_hash}\n\
              The staged binary has been tampered with and has been removed.",
-            expected_hash,
-            actual_hash,
         );
     }
 
@@ -100,9 +98,7 @@ pub fn verify_staged() -> Result<String> {
 }
 
 pub async fn run(binary: Option<String>) -> Result<()> {
-    let source = binary
-        .map(PathBuf::from)
-        .unwrap_or_else(default_binary_path);
+    let source = binary.map_or_else(default_binary_path, PathBuf::from);
 
     if !source.exists() {
         anyhow::bail!(

@@ -91,11 +91,11 @@ pub struct WorkflowPhase {
     pub description: String,
 }
 
-fn default_true() -> bool {
+const fn default_true() -> bool {
     true
 }
 
-fn default_judge() -> JudgeModel {
+const fn default_judge() -> JudgeModel {
     JudgeModel::Sonnet
 }
 
@@ -269,12 +269,7 @@ impl WorkflowState {
         &self,
         workflow: &'a SkillWorkflow,
     ) -> Option<&'a WorkflowPhase> {
-        for phase in &workflow.phases {
-            if phase.required && !self.is_phase_complete(&phase.id) {
-                return Some(phase);
-            }
-        }
-        None
+        workflow.phases.iter().find(|&phase| phase.required && !self.is_phase_complete(&phase.id)).map(|v| v as _)
     }
 
     /// Check if a tool call should be blocked based on workflow state

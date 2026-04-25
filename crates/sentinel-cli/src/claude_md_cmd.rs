@@ -32,9 +32,9 @@ pub fn regenerate() -> Result<Value> {
     }))
 }
 
-/// Apply a find-and-replace to the compiled template source (session_init.rs).
+/// Apply a find-and-replace to the compiled template source (`session_init.rs`).
 ///
-/// **Safety contract** — mirrors the `Edit` tool's "old_string must be unique"
+/// **Safety contract** — mirrors the `Edit` tool's "`old_string` must be unique"
 /// rule. Refuses to modify the file if:
 ///   * `find` is empty,
 ///   * `find` equals `replace` (no-op),
@@ -119,7 +119,7 @@ pub fn restart_all_mcps() -> Result<Value> {
 /// Inner implementation with explicit config path + extra resolver dirs so
 /// tests can point at a fixture without racing `dirs::home_dir` (which on
 /// Windows bypasses the `HOME`/`USERPROFILE` env and reads the user profile
-/// via the FOLDERID_Profile API).
+/// via the `FOLDERID_Profile` API).
 fn restart_all_mcps_with(config_path: &Path, extra_dirs: &[PathBuf]) -> Result<Value> {
     let text = fs::read_to_string(config_path)
         .with_context(|| format!("reading {}", config_path.display()))?;
@@ -366,7 +366,7 @@ mod tests {
         // race. Binary resolution still uses fixture dirs, not real $HOME.
         let _lock = ENV_LOCK
             .lock()
-            .unwrap_or_else(|e| e.into_inner()); // recover poisoned lock
+            .unwrap_or_else(std::sync::PoisonError::into_inner); // recover poisoned lock
 
         let tmp = tempfile::TempDir::new().unwrap();
         let prev_path = std::env::var_os("PATH");

@@ -19,7 +19,7 @@ fn is_interactive() -> bool {
             fn GetConsoleMode(h: *mut std::ffi::c_void, m: *mut u32) -> i32;
         }
         let mut m = 0u32;
-        unsafe { GetConsoleMode(std::io::stdin().as_raw_handle() as *mut _, &mut m) != 0 }
+        unsafe { GetConsoleMode(std::io::stdin().as_raw_handle().cast(), &raw mut m) != 0 }
     }
 
     #[cfg(not(target_os = "windows"))]

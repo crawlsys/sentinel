@@ -70,16 +70,12 @@ pub fn check_rate_limit(session_id: &str) -> Result<()> {
             "rate_limited",
             session_id,
             &format!(
-                "Exceeded {} hook invocations in {}s — possible hook loop or abuse",
-                MAX_INVOCATIONS_PER_WINDOW, WINDOW_SECONDS,
+                "Exceeded {MAX_INVOCATIONS_PER_WINDOW} hook invocations in {WINDOW_SECONDS}s — possible hook loop or abuse",
             ),
         );
         anyhow::bail!(
-            "[sentinel] Rate limited: session '{}' exceeded {} hook invocations in {} seconds. \
+            "[sentinel] Rate limited: session '{session_id}' exceeded {MAX_INVOCATIONS_PER_WINDOW} hook invocations in {WINDOW_SECONDS} seconds. \
              This may indicate a hook loop or abuse.",
-            session_id,
-            MAX_INVOCATIONS_PER_WINDOW,
-            WINDOW_SECONDS,
         );
     }
 
@@ -89,7 +85,7 @@ pub fn check_rate_limit(session_id: &str) -> Result<()> {
     // Write back (compact format — just timestamps)
     let content: String = timestamps
         .iter()
-        .map(|ts| ts.to_string())
+        .map(std::string::ToString::to_string)
         .collect::<Vec<_>>()
         .join("\n");
     std::fs::write(&path, content).context("Failed to write rate limit file")?;

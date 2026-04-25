@@ -120,7 +120,7 @@ pub struct VectorPoint {
     pub payload: serde_json::Value,
 }
 
-/// A point returned from scroll or get_points.
+/// A point returned from scroll or `get_points`.
 #[derive(Debug, Clone)]
 pub struct VectorScrollResult {
     pub id: String,
@@ -133,9 +133,9 @@ pub struct VectorScrollResult {
 
 /// Port for filesystem operations.
 ///
-/// Abstracts all std::fs and dirs calls. Hooks use this for reading/writing
+/// Abstracts all `std::fs` and dirs calls. Hooks use this for reading/writing
 /// state files, config, metrics, and memory files. The infrastructure layer
-/// delegates to real std::fs. Tests can inject a mock.
+/// delegates to real `std::fs`. Tests can inject a mock.
 pub trait FileSystemPort: Send + Sync {
     /// Get the user's home directory.
     fn home_dir(&self) -> Option<PathBuf>;
@@ -177,7 +177,7 @@ pub trait FileSystemPort: Send + Sync {
 
     /// Remove a single file. No-op if the file doesn't exist; errors only on
     /// permission failures or unexpected IO errors. Used by hooks that maintain
-    /// short-lived state markers (skill_router, verification_gate, session_init).
+    /// short-lived state markers (`skill_router`, `verification_gate`, `session_init`).
     ///
     /// Default impl: Ok(()). See `copy` for rationale.
     fn remove_file(&self, _path: &Path) -> anyhow::Result<()> {
@@ -225,11 +225,11 @@ pub trait FileSystemPort: Send + Sync {
 
 /// Port for spawning external processes.
 ///
-/// Abstracts std::process::Command calls for binary execution and
-/// fire-and-forget spawns. Used by session_init (qdrant sync, git),
-/// pre_push_steel_test (git).
+/// Abstracts `std::process::Command` calls for binary execution and
+/// fire-and-forget spawns. Used by `session_init` (qdrant sync, git),
+/// `pre_push_steel_test` (git).
 pub trait ProcessPort: Send + Sync {
-    /// Run a command and capture output. Returns (exit_success, stdout, stderr).
+    /// Run a command and capture output. Returns (`exit_success`, stdout, stderr).
     fn run(
         &self,
         command: &str,
@@ -259,7 +259,7 @@ pub struct ProcessOutput {
 
 /// Port for free-form LLM text completion.
 ///
-/// Wraps Anthropic / OpenRouter / etc. for hooks that need an LLM call but
+/// Wraps Anthropic / `OpenRouter` / etc. for hooks that need an LLM call but
 /// don't fit the existing `AiClassifier` or `JudgeService` shapes (those are
 /// classification- and verdict-shaped). Used by `memory_verify` for claim
 /// extraction (Claude Haiku) and is generic enough for future LLM hooks.

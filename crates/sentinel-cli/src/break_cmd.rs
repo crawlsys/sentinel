@@ -228,7 +228,7 @@ async fn initiate_break(
     eprintln!("  +============================================================+");
     eprintln!("  |  GLASS BREAK — Emergency Workflow Override                  |");
     eprintln!("  +============================================================+");
-    eprintln!("  |  Reason: {:<51}|", reason);
+    eprintln!("  |  Reason: {reason:<51}|");
     eprintln!(
         "  |  Duration: {} minutes{:<44}|",
         duration_minutes,
@@ -292,8 +292,7 @@ async fn initiate_break(
     // Verify challenge
     if user_input != challenge_code {
         eprintln!(
-            "  [sentinel] Challenge FAILED. Expected '{}', got '{}'.",
-            challenge_code, user_input
+            "  [sentinel] Challenge FAILED. Expected '{challenge_code}', got '{user_input}'."
         );
         anyhow::bail!("Challenge verification failed");
     }
@@ -507,20 +506,17 @@ async fn cancel_break(session: Option<String>) -> Result<()> {
 }
 
 /// Enumerate every known session's break state. Reads every `*.json` under
-/// `~/.claude/sentinel/state/`, decrypts via the state_store, and emits one
+/// `~/.claude/sentinel/state/`, decrypts via the `state_store`, and emits one
 /// record per session. Sessions with no active or historical break still
 /// appear with `active: false`.
 async fn list_breaks(json: bool) -> Result<()> {
-    let state_dir = match dirs::home_dir() {
-        Some(h) => h.join(".claude").join("sentinel").join("state"),
-        None => {
-            if json {
-                println!("[]");
-            } else {
-                eprintln!("  Cannot resolve home directory.");
-            }
-            return Ok(());
+    let state_dir = if let Some(h) = dirs::home_dir() { h.join(".claude").join("sentinel").join("state") } else {
+        if json {
+            println!("[]");
+        } else {
+            eprintln!("  Cannot resolve home directory.");
         }
+        return Ok(());
     };
 
     if !state_dir.exists() {

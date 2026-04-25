@@ -4,7 +4,7 @@
 //! Each session gets its own proof file.
 //!
 //! **Attack #123 fix**: Proof chain files are now HMAC-signed (`.sig` companion
-//! files), mirroring the state_store integrity pattern. Without this, an attacker
+//! files), mirroring the `state_store` integrity pattern. Without this, an attacker
 //! could inject forged proofs into JSONL files to fake phase completion evidence.
 
 use std::path::PathBuf;
@@ -13,7 +13,7 @@ use anyhow::{Context, Result};
 
 use sentinel_domain::proof::{PhaseProof, ProofChain};
 
-/// Reuse the same versioned HMAC signing as state_store.
+/// Reuse the same versioned HMAC signing as `state_store`.
 /// Returns `v{N}:{hex}` format for consistency with state file signatures.
 fn compute_hmac(data: &[u8]) -> String {
     // Delegate to state_store's versioned compute_hmac
@@ -26,7 +26,7 @@ fn verify_hmac(data: &[u8], sig_str: &str) -> bool {
     crate::state_store::verify_hmac_for_proofs(data, sig_str)
 }
 
-/// Public accessor for proof directory path (used by resign_cmd).
+/// Public accessor for proof directory path (used by `resign_cmd`).
 pub fn proof_dir_public() -> PathBuf {
     proof_dir()
 }
@@ -44,7 +44,7 @@ fn proof_dir() -> PathBuf {
         .join("proofs")
 }
 
-/// Validate session ID for safe filesystem use (mirrors state_store::sanitize_session_id).
+/// Validate session ID for safe filesystem use (mirrors `state_store::sanitize_session_id`).
 /// **Attack #121 fix**: Without this, `session_id = "../../etc/passwd"` writes proof
 /// files outside the intended directory via path traversal.
 fn sanitize_session_id(session_id: &str) -> Result<()> {
@@ -55,13 +55,13 @@ fn sanitize_session_id(session_id: &str) -> Result<()> {
         anyhow::bail!("Session ID too long (max 128 chars): {}", session_id.len());
     }
     if session_id.contains("..") {
-        anyhow::bail!("Session ID contains path traversal: '{}'", session_id);
+        anyhow::bail!("Session ID contains path traversal: '{session_id}'");
     }
     if !session_id
         .chars()
         .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
     {
-        anyhow::bail!("Session ID contains unsafe characters: '{}'", session_id);
+        anyhow::bail!("Session ID contains unsafe characters: '{session_id}'");
     }
     Ok(())
 }
@@ -120,18 +120,16 @@ pub fn load_chain(session_id: &str) -> Result<Option<ProofChain>> {
     let sig_path = proof_dir().join(format!("{session_id}-chain.json.sig"));
     if !sig_path.exists() {
         eprintln!(
-            "[sentinel] SECURITY: Proof chain for session '{}' has no signature file. \
-             Rejecting unsigned chain (may be forged).",
-            session_id
+            "[sentinel] SECURITY: Proof chain for session '{session_id}' has no signature file. \
+             Rejecting unsigned chain (may be forged)."
         );
         return Ok(None);
     }
     let sig = std::fs::read_to_string(&sig_path).context("Failed to read proof chain signature")?;
     if !verify_hmac(json.as_bytes(), sig.trim()) {
         eprintln!(
-            "[sentinel] SECURITY: Proof chain integrity check FAILED for session '{}'. \
-             The proof chain may have been tampered with. Discarding.",
-            session_id
+            "[sentinel] SECURITY: Proof chain integrity check FAILED for session '{session_id}'. \
+             The proof chain may have been tampered with. Discarding."
         );
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(&sig_path);

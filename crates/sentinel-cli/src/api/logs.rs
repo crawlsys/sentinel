@@ -93,8 +93,7 @@ fn parse_ts(entry: &LogEntry) -> i64 {
         .get("ts")
         .and_then(|v| v.as_str())
         .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-        .map(|dt| dt.timestamp_millis())
-        .unwrap_or(0)
+        .map_or(0, |dt| dt.timestamp_millis())
 }
 
 fn get_all_logs() -> (Vec<LogEntry>, HashMap<String, usize>) {

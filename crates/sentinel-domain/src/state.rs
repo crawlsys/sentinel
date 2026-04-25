@@ -36,7 +36,7 @@ pub struct SessionState {
     /// Whether the session is still active
     pub active: bool,
 
-    /// Phase files that have been Read() by Claude, keyed by skill name.
+    /// Phase files that have been `Read()` by Claude, keyed by skill name.
     /// E.g., `{"linear": ["claim.md", "fetch.md"], "steel": ["claim.md"]}`.
     ///
     /// **Attack #50**: Was a global `Vec<String>` — reading skill A's `review.md`
@@ -45,23 +45,23 @@ pub struct SessionState {
     pub phases_read: HashMap<String, Vec<String>>,
 
     /// Total tool calls in this session (for phase-skip detection)
-    /// **Attack #152 fix**: Changed from u32 to u64 to match HookStats.total_invocations.
+    /// **Attack #152 fix**: Changed from u32 to u64 to match `HookStats.total_invocations`.
     /// u32 wraps at ~4.3B, silently corrupting audit data in long-running sessions.
     #[serde(default)]
     pub tool_calls: u64,
 
-    /// Failed submission attempts per phase key ("skill:phase_id")
+    /// Failed submission attempts per phase key ("`skill:phase_id`")
     /// Used for resubmission rate limiting
     #[serde(default)]
     pub failed_submissions: HashMap<String, SubmissionAttempts>,
 
     /// SHA-256 hashes of phase file content, keyed by canonical path.
-    /// Set on first trusted Read() of a phase file. Subsequent reads with
+    /// Set on first trusted `Read()` of a phase file. Subsequent reads with
     /// different content indicate mid-session file tampering.
     #[serde(default)]
     pub phase_file_hashes: HashMap<String, String>,
 
-    /// Monotonic state generation counter. Incremented on every save().
+    /// Monotonic state generation counter. Incremented on every `save()`.
     /// **Attack #81 fix**: Detects state regression from file deletion/replacement.
     /// If loaded state has a lower generation than the in-memory counter,
     /// someone deleted and recreated the state file mid-session.
@@ -109,7 +109,7 @@ pub struct BreakToolUse {
     /// Tool name (e.g., "Bash", "Edit", "Write")
     pub tool: String,
 
-    /// Detail — command for Bash, file_path for Edit/Write
+    /// Detail — command for Bash, `file_path` for Edit/Write
     pub detail: String,
 
     /// ISO 8601 timestamp
@@ -163,7 +163,7 @@ impl SessionState {
     }
 
     /// **Attack #169 fix**: Maximum distinct skills per session.
-    /// Prevents unbounded HashMap growth from skill router manipulation.
+    /// Prevents unbounded `HashMap` growth from skill router manipulation.
     const MAX_SKILLS_PER_SESSION: usize = 100;
 
     /// Set the active skill (from skill router)
@@ -241,11 +241,11 @@ impl SessionState {
     }
 
     /// Record a blocked tool call
-    pub fn record_blocked(&mut self) {
+    pub const fn record_blocked(&mut self) {
         self.hook_stats.total_blocked += 1;
     }
 
-    /// Record that a phase file has been Read() by Claude for a specific skill.
+    /// Record that a phase file has been `Read()` by Claude for a specific skill.
     /// Only adds if not already present (idempotent).
     pub fn record_phase_read(&mut self, skill: &str, phase_file: &str) {
         let files = self.phases_read.entry(skill.to_string()).or_default();
@@ -258,7 +258,7 @@ impl SessionState {
     /// Number of phase files that have been read across all skills
     #[must_use]
     pub fn phases_read_count(&self) -> usize {
-        self.phases_read.values().map(|v| v.len()).sum()
+        self.phases_read.values().map(std::vec::Vec::len).sum()
     }
 
     /// Check if a specific phase file has been read for a given skill
@@ -266,8 +266,7 @@ impl SessionState {
     pub fn has_phase_been_read(&self, skill: &str, phase_file: &str) -> bool {
         self.phases_read
             .get(skill)
-            .map(|files| files.contains(&phase_file.to_string()))
-            .unwrap_or(false)
+            .is_some_and(|files| files.contains(&phase_file.to_string()))
     }
 
     /// Returns the file name of the next required phase that hasn't been read yet.
@@ -278,8 +277,7 @@ impl SessionState {
         for phase in &workflow.phases {
             if phase.required {
                 let read = skill_files
-                    .map(|files| files.contains(&phase.file))
-                    .unwrap_or(false);
+                    .is_some_and(|files| files.contains(&phase.file));
                 if !read {
                     return Some(phase.file.clone());
                 }
@@ -293,8 +291,7 @@ impl SessionState {
     pub fn is_break_active(&self) -> bool {
         self.glass_break
             .as_ref()
-            .map(|gb| Utc::now() < gb.expires_at)
-            .unwrap_or(false)
+            .is_some_and(|gb| Utc::now() < gb.expires_at)
     }
 
     /// Clear the glass break if it has expired. Preserves break data for
@@ -309,11 +306,11 @@ impl SessionState {
     }
 
     /// Record a tool call (increments counter)
-    pub fn record_tool_call(&mut self) {
+    pub const fn record_tool_call(&mut self) {
         self.tool_calls += 1;
     }
 
-    /// Record the SHA-256 hash of a phase file's content on first Read().
+    /// Record the SHA-256 hash of a phase file's content on first `Read()`.
     /// Returns `Ok(())` if this is the first read or the hash matches.
     /// Returns `Err(reason)` if the content has changed (tampering detected).
     /// **Attack #106 fix**: Normalize hash keys to lowercase on Windows.
@@ -330,15 +327,14 @@ impl SessionState {
         let canonical_path = &canonical_path.to_lowercase();
         match self.phase_file_hashes.get(canonical_path) {
             Some(existing) if existing != content_hash => Err(format!(
-                "Phase file content changed mid-session: '{}'. \
-                     Original hash: {}, new hash: {}. \
-                     This indicates file tampering.",
-                canonical_path, existing, content_hash
+                "Phase file content changed mid-session: '{canonical_path}'. \
+                     Original hash: {existing}, new hash: {content_hash}. \
+                     This indicates file tampering."
             )),
             Some(_) => Ok(()), // Same hash — no change
             None => {
                 self.phase_file_hashes
-                    .insert(canonical_path.to_string(), content_hash.to_string());
+                    .insert(canonical_path.clone(), content_hash.to_string());
                 Ok(())
             }
         }

@@ -47,7 +47,7 @@ struct WorkflowToml {
     skill: String,
     phases: Vec<PhaseToml>,
     /// Tool name prefixes to block when this workflow is active.
-    /// E.g., ["mcp__cdp__", "mcp__edge_cdp__"] blocks CDP tools when steel is active.
+    /// E.g., ["`mcp__cdp`__", "`mcp__edge_cdp`__"] blocks CDP tools when steel is active.
     #[serde(default)]
     blocked_tool_prefixes: Vec<String>,
     /// Bash command patterns (regex) to block when this workflow is active.
@@ -71,7 +71,7 @@ struct PhaseToml {
     description: String,
 }
 
-fn default_true() -> bool {
+const fn default_true() -> bool {
     true
 }
 
@@ -146,7 +146,7 @@ fn warn_if_world_writable(path: &Path) {
 }
 
 #[cfg(not(unix))]
-fn warn_if_world_writable(_path: &Path) {
+const fn warn_if_world_writable(_path: &Path) {
     // Windows ACLs are handled by icacls elsewhere; no simple mode check.
 }
 
@@ -269,7 +269,7 @@ pub fn load_skill_steps(config_path: &Path, skill: &str) -> Result<Option<SkillS
         || skill.is_empty()
         || skill.len() > 64
     {
-        anyhow::bail!("Invalid skill name for step loading: '{}'", skill);
+        anyhow::bail!("Invalid skill name for step loading: '{skill}'");
     }
     let toml_path = config_path.join("steps").join(format!("{skill}.toml"));
     if !toml_path.exists() {

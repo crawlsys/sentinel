@@ -25,15 +25,12 @@ pub fn set(key: &str, value: &str) -> Result<()> {
         Table::new()
     };
 
-    match key {
-        "name" => {
-            doc.insert(key.to_string(), Value::String(value.to_string()));
-        }
-        _ => {
-            eprintln!("Unknown config key: {key}");
-            eprintln!("Available keys: name");
-            return Ok(());
-        }
+    if key == "name" {
+        doc.insert(key.to_string(), Value::String(value.to_string()));
+    } else {
+        eprintln!("Unknown config key: {key}");
+        eprintln!("Available keys: name");
+        return Ok(());
     }
 
     // Ensure parent dir exists

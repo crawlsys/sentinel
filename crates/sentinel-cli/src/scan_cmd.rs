@@ -124,7 +124,7 @@ pub async fn run(
             if v.warned > 0 {
                 v.warned.to_string().yellow().to_string()
             } else {
-                v.warned.to_string().to_string()
+                v.warned.to_string()
             },
             v.duration_ms,
         );

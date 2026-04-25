@@ -1,8 +1,8 @@
 //! Proof Chain API Endpoints
 //!
 //! GET /api/proofs                    — list all proof chain sessions
-//! GET /api/proofs/:session_id        — full proof chain for a session
-//! GET /api/proofs/:session_id/verify — re-verify chain integrity
+//! GET /`api/proofs/:session_id`        — full proof chain for a session
+//! GET /`api/proofs/:session_id/verify` — re-verify chain integrity
 
 use axum::{
     extract::{Path, State},
@@ -43,7 +43,7 @@ async fn get_proof_chain(
 ) -> Json<serde_json::Value> {
     // Try in-memory first
     let session = state.session.read().await;
-    for (_skill, chain) in &session.proof_chains {
+    for chain in session.proof_chains.values() {
         if chain.session_id == session_id {
             return Json(serde_json::to_value(chain).unwrap_or_default());
         }
@@ -60,7 +60,7 @@ async fn verify_chain(
     Path(session_id): Path<String>,
 ) -> Json<serde_json::Value> {
     let session = state.session.read().await;
-    for (_skill, chain) in &session.proof_chains {
+    for chain in session.proof_chains.values() {
         if chain.session_id == session_id {
             let verification = chain.verify();
             return Json(serde_json::to_value(&verification).unwrap_or_default());

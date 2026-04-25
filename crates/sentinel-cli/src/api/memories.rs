@@ -50,8 +50,7 @@ async fn status() -> Json<serde_json::Value> {
     let precomputed_count = precomputed
         .get("results")
         .and_then(|v| v.as_array())
-        .map(|a| a.len())
-        .unwrap_or(0);
+        .map_or(0, std::vec::Vec::len);
 
     let injected_ts = injected
         .get("timestamp")
@@ -61,8 +60,7 @@ async fn status() -> Json<serde_json::Value> {
     let injected_count = injected
         .get("memories")
         .and_then(|v| v.as_array())
-        .map(|a| a.len())
-        .unwrap_or(0);
+        .map_or(0, std::vec::Vec::len);
     let injected_prompt = injected
         .get("user_prompt")
         .and_then(|v| v.as_str())
@@ -79,8 +77,7 @@ async fn status() -> Json<serde_json::Value> {
 
     // Check config
     let config_exists = dirs::home_dir()
-        .map(|h| h.join(".qdrant").join("config.json").exists())
-        .unwrap_or(false);
+        .is_some_and(|h| h.join(".qdrant").join("config.json").exists());
 
     Json(serde_json::json!({
         "qdrant_configured": config_exists,

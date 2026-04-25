@@ -1,7 +1,7 @@
 //! Proof-of-Work Chain
 //!
 //! Cryptographic proof chain for skill phase execution.
-//! Each phase produces a hash from (phase_id + evidence_hash + previous_hash),
+//! Each phase produces a hash from (`phase_id` + `evidence_hash` + `previous_hash`),
 //! creating a tamper-evident chain — same trust model as blockchain.
 
 use chrono::{DateTime, Utc};
@@ -34,10 +34,10 @@ pub struct PhaseProof {
     pub evidence_hash: String,
 
     // ── Chain ──
-    /// Previous phase's combined_hash (or GENESIS_HASH for first phase)
+    /// Previous phase's `combined_hash` (or `GENESIS_HASH` for first phase)
     pub previous_hash: String,
 
-    /// SHA-256(phase_id + evidence_hash + previous_hash) — the tessera
+    /// SHA-256(phase_id + `evidence_hash` + `previous_hash`) — the tessera
     pub combined_hash: String,
 
     // ── AI Judge ──
@@ -56,7 +56,7 @@ pub struct PhaseProof {
 impl PhaseProof {
     /// Compute the evidence hash from evidence data.
     ///
-    /// Note: Evidence hash determinism depends on serde_json using BTreeMap
+    /// Note: Evidence hash determinism depends on `serde_json` using `BTreeMap`
     /// (the default) for JSON object ordering. If the `preserve_order` feature
     /// is enabled, ordering may change.
     pub fn compute_evidence_hash(evidence: &Evidence) -> String {
@@ -113,7 +113,7 @@ pub struct ProofChain {
     /// Session ID
     pub session_id: String,
 
-    /// Genesis hash (always GENESIS_HASH)
+    /// Genesis hash (always `GENESIS_HASH`)
     pub genesis_hash: String,
 
     /// Ordered list of phase proofs
@@ -140,7 +140,7 @@ impl ProofChain {
         }
     }
 
-    /// Get the hash that the next proof must reference as previous_hash
+    /// Get the hash that the next proof must reference as `previous_hash`
     #[must_use]
     pub fn head_hash(&self) -> &str {
         self.proofs
@@ -153,7 +153,7 @@ impl ProofChain {
     /// 500 phases per skill is far beyond any legitimate workflow.
     const MAX_PROOFS_PER_CHAIN: usize = 500;
 
-    /// Add a proof to the chain. Returns error if previous_hash doesn't match.
+    /// Add a proof to the chain. Returns error if `previous_hash` doesn't match.
     pub fn add_proof(&mut self, proof: PhaseProof) -> Result<(), ProofChainError> {
         // **Attack #175 fix**: Reject proofs beyond the per-chain cap.
         if self.proofs.len() >= Self::MAX_PROOFS_PER_CHAIN {
@@ -168,14 +168,14 @@ impl ProofChain {
             return Err(ProofChainError::BrokenChain {
                 phase: proof.phase_id.clone(),
                 expected: self.head_hash().to_string(),
-                got: proof.previous_hash.clone(),
+                got: proof.previous_hash,
             });
         }
 
         // Verify internal consistency
         if !proof.verify_self() {
             return Err(ProofChainError::InvalidProof {
-                phase: proof.phase_id.clone(),
+                phase: proof.phase_id,
             });
         }
 

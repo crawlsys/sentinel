@@ -49,7 +49,7 @@ fn write_token_file(token: &str, port: u16) -> std::path::PathBuf {
     let _ = std::fs::create_dir_all(&dir);
     let path = dir.join("daemon-token");
     let tmp_path = dir.join(".daemon-token.tmp");
-    let content = format!("{}:{}", port, token);
+    let content = format!("{port}:{token}");
 
     // Write to temp file first
     let _ = std::fs::write(&tmp_path, &content);

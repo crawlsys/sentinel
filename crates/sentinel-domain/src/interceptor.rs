@@ -37,7 +37,7 @@ pub enum RiskLevel {
 }
 
 impl RiskLevel {
-    pub fn label(self) -> &'static str {
+    pub const fn label(self) -> &'static str {
         match self {
             Self::Low => "LOW",
             Self::Medium => "MEDIUM",

@@ -136,7 +136,7 @@ pub fn router() -> Router<AppState> {
 }
 
 /// **Attack #172 fix**: Default and max limits for session listing.
-/// Prevents DoS from loading thousands of session state files.
+/// Prevents `DoS` from loading thousands of session state files.
 const DEFAULT_SESSION_LIMIT: usize = 100;
 const MAX_SESSION_LIMIT: usize = 500;
 
@@ -279,7 +279,7 @@ async fn get_stats() -> Json<serde_json::Value> {
                     let per_hook_count = stats["per_hook"]
                         .as_object()
                         .and_then(|ph| ph.get(hook))
-                        .and_then(|v| v.as_u64())
+                        .and_then(serde_json::Value::as_u64)
                         .unwrap_or(1);
 
                     let entry = hook_timings.entry(hook.clone()).or_insert((0, 0));

@@ -1,4 +1,4 @@
-//! Qdrant Cloud adapter — implements VectorStorePort.
+//! Qdrant Cloud adapter — implements `VectorStorePort`.
 //!
 //! Handles HTTP client lifecycle, auth, URL construction, and
 //! server-side embedding model configuration.
@@ -77,7 +77,7 @@ impl VectorStorePort for QdrantAdapter {
         for batch in qdrant_points.chunks(20) {
             let body = serde_json::json!({ "points": batch });
             self.client
-                .put(&self.url(collection, "points?wait=true"))
+                .put(self.url(collection, "points?wait=true"))
                 .header("api-key", &self.config.api_key)
                 .json(&body)
                 .send()
@@ -105,7 +105,7 @@ impl VectorStorePort for QdrantAdapter {
 
         let resp = self
             .client
-            .post(&self.url(collection, "points/scroll"))
+            .post(self.url(collection, "points/scroll"))
             .header("api-key", &self.config.api_key)
             .json(&body)
             .send()
@@ -145,7 +145,7 @@ impl VectorStorePort for QdrantAdapter {
         });
 
         self.client
-            .post(&self.url(collection, "points/payload"))
+            .post(self.url(collection, "points/payload"))
             .header("api-key", &self.config.api_key)
             .json(&body)
             .send()
