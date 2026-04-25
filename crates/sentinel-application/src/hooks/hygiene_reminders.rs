@@ -13,7 +13,7 @@
 use sentinel_domain::events::{HookEvent, HookInput, HookOutput};
 use std::path::PathBuf;
 
-use super::{FileSystemPort, GitStatusPort, HookContext};
+use super::{FileSystemPort, HookContext};
 
 #[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
 struct ReminderState {

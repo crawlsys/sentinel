@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Removed
+
+- **PR7 — clippy warnings sweep**: zeroes out the 9 lingering build warnings that had accumulated.
+  - 5 unused imports across the application crate: `Path` in `memory_inject.rs`, `RiskLevel` in `interceptor.rs`, `PathBuf` in `scanner.rs` (kept `Path`), `GitStatusPort` in `commit_hygiene.rs` and `hygiene_reminders.rs` (added test-mod-scoped imports where the trait is used in stubs).
+  - 4 dead supervisor functions/struct in `hook_cmd.rs`: `hook_timeout`, `run_supervised`, `ChildOutput`, `supervise_child`. The supervisor path was permanently disabled with a comment ("Always run inline — added 5-15s overhead on Windows due to process creation, pipe inheritance, and stdin read timing issues") and no callers remained. Deleting it removes ~140 LOC and the now-unused imports `Stdio`, `ExitStatus`, `Duration`, `Context`, `AsyncReadExt`, `AsyncWriteExt`, `Write`, `warn`. Three dead-code tests dropped (`test_hook_timeout_values`, `test_supervise_child_returns_output_on_success`, `test_supervise_child_times_out_and_kills_worker`); test count drops 742 → 739.
+- Workspace now builds with **zero warnings** in both `cargo check --workspace` and `cargo build --release --workspace`.
+
 ### Added
 
 - **`FileSystemPort::remove_dir_all`** — new method on the port trait with default impl `Ok(())` (non-destructive no-op for stubs). Real adapter delegates to `std::fs::remove_dir_all`. Closes the last `std::fs::remove_dir_all` site in `channel_events::cleanup_stale_sessions` — the migration that PR2 deferred is now complete.

@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use sentinel_domain::interceptor::{self, InterceptorPolicy, RiskLevel};
+use sentinel_domain::interceptor::{self, InterceptorPolicy};
 
 // ============================================================================
 // Port traits — implemented by infrastructure adapters

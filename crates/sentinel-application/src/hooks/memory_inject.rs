@@ -14,7 +14,7 @@
 
 use chrono::Utc;
 use sentinel_domain::events::{HookEvent, HookInput, HookOutput};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use tracing::{debug, warn};
 
 use super::{run_async, FileSystemPort, MemoryMcpPort};

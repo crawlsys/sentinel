@@ -11,7 +11,7 @@ use sentinel_domain::events::{HookEvent, HookInput, HookOutput};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use super::{EnvPort, FileSystemPort, GitStatusPort, HookContext};
+use super::{EnvPort, FileSystemPort, HookContext};
 
 /// Cooldown between commit reminders.
 const COOLDOWN_MS: u64 = constants::HOOK_COOLDOWN_MEDIUM_MS;
@@ -197,6 +197,7 @@ pub fn process_prompt(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
 mod tests {
     use super::*;
     use crate::hooks::test_support;
+    use crate::hooks::GitStatusPort;
 
     struct TestGit {
         has_changes: bool,
