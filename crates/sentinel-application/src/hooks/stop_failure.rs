@@ -21,6 +21,8 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 use sentinel_domain::events::{HookInput, HookOutput};
 
+use crate::ntfy_push;
+
 const DEFAULT_RATE_LIMIT_COOLDOWN_MINUTES: u64 = 300;
 const RATE_LIMIT_RELAUNCH_FILE: &str = "rate-limit-relaunch.json";
 
@@ -340,6 +342,13 @@ pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
                             "Rate limit detected, account rotated, relaunch requested"
                         );
 
+                        ntfy_push::push_attention(
+                            "Claude rate-limited (auto-recovering)",
+                            &format!("Cooldown {cooldown_minutes}m. {rotate_msg} Relaunch queued."),
+                            5,
+                            &["rotating_light"],
+                        );
+
                         return HookOutput {
                             system_message: Some(format!(
                                 "[Rate Limit] Account hit rate limit (cooldown: {cooldown_minutes}m). \
@@ -358,6 +367,13 @@ pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
                             error = %e,
                             cooldown_minutes,
                             "Rate limit rotation succeeded but relaunch request could not be persisted"
+                        );
+
+                        ntfy_push::push_attention(
+                            "Claude rate-limited: relaunch setup failed",
+                            &format!("Cooldown {cooldown_minutes}m. {rotate_msg} Manually relaunch `c`."),
+                            5,
+                            &["rotating_light", "warning"],
                         );
 
                         return HookOutput {
@@ -383,6 +399,13 @@ pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
                     "Rate limit detected but account rotation command failed"
                 );
 
+                ntfy_push::push_attention(
+                    "Claude rate-limited: rotation FAILED",
+                    &format!("Cooldown {cooldown_minutes}m. {}. Manual intervention needed.", truncate_for_push(&detail)),
+                    5,
+                    &["rotating_light", "x"],
+                );
+
                 return HookOutput {
                     system_message: Some(format!(
                         "[Rate Limit] Account hit rate limit (cooldown: {cooldown_minutes}m), \
@@ -403,6 +426,13 @@ pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
                     "Rate limit detected but accounts CLI could not be executed"
                 );
 
+                ntfy_push::push_attention(
+                    "Claude rate-limited: rotation could not start",
+                    &format!("Cooldown {cooldown_minutes}m. {}. Manual intervention needed.", truncate_for_push(&e.to_string())),
+                    5,
+                    &["rotating_light", "x"],
+                );
+
                 return HookOutput {
                     system_message: Some(format!(
                         "[Rate Limit] Account hit rate limit (cooldown: {cooldown_minutes}m), \
@@ -419,7 +449,23 @@ pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
         }
     }
 
+    // Non-rate-limit API error — turn aborted, push so Gary knows.
+    ntfy_push::push_attention(
+        &format!("Claude turn aborted: {error}"),
+        &truncate_for_push(error_details),
+        4,
+        &["warning"],
+    );
+
     HookOutput::allow()
+}
+
+fn truncate_for_push(s: &str) -> String {
+    if s.len() > 200 {
+        format!("{}…", &s[..200])
+    } else {
+        s.to_string()
+    }
 }
 
 #[cfg(test)]
