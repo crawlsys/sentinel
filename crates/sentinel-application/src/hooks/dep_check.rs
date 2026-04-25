@@ -13,16 +13,12 @@
 
 use sentinel_domain::events::{HookEvent, HookInput, HookOutput};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::{Duration, SystemTime};
 
-use super::{FileSystemPort, HookContext};
+use super::{FileSystemPort, HookContext, ProcessPort};
 
 /// How long to cache results before re-checking (24 hours).
 const CACHE_TTL: Duration = Duration::from_secs(86400);
-
-/// Max time to wait for any single dep check command.
-const CMD_TIMEOUT_SECS: u64 = 10;
 
 /// Detected project type and the command to check for outdated deps.
 #[derive(Debug)]
@@ -96,23 +92,16 @@ fn is_cache_fresh(fs: &dyn FileSystemPort, path: &Path) -> bool {
     false
 }
 
-/// Run a command with timeout, returning stdout as a string.
-fn run_cmd(cmd: &str, args: &[&str], cwd: &Path) -> Option<String> {
-    let output = Command::new(cmd)
-        .args(args)
-        .current_dir(cwd)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .output();
-
-    match output {
-        Ok(o) => {
-            let stdout = String::from_utf8_lossy(&o.stdout).to_string();
-            if stdout.trim().is_empty() {
+/// Run a command via `ProcessPort` and return stdout, or `None` if the
+/// process failed to spawn or produced empty output.
+fn run_cmd(process: &dyn ProcessPort, cmd: &str, args: &[&str], cwd: &Path) -> Option<String> {
+    let cwd_str = cwd.to_str()?;
+    match process.run(cmd, args, Some(cwd_str)) {
+        Ok(output) => {
+            if output.stdout.trim().is_empty() {
                 None
             } else {
-                Some(stdout)
+                Some(output.stdout)
             }
         }
         Err(_) => None,
@@ -120,14 +109,18 @@ fn run_cmd(cmd: &str, args: &[&str], cwd: &Path) -> Option<String> {
 }
 
 /// Check outdated deps for a given project type. Returns human-readable summary.
-fn check_outdated(project_type: &ProjectType, cwd: &Path) -> Option<String> {
+fn check_outdated(
+    process: &dyn ProcessPort,
+    project_type: &ProjectType,
+    cwd: &Path,
+) -> Option<String> {
     match project_type {
         ProjectType::Rust => {
             // `cargo outdated -R` requires cargo-outdated installed.
             // Fallback: `cargo update --dry-run` shows available updates.
-            if let Some(output) = run_cmd("cargo", &["outdated", "-R", "--exit-code", "1"], cwd) {
+            if let Some(output) = run_cmd(process, "cargo", &["outdated", "-R", "--exit-code", "1"], cwd) {
                 Some(format!("**Rust (cargo outdated):**\n```\n{}\n```", output.trim()))
-            } else if let Some(output) = run_cmd("cargo", &["update", "--dry-run"], cwd) {
+            } else if let Some(output) = run_cmd(process, "cargo", &["update", "--dry-run"], cwd) {
                 let updates: Vec<&str> = output
                     .lines()
                     .filter(|l| l.contains("Updating") || l.contains("Adding"))
@@ -146,16 +139,16 @@ fn check_outdated(project_type: &ProjectType, cwd: &Path) -> Option<String> {
         }
         ProjectType::Node => {
             // Try bun first (faster), fall back to npm
-            let output = run_cmd("bun", &["outdated"], cwd)
-                .or_else(|| run_cmd("npm", &["outdated"], cwd));
+            let output = run_cmd(process, "bun", &["outdated"], cwd)
+                .or_else(|| run_cmd(process, "npm", &["outdated"], cwd));
             output.map(|o| format!("**Node (outdated):**\n```\n{}\n```", o.trim()))
         }
         ProjectType::Python => {
-            let output = run_cmd("pip", &["list", "--outdated", "--format=columns"], cwd);
+            let output = run_cmd(process, "pip", &["list", "--outdated", "--format=columns"], cwd);
             output.map(|o| format!("**Python (pip outdated):**\n```\n{}\n```", o.trim()))
         }
         ProjectType::Go => {
-            let output = run_cmd("go", &["list", "-u", "-m", "all"], cwd);
+            let output = run_cmd(process, "go", &["list", "-u", "-m", "all"], cwd);
             if let Some(ref o) = output {
                 // Filter to only lines with updates (contain [v...])
                 let updates: Vec<&str> = o.lines().filter(|l| l.contains('[') && l.contains(']')).collect();
@@ -170,7 +163,7 @@ fn check_outdated(project_type: &ProjectType, cwd: &Path) -> Option<String> {
             None
         }
         ProjectType::Ruby => {
-            let output = run_cmd("bundle", &["outdated"], cwd);
+            let output = run_cmd(process, "bundle", &["outdated"], cwd);
             output.map(|o| format!("**Ruby (bundle outdated):**\n```\n{}\n```", o.trim()))
         }
     }
@@ -213,7 +206,7 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     // Run checks for each detected project type
     let mut results = Vec::new();
     for pt in &project_types {
-        if let Some(result) = check_outdated(pt, cwd) {
+        if let Some(result) = check_outdated(ctx.process, pt, cwd) {
             results.push(result);
         }
     }

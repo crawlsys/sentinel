@@ -197,8 +197,8 @@ where
 // The CLI (hook_cmd.rs) constructs concrete adapters and injects them.
 
 pub use sentinel_domain::ports::{
-    FileSystemPort, GitStatusPort, LlmModel, LlmPort, LlmRequest, ProcessOutput, ProcessPort,
-    VectorPoint, VectorScrollResult, VectorStorePort,
+    FileSystemPort, GitStatusPort, LlmModel, LlmPort, LlmRequest, MemoryMcpPort, ProcessOutput,
+    ProcessPort, VectorPoint, VectorScrollResult, VectorStorePort,
 };
 
 // ---------------------------------------------------------------------------
@@ -224,6 +224,9 @@ pub struct HookContext<'a> {
 
     /// LLM completion (Anthropic). `None` if no API key is configured.
     pub llm: Option<&'a dyn LlmPort>,
+
+    /// Memory engine MCP client. Always present — wraps memory-mcp stdio.
+    pub memory_mcp: &'a dyn MemoryMcpPort,
 }
 
 /// Test utilities for creating mock `HookContext`.
@@ -264,11 +267,27 @@ pub mod test_support {
         fn spawn_detached(&self, _: &str, _: &[&str]) -> anyhow::Result<()> { Ok(()) }
     }
 
+    pub struct StubMemoryMcp;
+    #[async_trait::async_trait]
+    impl MemoryMcpPort for StubMemoryMcp {
+        async fn call_tool(
+            &self,
+            _name: &str,
+            _arguments: serde_json::Map<String, serde_json::Value>,
+        ) -> anyhow::Result<serde_json::Value> {
+            // Tests that don't need a memory-mcp response get a benign empty
+            // object — hooks that depend on specific shapes will fail to
+            // deserialise, which is the right signal to inject a real stub.
+            Ok(serde_json::Value::Object(serde_json::Map::new()))
+        }
+    }
+
     /// Create a test `HookContext` with stub ports.
     pub fn stub_ctx() -> HookContext<'static> {
         let git: &'static StubGit = Box::leak(Box::new(StubGit));
         let fs: &'static StubFs = Box::leak(Box::new(StubFs));
         let process: &'static StubProcess = Box::leak(Box::new(StubProcess));
-        HookContext { git, vector_store: None, fs, process, llm: None }
+        let memory_mcp: &'static StubMemoryMcp = Box::leak(Box::new(StubMemoryMcp));
+        HookContext { git, vector_store: None, fs, process, llm: None, memory_mcp }
     }
 }

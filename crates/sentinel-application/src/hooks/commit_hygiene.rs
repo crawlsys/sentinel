@@ -233,12 +233,15 @@ mod tests {
             Box::leak(Box::new(crate::hooks::test_support::StubFs));
         let process: &'static crate::hooks::test_support::StubProcess =
             Box::leak(Box::new(crate::hooks::test_support::StubProcess));
+        let memory_mcp: &'static crate::hooks::test_support::StubMemoryMcp =
+            Box::leak(Box::new(crate::hooks::test_support::StubMemoryMcp));
         HookContext {
             git,
             vector_store: None,
             fs,
             process,
             llm: None,
+            memory_mcp,
         }
     }
 

@@ -15,7 +15,7 @@ use sentinel_domain::events::{HookInput, HookOutput};
 use std::path::{Path, PathBuf};
 use tracing::{debug, warn};
 
-use super::{FileSystemPort, HookContext};
+use super::{FileSystemPort, HookContext, MemoryMcpPort};
 
 // ---------------------------------------------------------------------------
 // State file types
@@ -136,6 +136,7 @@ fn detect_used_memories<'a>(
 /// negative than "contradicted" in the EMA (see
 /// `OutcomeSignal::WeakNegative` vs `StrongNegative`).
 fn record_outcomes_unified(
+    memory_mcp: &dyn MemoryMcpPort,
     injected: &[InjectedMemory],
     used: &[&InjectedMemory],
     correction_detected: bool,
@@ -165,7 +166,10 @@ fn record_outcomes_unified(
     // we unwrap to () here.
     crate::hooks::run_async(async move {
         for (event_id, outcome) in outcomes {
-            if let Err(e) = call_memory_record_outcome(&event_id, outcome).await {
+            let mut args = serde_json::Map::new();
+            args.insert("event_id".into(), serde_json::Value::String(event_id.clone()));
+            args.insert("outcome".into(), serde_json::Value::String(outcome.to_string()));
+            if let Err(e) = memory_mcp.call_tool("memory_record_outcome", args).await {
                 warn!(
                     event_id = %event_id,
                     outcome = %outcome,
@@ -175,130 +179,6 @@ fn record_outcomes_unified(
             }
         }
     });
-}
-
-/// Spawn `mcp-router --single memory-mcp`, perform the MCP handshake,
-/// and call `memory_record_outcome(event_id, outcome)`. Mirror of
-/// `call_memory_mcp_search` in memory_inject; keep the two in lockstep
-/// with `sentinel-infrastructure::memory_mcp_client` as the source of
-/// truth for JSON-RPC framing.
-async fn call_memory_record_outcome(
-    event_id: &str,
-    outcome: &str,
-) -> anyhow::Result<()> {
-    use std::process::Stdio;
-    use std::time::Duration;
-    use tokio::io::BufReader;
-    use tokio::process::Command;
-    use tokio::time::timeout as tokio_timeout;
-
-    const PROTOCOL_VERSION: &str = "2024-11-05";
-    let timeout_secs: u64 = std::env::var("MEMORY_MCP_TIMEOUT_SECS")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(10);
-    let cmd_str = std::env::var("MEMORY_MCP_CMD")
-        .ok()
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| "mcp-router --single memory-mcp".to_string());
-    let argv: Vec<String> = cmd_str.split_whitespace().map(String::from).collect();
-    if argv.is_empty() {
-        return Err(anyhow::anyhow!("MEMORY_MCP_CMD is empty"));
-    }
-
-    let event_id = event_id.to_string();
-    let outcome = outcome.to_string();
-
-    let call = async move {
-        let mut cmd = Command::new(&argv[0]);
-        cmd.args(&argv[1..])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .kill_on_drop(true);
-        let mut child = cmd.spawn()?;
-        let mut stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| anyhow::anyhow!("child stdin missing"))?;
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| anyhow::anyhow!("child stdout missing"))?;
-        let mut reader = BufReader::new(stdout);
-
-        let init_req = serde_json::json!({
-            "jsonrpc": "2.0", "id": 1, "method": "initialize",
-            "params": {
-                "protocolVersion": PROTOCOL_VERSION,
-                "capabilities": {},
-                "clientInfo": { "name": "sentinel-memory-feedback", "version": env!("CARGO_PKG_VERSION") }
-            }
-        });
-        write_line(&mut stdin, &init_req).await?;
-        let _ = read_json_line(&mut reader).await?;
-
-        let initialized = serde_json::json!({
-            "jsonrpc": "2.0", "method": "notifications/initialized", "params": {}
-        });
-        write_line(&mut stdin, &initialized).await?;
-
-        let call_req = serde_json::json!({
-            "jsonrpc": "2.0", "id": 2, "method": "tools/call",
-            "params": {
-                "name": "memory_record_outcome",
-                "arguments": {
-                    "event_id": event_id,
-                    "outcome": outcome,
-                }
-            }
-        });
-        write_line(&mut stdin, &call_req).await?;
-        let resp = read_json_line(&mut reader).await?;
-
-        drop(stdin);
-        let _ = child.wait().await;
-
-        if let Some(err) = resp.get("error") {
-            return Err(anyhow::anyhow!("memory-mcp error: {err}"));
-        }
-        Ok::<_, anyhow::Error>(())
-    };
-
-    tokio_timeout(Duration::from_secs(timeout_secs), call)
-        .await
-        .map_err(|_| anyhow::anyhow!("memory-mcp call timed out"))?
-}
-
-async fn write_line<T: serde::Serialize>(
-    stdin: &mut tokio::process::ChildStdin,
-    value: &T,
-) -> anyhow::Result<()> {
-    use tokio::io::AsyncWriteExt;
-    let mut line = serde_json::to_vec(value)?;
-    line.push(b'\n');
-    stdin.write_all(&line).await?;
-    stdin.flush().await?;
-    Ok(())
-}
-
-async fn read_json_line(
-    reader: &mut tokio::io::BufReader<tokio::process::ChildStdout>,
-) -> anyhow::Result<serde_json::Value> {
-    use tokio::io::AsyncBufReadExt;
-    let mut buf = String::new();
-    loop {
-        buf.clear();
-        let n = reader.read_line(&mut buf).await?;
-        if n == 0 {
-            return Err(anyhow::anyhow!("memory-mcp stdout closed before response"));
-        }
-        let trimmed = buf.trim();
-        if trimmed.is_empty() || !trimmed.starts_with('{') {
-            continue;
-        }
-        return Ok(serde_json::from_str(trimmed)?);
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -340,7 +220,7 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     let response = input.last_assistant_message.as_deref().unwrap_or("");
     let used = detect_used_memories(&state.memories, response);
     let correction = state.user_prompt.as_deref().and_then(detect_correction);
-    record_outcomes_unified(&state.memories, &used, correction.is_some());
+    record_outcomes_unified(ctx.memory_mcp, &state.memories, &used, correction.is_some());
 
     // Never block
     HookOutput::allow()

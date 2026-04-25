@@ -213,3 +213,28 @@ pub enum LlmModel {
     /// Heavy reasoning.
     Opus,
 }
+
+// ---------------------------------------------------------------------------
+// Memory-MCP port
+// ---------------------------------------------------------------------------
+
+/// Port for calling tools on the Memory engine MCP server (`memory-mcp`).
+///
+/// Wraps the MCP stdio handshake + tool-call loop so hooks can talk to the
+/// Memory engine without each one inlining its own subprocess transport.
+/// `call_tool` is intentionally generic — every Memory engine tool reduces
+/// to "send a tool name + JSON args, get JSON back", and a typed surface
+/// per tool would balloon the port for no behavioural gain.
+#[async_trait::async_trait]
+pub trait MemoryMcpPort: Send + Sync {
+    /// Call any tool on memory-mcp. Returns the parsed JSON payload from
+    /// `result.structuredContent` (preferred) or `result.content[0].text`
+    /// (fallback) on the MCP response. Errors when the subprocess fails to
+    /// spawn, the handshake fails, the tool returns an error, or the
+    /// response payload is missing.
+    async fn call_tool(
+        &self,
+        name: &str,
+        arguments: serde_json::Map<String, serde_json::Value>,
+    ) -> anyhow::Result<serde_json::Value>;
+}

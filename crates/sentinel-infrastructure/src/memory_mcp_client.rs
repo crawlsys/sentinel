@@ -25,6 +25,7 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
+use sentinel_domain::ports::MemoryMcpPort;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
@@ -310,15 +311,33 @@ fn extract_tool_payload(resp: &serde_json::Value) -> Result<serde_json::Value> {
     if let Some(err) = resp.get("error") {
         return Err(anyhow!("memory-mcp error: {err}"));
     }
+    // memory-mcp emits both `structuredContent` (preferred — typed JSON) and
+    // `content[0].text` (fallback — JSON string inside a text block). Match
+    // the order the inlined transports used so behaviour is unchanged.
+    if let Some(sc) = resp.pointer("/result/structuredContent") {
+        return Ok(sc.clone());
+    }
     let text = resp
-        .get("result")
-        .and_then(|r| r.get("content"))
-        .and_then(|c| c.get(0))
-        .and_then(|c| c.get("text"))
+        .pointer("/result/content/0/text")
         .and_then(|t| t.as_str())
-        .ok_or_else(|| anyhow!("memory-mcp response missing content[0].text: {resp}"))?;
+        .ok_or_else(|| anyhow!("memory-mcp response missing structuredContent and content[0].text: {resp}"))?;
     serde_json::from_str(text)
         .with_context(|| format!("parse memory-mcp tool text payload: {text}"))
+}
+
+/// Implement `MemoryMcpPort` so hooks can call any memory-mcp tool through
+/// the domain port instead of inlining their own subprocess transport.
+#[async_trait::async_trait]
+impl MemoryMcpPort for MemoryMcpClient {
+    async fn call_tool(
+        &self,
+        name: &str,
+        arguments: serde_json::Map<String, serde_json::Value>,
+    ) -> Result<serde_json::Value> {
+        // Delegate to the inherent method, which already wraps the call in
+        // the configured timeout and handles the MCP handshake.
+        MemoryMcpClient::call_tool(self, name, arguments).await
+    }
 }
 
 // ── Tests ────────────────────────────────────────────────────────────

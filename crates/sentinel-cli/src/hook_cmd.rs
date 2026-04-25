@@ -17,6 +17,7 @@ use sentinel_domain::workflow::{SkillSteps, SkillWorkflow};
 use std::sync::Arc;
 use sentinel_domain::ports::{LlmPort, VectorStorePort};
 use sentinel_infrastructure::git::RealGit;
+use sentinel_infrastructure::memory_mcp_client::MemoryMcpClient;
 
 pub async fn run(event: &str, matcher: Option<&str>, standalone: bool) -> Result<()> {
     // ── Glass break emergency override ───────────────────────────────────
@@ -130,6 +131,10 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
         .ok()
         .map(|c| Arc::new(c) as Arc<dyn LlmPort>);
 
+    // Construct memory-mcp client (always present; reads MEMORY_MCP_CMD /
+    // MEMORY_MCP_TIMEOUT_SECS from env, defaults handled by from_env).
+    let memory_mcp = MemoryMcpClient::from_env();
+
     // Bundle all ports into HookContext
     let ctx = hooks::HookContext {
         git: &git,
@@ -137,6 +142,7 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
         fs: &real_fs,
         process: &real_process,
         llm: llm.as_deref(),
+        memory_mcp: &memory_mcp,
     };
 
     // Process through matching hooks based on event type

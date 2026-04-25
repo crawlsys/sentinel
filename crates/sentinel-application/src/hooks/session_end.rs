@@ -10,7 +10,7 @@ use sentinel_domain::events::{HookInput, HookOutput};
 ///
 /// Performs minimal cleanup: flush pending state to disk.
 /// Must complete within 1.5s — no network calls, no heavy I/O.
-pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
+pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
     let reason = input
         .extra
         .get("reason")
@@ -22,7 +22,7 @@ pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
     tracing::info!(session_id, reason, "Session ending");
 
     // Flush any buffered telemetry/metrics
-    if let Some(home) = dirs::home_dir() {
+    if let Some(home) = ctx.fs.home_dir() {
         let metrics_dir = super::metrics_dir(&home);
         let end_entry = serde_json::json!({
             "event": "session_end",
@@ -31,14 +31,9 @@ pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
             "ts": chrono::Utc::now().to_rfc3339(),
         });
 
-        if let Ok(mut file) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(metrics_dir.join("sessions.jsonl"))
-        {
-            use std::io::Write;
-            let _ = writeln!(file, "{}", end_entry);
-        }
+        let _ = ctx.fs.create_dir_all(&metrics_dir);
+        let line = format!("{end_entry}\n");
+        let _ = ctx.fs.append(&metrics_dir.join("sessions.jsonl"), line.as_bytes());
     }
 
     HookOutput::allow()

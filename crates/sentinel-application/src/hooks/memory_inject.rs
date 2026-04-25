@@ -17,7 +17,7 @@ use sentinel_domain::events::{HookEvent, HookInput, HookOutput};
 use std::path::{Path, PathBuf};
 use tracing::{debug, warn};
 
-use super::{run_async, FileSystemPort};
+use super::{run_async, FileSystemPort, MemoryMcpPort};
 
 // ---------------------------------------------------------------------------
 // Injected state — written so memory_feedback can classify outcomes on Stop
@@ -192,11 +192,19 @@ fn render_context(hits: &[UnifiedHit]) -> String {
 
 /// Call memory-mcp's `memory_search` tool and return hits + rendered context.
 /// Returns `None` when memory-mcp returns zero hits or the subprocess fails.
-fn search_memory_engine(prompt: &str, cwd: &str) -> Option<(Vec<UnifiedHit>, String)> {
+fn search_memory_engine(
+    memory_mcp: &dyn MemoryMcpPort,
+    prompt: &str,
+    cwd: &str,
+) -> Option<(Vec<UnifiedHit>, String)> {
     let project = project_from_cwd(cwd);
+    let mut args = serde_json::Map::new();
+    args.insert("query".into(), serde_json::Value::String(prompt.to_string()));
+    args.insert("project".into(), serde_json::Value::String(project.clone()));
+    args.insert("top_k".into(), serde_json::Value::Number(8u32.into()));
 
     let payload: serde_json::Value = match run_async(async {
-        match call_memory_mcp_search(prompt, &project).await {
+        match memory_mcp.call_tool("memory_search", args).await {
             Ok(p) => Some(p),
             Err(e) => {
                 warn!(
@@ -224,140 +232,6 @@ fn search_memory_engine(prompt: &str, cwd: &str) -> Option<(Vec<UnifiedHit>, Str
     Some((hits, rendered))
 }
 
-/// Spawn `mcp-router --single memory-mcp`, run the initialise handshake,
-/// call `memory_search`, and return the parsed tool payload.
-async fn call_memory_mcp_search(
-    query: &str,
-    project: &str,
-) -> anyhow::Result<serde_json::Value> {
-    use std::process::Stdio;
-    use std::time::Duration;
-    use tokio::io::BufReader;
-    use tokio::process::Command;
-    use tokio::time::timeout as tokio_timeout;
-
-    const PROTOCOL_VERSION: &str = "2024-11-05";
-    let timeout_secs: u64 = std::env::var("MEMORY_MCP_TIMEOUT_SECS")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(10);
-
-    let cmd_str = std::env::var("MEMORY_MCP_CMD")
-        .ok()
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| "mcp-router --single memory-mcp".to_string());
-    let argv: Vec<String> = cmd_str.split_whitespace().map(String::from).collect();
-    if argv.is_empty() {
-        return Err(anyhow::anyhow!("MEMORY_MCP_CMD is empty"));
-    }
-
-    let query = query.to_string();
-    let project = project.to_string();
-
-    let call = async move {
-        let mut cmd = Command::new(&argv[0]);
-        cmd.args(&argv[1..])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .kill_on_drop(true);
-        let mut child = cmd.spawn()?;
-        let mut stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| anyhow::anyhow!("child stdin missing"))?;
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| anyhow::anyhow!("child stdout missing"))?;
-        let mut reader = BufReader::new(stdout);
-
-        let init = serde_json::json!({
-            "jsonrpc": "2.0", "id": 1, "method": "initialize",
-            "params": {
-                "protocolVersion": PROTOCOL_VERSION,
-                "capabilities": {},
-                "clientInfo": { "name": "sentinel-memory-inject", "version": env!("CARGO_PKG_VERSION") }
-            }
-        });
-        write_line(&mut stdin, &init).await?;
-        let _ = read_json_line(&mut reader).await?;
-
-        let initialized = serde_json::json!({
-            "jsonrpc": "2.0", "method": "notifications/initialized", "params": {}
-        });
-        write_line(&mut stdin, &initialized).await?;
-
-        let search_req = serde_json::json!({
-            "jsonrpc": "2.0", "id": 2, "method": "tools/call",
-            "params": {
-                "name": "memory_search",
-                "arguments": {
-                    "query": query,
-                    "project": project,
-                    "top_k": 8,
-                }
-            }
-        });
-        write_line(&mut stdin, &search_req).await?;
-        let resp = read_json_line(&mut reader).await?;
-
-        drop(stdin);
-        let _ = child.wait().await;
-
-        if let Some(err) = resp.get("error") {
-            return Err(anyhow::anyhow!("memory-mcp error: {err}"));
-        }
-
-        // memory-mcp returns {"content": [{"type":"text","text":"<json>"}], "structuredContent": {...}}
-        // Prefer structuredContent; fall back to parsing the text block.
-        if let Some(sc) = resp.pointer("/result/structuredContent") {
-            return Ok(sc.clone());
-        }
-        if let Some(text) = resp.pointer("/result/content/0/text").and_then(|v| v.as_str()) {
-            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(text) {
-                return Ok(parsed);
-            }
-        }
-        Err(anyhow::anyhow!("memory-mcp returned no parsable payload"))
-    };
-
-    tokio_timeout(Duration::from_secs(timeout_secs), call)
-        .await
-        .map_err(|_| anyhow::anyhow!("memory-mcp call timed out"))?
-}
-
-async fn write_line<T: serde::Serialize>(
-    stdin: &mut tokio::process::ChildStdin,
-    value: &T,
-) -> anyhow::Result<()> {
-    use tokio::io::AsyncWriteExt;
-    let mut line = serde_json::to_vec(value)?;
-    line.push(b'\n');
-    stdin.write_all(&line).await?;
-    stdin.flush().await?;
-    Ok(())
-}
-
-async fn read_json_line(
-    reader: &mut tokio::io::BufReader<tokio::process::ChildStdout>,
-) -> anyhow::Result<serde_json::Value> {
-    use tokio::io::AsyncBufReadExt;
-    let mut buf = String::new();
-    loop {
-        buf.clear();
-        let n = reader.read_line(&mut buf).await?;
-        if n == 0 {
-            return Err(anyhow::anyhow!("memory-mcp stdout closed before response"));
-        }
-        let trimmed = buf.trim();
-        if trimmed.is_empty() || !trimmed.starts_with('{') {
-            continue;
-        }
-        return Ok(serde_json::from_str(trimmed)?);
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Hook entry points
 // ---------------------------------------------------------------------------
@@ -376,7 +250,7 @@ pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
     }
 
     let cwd = input.cwd.as_deref().unwrap_or(".");
-    match search_memory_engine(prompt, cwd) {
+    match search_memory_engine(ctx.memory_mcp, prompt, cwd) {
         Some((hits, rendered)) => {
             write_injected_state(ctx.fs, &hits, Some(prompt));
             debug!(atoms = hits.len(), "Injecting atoms via memory-mcp");
