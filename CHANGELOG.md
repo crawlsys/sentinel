@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added
+
+- **`FileSystemPort::remove_dir_all`** — new method on the port trait with default impl `Ok(())` (non-destructive no-op for stubs). Real adapter delegates to `std::fs::remove_dir_all`. Closes the last `std::fs::remove_dir_all` site in `channel_events::cleanup_stale_sessions` — the migration that PR2 deferred is now complete.
+
+### Changed
+
+- **PR6 — `channel_events::cleanup_stale_sessions` uses `fs.remove_dir_all`**: the deferred-from-PR2 site is now behind `FileSystemPort`. Removes the explanatory comment about the missing port method (the method exists now). Net 1 prod `std::fs::remove_dir_all` deleted. Total prod IO leaks: 5 → 4. Workspace tests: 742 passing.
+
 ### Changed
 
 - **PR5 — `session_init` git ops via `ProcessPort` + delete dead `git_pull`**: `get_git_head(repo)` migrated to `get_git_head(process: &dyn ProcessPort, repo: &Path)` — uses `process.run("git", &["rev-parse", "HEAD"], Some(cwd))` instead of `Command::new("git").args(...).current_dir(repo).output()`. `sync_marketplace` threads `&dyn ProcessPort` through and the call site in `process()` passes `ctx.process`. The dead `git_pull` function is deleted entirely — `sync_marketplace` short-circuits with `let pull_ok = true;` and never calls it (changelog already noted this as a dead-code warning). Drops the `use std::process::Command;` import. Net 3 prod `Command::new("git")` calls deleted, 1 unused function removed, 1 unused import removed. After this PR: `std::process::Command` count in `crates/sentinel-application/src/`: **0**. Total prod IO leaks drop from 6 → 5. Workspace tests: 742 passing.

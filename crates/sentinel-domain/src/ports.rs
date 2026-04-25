@@ -205,6 +205,18 @@ pub trait FileSystemPort: Send + Sync {
     fn canonicalize(&self, path: &Path) -> anyhow::Result<PathBuf> {
         Ok(path.to_path_buf())
     }
+
+    /// Recursively remove a directory and all its contents. Used by
+    /// `channel_events::cleanup_stale_sessions` to prune stale per-session
+    /// event directories on `SessionStart`.
+    ///
+    /// Default impl: Ok(()) — non-destructive no-op so existing test stubs
+    /// don't need updating. The real adapter in `sentinel-infrastructure`
+    /// overrides with `std::fs::remove_dir_all`. Tests that exercise
+    /// recursive removal must inject an adapter that performs the deletion.
+    fn remove_dir_all(&self, _path: &Path) -> anyhow::Result<()> {
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------

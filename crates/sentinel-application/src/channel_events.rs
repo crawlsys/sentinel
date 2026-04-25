@@ -177,10 +177,6 @@ pub fn consume(fs: &dyn FileSystemPort, path: &std::path::Path) {
 /// Remove session event directories older than the given duration.
 ///
 /// Call during `SessionStart` to prevent stale directories from accumulating.
-/// `remove_dir_all` doesn't have a port equivalent yet — this function still
-/// reaches for `std::fs::remove_dir_all` directly. That is one of three
-/// remaining IO leaks intentionally left for a future port-extension PR;
-/// every other path in this module goes through `FileSystemPort`.
 pub fn cleanup_stale_sessions(fs: &dyn FileSystemPort, max_age: std::time::Duration) {
     let base = events_base_dir(fs);
     let cutoff = std::time::SystemTime::now()
@@ -203,11 +199,7 @@ pub fn cleanup_stale_sessions(fs: &dyn FileSystemPort, max_age: std::time::Durat
         };
 
         if modified < cutoff {
-            // No FileSystemPort method for recursive directory removal — drop
-            // back to std::fs here. Adding `remove_dir_all` to the port would
-            // require updating the 24+ existing test stubs; left as a tracked
-            // item for the next port-extension PR.
-            if let Err(e) = std::fs::remove_dir_all(&path) {
+            if let Err(e) = fs.remove_dir_all(&path) {
                 debug!(error = %e, path = %path.display(), "Failed to remove stale session events dir");
             } else {
                 debug!(path = %path.display(), "Cleaned up stale session events directory");

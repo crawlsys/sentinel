@@ -43,6 +43,10 @@ impl FileSystemPort for RealFileSystem {
         std::fs::canonicalize(path).with_context(|| format!("canonicalize {}", path.display()))
     }
 
+    fn remove_dir_all(&self, path: &Path) -> Result<()> {
+        std::fs::remove_dir_all(path).with_context(|| format!("remove_dir_all {}", path.display()))
+    }
+
     fn exists(&self, path: &Path) -> bool {
         path.exists()
     }
