@@ -8,6 +8,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Changed
 
+- **`memory_extract` routes every flat-file memory sync through `memory-mcp` memory_capture**: deleted the legacy direct-Qdrant upsert path (`upsert_memory`) and dropped the `MEMORY_ENGINE_UNIFIED` env gate. Every flat-file memory now goes through memory-mcp's dual-judge write gate (Opus + Codex in parallel) before anything lands in the corpus — the `auto-extract` project is no longer a raw dump. Also removes the now-unused `path_to_uuid` helper and its test. Kept: `QdrantConfig` + `load_config` + the session-indexing path that targets the `claude-sessions` collection (direct Qdrant until task #19 decides its fate). Net −120 lines. 14 memory_extract tests pass; full 592 sentinel-application tests pass.
+
+### Changed
+
 - **`memory_feedback` routes all Loop 4 outcomes through `memory-mcp` unconditionally**: deleted the legacy Qdrant-boost (access_count increment) + corrections.jsonl path that previously ran when `MEMORY_ENGINE_UNIFIED` was unset. The unified-mode path that calls memory-mcp's `memory_record_outcome` tool is now the only path. memory-mcp is registered in `~/.claude.json` as a first-class MCP (`mcp-router --single <path-to-memory-mcp.exe>`) so the subprocess call works out of the box — no env setup needed. Every outcome now flows through the Memory engine's `RelevanceUpdater` (EMA on per-atom utility) instead of a raw payload bump, which is the correctness upgrade the unified flag existed to ship in the first place. Removes: `memory_engine_unified()` gate, `boost_memory()` via VectorStorePort, `log_correction()` + `CorrectionEntry` JSONL writer, the local `COLLECTION` const. Net −170 lines. Production-side direct-IO in this file now: `std::fs=0, reqwest=0, dirs=0, VectorStorePort refs=0`. Tradeoff: ~2.7s added to each Stop hook turn for memory-mcp cold start — acceptable at Stop-hook frequency (1/turn). 10 memory_feedback tests pass; full 593 sentinel-application tests pass.
 
 ### Changed
