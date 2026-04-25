@@ -71,15 +71,33 @@ pub fn process(input: &HookInput, git: &dyn GitStatusPort) -> HookOutput {
     // If the target file is outside the cwd's repo, this hook doesn't apply.
     // git_hygiene governs the *current* repo — edits to files outside it
     // (e.g. ~/.claude/ config files) are always allowed.
-    if let Some(file_path) = file_path_from_input(input) {
-        if !is_path_inside_repo(&file_path, cwd, git) {
+    let file_path = file_path_from_input(input);
+    if let Some(fp) = file_path.as_deref() {
+        if !is_path_inside_repo(fp, cwd, git) {
             return HookOutput::allow();
         }
     }
 
+    // Resolve the effective repo path for branch/worktree checks.
+    //
+    // When the session cwd is the primary repo checkout (on main) but the
+    // edit targets a file inside `.claude/worktrees/*` or `.worktrees/*`,
+    // using `cwd` here reports "main" even though the file actually lives
+    // on a feature branch in a worktree. That falsely blocks legitimate
+    // worktree edits. Resolve the target file's own repo root instead and
+    // fall back to `cwd` only when the file path is absent or outside any
+    // repo.
+    let effective_repo = file_path
+        .as_deref()
+        .and_then(|fp| git.repo_root(fp))
+        .unwrap_or_else(|| cwd.to_string());
+    let effective_repo_str = effective_repo.as_str();
+
     // Check 1: BLOCK if on a protected branch and not in a worktree
-    if let Ok(branch) = git.current_branch(cwd) {
-        if PROTECTED_BRANCHES.contains(&branch.as_str()) && !git.is_worktree(cwd) {
+    if let Ok(branch) = git.current_branch(effective_repo_str) {
+        if PROTECTED_BRANCHES.contains(&branch.as_str())
+            && !git.is_worktree(effective_repo_str)
+        {
             return HookOutput::deny(format!(
                 "[Git Hygiene] BLOCKED: editing directly on `{branch}` without a worktree. \
                  Use `EnterWorktree` to create an isolated branch first. \
@@ -171,6 +189,91 @@ mod tests {
         fn list_worktree_names(&self, _: &str) -> Vec<String> {
             Vec::new()
         }
+    }
+
+    /// Stub that returns a different branch (+ worktree status + repo_root)
+    /// depending on the path. Used to regression-test that git_hygiene
+    /// resolves the branch from the *target file's* repo root rather than
+    /// from the session cwd.
+    struct PathAwareStubGit {
+        primary_root: String,
+        worktree_root: String,
+    }
+
+    impl GitStatusPort for PathAwareStubGit {
+        fn has_uncommitted_changes(&self, _: &str) -> anyhow::Result<bool> {
+            Ok(false)
+        }
+        fn changed_files(&self, _: &str) -> anyhow::Result<Vec<String>> {
+            Ok(vec![])
+        }
+        fn current_branch(&self, repo_path: &str) -> anyhow::Result<String> {
+            if repo_path == self.worktree_root {
+                Ok("feat/wt".to_string())
+            } else {
+                Ok("main".to_string())
+            }
+        }
+        fn is_worktree(&self, repo_path: &str) -> bool {
+            repo_path == self.worktree_root
+        }
+        fn has_unpushed_commits(&self, _: &str) -> anyhow::Result<bool> {
+            Ok(false)
+        }
+        fn repo_root(&self, path: &str) -> Option<String> {
+            if path.starts_with(&self.worktree_root) {
+                Some(self.worktree_root.clone())
+            } else if path.starts_with(&self.primary_root) {
+                Some(self.primary_root.clone())
+            } else {
+                None
+            }
+        }
+        fn list_worktree_names(&self, _: &str) -> Vec<String> {
+            Vec::new()
+        }
+    }
+
+    /// Regression: session cwd is the primary repo on main, but the edit
+    /// targets a file inside a worktree on a feature branch. Must NOT
+    /// block — the file's own repo root is a worktree off feat/wt.
+    #[test]
+    fn test_worktree_edit_from_main_cwd_not_blocked() {
+        let git = PathAwareStubGit {
+            primary_root: "/repo".to_string(),
+            worktree_root: "/repo/.worktrees/feature".to_string(),
+        };
+        let input = HookInput {
+            tool_name: Some("Edit".to_string()),
+            cwd: Some("/repo".to_string()),
+            file_path: Some("/repo/.worktrees/feature/src/lib.rs".to_string()),
+            ..Default::default()
+        };
+        assert!(
+            process(&input, &git).blocked.is_none(),
+            "worktree edits from main cwd should not be blocked"
+        );
+    }
+
+    /// Regression: cwd is on main, file path is inside the primary repo
+    /// on main (no worktree) — must still block (previous behaviour).
+    #[test]
+    fn test_direct_main_edit_still_blocked() {
+        let git = PathAwareStubGit {
+            primary_root: "/repo".to_string(),
+            worktree_root: "/repo/.worktrees/feature".to_string(),
+        };
+        let input = HookInput {
+            tool_name: Some("Edit".to_string()),
+            cwd: Some("/repo".to_string()),
+            file_path: Some("/repo/src/main.rs".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            process(&input, &git).blocked,
+            Some(true),
+            "direct main edits should still be blocked"
+        );
     }
 
     #[test]
