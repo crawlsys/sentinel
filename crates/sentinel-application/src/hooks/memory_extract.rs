@@ -139,18 +139,6 @@ fn load_config(fs: &dyn FileSystemPort) -> Option<QdrantConfig> {
     serde_json::from_str(&content).ok()
 }
 
-/// Compute deterministic UUID from source path
-fn path_to_uuid(path: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(path.as_bytes());
-    let result = hasher.finalize();
-    let mut bytes = [0u8; 16];
-    bytes.copy_from_slice(&result[..16]);
-    bytes[6] = (bytes[6] & 0x0f) | 0x40;
-    bytes[8] = (bytes[8] & 0x3f) | 0x80;
-    uuid::Uuid::from_bytes(bytes).to_string()
-}
-
 /// Parse frontmatter from a memory file
 fn parse_frontmatter(content: &str) -> Option<(String, String, String, String)> {
     let content = content.trim();
@@ -184,93 +172,9 @@ fn parse_frontmatter(content: &str) -> Option<(String, String, String, String)> 
     Some((name, description, mem_type, body))
 }
 
-/// Upsert a single memory file to Qdrant. Returns true on success.
-fn upsert_memory(fs: &dyn FileSystemPort, config: &QdrantConfig, path: &PathBuf) -> bool {
-    let content = match fs.read_to_string(path) {
-        Ok(c) => c,
-        Err(_) => return false,
-    };
-
-    let (name, description, mem_type, body) = match parse_frontmatter(&content) {
-        Some(fm) => fm,
-        None => return false,
-    };
-
-    let source_path = path.to_string_lossy().to_string();
-    let id = path_to_uuid(&source_path);
-
-    let full_text = if body.is_empty() {
-        format!("{name}. {description}")
-    } else {
-        format!("{name}. {description}\n\n{body}")
-    };
-
-    let body_json = serde_json::json!({
-        "points": [{
-            "id": id,
-            "vector": {
-                "text-dense": {
-                    "text": full_text,
-                    "model": config.model
-                }
-            },
-            "payload": {
-                "content": full_text,
-                "name": name,
-                "description": description,
-                "memory_type": if mem_type.is_empty() { "project" } else { &mem_type },
-                "project": "auto-extract",
-                "source_file": source_path,
-                "created_at": chrono::Utc::now().to_rfc3339(),
-                "access_count": 0
-            }
-        }]
-    });
-
-    let url = format!(
-        "{}/collections/{}/points?wait=true",
-        config.cluster_url, config.collection
-    );
-
-    super::run_async(async {
-        let client = match reqwest::Client::builder()
-            .timeout(constants::API_CALL_TIMEOUT)
-            .build()
-        {
-            Ok(c) => c,
-            Err(_) => return false,
-        };
-
-        client
-            .put(&url)
-            .header("api-key", &config.api_key)
-            .header("Content-Type", "application/json")
-            .json(&body_json)
-            .send()
-            .await
-            .is_ok()
-    })
-}
-
 // ---------------------------------------------------------------------------
-// F1-PRE-3e: unified Memory-engine capture path
+// Memory-engine capture path (memory-mcp memory_capture)
 // ---------------------------------------------------------------------------
-
-/// `MEMORY_ENGINE_UNIFIED=1`/`true`/`yes`/`on` flips memory_extract to
-/// route flat-file memories through the Memory engine's `memory_capture`
-/// MCP tool — i.e. through the dual-judge gate — instead of upserting
-/// directly into the legacy `claude-memory` Qdrant collection. Mirrors
-/// the flag used by memory_inject (F1-PRE-3c) and memory_feedback
-/// (F1-PRE-3d) so all three hooks stay coherent.
-fn memory_engine_unified() -> bool {
-    matches!(
-        std::env::var("MEMORY_ENGINE_UNIFIED")
-            .unwrap_or_default()
-            .to_ascii_lowercase()
-            .as_str(),
-        "1" | "true" | "yes" | "on"
-    )
-}
 
 /// Read a flat-file memory, project it into the Memory engine's
 /// subject/predicate/value shape, and submit via `memory_capture`.
@@ -828,37 +732,20 @@ pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
 
     debug!(count = unsynced.len(), "Found unsynced memory files");
 
-    let config = match load_config(fs) {
-        Some(c) => c,
-        None => {
-            debug!("No Qdrant config — skipping memory sync");
-            return HookOutput::allow();
-        }
-    };
-
-    // Sync each changed file and update state. When MEMORY_ENGINE_UNIFIED=1,
-    // route through the Memory engine's `memory_capture` dual-judge gate
-    // (F1-PRE-3e) instead of the raw Qdrant upsert. Legacy path preserved
-    // for the F1-PRE-3f A/B window.
-    let unified = memory_engine_unified();
+    // Sync each changed file via the Memory engine's `memory_capture` MCP
+    // tool — every write goes through the dual-judge gate. No direct Qdrant
+    // upsert path; the legacy `upsert_memory` helper and the
+    // MEMORY_ENGINE_UNIFIED env flag were removed in the migration that
+    // made memory-mcp the only path.
     let mut state = load_sync_state(fs);
     let mut synced = 0;
     for path in &unsynced {
-        let ok = if unified {
-            capture_memory_via_mcp(fs, path)
-        } else {
-            upsert_memory(fs, &config, path)
-        };
-        if ok {
+        if capture_memory_via_mcp(fs, path) {
             synced += 1;
             let key = path.to_string_lossy().to_string();
             let mtime = file_mtime(fs, path).unwrap_or(0);
             state.insert(key, mtime);
-            debug!(
-                file = %path.display(),
-                unified,
-                "Synced memory (unified={unified})"
-            );
+            debug!(file = %path.display(), "Synced memory via memory-mcp");
         }
     }
 
@@ -887,13 +774,6 @@ mod tests {
     #[test]
     fn test_parse_frontmatter_invalid() {
         assert!(parse_frontmatter("no frontmatter").is_none());
-    }
-
-    #[test]
-    fn test_path_to_uuid_deterministic() {
-        let id1 = path_to_uuid("test.md");
-        let id2 = path_to_uuid("test.md");
-        assert_eq!(id1, id2);
     }
 
     #[test]
