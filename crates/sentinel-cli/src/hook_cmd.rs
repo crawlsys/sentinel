@@ -122,9 +122,10 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
         sentinel_infrastructure::qdrant::QdrantAdapter::from_config()
             .map(|a| Arc::new(a) as Arc<dyn VectorStorePort>);
 
-    // Construct filesystem and process adapters
+    // Construct filesystem, process, and env adapters
     let real_fs = sentinel_infrastructure::filesystem::RealFileSystem;
     let real_process = sentinel_infrastructure::process::RealProcess;
+    let real_env = sentinel_infrastructure::env::RealEnv;
 
     // Construct LLM adapter (None if no Anthropic key)
     let llm: Option<Arc<dyn LlmPort>> = sentinel_infrastructure::anthropic::AnthropicClient::from_env()
@@ -143,6 +144,7 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
         process: &real_process,
         llm: llm.as_deref(),
         memory_mcp: &memory_mcp,
+        env: &real_env,
     };
 
     // Process through matching hooks based on event type
@@ -324,7 +326,7 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
                 output.merge(&hygiene_output);
 
                 // Tool usage gate — require sequential thinking + task creation
-                let usage_output = hooks::tool_usage_gate::process(&input, ctx.fs);
+                let usage_output = hooks::tool_usage_gate::process(&input, ctx.fs, ctx.env);
                 output.merge(&usage_output);
             }
 
@@ -346,7 +348,7 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
                 output.merge(&steel_output);
 
                 // PR merge gate — block gh pr merge without confirmation (Bash only)
-                let pr_output = hooks::pr_merge_gate::process(&input);
+                let pr_output = hooks::pr_merge_gate::process(&input, ctx.env);
                 output.merge(&pr_output);
 
                 // DB ops gate — block production database operations (Bash only)

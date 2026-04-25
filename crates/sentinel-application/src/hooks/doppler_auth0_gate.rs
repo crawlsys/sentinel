@@ -26,11 +26,11 @@
 
 use sentinel_domain::events::{HookInput, HookOutput};
 
-use super::HookContext;
+use super::{EnvPort, HookContext};
 
 /// True iff `SENTINEL_AUTOPILOT` is set to `1` or `true` (case-insensitive).
-fn is_autopilot() -> bool {
-    std::env::var("SENTINEL_AUTOPILOT")
+fn is_autopilot(env: &dyn EnvPort) -> bool {
+    env.var("SENTINEL_AUTOPILOT")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false)
 }
@@ -137,7 +137,7 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     // tenants are allowed (the Autopilot directive in CLAUDE.md explicitly
     // permits non-prod Auth0 changes).
     if tool.starts_with("mcp__auth0__") {
-        if is_autopilot() && !targets_production(input.tool_input.as_ref()) {
+        if is_autopilot(ctx.env) && !targets_production(input.tool_input.as_ref()) {
             return HookOutput::allow();
         }
         return HookOutput::deny(
@@ -160,7 +160,7 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
         // without requiring an override. Prod configs (config/project name
         // contains `prd`/`prod`/`production`) still require the explicit
         // override path below.
-        if is_autopilot() && !targets_production(input.tool_input.as_ref()) {
+        if is_autopilot(ctx.env) && !targets_production(input.tool_input.as_ref()) {
             return HookOutput::allow();
         }
 
@@ -234,21 +234,17 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hooks::test_support::stub_ctx;
-    use std::sync::Mutex;
+    use crate::hooks::test_support::{stub_ctx, StubEnv, StubFs, StubGit, StubMemoryMcp, StubProcess};
 
-    // Tests read/mutate SENTINEL_AUTOPILOT via process env — serialise to
-    // avoid races with parallel test threads seeing stale values.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
-
-    /// Acquire ENV_LOCK (recovering from poisoning) and force autopilot off
-    /// for the duration of the test. Guards every test that assumes the
-    /// default deny-by-default gate behaviour against an inherited
-    /// `SENTINEL_AUTOPILOT=1` from the caller's shell.
-    fn clear_autopilot() -> std::sync::MutexGuard<'static, ()> {
-        let g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        std::env::remove_var("SENTINEL_AUTOPILOT");
-        g
+    /// Build a `HookContext` with `SENTINEL_AUTOPILOT=1` injected via `StubEnv`
+    /// so tests don't have to mutate process-global env state.
+    fn ctx_autopilot_on() -> HookContext<'static> {
+        let git: &'static StubGit = Box::leak(Box::new(StubGit));
+        let fs: &'static StubFs = Box::leak(Box::new(StubFs));
+        let process: &'static StubProcess = Box::leak(Box::new(StubProcess));
+        let memory_mcp: &'static StubMemoryMcp = Box::leak(Box::new(StubMemoryMcp));
+        let env: &'static StubEnv = Box::leak(Box::new(StubEnv::with(&[("SENTINEL_AUTOPILOT", "1")])));
+        HookContext { git, vector_store: None, fs, process, llm: None, memory_mcp, env }
     }
 
     fn input_with_tool(tool: &str) -> HookInput {
@@ -276,7 +272,6 @@ mod tests {
 
     #[test]
     fn test_allows_non_doppler_auth0_tools() {
-        let _g = clear_autopilot();
         let ctx = stub_ctx();
         assert!(process(&input_with_tool("Edit"), &ctx).blocked.is_none());
         assert!(process(&input_with_tool("Bash"), &ctx).blocked.is_none());
@@ -285,14 +280,12 @@ mod tests {
 
     #[test]
     fn test_blocks_auth0_mutation_tools() {
-        let _g = clear_autopilot();
         let ctx = stub_ctx();
         assert_eq!(process(&input_with_tool("mcp__auth0__authenticate"), &ctx).blocked, Some(true));
     }
 
     #[test]
     fn test_allows_mcp_router_tools_on_all_servers() {
-        let _g = clear_autopilot();
         let ctx = stub_ctx();
         assert!(process(&input_with_tool("mcp__auth0__mcp_health_check"), &ctx).blocked.is_none());
         assert!(process(&input_with_tool("mcp__auth0__mcp_list_servers"), &ctx).blocked.is_none());
@@ -304,7 +297,6 @@ mod tests {
 
     #[test]
     fn test_allows_doppler_read_ops() {
-        let _g = clear_autopilot();
         let ctx = stub_ctx();
         assert!(process(&input_with_tool("mcp__doppler__get_secret"), &ctx).blocked.is_none());
         assert!(process(&input_with_tool("mcp__doppler__list_projects"), &ctx).blocked.is_none());
@@ -315,7 +307,6 @@ mod tests {
 
     #[test]
     fn test_blocks_doppler_mutations() {
-        let _g = clear_autopilot();
         let ctx = stub_ctx();
         assert_eq!(process(&input_with_tool("mcp__doppler__set_secret"), &ctx).blocked, Some(true));
         assert_eq!(process(&input_with_tool("mcp__doppler__set_secrets"), &ctx).blocked, Some(true));
@@ -331,9 +322,7 @@ mod tests {
 
     #[test]
     fn test_autopilot_allows_doppler_mutation_on_nonprod_config() {
-        let g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        std::env::set_var("SENTINEL_AUTOPILOT", "1");
-        let ctx = stub_ctx();
+        let ctx = ctx_autopilot_on();
         let input = input_with_tool_and_args(
             "mcp__doppler__set_secret",
             serde_json::json!({
@@ -344,9 +333,7 @@ mod tests {
             }),
         );
         let out = process(&input, &ctx);
-        std::env::remove_var("SENTINEL_AUTOPILOT");
-        drop(g);
-        assert!(
+assert!(
             out.blocked.is_none(),
             "autopilot + non-prod config should allow doppler mutation"
         );
@@ -354,9 +341,7 @@ mod tests {
 
     #[test]
     fn test_autopilot_blocks_doppler_mutation_on_prod_config() {
-        let g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        std::env::set_var("SENTINEL_AUTOPILOT", "1");
-        let ctx = stub_ctx();
+        let ctx = ctx_autopilot_on();
         let input = input_with_tool_and_args(
             "mcp__doppler__set_secret",
             serde_json::json!({
@@ -367,9 +352,7 @@ mod tests {
             }),
         );
         let out = process(&input, &ctx);
-        std::env::remove_var("SENTINEL_AUTOPILOT");
-        drop(g);
-        assert_eq!(
+assert_eq!(
             out.blocked,
             Some(true),
             "autopilot must NOT bypass the gate when config is prod"
@@ -378,18 +361,14 @@ mod tests {
 
     #[test]
     fn test_autopilot_blocks_doppler_mutation_on_production_substring() {
-        let g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        std::env::set_var("SENTINEL_AUTOPILOT", "1");
-        let ctx = stub_ctx();
+        let ctx = ctx_autopilot_on();
         // A config literally named "production" — should still block.
         let input = input_with_tool_and_args(
             "mcp__doppler__set_secret",
             serde_json::json!({"project": "x", "config": "production"}),
         );
         let out = process(&input, &ctx);
-        std::env::remove_var("SENTINEL_AUTOPILOT");
-        drop(g);
-        assert_eq!(out.blocked, Some(true));
+assert_eq!(out.blocked, Some(true));
     }
 
     #[test]
@@ -397,28 +376,20 @@ mod tests {
         // Conservative fallback: no `tool_input` → assume prod → still block.
         // This matters because the hook can't otherwise distinguish a
         // "set_secret without a config" from a prod call.
-        let g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        std::env::set_var("SENTINEL_AUTOPILOT", "1");
-        let ctx = stub_ctx();
+        let ctx = ctx_autopilot_on();
         let out = process(&input_with_tool("mcp__doppler__set_secret"), &ctx);
-        std::env::remove_var("SENTINEL_AUTOPILOT");
-        drop(g);
-        assert_eq!(out.blocked, Some(true));
+assert_eq!(out.blocked, Some(true));
     }
 
     #[test]
     fn test_autopilot_allows_auth0_mutation_on_nonprod_tenant() {
-        let g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        std::env::set_var("SENTINEL_AUTOPILOT", "1");
-        let ctx = stub_ctx();
+        let ctx = ctx_autopilot_on();
         let input = input_with_tool_and_args(
             "mcp__auth0__update_rule",
             serde_json::json!({"domain": "dev-fireflypro.us.auth0.com"}),
         );
         let out = process(&input, &ctx);
-        std::env::remove_var("SENTINEL_AUTOPILOT");
-        drop(g);
-        assert!(
+assert!(
             out.blocked.is_none(),
             "autopilot + non-prod Auth0 tenant should allow the mutation"
         );
@@ -426,17 +397,13 @@ mod tests {
 
     #[test]
     fn test_autopilot_blocks_auth0_mutation_on_prod_tenant() {
-        let g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        std::env::set_var("SENTINEL_AUTOPILOT", "1");
-        let ctx = stub_ctx();
+        let ctx = ctx_autopilot_on();
         let input = input_with_tool_and_args(
             "mcp__auth0__update_rule",
             serde_json::json!({"domain": "fireflypro-production.us.auth0.com"}),
         );
         let out = process(&input, &ctx);
-        std::env::remove_var("SENTINEL_AUTOPILOT");
-        drop(g);
-        assert_eq!(
+assert_eq!(
             out.blocked,
             Some(true),
             "autopilot must NOT bypass the gate when Auth0 tenant is production"
@@ -445,13 +412,9 @@ mod tests {
 
     #[test]
     fn test_autopilot_blocks_auth0_mutation_when_no_args() {
-        let g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        std::env::set_var("SENTINEL_AUTOPILOT", "1");
-        let ctx = stub_ctx();
+        let ctx = ctx_autopilot_on();
         let out = process(&input_with_tool("mcp__auth0__create_user"), &ctx);
-        std::env::remove_var("SENTINEL_AUTOPILOT");
-        drop(g);
-        assert_eq!(
+assert_eq!(
             out.blocked,
             Some(true),
             "conservative fallback: no args → assume prod → block"
@@ -500,7 +463,6 @@ mod tests {
         // Even if a Doppler override were active (verified at integration level),
         // Auth0 mutations must remain hard-blocked. The gate checks Auth0 first,
         // before any override lookup, so this test verifies the control-flow order.
-        let _g = clear_autopilot();
         let ctx = stub_ctx();
         let input = input_with_session("mcp__auth0__update_user", "any-session");
         assert_eq!(
@@ -512,7 +474,6 @@ mod tests {
 
     #[test]
     fn test_doppler_mutation_without_override_still_blocked() {
-        let _g = clear_autopilot();
         let ctx = stub_ctx();
         let input = input_with_session("mcp__doppler__set_secret", "no-override-session");
         assert_eq!(process(&input, &ctx).blocked, Some(true));
@@ -520,7 +481,6 @@ mod tests {
 
     #[test]
     fn test_allows_no_tool_name() {
-        let _g = clear_autopilot();
         let ctx = stub_ctx();
         assert!(process(&HookInput::default(), &ctx).blocked.is_none());
     }

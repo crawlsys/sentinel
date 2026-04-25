@@ -16,22 +16,24 @@
 
 use sentinel_domain::events::{HookEvent, HookInput, HookOutput};
 
+use super::EnvPort;
+
 /// Check if autopilot mode is active via env var.
-fn is_autopilot() -> bool {
-    std::env::var("SENTINEL_AUTOPILOT")
+fn is_autopilot(env: &dyn EnvPort) -> bool {
+    env.var("SENTINEL_AUTOPILOT")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false)
 }
 
 /// Process a PreToolUse Bash event. Warns on `gh pr merge` but allows it.
-pub fn process(input: &HookInput) -> HookOutput {
+pub fn process(input: &HookInput, env: &dyn EnvPort) -> HookOutput {
     let cmd = match extract_bash_command(input) {
         Some(c) => c,
         None => return HookOutput::allow(),
     };
 
     if cmd.contains("gh pr merge") || cmd.contains("gh pr close") {
-        if is_autopilot() {
+        if is_autopilot(env) {
             // Autopilot: inject a reminder via context, do not open the Yes/No dialog.
             return HookOutput::inject_context(
                 HookEvent::PreToolUse,
@@ -55,11 +57,6 @@ fn extract_bash_command(input: &HookInput) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-
-    // Tests touch SENTINEL_AUTOPILOT env var — serialize them to avoid
-    // races with parallel test threads reading stale values.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn bash_input(cmd: &str) -> HookInput {
         HookInput {
@@ -69,15 +66,21 @@ mod tests {
         }
     }
 
+    fn no_autopilot() -> crate::hooks::test_support::StubEnv {
+        crate::hooks::test_support::StubEnv::new()
+    }
+
+    fn autopilot_on() -> crate::hooks::test_support::StubEnv {
+        crate::hooks::test_support::StubEnv::with(&[("SENTINEL_AUTOPILOT", "1")])
+    }
+
+    fn autopilot_off() -> crate::hooks::test_support::StubEnv {
+        crate::hooks::test_support::StubEnv::with(&[("SENTINEL_AUTOPILOT", "0")])
+    }
+
     #[test]
     fn test_asks_gh_pr_merge() {
-        // Must clear SENTINEL_AUTOPILOT — an inherited `=1` from the caller's
-        // shell (e.g. running tests inside a Claude Code autopilot session)
-        // would route `process` through the autopilot branch and return
-        // inject_context instead of ask.
-        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        std::env::remove_var("SENTINEL_AUTOPILOT");
-        let out = process(&bash_input("gh pr merge 123"));
+        let out = process(&bash_input("gh pr merge 123"), &no_autopilot());
         assert!(out.blocked.is_none()); // not hard-blocked
         let hso = out.hook_specific_output.unwrap();
         assert_eq!(hso.permission_decision, Some(sentinel_domain::events::PermissionDecision::Ask));
@@ -85,9 +88,7 @@ mod tests {
 
     #[test]
     fn test_asks_gh_pr_close() {
-        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        std::env::remove_var("SENTINEL_AUTOPILOT");
-        let out = process(&bash_input("gh pr close 42"));
+        let out = process(&bash_input("gh pr close 42"), &no_autopilot());
         assert!(out.blocked.is_none());
         let hso = out.hook_specific_output.unwrap();
         assert_eq!(hso.permission_decision, Some(sentinel_domain::events::PermissionDecision::Ask));
@@ -95,31 +96,28 @@ mod tests {
 
     #[test]
     fn test_allows_gh_pr_view() {
-        assert!(process(&bash_input("gh pr view 123")).blocked.is_none());
+        assert!(process(&bash_input("gh pr view 123"), &no_autopilot()).blocked.is_none());
     }
 
     #[test]
     fn test_allows_gh_pr_create() {
-        assert!(process(&bash_input("gh pr create --title test")).blocked.is_none());
+        assert!(process(&bash_input("gh pr create --title test"), &no_autopilot()).blocked.is_none());
     }
 
     #[test]
     fn test_allows_non_gh_commands() {
-        assert!(process(&bash_input("git push")).blocked.is_none());
-        assert!(process(&bash_input("cargo test")).blocked.is_none());
+        assert!(process(&bash_input("git push"), &no_autopilot()).blocked.is_none());
+        assert!(process(&bash_input("cargo test"), &no_autopilot()).blocked.is_none());
     }
 
     #[test]
     fn test_allows_no_tool_input() {
-        assert!(process(&HookInput::default()).blocked.is_none());
+        assert!(process(&HookInput::default(), &no_autopilot()).blocked.is_none());
     }
 
     #[test]
     fn test_autopilot_downgrades_ask_to_context_inject() {
-        let _g = ENV_LOCK.lock().unwrap();
-        std::env::set_var("SENTINEL_AUTOPILOT", "1");
-        let out = process(&bash_input("gh pr merge 123 --squash"));
-        std::env::remove_var("SENTINEL_AUTOPILOT");
+        let out = process(&bash_input("gh pr merge 123 --squash"), &autopilot_on());
 
         assert!(out.blocked.is_none());
         let hso = out.hook_specific_output.expect("output should have hso");
@@ -136,11 +134,7 @@ mod tests {
 
     #[test]
     fn test_autopilot_false_still_asks() {
-        let _g = ENV_LOCK.lock().unwrap();
-        std::env::set_var("SENTINEL_AUTOPILOT", "0");
-        let out = process(&bash_input("gh pr merge 7"));
-        std::env::remove_var("SENTINEL_AUTOPILOT");
-
+        let out = process(&bash_input("gh pr merge 7"), &autopilot_off());
         let hso = out.hook_specific_output.unwrap();
         assert_eq!(
             hso.permission_decision,
@@ -150,9 +144,7 @@ mod tests {
 
     #[test]
     fn test_no_autopilot_env_still_asks() {
-        let _g = ENV_LOCK.lock().unwrap();
-        std::env::remove_var("SENTINEL_AUTOPILOT");
-        let out = process(&bash_input("gh pr close 42"));
+        let out = process(&bash_input("gh pr close 42"), &no_autopilot());
         let hso = out.hook_specific_output.unwrap();
         assert_eq!(
             hso.permission_decision,

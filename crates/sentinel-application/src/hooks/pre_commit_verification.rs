@@ -556,6 +556,7 @@ mod tests {
         let stub_git = crate::hooks::test_support::StubGit;
         let stub_proc = crate::hooks::test_support::StubProcess;
         let stub_mcp = crate::hooks::test_support::StubMemoryMcp;
+        let stub_env = crate::hooks::test_support::StubEnv::new();
         let ctx = super::super::HookContext {
             git: &stub_git,
             vector_store: None,
@@ -563,6 +564,7 @@ mod tests {
             process: &stub_proc,
             llm: None,
             memory_mcp: &stub_mcp,
+            env: &stub_env,
         };
         let output = process(&input, &ctx);
         assert!(output.blocked.is_none());
@@ -682,6 +684,7 @@ mod tests {
         let stub_git = crate::hooks::test_support::StubGit;
         let stub_proc = crate::hooks::test_support::StubProcess;
         let stub_mcp = crate::hooks::test_support::StubMemoryMcp;
+        let stub_env = crate::hooks::test_support::StubEnv::new();
         let ctx = super::super::HookContext {
             git: &stub_git,
             vector_store: None,
@@ -689,6 +692,7 @@ mod tests {
             process: &stub_proc,
             llm: None,
             memory_mcp: &stub_mcp,
+            env: &stub_env,
         };
         let output = process(&input, &ctx);
         assert!(output.blocked.is_none());

@@ -13,7 +13,7 @@ use sentinel_domain::events::{HookEvent, HookInput, HookOutput};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use super::{FileSystemPort, HookContext};
+use super::{EnvPort, FileSystemPort, HookContext};
 
 /// Cooldown duration.
 const COOLDOWN_MS: u64 = constants::HOOK_COOLDOWN_VERIFY_MS;
@@ -44,7 +44,7 @@ fn state_file(fs: &dyn FileSystemPort, session_id: &str) -> Option<PathBuf> {
 #[cfg(test)]
 static COOLDOWN_PATH_OVERRIDE: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
 
-fn cooldown_file() -> PathBuf {
+fn cooldown_file(env: &dyn EnvPort) -> PathBuf {
     #[cfg(test)]
     {
         if let Ok(guard) = COOLDOWN_PATH_OVERRIDE.lock() {
@@ -53,14 +53,15 @@ fn cooldown_file() -> PathBuf {
             }
         }
     }
-    let session_id = std::env::var("CLAUDE_SESSION_ID")
-        .or_else(|_| std::env::var("SESSION_ID"))
-        .unwrap_or_else(|_| "default".to_string());
+    let session_id = env
+        .var("CLAUDE_SESSION_ID")
+        .or_else(|| env.var("SESSION_ID"))
+        .unwrap_or_else(|| "default".to_string());
     std::env::temp_dir().join(format!("claude-verification-gate-{session_id}-last"))
 }
 
-fn cooldown_expired(fs: &dyn FileSystemPort) -> bool {
-    let content = match fs.read_to_string(&cooldown_file()) {
+fn cooldown_expired(fs: &dyn FileSystemPort, env: &dyn EnvPort) -> bool {
+    let content = match fs.read_to_string(&cooldown_file(env)) {
         Ok(c) => c,
         Err(_) => return true,
     };
@@ -71,8 +72,8 @@ fn cooldown_expired(fs: &dyn FileSystemPort) -> bool {
     now_ms().saturating_sub(last) >= COOLDOWN_MS
 }
 
-fn write_cooldown(fs_port: &dyn FileSystemPort) {
-    let _ = fs_port.write(&cooldown_file(), now_ms().to_string().as_bytes());
+fn write_cooldown(fs_port: &dyn FileSystemPort, env: &dyn EnvPort) {
+    let _ = fs_port.write(&cooldown_file(env), now_ms().to_string().as_bytes());
 }
 
 /// Get the offset file path for a session.
@@ -301,11 +302,11 @@ pub fn process_prompt(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
         return HookOutput::allow();
     }
 
-    if !cooldown_expired(ctx.fs) {
+    if !cooldown_expired(ctx.fs, ctx.env) {
         return HookOutput::allow();
     }
 
-    write_cooldown(ctx.fs);
+    write_cooldown(ctx.fs, ctx.env);
 
     let claims_list: String = state
         .claims
@@ -464,7 +465,7 @@ mod tests {
     fn test_cooldown_expired_with_stub() {
         let ctx = crate::hooks::test_support::stub_ctx();
         // StubFs returns error on read → expired
-        assert!(cooldown_expired(ctx.fs));
+        assert!(cooldown_expired(ctx.fs, ctx.env));
     }
 
     #[test]

@@ -676,6 +676,8 @@ mod tests {
         }));
         let memory_mcp: &'static crate::hooks::test_support::StubMemoryMcp =
             Box::leak(Box::new(crate::hooks::test_support::StubMemoryMcp));
+        let env: &'static crate::hooks::test_support::StubEnv =
+            Box::leak(Box::new(crate::hooks::test_support::StubEnv::new()));
         let ctx = HookContext {
             git,
             vector_store: None,
@@ -683,6 +685,7 @@ mod tests {
             process: process_port,
             llm: None,
             memory_mcp,
+            env,
         };
 
         let mut input = HookInput::default();

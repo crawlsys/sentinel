@@ -160,7 +160,7 @@ pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
         .collect();
 
     // 9. Write env vars to CLAUDE_ENV_FILE (injected into Bash commands)
-    if let Ok(env_file) = std::env::var("CLAUDE_ENV_FILE") {
+    if let Some(env_file) = ctx.env.var("CLAUDE_ENV_FILE") {
         let mut lines = Vec::new();
         // Detect project from cwd path
         let project = detect_project_from_cwd(cwd);

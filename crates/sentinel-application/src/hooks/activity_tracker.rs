@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use super::{FileSystemPort, HookContext};
+use super::{EnvPort, FileSystemPort, HookContext};
 
 /// Cooldown between activity summaries.
 const COOLDOWN_MS: u64 = constants::HOOK_COOLDOWN_LONG_MS;
@@ -68,15 +68,16 @@ fn summary_file(fs: &dyn FileSystemPort, session_id: &str) -> Option<PathBuf> {
     Some(metrics_dir(fs)?.join(format!("activity-summary-{session_id}.json")))
 }
 
-fn cooldown_file() -> PathBuf {
-    let session_id = std::env::var("CLAUDE_SESSION_ID")
-        .or_else(|_| std::env::var("SESSION_ID"))
-        .unwrap_or_else(|_| "default".to_string());
+fn cooldown_file(env: &dyn EnvPort) -> PathBuf {
+    let session_id = env
+        .var("CLAUDE_SESSION_ID")
+        .or_else(|| env.var("SESSION_ID"))
+        .unwrap_or_else(|| "default".to_string());
     std::env::temp_dir().join(format!("claude-activity-tracker-{session_id}-last"))
 }
 
-fn cooldown_expired(fs: &dyn FileSystemPort) -> bool {
-    let content = match fs.read_to_string(&cooldown_file()) {
+fn cooldown_expired(fs: &dyn FileSystemPort, env: &dyn EnvPort) -> bool {
+    let content = match fs.read_to_string(&cooldown_file(env)) {
         Ok(c) => c,
         Err(_) => return true,
     };
@@ -87,8 +88,8 @@ fn cooldown_expired(fs: &dyn FileSystemPort) -> bool {
     now_ms().saturating_sub(last) >= COOLDOWN_MS
 }
 
-fn write_cooldown(fs: &dyn FileSystemPort) {
-    let _ = fs.write(&cooldown_file(), now_ms().to_string().as_bytes());
+fn write_cooldown(fs: &dyn FileSystemPort, env: &dyn EnvPort) {
+    let _ = fs.write(&cooldown_file(env), now_ms().to_string().as_bytes());
 }
 
 /// Extract file path from tool input (Edit, Write, Read, Glob, Grep).
@@ -309,11 +310,11 @@ pub fn process_prompt(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
         return HookOutput::allow();
     }
 
-    if !cooldown_expired(ctx.fs) {
+    if !cooldown_expired(ctx.fs, ctx.env) {
         return HookOutput::allow();
     }
 
-    write_cooldown(ctx.fs);
+    write_cooldown(ctx.fs, ctx.env);
 
     let context = build_summary_context(&summary);
     HookOutput::inject_context(HookEvent::UserPromptSubmit, context)
@@ -526,7 +527,7 @@ mod tests {
     fn test_cooldown_logic() {
         let ctx = crate::hooks::test_support::stub_ctx();
         // StubFs returns error on read → expired
-        assert!(cooldown_expired(ctx.fs));
+        assert!(cooldown_expired(ctx.fs, ctx.env));
     }
 
     #[test]

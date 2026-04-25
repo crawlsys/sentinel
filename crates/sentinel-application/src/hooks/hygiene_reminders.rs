@@ -354,6 +354,7 @@ mod tests {
         let git = RepoRootGit;
         let stub_proc = crate::hooks::test_support::StubProcess;
         let stub_mcp = crate::hooks::test_support::StubMemoryMcp;
+        let stub_env = crate::hooks::test_support::StubEnv::new();
         let ctx = crate::hooks::HookContext {
             git: &git,
             vector_store: None,
@@ -361,6 +362,7 @@ mod tests {
             process: &stub_proc,
             llm: None,
             memory_mcp: &stub_mcp,
+            env: &stub_env,
         };
 
         let input = HookInput {

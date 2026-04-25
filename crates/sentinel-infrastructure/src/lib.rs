@@ -4,6 +4,7 @@
 //! Implements ports defined in the domain layer (`sentinel_domain::ports`).
 
 pub mod activity_log;
+pub mod env;
 pub mod filesystem;
 pub mod process;
 pub mod qdrant;

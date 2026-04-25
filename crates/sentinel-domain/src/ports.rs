@@ -267,6 +267,27 @@ pub enum LlmModel {
 }
 
 // ---------------------------------------------------------------------------
+// Environment port
+// ---------------------------------------------------------------------------
+
+/// Port for reading process environment variables.
+///
+/// Abstracts `std::env::var` / `std::env::var_os` so hooks don't reach for
+/// the global env directly. Tests inject a `StubEnv` with a fixed map; the
+/// real adapter delegates to `std::env`. Used for the session-id idiom
+/// (`CLAUDE_SESSION_ID` → fallback `SESSION_ID`), the `SENTINEL_AUTOPILOT`
+/// flag, and ntfy/`CLAUDE_ENV_FILE` config reads.
+pub trait EnvPort: Send + Sync {
+    /// Read a UTF-8 environment variable. Returns `None` if absent or the
+    /// value is not valid UTF-8 (matches `std::env::var(...).ok()`).
+    fn var(&self, key: &str) -> Option<String>;
+
+    /// Read an environment variable as `OsString` (handles non-UTF-8 values
+    /// like Windows HOME paths). Returns `None` if absent.
+    fn var_os(&self, key: &str) -> Option<std::ffi::OsString>;
+}
+
+// ---------------------------------------------------------------------------
 // Memory-MCP port
 // ---------------------------------------------------------------------------
 

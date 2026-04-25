@@ -11,7 +11,7 @@ use sentinel_domain::events::{HookEvent, HookInput, HookOutput};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use super::{FileSystemPort, GitStatusPort, HookContext};
+use super::{EnvPort, FileSystemPort, GitStatusPort, HookContext};
 
 /// Cooldown between commit reminders.
 const COOLDOWN_MS: u64 = constants::HOOK_COOLDOWN_MEDIUM_MS;
@@ -51,19 +51,19 @@ fn state_file(fs: &dyn FileSystemPort, repo_root: &str) -> Option<PathBuf> {
     Some(dir.join(format!("commit-hygiene-{}.json", repo_hash(repo_root))))
 }
 
-fn current_session_id() -> String {
-    std::env::var("CLAUDE_SESSION_ID")
-        .or_else(|_| std::env::var("SESSION_ID"))
-        .unwrap_or_else(|_| "default".to_string())
+fn current_session_id(env: &dyn EnvPort) -> String {
+    env.var("CLAUDE_SESSION_ID")
+        .or_else(|| env.var("SESSION_ID"))
+        .unwrap_or_else(|| "default".to_string())
 }
 
-fn cooldown_file() -> PathBuf {
-    let session_id = current_session_id();
+fn cooldown_file(env: &dyn EnvPort) -> PathBuf {
+    let session_id = current_session_id(env);
     std::env::temp_dir().join(format!("claude-commit-hygiene-{session_id}-last"))
 }
 
-fn cooldown_expired(fs: &dyn FileSystemPort) -> bool {
-    let content = match fs.read_to_string(&cooldown_file()) {
+fn cooldown_expired(fs: &dyn FileSystemPort, env: &dyn EnvPort) -> bool {
+    let content = match fs.read_to_string(&cooldown_file(env)) {
         Ok(c) => c,
         Err(_) => return true,
     };
@@ -74,8 +74,8 @@ fn cooldown_expired(fs: &dyn FileSystemPort) -> bool {
     now_ms().saturating_sub(last) >= COOLDOWN_MS
 }
 
-fn write_cooldown(fs: &dyn FileSystemPort) {
-    let _ = fs.write(&cooldown_file(), now_ms().to_string().as_bytes());
+fn write_cooldown(fs: &dyn FileSystemPort, env: &dyn EnvPort) {
+    let _ = fs.write(&cooldown_file(env), now_ms().to_string().as_bytes());
 }
 
 // ---------------------------------------------------------------------------
@@ -107,7 +107,7 @@ pub fn process_stop(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
 
     let state = CommitState {
         cwd: cwd.to_string(),
-        session_id: current_session_id(),
+        session_id: current_session_id(ctx.env),
         file_count: files.len(),
         files: files.into_iter().take(20).collect(), // Cap at 20 for readability
         ts: chrono::Utc::now().to_rfc3339(),
@@ -151,7 +151,7 @@ pub fn process_prompt(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     // Including session_id prevents cross-session suppression when two
     // sessions share the same repo (non-worktree case): session A writes
     // state, session B must not treat it as its own.
-    let session_id = current_session_id();
+    let session_id = current_session_id(ctx.env);
     if state.session_id != session_id || state.cwd != cwd {
         return HookOutput::allow();
     }
@@ -161,11 +161,11 @@ pub fn process_prompt(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
         return HookOutput::allow();
     }
 
-    if !cooldown_expired(ctx.fs) {
+    if !cooldown_expired(ctx.fs, ctx.env) {
         return HookOutput::allow();
     }
 
-    write_cooldown(ctx.fs);
+    write_cooldown(ctx.fs, ctx.env);
 
     let file_list: String = state
         .files
@@ -238,6 +238,8 @@ mod tests {
             Box::leak(Box::new(crate::hooks::test_support::StubProcess));
         let memory_mcp: &'static crate::hooks::test_support::StubMemoryMcp =
             Box::leak(Box::new(crate::hooks::test_support::StubMemoryMcp));
+        let env: &'static crate::hooks::test_support::StubEnv =
+            Box::leak(Box::new(crate::hooks::test_support::StubEnv::new()));
         HookContext {
             git,
             vector_store: None,
@@ -245,6 +247,7 @@ mod tests {
             process,
             llm: None,
             memory_mcp,
+            env,
         }
     }
 
@@ -308,7 +311,7 @@ mod tests {
     fn test_cooldown_logic() {
         let ctx = test_support::stub_ctx();
         // StubFs.read_to_string returns error → cooldown_expired returns true
-        assert!(cooldown_expired(ctx.fs));
+        assert!(cooldown_expired(ctx.fs, ctx.env));
     }
 
     #[test]

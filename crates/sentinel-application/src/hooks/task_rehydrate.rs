@@ -221,7 +221,9 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     // pausing to ask. Gary explicitly wants Autopilot to keep momentum, and
     // these tasks belong to this project's cwd (the hash is scoped) so
     // there's no cross-project leakage risk.
-    let autopilot = std::env::var("SENTINEL_AUTOPILOT")
+    let autopilot = ctx
+        .env
+        .var("SENTINEL_AUTOPILOT")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
 

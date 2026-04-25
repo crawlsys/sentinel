@@ -197,8 +197,8 @@ where
 // The CLI (hook_cmd.rs) constructs concrete adapters and injects them.
 
 pub use sentinel_domain::ports::{
-    FileSystemPort, GitStatusPort, LlmModel, LlmPort, LlmRequest, MemoryMcpPort, ProcessOutput,
-    ProcessPort, VectorPoint, VectorScrollResult, VectorStorePort,
+    EnvPort, FileSystemPort, GitStatusPort, LlmModel, LlmPort, LlmRequest, MemoryMcpPort,
+    ProcessOutput, ProcessPort, VectorPoint, VectorScrollResult, VectorStorePort,
 };
 
 // ---------------------------------------------------------------------------
@@ -227,6 +227,32 @@ pub struct HookContext<'a> {
 
     /// Memory engine MCP client. Always present — wraps memory-mcp stdio.
     pub memory_mcp: &'a dyn MemoryMcpPort,
+
+    /// Environment-variable reader. Always present — wraps `std::env`.
+    pub env: &'a dyn EnvPort,
+}
+
+impl<'a> HookContext<'a> {
+    /// Resolve the active Claude session ID by reading `CLAUDE_SESSION_ID`
+    /// then falling back to `SESSION_ID`. Five hooks (`activity_tracker`,
+    /// `commit_hygiene`, `context_monitor`, `doc_drift`, `verification_gate`)
+    /// open with the same two-line idiom — this collapses it to one call.
+    pub fn session_id(&self) -> Option<String> {
+        self.env
+            .var("CLAUDE_SESSION_ID")
+            .or_else(|| self.env.var("SESSION_ID"))
+    }
+
+    /// Whether sentinel autopilot is active. Read from `SENTINEL_AUTOPILOT`
+    /// (any value other than `"0"` / empty / unset is treated as enabled).
+    /// Used by `tool_usage_gate`, `pr_merge_gate`, `doppler_auth0_gate`,
+    /// `task_rehydrate`.
+    pub fn autopilot_enabled(&self) -> bool {
+        match self.env.var("SENTINEL_AUTOPILOT").as_deref() {
+            None | Some("") | Some("0") => false,
+            Some(_) => true,
+        }
+    }
 }
 
 /// Test utilities for creating mock `HookContext`.
@@ -270,6 +296,41 @@ pub mod test_support {
         fn spawn_detached(&self, _: &str, _: &[&str]) -> anyhow::Result<()> { Ok(()) }
     }
 
+    /// Stub `EnvPort` backed by an in-memory map. Tests inject scenarios
+    /// like `StubEnv::with(&[("SENTINEL_AUTOPILOT", "1")])` without touching
+    /// process-global env state.
+    #[derive(Default)]
+    pub struct StubEnv {
+        vars: std::collections::HashMap<String, String>,
+    }
+
+    impl StubEnv {
+        pub fn new() -> Self {
+            Self::default()
+        }
+
+        pub fn with(pairs: &[(&str, &str)]) -> Self {
+            let mut vars = std::collections::HashMap::new();
+            for (k, v) in pairs {
+                vars.insert((*k).to_string(), (*v).to_string());
+            }
+            Self { vars }
+        }
+
+        pub fn set(&mut self, key: &str, value: &str) {
+            self.vars.insert(key.to_string(), value.to_string());
+        }
+    }
+
+    impl EnvPort for StubEnv {
+        fn var(&self, key: &str) -> Option<String> {
+            self.vars.get(key).cloned()
+        }
+        fn var_os(&self, key: &str) -> Option<std::ffi::OsString> {
+            self.vars.get(key).map(std::ffi::OsString::from)
+        }
+    }
+
     pub struct StubMemoryMcp;
     #[async_trait::async_trait]
     impl MemoryMcpPort for StubMemoryMcp {
@@ -291,6 +352,7 @@ pub mod test_support {
         let fs: &'static StubFs = Box::leak(Box::new(StubFs));
         let process: &'static StubProcess = Box::leak(Box::new(StubProcess));
         let memory_mcp: &'static StubMemoryMcp = Box::leak(Box::new(StubMemoryMcp));
-        HookContext { git, vector_store: None, fs, process, llm: None, memory_mcp }
+        let env: &'static StubEnv = Box::leak(Box::new(StubEnv::new()));
+        HookContext { git, vector_store: None, fs, process, llm: None, memory_mcp, env }
     }
 }

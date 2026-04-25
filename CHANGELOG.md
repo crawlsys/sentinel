@@ -6,6 +6,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added
+
+- **`EnvPort` domain trait + `RealEnv` adapter + `StubEnv` test helper** — new hex port at `sentinel_domain::ports::EnvPort` with `var(&str) -> Option<String>` and `var_os(&str) -> Option<OsString>`. Implemented by `sentinel_infrastructure::env::RealEnv` (thin `std::env` delegation). Wired into `HookContext` as `env: &'a dyn EnvPort` (always present, mirrors `fs`/`process` shape) at the composition root in `crates/sentinel-cli/src/hook_cmd.rs`. `HookContext` gains two convenience methods — `session_id()` (reads `CLAUDE_SESSION_ID` then `SESSION_ID` fallback, the idiom shared by 5 hooks) and `autopilot_enabled()` (reads `SENTINEL_AUTOPILOT`, the flag shared by 4 gates). `StubEnv` test helper added to `hooks::test_support` with `new()`, `with(&[(k, v)])`, `set(k, v)` for terse test scenarios.
+
+### Changed
+
+- **9 hooks migrated from `std::env::var` to `EnvPort`** — closes the largest leak class identified in the DDD/hex audit (14 prod-side `std::env::var` calls → 0). Per file:
+  - `activity_tracker.rs` — `cooldown_file()` / `cooldown_expired()` / `write_cooldown()` now thread `env: &dyn EnvPort` (2 calls deleted).
+  - `commit_hygiene.rs` — `current_session_id()` / `cooldown_*()` thread `env`; `process_prompt` / `process_stop` pass `ctx.env` (2 calls deleted).
+  - `context_monitor.rs` — `cooldown_file()` / `cooldown_expired()` / `write_cooldown()` thread `env`; the cross-session cooldown regression test (`test_session_b_cooldown_not_blocked_by_session_a_stamp`) rewritten to use `StubEnv::with(...)` instead of process-global `std::env::set_var`/`remove_var` (2 calls deleted).
+  - `doc_drift.rs` — same threading pattern (2 calls deleted).
+  - `verification_gate.rs` — `cooldown_file()` / `cooldown_expired()` / `write_cooldown()` thread `env` (2 calls deleted).
+  - `tool_usage_gate.rs` — `is_autopilot()` takes `&dyn EnvPort`; `process()` signature gains `env: &dyn EnvPort` (call site in `hook_cmd.rs` updated to pass `ctx.env`); 9 test sites migrated from raw `std::env::set_var`/`remove_var` + `AUTOPILOT_LOCK` `Mutex` serialization to `StubEnv::with(...)` — `AUTOPILOT_LOCK` deleted entirely. Net 1 prod call deleted, 7 test-side calls deleted.
+  - `pr_merge_gate.rs` — `is_autopilot(env)` + `process(input, env)` signature change; call site in `hook_cmd.rs` updated; entire test module's `ENV_LOCK` + `set_var`/`remove_var` pattern dropped in favour of `StubEnv` helpers (1 prod call deleted, 7 test-side calls deleted).
+  - `doppler_auth0_gate.rs` — `is_autopilot(env)` reads `ctx.env`; both call sites in `process()` updated; test module's `ENV_LOCK` + `clear_autopilot()` helper dropped, autopilot tests reuse a `ctx_autopilot_on()` helper that injects `StubEnv::with(("SENTINEL_AUTOPILOT","1"))` (1 prod call deleted, 14 test-side calls deleted).
+  - `task_rehydrate.rs` — autopilot flag read from `ctx.env` instead of `std::env::var` (1 prod call deleted).
+  - `session_init.rs` — `CLAUDE_ENV_FILE` read goes through `ctx.env` (1 prod call deleted).
+- After this batch: production-side `std::env::var` count in `crates/sentinel-application/src/` (excluding `#[cfg(test)]` and the deferred `ntfy_push` + `channel_events` modules) is **0**. Total prod-side IO leaks dropped from 52 to 39 (−13). Workspace tests: 742 passing, 0 failing.
+- **Test seam upgrade**: tests that previously serialized on `Mutex<()>` env locks (because `std::env::set_var` is process-global and unsafe in edition 2024) now use `StubEnv` for per-test isolation. Removes lock contention and poison-recovery boilerplate from 4 test modules.
+- **Deferred to PR4 (edge-case sweep)**: `ntfy_push.rs` (3 env sites — module is a fire-and-forget helper shared by `build_notify`, `stop_failure`, and the `hook_cmd.rs` block-bridge; threading `&dyn EnvPort` through changes 6 call sites for marginal benefit) and `channel_events.rs` (2 env sites — same module is slated for PR2 to migrate to `FileSystemPort` as well, so doing both in one PR is cleaner).
+
 ### Changed
 
 - **`verification_gate` migrated to `FileSystemPort`**: 4 prod-side `std::fs` calls deleted (transcript read, offset file read/write, one-shot reminder removal). `read_offset(fs, session_id)`, `write_offset(fs, session_id, offset)`, `parse_transcript(fs, transcript_path, session_id)` thread `&dyn FileSystemPort` through. The state-clear-after-inject path uses `ctx.fs.remove_file(&path)` (which silently swallows `ErrorKind::NotFound` — matches the previous `let _ = std::fs::remove_file(...)` semantics). Module-level `use std::fs;` dropped; one test still uses `std::fs::remove_file` for setup, qualified inline. Production-side direct-IO count in this file: 0.

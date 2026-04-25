@@ -45,13 +45,13 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use super::hygiene_override::is_signed_override_active;
-use super::FileSystemPort;
+use super::{EnvPort, FileSystemPort};
 
 /// Last-resort escape hatch for when the hook fires with no transcript
 /// path at all. In normal 2.1.114 operation the transcript is the
 /// authoritative signal and this env var is ignored.
-fn is_autopilot() -> bool {
-    std::env::var("SENTINEL_AUTOPILOT")
+fn is_autopilot(env: &dyn EnvPort) -> bool {
+    env.var("SENTINEL_AUTOPILOT")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false)
 }
@@ -271,7 +271,7 @@ fn recent_pending_task_hint(fs: &dyn FileSystemPort, _session_id: &str) -> Optio
 }
 
 /// Process a PreToolUse event. Blocks Edit/Write if preconditions aren't met.
-pub fn process(input: &HookInput, fs: &dyn FileSystemPort) -> HookOutput {
+pub fn process(input: &HookInput, fs: &dyn FileSystemPort, env: &dyn EnvPort) -> HookOutput {
     let tool = match &input.tool_name {
         Some(t) => t.as_str(),
         None => return HookOutput::allow(),
@@ -358,7 +358,7 @@ pub fn process(input: &HookInput, fs: &dyn FileSystemPort) -> HookOutput {
         None => {
             // No transcript available — fall back to markers, the plan-file
             // heuristic, and finally the SENTINEL_AUTOPILOT escape hatch.
-            is_autopilot()
+            is_autopilot(env)
                 || has_marker(fs, PLAN_MARKER_PREFIX, session_id)
                 || has_recent_plan_file(fs, input.cwd.as_deref(), SystemTime::now())
         }
@@ -498,7 +498,7 @@ mod tests {
             session_id: Some("test-session".to_string()),
             ..Default::default()
         };
-        assert!(process(&input, &fs).blocked.is_none());
+        assert!(process(&input, &fs, &crate::hooks::test_support::StubEnv::new()).blocked.is_none());
     }
 
     #[test]
@@ -509,7 +509,7 @@ mod tests {
             session_id: Some("test-session".to_string()),
             ..Default::default()
         };
-        assert!(process(&input, &fs).blocked.is_none());
+        assert!(process(&input, &fs, &crate::hooks::test_support::StubEnv::new()).blocked.is_none());
     }
 
     #[test]
@@ -519,42 +519,37 @@ mod tests {
             tool_name: Some("Edit".to_string()),
             ..Default::default()
         };
-        assert!(process(&input, &fs).blocked.is_none());
+        assert!(process(&input, &fs, &crate::hooks::test_support::StubEnv::new()).blocked.is_none());
     }
 
     #[test]
     fn test_blocks_edit_without_sequential_thinking() {
         let fs = MockFs::new();
-        let output = process(&edit_input("test-session"), &fs);
+        let output = process(&edit_input("test-session"), &fs, &crate::hooks::test_support::StubEnv::new());
         assert_eq!(output.blocked, Some(true));
     }
 
     #[test]
     fn test_blocks_write_without_sequential_thinking() {
         let fs = MockFs::new();
-        let output = process(&write_input("test-session"), &fs);
+        let output = process(&write_input("test-session"), &fs, &crate::hooks::test_support::StubEnv::new());
         assert_eq!(output.blocked, Some(true));
     }
 
     #[test]
     fn test_blocks_edit_without_task_but_with_sequential() {
         let fs = MockFs::with_marker(SEQUENTIAL_MARKER_PREFIX, "test-session");
-        let output = process(&edit_input("test-session"), &fs);
+        let output = process(&edit_input("test-session"), &fs, &crate::hooks::test_support::StubEnv::new());
         assert_eq!(output.blocked, Some(true));
     }
 
     #[test]
     fn test_blocks_edit_without_plan_approval() {
-        // Take the autopilot lock so a parallel test can't leak
-        // `SENTINEL_AUTOPILOT=1` into this one (which would bypass check #3
-        // and flow to check #4, producing a different deny message).
-        let _guard = AUTOPILOT_LOCK.lock().unwrap();
-        std::env::remove_var("SENTINEL_AUTOPILOT");
         let fs = MockFs::with_markers("test-session", &[
             SEQUENTIAL_MARKER_PREFIX,
             TASK_MARKER_PREFIX,
         ]);
-        let output = process(&edit_input("test-session"), &fs);
+        let output = process(&edit_input("test-session"), &fs, &crate::hooks::test_support::StubEnv::new());
         assert_eq!(output.blocked, Some(true));
         let reason = output.hook_specific_output.as_ref()
             .and_then(|h| h.permission_decision_reason.as_deref()).unwrap_or("");
@@ -573,14 +568,12 @@ mod tests {
 
     #[test]
     fn test_blocks_edit_without_active_task() {
-        let _guard = AUTOPILOT_LOCK.lock().unwrap();
-        std::env::remove_var("SENTINEL_AUTOPILOT");
         let fs = MockFs::with_markers("test-session", &[
             SEQUENTIAL_MARKER_PREFIX,
             TASK_MARKER_PREFIX,
             PLAN_MARKER_PREFIX,
         ]);
-        let output = process(&edit_input("test-session"), &fs);
+        let output = process(&edit_input("test-session"), &fs, &crate::hooks::test_support::StubEnv::new());
         assert_eq!(output.blocked, Some(true));
         let reason = output.hook_specific_output.as_ref()
             .and_then(|h| h.permission_decision_reason.as_deref()).unwrap_or("");
@@ -593,14 +586,14 @@ mod tests {
     #[test]
     fn test_allows_edit_with_all_markers() {
         let fs = MockFs::with_all_markers("test-session");
-        let output = process(&edit_input("test-session"), &fs);
+        let output = process(&edit_input("test-session"), &fs, &crate::hooks::test_support::StubEnv::new());
         assert!(output.blocked.is_none());
     }
 
     #[test]
     fn test_allows_write_with_all_markers() {
         let fs = MockFs::with_all_markers("test-session");
-        let output = process(&write_input("test-session"), &fs);
+        let output = process(&write_input("test-session"), &fs, &crate::hooks::test_support::StubEnv::new());
         assert!(output.blocked.is_none());
     }
 
@@ -639,7 +632,7 @@ mod tests {
     #[test]
     fn test_markers_are_session_scoped() {
         let fs = MockFs::with_all_markers("session-a");
-        let output = process(&edit_input("session-b"), &fs);
+        let output = process(&edit_input("session-b"), &fs, &crate::hooks::test_support::StubEnv::new());
         assert_eq!(output.blocked, Some(true));
     }
 
@@ -702,25 +695,22 @@ mod tests {
             session_id: Some(session.into()),
             ..Default::default()
         };
-        let output = process(&input, &fs_port);
+        let output = process(&input, &fs_port, &crate::hooks::test_support::StubEnv::new());
         assert!(
             output.blocked.is_none(),
             "active signed verification override must bypass the tool_usage_gate"
         );
     }
 
-    /// Tests touch SENTINEL_AUTOPILOT env var — serialize them to avoid
-    /// interference with other tests running in parallel (cargo test
-    /// defaults to parallel execution).
-    static AUTOPILOT_LOCK: Mutex<()> = Mutex::new(());
+    fn autopilot_env() -> crate::hooks::test_support::StubEnv {
+        crate::hooks::test_support::StubEnv::with(&[("SENTINEL_AUTOPILOT", "1")])
+    }
 
     #[test]
     fn test_autopilot_fallback_when_no_transcript() {
         // SENTINEL_AUTOPILOT is only consulted when no transcript_path is
         // available in the hook input — it's a last-resort escape hatch,
         // not a user-facing bypass.
-        let _guard = AUTOPILOT_LOCK.lock().unwrap();
-        std::env::set_var("SENTINEL_AUTOPILOT", "1");
         let fs = MockFs::with_markers("test-session", &[
             SEQUENTIAL_MARKER_PREFIX,
             TASK_MARKER_PREFIX,
@@ -728,8 +718,7 @@ mod tests {
         ]);
         // `edit_input` omits transcript_path, so the None-branch fallback
         // kicks in and honours SENTINEL_AUTOPILOT.
-        let output = process(&edit_input("test-session"), &fs);
-        std::env::remove_var("SENTINEL_AUTOPILOT");
+        let output = process(&edit_input("test-session"), &fs, &autopilot_env());
         assert!(output.blocked.is_none(),
             "autopilot env var must still work when no transcript is available");
     }
@@ -739,8 +728,6 @@ mod tests {
         // Once a transcript is available, it is authoritative. Autopilot
         // env var does NOT bypass the check — the model must actually
         // enter plan mode.
-        let _guard = AUTOPILOT_LOCK.lock().unwrap();
-        std::env::set_var("SENTINEL_AUTOPILOT", "1");
         let t = write_transcript(&[assistant_tool_use("Read")]);
         let fs = MockFs::with_markers("test-session", &[
             SEQUENTIAL_MARKER_PREFIX,
@@ -753,8 +740,7 @@ mod tests {
             transcript_path: Some(t.path().to_string_lossy().into_owned()),
             ..Default::default()
         };
-        let output = process(&input, &fs);
-        std::env::remove_var("SENTINEL_AUTOPILOT");
+        let output = process(&input, &fs, &autopilot_env());
         assert_eq!(
             output.blocked,
             Some(true),
@@ -764,15 +750,12 @@ mod tests {
 
     #[test]
     fn test_autopilot_does_not_bypass_task_active_check() {
-        let _guard = AUTOPILOT_LOCK.lock().unwrap();
-        std::env::set_var("SENTINEL_AUTOPILOT", "1");
         // Plan marker missing AND task-active marker missing.
         let fs = MockFs::with_markers("test-session", &[
             SEQUENTIAL_MARKER_PREFIX,
             TASK_MARKER_PREFIX,
         ]);
-        let output = process(&edit_input("test-session"), &fs);
-        std::env::remove_var("SENTINEL_AUTOPILOT");
+        let output = process(&edit_input("test-session"), &fs, &autopilot_env());
         // Plan check skipped, but task-active still blocks.
         assert_eq!(output.blocked, Some(true));
         let reason = output.hook_specific_output.as_ref()
@@ -1021,8 +1004,6 @@ mod tests {
     fn test_transcript_plan_mode_allows_edit() {
         // Transcript shows EnterPlanMode — check #3 is satisfied by the
         // real 2.1.114 signal without any markers or env vars.
-        let _guard = AUTOPILOT_LOCK.lock().unwrap();
-        std::env::remove_var("SENTINEL_AUTOPILOT");
         let t = write_transcript(&[assistant_tool_use("EnterPlanMode")]);
 
         let fs = MockFs::with_markers("sess-plan", &[
@@ -1036,7 +1017,7 @@ mod tests {
             transcript_path: Some(t.path().to_string_lossy().into_owned()),
             ..Default::default()
         };
-        let output = process(&input, &fs);
+        let output = process(&input, &fs, &crate::hooks::test_support::StubEnv::new());
         assert!(
             output.blocked.is_none(),
             "transcript EnterPlanMode signal must satisfy plan check #3"
@@ -1045,8 +1026,6 @@ mod tests {
 
     #[test]
     fn test_transcript_without_plan_signal_blocks_edit() {
-        let _guard = AUTOPILOT_LOCK.lock().unwrap();
-        std::env::remove_var("SENTINEL_AUTOPILOT");
         let t = write_transcript(&[assistant_tool_use("Read")]);
 
         let fs = MockFs::with_markers("sess-noplan", &[
@@ -1060,7 +1039,7 @@ mod tests {
             transcript_path: Some(t.path().to_string_lossy().into_owned()),
             ..Default::default()
         };
-        let output = process(&input, &fs);
+        let output = process(&input, &fs, &crate::hooks::test_support::StubEnv::new());
         assert_eq!(
             output.blocked,
             Some(true),
@@ -1118,7 +1097,7 @@ mod tests {
             cwd: Some(tmp.path().to_string_lossy().into()),
             ..Default::default()
         };
-        let output = process(&input, &fs_port);
+        let output = process(&input, &fs_port, &crate::hooks::test_support::StubEnv::new());
         assert!(output.blocked.is_none(), "plan-file fallback should allow write");
     }
 
