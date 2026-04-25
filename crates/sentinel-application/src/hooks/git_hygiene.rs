@@ -87,9 +87,21 @@ pub fn process(input: &HookInput, git: &dyn GitStatusPort) -> HookOutput {
     // worktree edits. Resolve the target file's own repo root instead and
     // fall back to `cwd` only when the file path is absent or outside any
     // repo.
+    //
+    // `git.repo_root` shells out to `git -C <dir> rev-parse` — it needs
+    // a *directory*. Pass the file's parent dir, not the file itself
+    // (passing a file path silently fails on Windows because
+    // `Command::current_dir` on a non-directory aborts the spawn).
     let effective_repo = file_path
         .as_deref()
-        .and_then(|fp| git.repo_root(fp))
+        .map(|fp| {
+            std::path::Path::new(fp)
+                .parent()
+                .and_then(|p| p.to_str())
+                .unwrap_or(fp)
+                .to_string()
+        })
+        .and_then(|dir| git.repo_root(&dir))
         .unwrap_or_else(|| cwd.to_string());
     let effective_repo_str = effective_repo.as_str();
 
