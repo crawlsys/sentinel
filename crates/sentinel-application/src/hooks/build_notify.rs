@@ -2,8 +2,14 @@
 //!
 //! Detects when Bash tool calls complete cargo builds, test suites,
 //! or git pushes, and emits channel events for real-time notification.
+//! Failures are also pushed to ntfy (`gary-somerhalder-claude-code-attention`
+//! for build failures, `gary-somerhalder-deploys` for deploy events).
 
 use sentinel_domain::events::{HookInput, HookOutput};
+
+use crate::ntfy_push;
+
+const TOPIC_DEPLOYS: &str = "gary-somerhalder-deploys";
 
 /// Patterns that indicate a build command
 const BUILD_PATTERNS: &[&str] = &[
@@ -78,6 +84,16 @@ pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
             "build_completed", &summary, meta,
             input.session_id.as_deref(), input.cwd.as_deref(), Some("build_notify"),
         );
+
+        // Phone push for FAILURES only — build successes stay quiet.
+        if !succeeded {
+            let project = project_name(input.cwd.as_deref());
+            let title = format!("Build FAILED: {project}");
+            let snippet = first_error_line(result_text)
+                .unwrap_or_else(|| truncate(command, 120).to_string());
+            ntfy_push::push_attention(&title, &snippet, 4, &["x"]);
+        }
+
         return HookOutput::allow();
     }
 
@@ -117,9 +133,46 @@ pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
             "deploy_completed", &summary, meta,
             input.session_id.as_deref(), input.cwd.as_deref(), Some("build_notify"),
         );
+
+        // Phone push for both success and failure — deploys are infrequent
+        // enough that knowing they finished is genuinely useful.
+        let project = project_name(input.cwd.as_deref());
+        let (title, priority, tag) = if succeeded {
+            (format!("Deploy OK: {project}{target}"), 2_u8, "rocket")
+        } else {
+            (format!("Deploy FAILED: {project}{target}"), 4_u8, "x")
+        };
+        let body = truncate(command, 120).to_string();
+        ntfy_push::push_to_topic(TOPIC_DEPLOYS, &title, &body, priority, &[tag]);
     }
 
     HookOutput::allow()
+}
+
+/// Best-effort project name from a cwd path (basename), falls back to "unknown".
+fn project_name(cwd: Option<&str>) -> String {
+    cwd.and_then(|p| {
+        std::path::Path::new(p)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(String::from)
+    })
+    .unwrap_or_else(|| "unknown".to_string())
+}
+
+/// Pull the first `error[E…]:` or `error:` line from build output, if any.
+/// Returns the trimmed line capped at 200 chars.
+fn first_error_line(text: &str) -> Option<String> {
+    text.lines()
+        .map(str::trim)
+        .find(|l| l.starts_with("error[E") || l.starts_with("error:"))
+        .map(|l| {
+            if l.len() > 200 {
+                l[..200].to_string()
+            } else {
+                l.to_string()
+            }
+        })
 }
 
 /// Extract push target from a git push command (e.g. "origin main" → " → origin/main")
@@ -173,6 +226,26 @@ mod tests {
         let ctx = crate::hooks::test_support::stub_ctx();
         let output = process(&input, &ctx);
         assert!(output.blocked.is_none());
+    }
+
+    #[test]
+    fn test_project_name_basename() {
+        assert_eq!(project_name(Some(r"C:\Users\garys\Documents\GitHub\sentinel")), "sentinel");
+        assert_eq!(project_name(Some("/home/g/repo")), "repo");
+        assert_eq!(project_name(None), "unknown");
+    }
+
+    #[test]
+    fn test_first_error_line_extracts_rustc_error() {
+        let out = "   Compiling foo\nerror[E0432]: unresolved import `bar`\n   --> src/lib.rs:1:5";
+        let got = first_error_line(out).unwrap();
+        assert!(got.starts_with("error[E0432]"), "got: {got}");
+    }
+
+    #[test]
+    fn test_first_error_line_returns_none_on_clean_output() {
+        let out = "   Compiling foo v0.1.0\n    Finished `dev` profile [unoptimized] target(s) in 1.23s";
+        assert!(first_error_line(out).is_none());
     }
 
     #[test]
