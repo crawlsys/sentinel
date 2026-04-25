@@ -167,7 +167,7 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
             // We offload the blocking init to a spawn_blocking task so it doesn't starve
             // the async executor; the surrounding timeout cancels the future if the whole
             // operation (init + classify) exceeds 8 s.
-            let router_output = if let Ok(output) = tokio::time::timeout(
+            let router_output = match tokio::time::timeout(
                 std::time::Duration::from_secs(8),
                 async {
                     let classifier = if has_prompt {
@@ -190,9 +190,13 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
                     .await
                 },
             )
-            .await { output } else {
-                tracing::warn!("Skill router timed out (8s) — no routing for this message");
-                hooks::skill_router::build_no_match_output(&real_fs)
+            .await
+            {
+                Ok(output) => output,
+                Err(_) => {
+                    tracing::warn!("Skill router timed out (8s) — no routing for this message");
+                    hooks::skill_router::build_no_match_output(&real_fs)
+                }
             };
             output.merge(&router_output);
 
