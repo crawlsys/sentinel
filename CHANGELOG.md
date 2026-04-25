@@ -8,6 +8,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
+- **`MemoryMcpPort` domain port + `MemoryMcpClient` adapter impl**: new domain port in `sentinel_domain::ports` exposing a generic `call_tool(name, args) -> JSON` surface for the Memory engine MCP server. Implemented on the existing `sentinel_infrastructure::memory_mcp_client::MemoryMcpClient` (no logic change — it just wraps the inherent `call_tool` method that already does the MCP handshake). Wired into `HookContext` as `memory_mcp: &dyn MemoryMcpPort`, always present, constructed at the composition root from `MemoryMcpClient::from_env()`. `extract_tool_payload` upgraded to read `result.structuredContent` (preferred) before falling back to `result.content[0].text`, matching what the inlined transports were doing.
+
+### Changed
+
+- **`memory_inject`, `memory_extract`, `memory_feedback` hooks now route through `MemoryMcpPort` — all three inlined memory-mcp stdio transports deleted**: each carried a near-identical ~130 LOC subprocess + JSON-RPC handshake (`call_memory_mcp_search`, `call_memory_capture`, `call_memory_record_outcome` + their `write_line` / `read_json_line` helpers). All three now call `ctx.memory_mcp.call_tool(...)` with a `serde_json::Map` of arguments. Net change: ~430 lines deleted across the three files. Behavioural change is nil — the inlined transports were direct copies of the adapter's logic. Test stub `StubMemoryMcp` added to `hooks::test_support`.
+
+- **`pre_commit_verification` hook migrated to `FileSystemPort`**: the transcript-evidence checker no longer calls `dirs::home_dir()`, `std::fs::read_dir`, `std::fs::metadata`, or `std::fs::read_to_string` directly. `find_transcript_by_session(fs, session_id)` walks the projects tree via `fs.read_dir` + `fs.is_dir` + `fs.metadata`; `transcript_has_test_evidence(fs, path)` reads via `fs.read_to_string`. Two existing tests (`test_allows_when_transcript_has_evidence`, `test_transcript_output_patterns_detected`) updated to inject a `RealFsStub` so they can read the temp transcripts they create — the default `StubFs.read_to_string` returns `bail!()` which would otherwise mask evidence detection.
+
+- **`phase_gate` content-hashing read migrated to `FileSystemPort`**: the TOCTOU-mitigation check at `phase_gate.rs:311` that hashes phase-file content on first Read now uses `fs.read_to_string(read_path)` instead of `std::fs::read_to_string`. The function already had `fs: &dyn FileSystemPort` in scope — one-line swap.
+
+- **`commit_message_validator` project-config scan migrated to `FileSystemPort`**: `projects_dir(fs)` and `detect_prefixes_for_cwd(fs, cwd)` now thread `&dyn FileSystemPort` through and call `fs.home_dir()` + `fs.read_dir()` + `fs.read_to_string()` instead of `std::env::var("USERPROFILE/HOME")`, `fs::read_dir`, `fs::read_to_string`. Hook signature updated to bind `ctx` (was `_ctx`). Drops the `use std::fs;` module import.
+
+- **`dep_check` hook migrated from raw `std::process::Command` to `ProcessPort`**: the `run_cmd` helper takes `&dyn ProcessPort` and delegates to `process.run(cmd, args, Some(cwd))`. Dead `CMD_TIMEOUT_SECS` const and `std::process::Command` import removed.
+
+- **`session_end` hook migrated from raw `std::fs::OpenOptions` to `FileSystemPort`**: uses `ctx.fs.create_dir_all` + `ctx.fs.append` instead of `OpenOptions::new().create(true).append(true).open(...)` + `writeln!`. Drops `dirs::home_dir()` for `ctx.fs.home_dir()`.
+
+### Added
+
 - **`LlmPort` domain port + `AnthropicClient` adapter**: new generic LLM completion port in `sentinel_domain::ports` with a `complete(LlmRequest) -> String` surface and a logical `LlmModel { Haiku, Sonnet, Opus }` enum. Implemented on the existing `AnthropicClient` (which already wraps the `/v1/messages` endpoint) by mapping `LlmModel` → `JudgeModel` → API model id. Wired into `HookContext` as `llm: Option<&dyn LlmPort>`, constructed at the composition root (`hook_cmd.rs`) from `AnthropicClient::from_env()` so hooks get `None` when `ANTHROPIC_API_KEY` isn't set instead of erroring out. Closes the "until an `LlmPort` is introduced" TODO that the previous `memory_verify` hex migration left behind.
 
 ### Changed

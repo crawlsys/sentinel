@@ -23,37 +23,37 @@ use std::path::PathBuf;
 ///
 /// Also searches one level deeper (subdirectories within project dirs) to catch
 /// cases where Claude Code nests transcripts under session-scoped subdirs.
-fn find_transcript_by_session(session_id: &str) -> Option<String> {
-    let projects_dir = dirs::home_dir()?.join(".claude").join("projects");
-    if !projects_dir.exists() {
+fn find_transcript_by_session(fs: &dyn super::FileSystemPort, session_id: &str) -> Option<String> {
+    let projects_dir = fs.home_dir()?.join(".claude").join("projects");
+    if !fs.exists(&projects_dir) {
         return None;
     }
     let filename = format!("{session_id}.jsonl");
     let mut best: Option<(u64, String)> = None;
     let mut candidates_checked = 0u32;
 
-    for entry in std::fs::read_dir(&projects_dir).ok()?.flatten() {
-        if !entry.file_type().ok().is_some_and(|ft| ft.is_dir()) {
+    for path in fs.read_dir(&projects_dir).ok()?.into_iter() {
+        if !fs.is_dir(&path) {
             continue;
         }
 
         // Check top-level: projects/{dir}/{session_id}.jsonl
-        let path = entry.path().join(&filename);
-        if let Ok(meta) = std::fs::metadata(&path) {
+        let candidate = path.join(&filename);
+        if let Ok(meta) = fs.metadata(&candidate) {
             let size = meta.len();
             candidates_checked += 1;
             if best.as_ref().is_none_or(|(best_size, _)| size > *best_size) {
-                best = Some((size, path.to_string_lossy().to_string()));
+                best = Some((size, candidate.to_string_lossy().to_string()));
             }
         }
 
         // Check one level deeper: projects/{dir}/{subdir}/{session_id}.jsonl
         // Claude Code sometimes nests transcripts in session-scoped subdirs
-        if let Ok(subdirs) = std::fs::read_dir(entry.path()) {
-            for subentry in subdirs.flatten() {
-                if subentry.file_type().ok().is_some_and(|ft| ft.is_dir()) {
-                    let subpath = subentry.path().join(&filename);
-                    if let Ok(meta) = std::fs::metadata(&subpath) {
+        if let Ok(subdirs) = fs.read_dir(&path) {
+            for subdir in subdirs {
+                if fs.is_dir(&subdir) {
+                    let subpath = subdir.join(&filename);
+                    if let Ok(meta) = fs.metadata(&subpath) {
                         let size = meta.len();
                         candidates_checked += 1;
                         if best.as_ref().is_none_or(|(best_size, _)| size > *best_size) {
@@ -122,8 +122,8 @@ fn default_override_path(fs: &dyn super::FileSystemPort, session_id: &str) -> Pa
 }
 
 /// Check the transcript for test evidence (Layer 1: regex)
-fn transcript_has_test_evidence(transcript_path: &str) -> bool {
-    let content = match std::fs::read_to_string(transcript_path) {
+fn transcript_has_test_evidence(fs: &dyn super::FileSystemPort, transcript_path: &str) -> bool {
+    let content = match fs.read_to_string(std::path::Path::new(transcript_path)) {
         Ok(c) => c,
         Err(_) => return false,
     };
@@ -408,13 +408,14 @@ fn process_with_override_and_git(
     );
 
     if let Some(ref transcript_path) = input.transcript_path {
-        let exists = std::path::Path::new(transcript_path.as_str()).exists();
-        let size = std::fs::metadata(transcript_path).map(|m| m.len()).unwrap_or(0);
+        let path = std::path::Path::new(transcript_path.as_str());
+        let exists = fs.exists(path);
+        let size = fs.metadata(path).map(|m| m.len()).unwrap_or(0);
         eprintln!(
             "[sentinel] pre-commit-verify: checking input.transcript_path: {} (exists={}, {} bytes)",
             transcript_path, exists, size
         );
-        if transcript_has_test_evidence(transcript_path) {
+        if transcript_has_test_evidence(fs, transcript_path) {
             eprintln!("[sentinel] pre-commit-verify: EVIDENCE FOUND in input.transcript_path");
             return HookOutput::allow();
         }
@@ -424,13 +425,13 @@ fn process_with_override_and_git(
     }
 
     // Fallback: search all project dirs for the largest transcript with this session ID
-    if let Some(ref fallback_path) = find_transcript_by_session(session_id) {
-        let size = std::fs::metadata(fallback_path).map(|m| m.len()).unwrap_or(0);
+    if let Some(ref fallback_path) = find_transcript_by_session(fs, session_id) {
+        let size = fs.metadata(std::path::Path::new(fallback_path)).map(|m| m.len()).unwrap_or(0);
         eprintln!(
             "[sentinel] pre-commit-verify: fallback transcript: {} ({} bytes)",
             fallback_path, size
         );
-        if transcript_has_test_evidence(fallback_path) {
+        if transcript_has_test_evidence(fs, fallback_path) {
             eprintln!("[sentinel] pre-commit-verify: EVIDENCE FOUND in fallback transcript");
             return HookOutput::allow();
         }
@@ -554,7 +555,34 @@ mod tests {
             transcript_path: Some(tmpfile.path().to_string_lossy().to_string()),
             ..Default::default()
         };
-        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
+        // `transcript_has_test_evidence` reads via FileSystemPort; the default
+        // StubFs returns `bail!()` for read_to_string, which would break the
+        // evidence detection. Use a real-FS stub that delegates to std::fs.
+        struct RealFsStub;
+        impl super::super::FileSystemPort for RealFsStub {
+            fn home_dir(&self) -> Option<PathBuf> { dirs::home_dir() }
+            fn read_to_string(&self, p: &std::path::Path) -> anyhow::Result<String> { Ok(std::fs::read_to_string(p)?) }
+            fn write(&self, _: &std::path::Path, _: &[u8]) -> anyhow::Result<()> { Ok(()) }
+            fn create_dir_all(&self, _: &std::path::Path) -> anyhow::Result<()> { Ok(()) }
+            fn read_dir(&self, _: &std::path::Path) -> anyhow::Result<Vec<PathBuf>> { Ok(vec![]) }
+            fn exists(&self, p: &std::path::Path) -> bool { p.exists() }
+            fn is_dir(&self, p: &std::path::Path) -> bool { p.is_dir() }
+            fn metadata(&self, p: &std::path::Path) -> anyhow::Result<std::fs::Metadata> { Ok(std::fs::metadata(p)?) }
+            fn append(&self, _: &std::path::Path, _: &[u8]) -> anyhow::Result<()> { Ok(()) }
+        }
+        let real_fs = RealFsStub;
+        let stub_git = crate::hooks::test_support::StubGit;
+        let stub_proc = crate::hooks::test_support::StubProcess;
+        let stub_mcp = crate::hooks::test_support::StubMemoryMcp;
+        let ctx = super::super::HookContext {
+            git: &stub_git,
+            vector_store: None,
+            fs: &real_fs,
+            process: &stub_proc,
+            llm: None,
+            memory_mcp: &stub_mcp,
+        };
+        let output = process(&input, &ctx);
         assert!(output.blocked.is_none());
     }
 
@@ -648,7 +676,33 @@ mod tests {
             transcript_path: Some(tmpfile.path().to_string_lossy().to_string()),
             ..Default::default()
         };
-        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
+        // Use a real-FS stub so transcript_has_test_evidence can read the
+        // tempfile we just wrote (default StubFs.read_to_string returns bail!).
+        struct RealFsStub;
+        impl super::super::FileSystemPort for RealFsStub {
+            fn home_dir(&self) -> Option<PathBuf> { dirs::home_dir() }
+            fn read_to_string(&self, p: &std::path::Path) -> anyhow::Result<String> { Ok(std::fs::read_to_string(p)?) }
+            fn write(&self, _: &std::path::Path, _: &[u8]) -> anyhow::Result<()> { Ok(()) }
+            fn create_dir_all(&self, _: &std::path::Path) -> anyhow::Result<()> { Ok(()) }
+            fn read_dir(&self, _: &std::path::Path) -> anyhow::Result<Vec<PathBuf>> { Ok(vec![]) }
+            fn exists(&self, p: &std::path::Path) -> bool { p.exists() }
+            fn is_dir(&self, p: &std::path::Path) -> bool { p.is_dir() }
+            fn metadata(&self, p: &std::path::Path) -> anyhow::Result<std::fs::Metadata> { Ok(std::fs::metadata(p)?) }
+            fn append(&self, _: &std::path::Path, _: &[u8]) -> anyhow::Result<()> { Ok(()) }
+        }
+        let real_fs = RealFsStub;
+        let stub_git = crate::hooks::test_support::StubGit;
+        let stub_proc = crate::hooks::test_support::StubProcess;
+        let stub_mcp = crate::hooks::test_support::StubMemoryMcp;
+        let ctx = super::super::HookContext {
+            git: &stub_git,
+            vector_store: None,
+            fs: &real_fs,
+            process: &stub_proc,
+            llm: None,
+            memory_mcp: &stub_mcp,
+        };
+        let output = process(&input, &ctx);
         assert!(output.blocked.is_none());
     }
 
@@ -692,12 +746,30 @@ mod tests {
         )
         .unwrap();
 
+        // Use a real-fs wrapper for read_to_string — `transcript_has_test_evidence`
+        // takes a `FileSystemPort`, and we need actual file IO here.
+        struct RealTestFs;
+        impl super::super::FileSystemPort for RealTestFs {
+            fn home_dir(&self) -> Option<PathBuf> { dirs::home_dir() }
+            fn read_to_string(&self, p: &std::path::Path) -> anyhow::Result<String> { Ok(std::fs::read_to_string(p)?) }
+            fn write(&self, _: &std::path::Path, _: &[u8]) -> anyhow::Result<()> { Ok(()) }
+            fn create_dir_all(&self, _: &std::path::Path) -> anyhow::Result<()> { Ok(()) }
+            fn read_dir(&self, _: &std::path::Path) -> anyhow::Result<Vec<PathBuf>> { Ok(vec![]) }
+            fn exists(&self, p: &std::path::Path) -> bool { p.exists() }
+            fn is_dir(&self, p: &std::path::Path) -> bool { p.is_dir() }
+            fn metadata(&self, p: &std::path::Path) -> anyhow::Result<std::fs::Metadata> { Ok(std::fs::metadata(p)?) }
+            fn append(&self, _: &std::path::Path, _: &[u8]) -> anyhow::Result<()> { Ok(()) }
+        }
+        let real_fs = RealTestFs;
+
         // The original (larger) transcript should have evidence
         assert!(transcript_has_test_evidence(
+            &real_fs,
             &original_transcript.to_string_lossy()
         ));
         // The worktree (empty) one should not
         assert!(!transcript_has_test_evidence(
+            &real_fs,
             &worktree_transcript.to_string_lossy()
         ));
     }

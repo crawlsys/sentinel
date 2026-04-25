@@ -10,7 +10,6 @@
 
 use regex::Regex;
 use sentinel_domain::events::{HookInput, HookOutput};
-use std::fs;
 use std::path::PathBuf;
 
 const VALID_PREFIXES: &[&str] = &[
@@ -54,11 +53,8 @@ fn is_conventional(message: &str) -> bool {
     VALID_PREFIXES.contains(&prefix.as_str())
 }
 
-fn projects_dir() -> Option<PathBuf> {
-    let home = std::env::var("USERPROFILE")
-        .or_else(|_| std::env::var("HOME"))
-        .ok()?;
-    Some(PathBuf::from(home).join(".claude").join("projects"))
+fn projects_dir(fs: &dyn super::FileSystemPort) -> Option<PathBuf> {
+    Some(fs.home_dir()?.join(".claude").join("projects"))
 }
 
 fn extract_frontmatter(content: &str) -> Option<&str> {
@@ -137,12 +133,11 @@ fn cwd_matches_tokens(cwd: &str, tokens: &[String]) -> bool {
     tokens.iter().any(|t| segments.iter().any(|s| s == t))
 }
 
-fn detect_prefixes_for_cwd(cwd: &str) -> Option<(String, Vec<String>)> {
-    let dir = projects_dir()?;
-    let entries = fs::read_dir(&dir).ok()?;
+fn detect_prefixes_for_cwd(fs: &dyn super::FileSystemPort, cwd: &str) -> Option<(String, Vec<String>)> {
+    let dir = projects_dir(fs)?;
+    let entries = fs.read_dir(&dir).ok()?;
 
-    for entry in entries.flatten() {
-        let path = entry.path();
+    for path in entries {
         if path.extension().and_then(|e| e.to_str()) != Some("md") {
             continue;
         }
@@ -150,7 +145,7 @@ fn detect_prefixes_for_cwd(cwd: &str) -> Option<(String, Vec<String>)> {
         if stem.eq_ignore_ascii_case("MEMORY") {
             continue;
         }
-        let content = match fs::read_to_string(&path) {
+        let content = match fs.read_to_string(&path) {
             Ok(c) => c,
             Err(_) => continue,
         };
@@ -222,7 +217,7 @@ fn has_linear_ref(message: &str, prefixes: &[String]) -> bool {
     false
 }
 
-pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
+pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
     if input.tool_name.as_deref() != Some("Bash") {
         return HookOutput::allow();
     }
@@ -277,7 +272,7 @@ pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
         .or(input.cwd.as_deref());
 
     if let Some(cwd) = cwd_for_lookup {
-        if let Some((project, prefixes)) = detect_prefixes_for_cwd(cwd) {
+        if let Some((project, prefixes)) = detect_prefixes_for_cwd(ctx.fs, cwd) {
             if !has_linear_ref(&message, &prefixes) {
                 let list = prefixes
                     .iter()

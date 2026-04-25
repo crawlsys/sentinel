@@ -308,7 +308,7 @@ pub fn process(
                             .unwrap_or(""),
                     )
                 });
-                if let Ok(content) = std::fs::read_to_string(read_path) {
+                if let Ok(content) = fs.read_to_string(read_path) {
                     let mut hasher = Sha256::new();
                     hasher.update(content.as_bytes());
                     let hash = format!("{:x}", hasher.finalize());
