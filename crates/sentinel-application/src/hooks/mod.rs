@@ -197,8 +197,8 @@ where
 // The CLI (hook_cmd.rs) constructs concrete adapters and injects them.
 
 pub use sentinel_domain::ports::{
-    FileSystemPort, GitStatusPort, ProcessOutput, ProcessPort, VectorPoint, VectorScrollResult,
-    VectorStorePort,
+    FileSystemPort, GitStatusPort, LlmModel, LlmPort, LlmRequest, ProcessOutput, ProcessPort,
+    VectorPoint, VectorScrollResult, VectorStorePort,
 };
 
 // ---------------------------------------------------------------------------
@@ -221,6 +221,9 @@ pub struct HookContext<'a> {
 
     /// Process execution (run commands, spawn detached). Always present.
     pub process: &'a dyn ProcessPort,
+
+    /// LLM completion (Anthropic). `None` if no API key is configured.
+    pub llm: Option<&'a dyn LlmPort>,
 }
 
 /// Test utilities for creating mock `HookContext`.
@@ -266,6 +269,6 @@ pub mod test_support {
         let git: &'static StubGit = Box::leak(Box::new(StubGit));
         let fs: &'static StubFs = Box::leak(Box::new(StubFs));
         let process: &'static StubProcess = Box::leak(Box::new(StubProcess));
-        HookContext { git, vector_store: None, fs, process }
+        HookContext { git, vector_store: None, fs, process, llm: None }
     }
 }

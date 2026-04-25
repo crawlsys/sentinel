@@ -10,7 +10,7 @@
 use chrono::Utc;
 use sentinel_domain::constants;
 use sentinel_domain::events::{HookEvent, HookInput, HookOutput};
-use sentinel_domain::ports::VectorStorePort;
+use sentinel_domain::ports::{LlmModel, LlmPort, LlmRequest, VectorStorePort};
 use std::path::PathBuf;
 use tracing::{debug, warn};
 
@@ -63,33 +63,6 @@ fn write_cooldown(fs: &dyn FileSystemPort) {
         let _ = fs.create_dir_all(parent);
     }
     let _ = fs.write(&path, Utc::now().to_rfc3339().as_bytes());
-}
-
-/// Load Anthropic API key — tries env var first, then Doppler.
-fn load_anthropic_key() -> Option<String> {
-    // 1. Check env var (fast path — set by settings.json or parent process)
-    if let Ok(key) = std::env::var("ANTHROPIC_API_KEY") {
-        if !key.is_empty() {
-            return Some(key);
-        }
-    }
-
-    // 2. Fall back to Doppler via the service token already in env
-    let output = std::process::Command::new("doppler")
-        .args(["secrets", "get", "ANTHROPIC_API_KEY", "--plain"])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .output()
-        .ok()?;
-
-    if output.status.success() {
-        let key = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !key.is_empty() {
-            return Some(key);
-        }
-    }
-
-    None
 }
 
 /// A memory point from Qdrant scroll.
@@ -165,12 +138,8 @@ async fn scroll_unverified(vector_store: &dyn VectorStorePort) -> Vec<MemoryPoin
         .collect()
 }
 
-/// Extract claims from content using Claude Haiku (fast, cheap).
-async fn extract_claims_claude(
-    client: &reqwest::Client,
-    api_key: &str,
-    content: &str,
-) -> Vec<Claim> {
+/// Extract claims from content using the LLM port (Claude Haiku).
+async fn extract_claims(llm: &dyn LlmPort, content: &str) -> Vec<Claim> {
     let prompt = format!(
         r#"Extract verifiable claims from this text. Return a JSON array of objects with:
 - "claim_type": one of "file_path", "url", "port", "linear_issue", "version", "count", "status"
@@ -185,42 +154,22 @@ Text:
 Return ONLY the JSON array, no other text."#
     );
 
-    let body = serde_json::json!({
-        "model": "claude-haiku-4-5-20251001",
-        "max_tokens": 2000,
-        "messages": [{"role": "user", "content": prompt}]
-    });
-
-    let resp = match client
-        .post("https://api.anthropic.com/v1/messages")
-        .header("x-api-key", api_key)
-        .header("anthropic-version", "2023-06-01")
-        .header("Content-Type", "application/json")
-        .json(&body)
-        .send()
+    let text = match llm
+        .complete(LlmRequest {
+            model: LlmModel::Haiku,
+            prompt,
+            max_tokens: 2000,
+        })
         .await
     {
-        Ok(r) => r,
+        Ok(t) => t,
         Err(e) => {
-            warn!(error = %e, "Claude API request failed");
+            warn!(error = %e, "LLM claim extraction failed");
             return vec![];
         }
     };
 
-    let json: serde_json::Value = match resp.json().await {
-        Ok(j) => j,
-        Err(_) => return vec![],
-    };
-
-    // Claude Messages API response format
-    let text = json
-        .get("content")
-        .and_then(|c| c.get(0))
-        .and_then(|b| b.get("text"))
-        .and_then(|t| t.as_str())
-        .unwrap_or("[]");
-
-    // Strip markdown code fences
+    // Strip markdown code fences (the model sometimes wraps JSON in ```json ... ```).
     let cleaned = text.trim();
     let cleaned = if cleaned.starts_with("```") {
         let inner = cleaned
@@ -232,7 +181,7 @@ Return ONLY the JSON array, no other text."#
     };
 
     serde_json::from_str(cleaned).unwrap_or_else(|e| {
-        debug!(error = %e, "Failed to parse claims from Cerebras");
+        debug!(error = %e, "Failed to parse claims from LLM");
         vec![]
     })
 }
@@ -313,14 +262,12 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
         }
     };
 
-    // 3. Anthropic API key — still sourced via env var or doppler fallback.
-    //    The Anthropic call in extract_claims_claude is not a Qdrant op,
-    //    so VectorStorePort doesn't cover it; direct reqwest stays here
-    //    until a dedicated LlmPort is introduced.
-    let anthropic_key = match load_anthropic_key() {
-        Some(k) => k,
+    // 3. LLM port — required for claim extraction. Skip silently if not
+    //    wired (e.g. no ANTHROPIC_API_KEY in env).
+    let llm = match ctx.llm {
+        Some(l) => l,
         None => {
-            debug!("No Anthropic API key — skipping memory verify");
+            debug!("No LLM port configured — skipping memory verify");
             return HookOutput::allow();
         }
     };
@@ -329,14 +276,6 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
 
     // 4. Run async verification.
     let stale_count = run_async(async {
-        let client = match reqwest::Client::builder()
-            .timeout(constants::API_CALL_TIMEOUT_LONG)
-            .build()
-        {
-            Ok(c) => c,
-            Err(_) => return 0usize,
-        };
-
         let memories = scroll_unverified(vector_store).await;
         if memories.is_empty() {
             debug!("No memories need verification");
@@ -348,8 +287,7 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
         let mut stale = 0usize;
 
         for memory in &memories {
-            let claims =
-                extract_claims_claude(&client, &anthropic_key, &memory.content).await;
+            let claims = extract_claims(llm, &memory.content).await;
 
             if claims.is_empty() {
                 // No claims — mark as verified (nothing to disprove)

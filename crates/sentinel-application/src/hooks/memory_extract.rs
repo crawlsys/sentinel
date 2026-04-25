@@ -8,7 +8,7 @@
 //! **Periodic session re-index:** Every 50 tool calls, indexes the last ~10
 //! substantive exchanges to keep long-running sessions searchable.
 
-use super::FileSystemPort;
+use super::{FileSystemPort, VectorPoint, VectorStorePort};
 use sentinel_domain::constants;
 use sentinel_domain::events::{HookInput, HookOutput};
 use sha2::{Digest, Sha256};
@@ -112,32 +112,8 @@ fn find_unsynced_memories(fs: &dyn FileSystemPort) -> Vec<PathBuf> {
 }
 
 // ---------------------------------------------------------------------------
-// Qdrant config + upsert
+// Frontmatter parsing
 // ---------------------------------------------------------------------------
-
-#[derive(serde::Deserialize)]
-struct QdrantConfig {
-    cluster_url: String,
-    api_key: String,
-    #[serde(default = "default_collection")]
-    collection: String,
-    #[serde(default = "default_model")]
-    model: String,
-}
-
-fn default_collection() -> String {
-    "claude-memory".to_string()
-}
-
-fn default_model() -> String {
-    "sentence-transformers/all-MiniLM-L6-v2".to_string()
-}
-
-fn load_config(fs: &dyn FileSystemPort) -> Option<QdrantConfig> {
-    let path = fs.home_dir()?.join(".qdrant").join("config.json");
-    let content = fs.read_to_string(&path).ok()?;
-    serde_json::from_str(&content).ok()
-}
 
 /// Parse frontmatter from a memory file
 fn parse_frontmatter(content: &str) -> Option<(String, String, String, String)> {
@@ -483,10 +459,12 @@ fn is_substantive_exchange(user: &str, assistant: &str) -> bool {
 }
 
 /// Lightweight session re-index: parse the last ~10 exchanges from the
-/// transcript and upsert substantive ones to Qdrant's `claude-sessions` collection.
+/// transcript and upsert substantive ones via `VectorStorePort` to the
+/// `claude-sessions` collection. The adapter handles HTTP, auth, and the
+/// embedding-model selection from its config.
 fn periodic_session_index(
     fs: &dyn FileSystemPort,
-    config: &QdrantConfig,
+    vector_store: &dyn VectorStorePort,
     transcript_path: &str,
     session_id: &str,
     cwd: &str,
@@ -566,8 +544,10 @@ fn periodic_session_index(
     let proj_hash = project_hash(cwd);
     let now = chrono::Utc::now().to_rfc3339();
 
-    // Build Qdrant points — filter out trivial exchanges
-    let points: Vec<serde_json::Value> = recent
+    // Build VectorPoints — filter out trivial exchanges. The embedding model
+    // is the adapter's responsibility (configured at construction time), so
+    // callers just supply the text.
+    let points: Vec<VectorPoint> = recent
         .iter()
         .enumerate()
         .filter(|(_, (u, a))| is_substantive_exchange(u, a))
@@ -580,15 +560,10 @@ fn periodic_session_index(
                 combined.clone()
             };
 
-            serde_json::json!({
-                "id": id,
-                "vector": {
-                    "text-dense": {
-                        "text": embed_text,
-                        "model": config.model
-                    }
-                },
-                "payload": {
+            VectorPoint {
+                id,
+                text: embed_text,
+                payload: serde_json::json!({
                     "session_id": session_id,
                     "project": project,
                     "project_hash": proj_hash,
@@ -596,8 +571,8 @@ fn periodic_session_index(
                     "chunk_type": "periodic_exchange",
                     "chunk_index": start + i,
                     "content": combined
-                }
-            })
+                }),
+            }
         })
         .collect();
 
@@ -606,49 +581,11 @@ fn periodic_session_index(
         return;
     }
 
-    // Upsert to Qdrant
+    let count = points.len();
     super::run_async(async {
-        let client = match reqwest::Client::builder()
-            .timeout(constants::API_CALL_TIMEOUT_LONG)
-            .build()
-        {
-            Ok(c) => c,
-            Err(_) => return,
-        };
-
-        let url = format!(
-            "{}/collections/{}/points?wait=true",
-            config.cluster_url, SESSION_COLLECTION
-        );
-
-        for batch in points.chunks(20) {
-            let body = serde_json::json!({ "points": batch });
-            match client
-                .put(&url)
-                .header("api-key", &config.api_key)
-                .header("Content-Type", "application/json")
-                .json(&body)
-                .send()
-                .await
-            {
-                Ok(resp) if resp.status().is_success() => {
-                    info!(
-                        count = batch.len(),
-                        session = session_id,
-                        "Periodic session index upserted"
-                    );
-                }
-                Ok(resp) => {
-                    let status = resp.status();
-                    warn!(
-                        status = %status,
-                        "Periodic session index upsert returned non-success"
-                    );
-                }
-                Err(e) => {
-                    warn!(error = %e, "Periodic session index upsert failed");
-                }
-            }
+        match vector_store.upsert_points(SESSION_COLLECTION, points).await {
+            Ok(()) => info!(count, session = session_id, "Periodic session index upserted"),
+            Err(e) => warn!(error = %e, "Periodic session index upsert failed"),
         }
     });
 }
@@ -712,8 +649,10 @@ pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
                 && !transcript_path.is_empty()
                 && fs.exists(std::path::Path::new(transcript_path))
             {
-                if let Some(config) = load_config(fs) {
-                    periodic_session_index(fs, &config, transcript_path, session_id, cwd);
+                // Skip silently if no vector store is configured — the hook
+                // is best-effort and never blocks the session.
+                if let Some(vs) = ctx.vector_store {
+                    periodic_session_index(fs, vs, transcript_path, session_id, cwd);
                 }
             }
         }

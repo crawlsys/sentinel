@@ -238,6 +238,7 @@ mod tests {
             vector_store: None,
             fs,
             process,
+            llm: None,
         }
     }
 

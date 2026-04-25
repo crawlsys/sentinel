@@ -630,6 +630,7 @@ mod tests {
             vector_store: None,
             fs,
             process: process_port,
+            llm: None,
         };
 
         let mut input = HookInput::default();

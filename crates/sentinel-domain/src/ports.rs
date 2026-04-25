@@ -175,3 +175,41 @@ pub struct ProcessOutput {
     pub stdout: String,
     pub stderr: String,
 }
+
+// ---------------------------------------------------------------------------
+// LLM port
+// ---------------------------------------------------------------------------
+
+/// Port for free-form LLM text completion.
+///
+/// Wraps Anthropic / OpenRouter / etc. for hooks that need an LLM call but
+/// don't fit the existing `AiClassifier` or `JudgeService` shapes (those are
+/// classification- and verdict-shaped). Used by `memory_verify` for claim
+/// extraction (Claude Haiku) and is generic enough for future LLM hooks.
+#[async_trait::async_trait]
+pub trait LlmPort: Send + Sync {
+    /// Run a completion. Returns the model's text response.
+    async fn complete(&self, request: LlmRequest) -> anyhow::Result<String>;
+}
+
+/// Request for an LLM completion.
+#[derive(Debug, Clone)]
+pub struct LlmRequest {
+    /// Logical model — the adapter maps to a provider-specific ID.
+    pub model: LlmModel,
+    /// User prompt.
+    pub prompt: String,
+    /// Maximum tokens in the response.
+    pub max_tokens: u32,
+}
+
+/// Logical LLM model — adapter maps to provider-specific IDs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LlmModel {
+    /// Fast, cheap classification / extraction.
+    Haiku,
+    /// Mid-tier reasoning.
+    Sonnet,
+    /// Heavy reasoning.
+    Opus,
+}

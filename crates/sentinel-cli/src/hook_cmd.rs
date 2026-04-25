@@ -15,41 +15,8 @@ use sentinel_domain::state::SessionState;
 use sentinel_domain::workflow::{SkillSteps, SkillWorkflow};
 
 use std::sync::Arc;
-use sentinel_domain::ports::VectorStorePort;
-
-/// Infrastructure implementation of GitStatusPort
-struct RealGit;
-
-impl hooks::GitStatusPort for RealGit {
-    fn has_uncommitted_changes(&self, repo_path: &str) -> Result<bool> {
-        sentinel_infrastructure::git::has_uncommitted_changes(repo_path)
-    }
-
-    fn changed_files(&self, repo_path: &str) -> Result<Vec<String>> {
-        sentinel_infrastructure::git::changed_files(repo_path)
-    }
-
-    fn current_branch(&self, repo_path: &str) -> Result<String> {
-        sentinel_infrastructure::git::current_branch(repo_path)
-    }
-
-    fn is_worktree(&self, repo_path: &str) -> bool {
-        // Worktrees have .git as a file (pointing to the main repo), not a directory
-        std::path::Path::new(repo_path).join(".git").is_file()
-    }
-
-    fn has_unpushed_commits(&self, repo_path: &str) -> Result<bool> {
-        sentinel_infrastructure::git::has_unpushed_commits(repo_path)
-    }
-
-    fn repo_root(&self, path: &str) -> Option<String> {
-        sentinel_infrastructure::git::repo_root(path).ok()
-    }
-
-    fn list_worktree_names(&self, repo_path: &str) -> Vec<String> {
-        sentinel_infrastructure::git::list_worktree_names(repo_path)
-    }
-}
+use sentinel_domain::ports::{LlmPort, VectorStorePort};
+use sentinel_infrastructure::git::RealGit;
 
 pub async fn run(event: &str, matcher: Option<&str>, standalone: bool) -> Result<()> {
     // ── Glass break emergency override ───────────────────────────────────
@@ -158,12 +125,18 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
     let real_fs = sentinel_infrastructure::filesystem::RealFileSystem;
     let real_process = sentinel_infrastructure::process::RealProcess;
 
+    // Construct LLM adapter (None if no Anthropic key)
+    let llm: Option<Arc<dyn LlmPort>> = sentinel_infrastructure::anthropic::AnthropicClient::from_env()
+        .ok()
+        .map(|c| Arc::new(c) as Arc<dyn LlmPort>);
+
     // Bundle all ports into HookContext
     let ctx = hooks::HookContext {
         git: &git,
         vector_store: vector_store.as_deref(),
         fs: &real_fs,
         process: &real_process,
+        llm: llm.as_deref(),
     };
 
     // Process through matching hooks based on event type

@@ -3,6 +3,7 @@
 //! Wraps git CLI for status, diff, branch info.
 
 use anyhow::{Context, Result};
+use sentinel_domain::ports::GitStatusPort;
 use std::process::Command;
 
 /// Run a git command and check exit status
@@ -140,4 +141,41 @@ pub fn list_worktree_names(repo_path: &str) -> Vec<String> {
                 .map(std::string::ToString::to_string)
         })
         .collect()
+}
+
+/// Infrastructure adapter implementing `GitStatusPort`.
+///
+/// Delegates to the free functions above. Constructed at the composition
+/// root (CLI / interceptors) and injected into hook handlers.
+pub struct RealGit;
+
+impl GitStatusPort for RealGit {
+    fn has_uncommitted_changes(&self, repo_path: &str) -> Result<bool> {
+        has_uncommitted_changes(repo_path)
+    }
+
+    fn changed_files(&self, repo_path: &str) -> Result<Vec<String>> {
+        changed_files(repo_path)
+    }
+
+    fn current_branch(&self, repo_path: &str) -> Result<String> {
+        current_branch(repo_path)
+    }
+
+    fn is_worktree(&self, repo_path: &str) -> bool {
+        // Worktrees have .git as a file (pointing to the main repo), not a directory.
+        std::path::Path::new(repo_path).join(".git").is_file()
+    }
+
+    fn has_unpushed_commits(&self, repo_path: &str) -> Result<bool> {
+        has_unpushed_commits(repo_path)
+    }
+
+    fn repo_root(&self, path: &str) -> Option<String> {
+        repo_root(path).ok()
+    }
+
+    fn list_worktree_names(&self, repo_path: &str) -> Vec<String> {
+        list_worktree_names(repo_path)
+    }
 }
