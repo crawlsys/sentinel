@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added
+
+- **`LlmPort` domain port + `AnthropicClient` adapter**: new generic LLM completion port in `sentinel_domain::ports` with a `complete(LlmRequest) -> String` surface and a logical `LlmModel { Haiku, Sonnet, Opus }` enum. Implemented on the existing `AnthropicClient` (which already wraps the `/v1/messages` endpoint) by mapping `LlmModel` → `JudgeModel` → API model id. Wired into `HookContext` as `llm: Option<&dyn LlmPort>`, constructed at the composition root (`hook_cmd.rs`) from `AnthropicClient::from_env()` so hooks get `None` when `ANTHROPIC_API_KEY` isn't set instead of erroring out. Closes the "until an `LlmPort` is introduced" TODO that the previous `memory_verify` hex migration left behind.
+
+### Changed
+
+- **`memory_verify` hook claim extraction migrated from raw reqwest to `LlmPort`**: the SessionStart hook that re-verifies stored memory claims now calls `ctx.llm.complete(...)` instead of building its own `reqwest::Client` and POSTing to `https://api.anthropic.com/v1/messages` with hand-rolled JSON. Deletes the local `load_anthropic_key()` helper (env var + Doppler shell-out fallback) — that responsibility moves to the composition root via `AnthropicClient::from_env()`. The per-call `reqwest::Client::builder().timeout(...)` block inside `run_async` is gone too; the adapter owns its own client and timeout. Production-side direct-IO count in this file: `std::fs=0, reqwest=0, dirs=0, std::process::Command=0`. Net −62 lines.
+
+- **`memory_extract` periodic session re-index migrated from raw reqwest to `VectorStorePort`**: the `periodic_session_index` path that upserts the last ~10 substantive exchanges to the `claude-sessions` Qdrant collection no longer constructs a `reqwest::Client` and PUTs hand-rolled `vector.text-dense` payloads. It now builds `Vec<VectorPoint>` and calls `vector_store.upsert_points(SESSION_COLLECTION, points)`. Embedding-model selection moves to the adapter (`QdrantConfig::model` lives in `sentinel-infrastructure::qdrant`) — the hook just supplies text. Deletes the local `QdrantConfig` struct + `load_config` helper + `default_collection`/`default_model` defaults from this file (the file no longer needs Qdrant config knowledge at all). The hook now skips silently if `ctx.vector_store` is `None`. Production-side direct-IO count in this file: `reqwest=0` (was 1 inside `run_async`).
+
+- **`RealGit` `GitStatusPort` adapter relocated from `sentinel-cli` to `sentinel-infrastructure`**: the `GitStatusPort` impl now lives next to the `git.rs` free functions it delegates to, matching the layering of `RealFileSystem` and `RealProcess`. Deletes the 32-line local `RealGit` struct from `crates/sentinel-cli/src/hook_cmd.rs:21-52`; the CLI now imports `sentinel_infrastructure::git::RealGit`. No behavioural change.
+
 ### Changed
 
 - **`VectorStorePort` surface trimmed to only what's used — `query` + `get_points` + `VectorSearchHit` deleted**: after the three memory-hook migrations, only `session_index` (upsert_points) and `memory_verify` (scroll + set_payload) still touch `VectorStorePort`. The `query` method was the entry point for the legacy `memory_inject` semantic-search path and the `get_points` method was only used by the old `boost_memory` access-count fetch in `memory_feedback` — both gone. Removes the method signatures from the port trait, the implementations from `QdrantAdapter` in `sentinel-infrastructure`, and the `VectorSearchHit` domain type that nothing returns anymore. Drive-by drops an unused `use chrono::Utc;` from `memory_feedback.rs`. Port is now minimal-useful: three methods for two orphan hooks, everything else talks to memory-mcp over stdio. 732 workspace tests pass.
