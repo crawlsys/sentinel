@@ -44,13 +44,13 @@ fn file_path_from_input(input: &HookInput) -> Option<String> {
 ///
 /// Worktree-aware: when `.git` is a file (`gitdir: <abs path>`), the real
 /// gitdir is followed so the sentinel-file lookups land in the right place.
-fn is_merge_in_progress(repo_dir: &str, git: &dyn GitStatusPort) -> bool {
+fn is_merge_in_progress(fs: &dyn super::FileSystemPort, repo_dir: &str, git: &dyn GitStatusPort) -> bool {
     let Some(root) = git.repo_root(repo_dir) else {
         return false;
     };
     let dot_git = std::path::Path::new(&root).join(".git");
     let gitdir = if dot_git.is_file() {
-        match std::fs::read_to_string(&dot_git) {
+        match fs.read_to_string(&dot_git) {
             Ok(content) => match content.lines().find_map(|l| l.strip_prefix("gitdir:")) {
                 Some(path) => std::path::PathBuf::from(path.trim()),
                 None => return false,
@@ -61,11 +61,11 @@ fn is_merge_in_progress(repo_dir: &str, git: &dyn GitStatusPort) -> bool {
         dot_git
     };
 
-    gitdir.join("MERGE_HEAD").exists()
-        || gitdir.join("CHERRY_PICK_HEAD").exists()
-        || gitdir.join("REVERT_HEAD").exists()
-        || gitdir.join("rebase-merge").is_dir()
-        || gitdir.join("rebase-apply").is_dir()
+    fs.exists(&gitdir.join("MERGE_HEAD"))
+        || fs.exists(&gitdir.join("CHERRY_PICK_HEAD"))
+        || fs.exists(&gitdir.join("REVERT_HEAD"))
+        || fs.is_dir(&gitdir.join("rebase-merge"))
+        || fs.is_dir(&gitdir.join("rebase-apply"))
 }
 
 /// Check whether `file_path` lives inside the git repo rooted at `cwd`.
@@ -73,15 +73,15 @@ fn is_merge_in_progress(repo_dir: &str, git: &dyn GitStatusPort) -> bool {
 /// Returns `true` if we can't determine a repo root (be conservative —
 /// hook continues to apply). Returns `false` only when we have a repo root
 /// and the file is clearly outside it.
-fn is_path_inside_repo(file_path: &str, cwd: &str, git: &dyn GitStatusPort) -> bool {
+fn is_path_inside_repo(fs: &dyn super::FileSystemPort, file_path: &str, cwd: &str, git: &dyn GitStatusPort) -> bool {
     let Some(repo_root) = git.repo_root(cwd) else {
         return true;
     };
     let root = std::path::Path::new(&repo_root);
     let target = std::path::Path::new(file_path);
     // Canonicalize best-effort; fall back to raw paths on error.
-    let canon_root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
-    let canon_target = std::fs::canonicalize(target).unwrap_or_else(|_| target.to_path_buf());
+    let canon_root = fs.canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    let canon_target = fs.canonicalize(target).unwrap_or_else(|_| target.to_path_buf());
     canon_target.starts_with(&canon_root)
 }
 
@@ -90,7 +90,7 @@ fn is_path_inside_repo(file_path: &str, cwd: &str, git: &dyn GitStatusPort) -> b
 /// Checks:
 /// 1. Warn if editing directly on main/master (not in a worktree)
 /// 2. Block if too many uncommitted files
-pub fn process(input: &HookInput, git: &dyn GitStatusPort) -> HookOutput {
+pub fn process(input: &HookInput, git: &dyn GitStatusPort, fs: &dyn super::FileSystemPort) -> HookOutput {
     let tool = match &input.tool_name {
         Some(t) => t.as_str(),
         None => return HookOutput::allow(),
@@ -108,7 +108,7 @@ pub fn process(input: &HookInput, git: &dyn GitStatusPort) -> HookOutput {
     // (e.g. ~/.claude/ config files) are always allowed.
     let file_path = file_path_from_input(input);
     if let Some(fp) = file_path.as_deref() {
-        if !is_path_inside_repo(fp, cwd, git) {
+        if !is_path_inside_repo(fs, fp, cwd, git) {
             return HookOutput::allow();
         }
     }
@@ -150,7 +150,7 @@ pub fn process(input: &HookInput, git: &dyn GitStatusPort) -> HookOutput {
     if let Ok(branch) = git.current_branch(effective_repo_str) {
         if PROTECTED_BRANCHES.contains(&branch.as_str())
             && !git.is_worktree(effective_repo_str)
-            && !is_merge_in_progress(effective_repo_str, git)
+            && !is_merge_in_progress(fs, effective_repo_str, git)
         {
             return HookOutput::deny(format!(
                 "[Git Hygiene] BLOCKED: editing directly on `{branch}` without a worktree. \
@@ -310,7 +310,7 @@ mod tests {
             ..Default::default()
         };
         assert!(
-            process(&input, &git).blocked.is_none(),
+            process(&input, &git, &crate::hooks::test_support::StubFs).blocked.is_none(),
             "worktree edits from main cwd should not be blocked"
         );
     }
@@ -330,7 +330,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            process(&input, &git).blocked,
+            process(&input, &git, &crate::hooks::test_support::StubFs).blocked,
             Some(true),
             "direct main edits should still be blocked"
         );
@@ -344,13 +344,13 @@ mod tests {
             cwd: Some(".".to_string()),
             ..Default::default()
         };
-        assert!(process(&input, &git).blocked.is_none());
+        assert!(process(&input, &git, &crate::hooks::test_support::StubFs).blocked.is_none());
     }
 
     #[test]
     fn test_allows_when_no_tool_name() {
         let git = StubGit::default_with(false, vec![]);
-        assert!(process(&HookInput::default(), &git).blocked.is_none());
+        assert!(process(&HookInput::default(), &git, &crate::hooks::test_support::StubFs).blocked.is_none());
     }
 
     #[test]
@@ -361,7 +361,7 @@ mod tests {
             cwd: Some(".".to_string()),
             ..Default::default()
         };
-        assert!(process(&input, &git).blocked.is_none());
+        assert!(process(&input, &git, &crate::hooks::test_support::StubFs).blocked.is_none());
     }
 
     #[test]
@@ -373,7 +373,7 @@ mod tests {
             cwd: Some(".".to_string()),
             ..Default::default()
         };
-        let output = process(&input, &git);
+        let output = process(&input, &git, &crate::hooks::test_support::StubFs);
         assert_eq!(output.blocked, Some(true));
     }
 
@@ -386,7 +386,7 @@ mod tests {
             cwd: Some(".".to_string()),
             ..Default::default()
         };
-        assert_eq!(process(&input, &git).blocked, Some(true));
+        assert_eq!(process(&input, &git, &crate::hooks::test_support::StubFs).blocked, Some(true));
     }
 
     #[test]
@@ -397,7 +397,7 @@ mod tests {
             cwd: Some(".".to_string()),
             ..Default::default()
         };
-        assert!(process(&input, &git).blocked.is_none());
+        assert!(process(&input, &git, &crate::hooks::test_support::StubFs).blocked.is_none());
     }
 
     #[test]
@@ -408,7 +408,7 @@ mod tests {
             cwd: Some(".".to_string()),
             ..Default::default()
         };
-        let output = process(&input, &git);
+        let output = process(&input, &git, &crate::hooks::test_support::StubFs);
         assert_eq!(output.blocked, Some(true), "Should hard-block edits on main without worktree");
     }
 
@@ -420,7 +420,7 @@ mod tests {
             cwd: Some(".".to_string()),
             ..Default::default()
         };
-        let output = process(&input, &git);
+        let output = process(&input, &git, &crate::hooks::test_support::StubFs);
         assert!(output.blocked.is_none());
         let ctx = output
             .hook_specific_output
@@ -437,7 +437,7 @@ mod tests {
             cwd: Some(".".to_string()),
             ..Default::default()
         };
-        assert!(process(&input, &git).blocked.is_none());
+        assert!(process(&input, &git, &crate::hooks::test_support::StubFs).blocked.is_none());
     }
 
     #[test]
@@ -452,7 +452,7 @@ mod tests {
             ..Default::default()
         };
         assert!(
-            process(&input, &git).blocked.is_none(),
+            process(&input, &git, &crate::hooks::test_support::StubFs).blocked.is_none(),
             "should allow edits to files outside the cwd's repo"
         );
     }
@@ -467,7 +467,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            process(&input, &git).blocked,
+            process(&input, &git, &crate::hooks::test_support::StubFs).blocked,
             Some(true),
             "should still block edits inside the repo on main"
         );
@@ -485,7 +485,7 @@ mod tests {
             ..Default::default()
         };
         assert!(
-            process(&input, &git).blocked.is_none(),
+            process(&input, &git, &crate::hooks::test_support::StubFs).blocked.is_none(),
             "should pull file_path from tool_input when input.file_path is empty"
         );
     }
@@ -552,10 +552,29 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            process(&input, &git).blocked,
+            process(&input, &git, &crate::hooks::test_support::StubFs).blocked,
             Some(true),
             "edit on main without worktree and without merge-in-progress must still block"
         );
+    }
+
+    /// Real-disk `FileSystemPort` impl needed by merge-detection tests
+    /// because `is_merge_in_progress` reads MERGE_HEAD / etc. off disk.
+    struct RealDiskFs;
+    impl super::super::FileSystemPort for RealDiskFs {
+        fn home_dir(&self) -> Option<std::path::PathBuf> { dirs::home_dir() }
+        fn read_to_string(&self, p: &std::path::Path) -> anyhow::Result<String> {
+            Ok(std::fs::read_to_string(p)?)
+        }
+        fn write(&self, _: &std::path::Path, _: &[u8]) -> anyhow::Result<()> { Ok(()) }
+        fn create_dir_all(&self, _: &std::path::Path) -> anyhow::Result<()> { Ok(()) }
+        fn read_dir(&self, _: &std::path::Path) -> anyhow::Result<Vec<std::path::PathBuf>> { Ok(vec![]) }
+        fn exists(&self, p: &std::path::Path) -> bool { p.exists() }
+        fn is_dir(&self, p: &std::path::Path) -> bool { p.is_dir() }
+        fn metadata(&self, p: &std::path::Path) -> anyhow::Result<std::fs::Metadata> {
+            Ok(std::fs::metadata(p)?)
+        }
+        fn append(&self, _: &std::path::Path, _: &[u8]) -> anyhow::Result<()> { Ok(()) }
     }
 
     /// Mid-merge edit on main is now allowed (the new exception). Repeated
@@ -584,7 +603,7 @@ mod tests {
                 ..Default::default()
             };
             assert!(
-                process(&input, &git).blocked.is_none(),
+                process(&input, &git, &RealDiskFs).blocked.is_none(),
                 "edit on main mid-merge should NOT block (sentinel: {sentinels:?})"
             );
         }
@@ -613,8 +632,24 @@ mod tests {
             branch: "main".to_string(),
             worktree: false,
         };
+        struct RealFs;
+        impl super::super::FileSystemPort for RealFs {
+            fn home_dir(&self) -> Option<std::path::PathBuf> { dirs::home_dir() }
+            fn read_to_string(&self, p: &std::path::Path) -> anyhow::Result<String> {
+                Ok(std::fs::read_to_string(p)?)
+            }
+            fn write(&self, _: &std::path::Path, _: &[u8]) -> anyhow::Result<()> { Ok(()) }
+            fn create_dir_all(&self, _: &std::path::Path) -> anyhow::Result<()> { Ok(()) }
+            fn read_dir(&self, _: &std::path::Path) -> anyhow::Result<Vec<std::path::PathBuf>> { Ok(vec![]) }
+            fn exists(&self, p: &std::path::Path) -> bool { p.exists() }
+            fn is_dir(&self, p: &std::path::Path) -> bool { p.is_dir() }
+            fn metadata(&self, p: &std::path::Path) -> anyhow::Result<std::fs::Metadata> {
+                Ok(std::fs::metadata(p)?)
+            }
+            fn append(&self, _: &std::path::Path, _: &[u8]) -> anyhow::Result<()> { Ok(()) }
+        }
         assert!(
-            is_merge_in_progress(worktree.path().to_str().unwrap(), &git),
+            is_merge_in_progress(&RealFs, worktree.path().to_str().unwrap(), &git),
             "should follow `.git` gitdir pointer file to the real gitdir"
         );
     }

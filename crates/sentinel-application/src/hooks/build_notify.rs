@@ -92,7 +92,7 @@ pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
             let title = format!("Build FAILED: {project}");
             let snippet = first_error_line(result_text)
                 .unwrap_or_else(|| truncate(command, 120).to_string());
-            ntfy_push::push_attention(&title, &snippet, 4, &["x"]);
+            ntfy_push::push_attention(ctx.fs, ctx.env, &title, &snippet, 4, &["x"]);
         }
 
         return HookOutput::allow();
@@ -145,7 +145,7 @@ pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
             (format!("Deploy FAILED: {project}{target}"), 4_u8, "x")
         };
         let body = truncate(command, 120).to_string();
-        ntfy_push::push_to_topic(TOPIC_DEPLOYS, &title, &body, priority, &[tag]);
+        ntfy_push::push_to_topic(ctx.fs, ctx.env, TOPIC_DEPLOYS, &title, &body, priority, &[tag]);
     }
 
     HookOutput::allow()

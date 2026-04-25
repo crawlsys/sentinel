@@ -192,6 +192,19 @@ pub trait FileSystemPort: Send + Sync {
     fn remove_dir(&self, _path: &Path) -> anyhow::Result<()> {
         Ok(())
     }
+
+    /// Resolve `path` to its canonical absolute form (follows symlinks /
+    /// junctions on Windows, drops `.` and `..` components). Used by
+    /// `git_hygiene` to compare worktree-edit targets against the canonical
+    /// repo root, and by `phase_gate`'s symlink-escape detector.
+    ///
+    /// Default impl: returns the input path unchanged. The real adapter
+    /// in `sentinel-infrastructure` overrides with `std::fs::canonicalize`.
+    /// Stub callers that don't exercise canonicalization can rely on the
+    /// no-op default.
+    fn canonicalize(&self, path: &Path) -> anyhow::Result<PathBuf> {
+        Ok(path.to_path_buf())
+    }
 }
 
 // ---------------------------------------------------------------------------

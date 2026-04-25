@@ -39,6 +39,10 @@ impl FileSystemPort for RealFileSystem {
         Ok(entries)
     }
 
+    fn canonicalize(&self, path: &Path) -> Result<PathBuf> {
+        std::fs::canonicalize(path).with_context(|| format!("canonicalize {}", path.display()))
+    }
+
     fn exists(&self, path: &Path) -> bool {
         path.exists()
     }

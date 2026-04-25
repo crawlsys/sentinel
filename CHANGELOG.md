@@ -6,6 +6,33 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added
+
+- **`FileSystemPort::canonicalize`** — new method on the port trait with default impl returning `Ok(path.to_path_buf())` (no-op for stubs). The real adapter in `sentinel-infrastructure::filesystem` overrides with `std::fs::canonicalize`. Closes the last `std::fs::canonicalize` site that wasn't already behind a port.
+
+### Changed
+
+- **PR4 — Edge-case sweep**: closes the last 9 prod IO leaks worth migrating.
+  - `git_hygiene.rs` — `is_merge_in_progress` and `is_path_inside_repo` now thread `&dyn FileSystemPort`. `process()` gains a third parameter `fs: &dyn FileSystemPort` (composition-root call site updated to pass `ctx.fs`). `is_path_inside_repo` uses the new `FileSystemPort::canonicalize` instead of raw `std::fs::canonicalize`. Net 3 prod `std::fs::` calls deleted. Tests get a `RealDiskFs` adapter for the merge-detection scenarios that need `MERGE_HEAD` lookups against a tempfile-backed repo, and `StubFs` for the rest.
+  - `phase_validator.rs` — `skill_has_phases_dir(fs, skill)` and `process(...)` thread `&dyn FileSystemPort`. Composition root in `hook_cmd.rs` passes `ctx.fs`. Tests gain a `PhasesExistFs` stub (returns `is_dir = true`) so the validator doesn't suppress its progress output, and reuse `StubFs` for the "no phases dir on disk" scenario. Net 1 prod `dirs::home_dir` deleted.
+  - `ntfy_push.rs` — full migration to `EnvPort` + `FileSystemPort`. `push_attention(fs, env, ...)`, `push_to_topic(fs, env, ...)`, `resolve_creds(fs, env)`, `accounts_path(fs)` thread the ports through. 8 call sites updated (`build_notify` × 2, `stop_failure` × 5, `hook_cmd.rs` block-bridge × 1). Net 3 prod `std::env::var` + 1 `std::fs::` + 1 `dirs::home_dir` deleted. The `reqwest::Client::new()` site stays — single fire-and-forget POST, no `HttpClientPort` exists yet, deferred.
+
+### Status
+
+- **DDD/hex audit follow-through complete** — total prod-side IO leaks in `crates/sentinel-application/src/`:
+  - Pre-audit: **52 leaks across 16 files**
+  - After PR1 (EnvPort): 39 (−13)
+  - After PR2 (channel_events): 24 (−15)
+  - After PR3 (sweep): 15 (−9)
+  - After PR4 (edges): **6 leaks across 4 files**
+  - Reduction: −46 (88%)
+- The 6 remaining leaks are all intentional / require larger port designs that aren't worth the cost for single-site usage:
+  - `channel_events.rs:210` `std::fs::remove_dir_all` — `FileSystemPort` doesn't expose recursive directory removal yet (would force every test stub to update)
+  - `ntfy_push.rs:149` `reqwest::Client::new()` — single fire-and-forget POST; would need an `HttpClientPort` port that has no other callers
+  - `doc_drift.rs:76,79,82` — `acquire_lock` opens an `OpenOptions` exclusive lock file; advisory locks need a real OS `File` handle that lives across read+write operations, no port equivalent
+  - `session_init.rs:14` `use std::process::Command` import — used by `get_git_head` / `git_pull`; the marketplace-sync git operations need their own targeted refactor (large scope)
+- Workspace tests: 742 passing, 0 failing across all 4 PRs.
+
 ### Changed
 
 - **PR2 — `channel_events.rs` migrated to `FileSystemPort` + `EnvPort`**: full module rewrite. `events_base_dir`, `events_dir_for_session`, `events_dir`, `emit`, `read_event`, `pending_events_for_session`, `pending_events`, `pending_events_in_dir`, `consume`, `cleanup_stale_sessions` all gain `&dyn FileSystemPort` (and `&dyn EnvPort` where session-id resolution is needed). `detect_session_id` now takes `&dyn EnvPort` instead of reading `std::env::var` directly. Net 7 prod-side `std::fs::` calls + 2 `std::env::var` + 1 `dirs::home_dir` deleted. One `std::fs::remove_dir_all` deliberately retained in `cleanup_stale_sessions` and explicitly commented — `FileSystemPort` doesn't expose recursive directory removal yet, and adding it would force every test stub to update; tracked as a future port-extension item.

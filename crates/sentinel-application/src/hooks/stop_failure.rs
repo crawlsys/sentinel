@@ -343,6 +343,7 @@ pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
                         );
 
                         ntfy_push::push_attention(
+                            ctx.fs, ctx.env,
                             "Claude rate-limited (auto-recovering)",
                             &format!("Cooldown {cooldown_minutes}m. {rotate_msg} Relaunch queued."),
                             5,
@@ -370,6 +371,7 @@ pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
                         );
 
                         ntfy_push::push_attention(
+                            ctx.fs, ctx.env,
                             "Claude rate-limited: relaunch setup failed",
                             &format!("Cooldown {cooldown_minutes}m. {rotate_msg} Manually relaunch `c`."),
                             5,
@@ -400,6 +402,7 @@ pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
                 );
 
                 ntfy_push::push_attention(
+                    ctx.fs, ctx.env,
                     "Claude rate-limited: rotation FAILED",
                     &format!("Cooldown {cooldown_minutes}m. {}. Manual intervention needed.", truncate_for_push(&detail)),
                     5,
@@ -427,6 +430,7 @@ pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
                 );
 
                 ntfy_push::push_attention(
+                    ctx.fs, ctx.env,
                     "Claude rate-limited: rotation could not start",
                     &format!("Cooldown {cooldown_minutes}m. {}. Manual intervention needed.", truncate_for_push(&e.to_string())),
                     5,
@@ -451,6 +455,7 @@ pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
 
     // Non-rate-limit API error — turn aborted, push so Gary knows.
     ntfy_push::push_attention(
+        ctx.fs, ctx.env,
         &format!("Claude turn aborted: {error}"),
         &truncate_for_push(error_details),
         4,

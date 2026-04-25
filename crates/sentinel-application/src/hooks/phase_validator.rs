@@ -17,14 +17,17 @@ use std::collections::HashMap;
 /// the skill uses an alternate structure (e.g. `orchestration/`,
 /// `protocols/`) the validator would otherwise emit a "Phase Execution
 /// Required" warning referencing a nonexistent file.
-fn skill_has_phases_dir(skill: &str) -> bool {
-    let Some(home) = dirs::home_dir() else {
+fn skill_has_phases_dir(fs: &dyn super::FileSystemPort, skill: &str) -> bool {
+    let Some(home) = fs.home_dir() else {
         return true; // Fail open — don't silently suppress warnings if we can't check.
     };
-    home.join(".claude/skills")
-        .join(skill)
-        .join("phases")
-        .is_dir()
+    fs.is_dir(
+        &home
+            .join(".claude")
+            .join("skills")
+            .join(skill)
+            .join("phases"),
+    )
 }
 
 /// Process a phase-validator hook event (UserPromptSubmit)
@@ -33,6 +36,7 @@ pub fn process(
     state: &SessionState,
     workflows: &HashMap<String, SkillWorkflow>,
     step_configs: &HashMap<String, SkillSteps>,
+    fs: &dyn super::FileSystemPort,
 ) -> HookOutput {
     // Only act when there's an active skill with a workflow
     let skill_name = match &state.active_skill {
@@ -48,7 +52,7 @@ pub fn process(
     // If the skill has no phases/ directory on disk, it uses an alternate
     // structure and the workflow config is stale. Don't emit warnings
     // pointing at files that don't exist.
-    if !skill_has_phases_dir(skill_name) {
+    if !skill_has_phases_dir(fs, skill_name) {
         return HookOutput::allow();
     }
 
@@ -325,6 +329,26 @@ mod tests {
         }
     }
 
+    /// Stub `FileSystemPort` whose `is_dir` always returns `true` so the
+    /// `skill_has_phases_dir` check passes and the validator gets to emit
+    /// progress / warning context. Real-disk structure isn't available
+    /// during unit tests; production code already validates the path under
+    /// `~/.claude/skills/{skill}/phases/`.
+    struct PhasesExistFs;
+    impl crate::hooks::FileSystemPort for PhasesExistFs {
+        fn home_dir(&self) -> Option<std::path::PathBuf> {
+            Some(std::path::PathBuf::from("/mock/home"))
+        }
+        fn read_to_string(&self, _: &std::path::Path) -> anyhow::Result<String> { anyhow::bail!("no") }
+        fn write(&self, _: &std::path::Path, _: &[u8]) -> anyhow::Result<()> { Ok(()) }
+        fn create_dir_all(&self, _: &std::path::Path) -> anyhow::Result<()> { Ok(()) }
+        fn read_dir(&self, _: &std::path::Path) -> anyhow::Result<Vec<std::path::PathBuf>> { Ok(vec![]) }
+        fn exists(&self, _: &std::path::Path) -> bool { true }
+        fn is_dir(&self, _: &std::path::Path) -> bool { true }
+        fn metadata(&self, _: &std::path::Path) -> anyhow::Result<std::fs::Metadata> { anyhow::bail!("no") }
+        fn append(&self, _: &std::path::Path, _: &[u8]) -> anyhow::Result<()> { Ok(()) }
+    }
+
     #[test]
     fn test_no_active_skill_passes_through() {
         let state = SessionState::new("sess-1");
@@ -332,7 +356,7 @@ mod tests {
         let step_configs = HashMap::new();
         let input = HookInput::default();
 
-        let output = process(&input, &state, &workflows, &step_configs);
+        let output = process(&input, &state, &workflows, &step_configs, &PhasesExistFs);
         assert!(output.hook_specific_output.is_none());
     }
 
@@ -345,7 +369,7 @@ mod tests {
         let step_configs = HashMap::new();
         let input = HookInput::default();
 
-        let output = process(&input, &state, &workflows, &step_configs);
+        let output = process(&input, &state, &workflows, &step_configs, &PhasesExistFs);
         let ctx = output.hook_specific_output.unwrap().additional_context;
         let ctx = ctx.as_deref().unwrap();
         assert!(ctx.contains("Phases loaded: 0/4"));
@@ -364,7 +388,7 @@ mod tests {
         let step_configs = HashMap::new();
         let input = HookInput::default();
 
-        let output = process(&input, &state, &workflows, &step_configs);
+        let output = process(&input, &state, &workflows, &step_configs, &PhasesExistFs);
         let ctx = output.hook_specific_output.unwrap().additional_context;
         let ctx = ctx.as_deref().unwrap();
         assert!(ctx.contains("Phases loaded: 2/4"));
@@ -383,7 +407,7 @@ mod tests {
         let step_configs = HashMap::new();
         let input = HookInput::default();
 
-        let output = process(&input, &state, &workflows, &step_configs);
+        let output = process(&input, &state, &workflows, &step_configs, &PhasesExistFs);
         let ctx = output.hook_specific_output.unwrap().additional_context;
         let ctx = ctx.as_deref().unwrap();
         assert!(ctx.contains("WARNING"));
@@ -408,7 +432,8 @@ mod tests {
         let step_configs = HashMap::new();
         let input = HookInput::default();
 
-        let output = process(&input, &state, &workflows, &step_configs);
+        // StubFs.is_dir returns false — simulates "no phases/ directory on disk".
+        let output = process(&input, &state, &workflows, &step_configs, &crate::hooks::test_support::StubFs);
         // allow() means no context injection
         assert!(output.hook_specific_output.is_none());
     }
@@ -426,7 +451,7 @@ mod tests {
         let step_configs = HashMap::new();
         let input = HookInput::default();
 
-        let output = process(&input, &state, &workflows, &step_configs);
+        let output = process(&input, &state, &workflows, &step_configs, &PhasesExistFs);
         let ctx = output.hook_specific_output.unwrap().additional_context;
         let ctx = ctx.as_deref().unwrap();
         assert!(ctx.contains("All 3/4 required phases loaded"));
@@ -455,7 +480,7 @@ mod tests {
         step_configs.insert("linear".to_string(), test_steps());
         let input = HookInput::default();
 
-        let output = process(&input, &state, &workflows, &step_configs);
+        let output = process(&input, &state, &workflows, &step_configs, &PhasesExistFs);
         let ctx = output.hook_specific_output.unwrap().additional_context;
         let ctx = ctx.as_deref().unwrap();
 
@@ -482,7 +507,7 @@ mod tests {
         let step_configs = HashMap::new();
         let input = HookInput::default();
 
-        let output = process(&input, &state, &workflows, &step_configs);
+        let output = process(&input, &state, &workflows, &step_configs, &PhasesExistFs);
         let ctx = output.hook_specific_output.unwrap().additional_context;
         let ctx = ctx.as_deref().unwrap();
 

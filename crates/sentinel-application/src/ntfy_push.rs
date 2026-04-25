@@ -15,6 +15,7 @@
 
 use std::path::PathBuf;
 
+use sentinel_domain::ports::{EnvPort, FileSystemPort};
 use serde_json::json;
 
 const DEFAULT_BASE_URL: &str = "https://ntfy.sh";
@@ -25,22 +26,37 @@ pub const TOPIC_ATTENTION: &str = "gary-somerhalder-claude-code-attention";
 
 /// Push to the canonical "needs attention" topic. Use for hard failures and
 /// session-blocking events.
-pub fn push_attention(title: &str, message: &str, priority: u8, tags: &[&str]) {
-    push_to_topic(TOPIC_ATTENTION, title, message, priority, tags);
+pub fn push_attention(
+    fs: &dyn FileSystemPort,
+    env: &dyn EnvPort,
+    title: &str,
+    message: &str,
+    priority: u8,
+    tags: &[&str],
+) {
+    push_to_topic(fs, env, TOPIC_ATTENTION, title, message, priority, tags);
 }
 
 /// Push to an arbitrary ntfy topic. Best-effort; spawns a tokio task, never
 /// blocks, never returns errors.
-pub fn push_to_topic(topic: &str, title: &str, message: &str, priority: u8, tags: &[&str]) {
+pub fn push_to_topic(
+    fs: &dyn FileSystemPort,
+    env: &dyn EnvPort,
+    topic: &str,
+    title: &str,
+    message: &str,
+    priority: u8,
+    tags: &[&str],
+) {
     // Allow tests to disable real network calls without faking out the
     // resolver — checked here, before the spawn, so unit tests don't leak
     // tasks into the runtime.
-    if std::env::var("SENTINEL_NTFY_DISABLE").ok().as_deref() == Some("1") {
+    if env.var("SENTINEL_NTFY_DISABLE").as_deref() == Some("1") {
         tracing::debug!(topic, "ntfy_push disabled via SENTINEL_NTFY_DISABLE=1");
         return;
     }
 
-    let creds = match resolve_creds() {
+    let creds = match resolve_creds(fs, env) {
         Some(c) => c,
         None => {
             tracing::debug!("ntfy_push: no credentials available, skipping");
@@ -90,17 +106,18 @@ struct Creds {
 ///
 /// 1. `NTFY_TOKEN` env var (with optional `NTFY_BASE_URL`)
 /// 2. Active account in `~/.ntfy/accounts.json`
-fn resolve_creds() -> Option<Creds> {
-    if let Ok(token) = std::env::var("NTFY_TOKEN") {
+fn resolve_creds(fs: &dyn FileSystemPort, env: &dyn EnvPort) -> Option<Creds> {
+    if let Some(token) = env.var("NTFY_TOKEN") {
         if !token.is_empty() {
-            let base_url = std::env::var("NTFY_BASE_URL")
-                .unwrap_or_else(|_| DEFAULT_BASE_URL.to_string());
+            let base_url = env
+                .var("NTFY_BASE_URL")
+                .unwrap_or_else(|| DEFAULT_BASE_URL.to_string());
             return Some(Creds { token, base_url });
         }
     }
 
-    let path = accounts_path()?;
-    let raw = std::fs::read_to_string(&path).ok()?;
+    let path = accounts_path(fs)?;
+    let raw = fs.read_to_string(&path).ok()?;
     let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
     let active = v.get("active_account")?.as_str()?;
     let cfg = v.get("accounts")?.get(active)?;
@@ -115,8 +132,8 @@ fn resolve_creds() -> Option<Creds> {
     Some(Creds { token, base_url })
 }
 
-fn accounts_path() -> Option<PathBuf> {
-    Some(dirs::home_dir()?.join(ACCOUNTS_FILE))
+fn accounts_path(fs: &dyn FileSystemPort) -> Option<PathBuf> {
+    Some(fs.home_dir()?.join(ACCOUNTS_FILE))
 }
 
 async fn send(creds: &Creds, topic: &str, title: &str, message: &str, priority: u8, tags: &[String]) {
@@ -176,7 +193,19 @@ mod tests {
     /// without requiring the file to exist.
     #[test]
     fn accounts_path_under_home() {
-        if let Some(p) = accounts_path() {
+        struct RealHomeFs;
+        impl FileSystemPort for RealHomeFs {
+            fn home_dir(&self) -> Option<std::path::PathBuf> { dirs::home_dir() }
+            fn read_to_string(&self, _: &std::path::Path) -> anyhow::Result<String> { anyhow::bail!("no") }
+            fn write(&self, _: &std::path::Path, _: &[u8]) -> anyhow::Result<()> { Ok(()) }
+            fn create_dir_all(&self, _: &std::path::Path) -> anyhow::Result<()> { Ok(()) }
+            fn read_dir(&self, _: &std::path::Path) -> anyhow::Result<Vec<std::path::PathBuf>> { Ok(vec![]) }
+            fn exists(&self, _: &std::path::Path) -> bool { false }
+            fn is_dir(&self, _: &std::path::Path) -> bool { false }
+            fn metadata(&self, _: &std::path::Path) -> anyhow::Result<std::fs::Metadata> { anyhow::bail!("no") }
+            fn append(&self, _: &std::path::Path, _: &[u8]) -> anyhow::Result<()> { Ok(()) }
+        }
+        if let Some(p) = accounts_path(&RealHomeFs) {
             let s = p.to_string_lossy();
             assert!(s.ends_with("accounts.json"), "got {s}");
             assert!(s.contains(".ntfy"), "got {s}");

@@ -252,7 +252,7 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
 
             // Phase validator — inject phase + step progress context
             let validator_output =
-                hooks::phase_validator::process(&input, &state, &workflows, &step_configs);
+                hooks::phase_validator::process(&input, &state, &workflows, &step_configs, ctx.fs);
             output.merge(&validator_output);
 
             // Error reporter — inject Linear filing instructions for unresolved errors
@@ -322,7 +322,7 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
 
             // Git hygiene — block on protected branch without worktree + uncommitted file limit
             if matches!(input.tool_name.as_deref(), Some("Edit" | "Write")) {
-                let hygiene_output = hooks::git_hygiene::process(&input, &git);
+                let hygiene_output = hooks::git_hygiene::process(&input, &git, ctx.fs);
                 output.merge(&hygiene_output);
 
                 // Tool usage gate — require sequential thinking + task creation
@@ -823,6 +823,8 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
             .map(|r| if r.len() > 240 { format!("{}…", &r[..240]) } else { r.to_string() })
             .unwrap_or_else(|| "(no reason given)".to_string());
         sentinel_application::ntfy_push::push_attention(
+            &real_fs,
+            &real_env,
             &title,
             &reason,
             5,
