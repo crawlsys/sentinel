@@ -10,9 +10,11 @@
 use chrono::Utc;
 use sentinel_domain::constants;
 use sentinel_domain::events::{HookEvent, HookInput, HookOutput};
+use sentinel_domain::ports::VectorStorePort;
+use std::path::PathBuf;
 use tracing::{debug, warn};
 
-use super::run_async;
+use super::{run_async, FileSystemPort, HookContext};
 
 /// Maximum memories to verify per session to limit API calls.
 const MAX_VERIFY_PER_SESSION: usize = constants::MAX_VERIFY_PER_SESSION;
@@ -20,9 +22,12 @@ const MAX_VERIFY_PER_SESSION: usize = constants::MAX_VERIFY_PER_SESSION;
 /// Memories not verified in this many days are eligible for re-verification.
 const VERIFY_STALE_DAYS: i64 = constants::VERIFY_STALE_DAYS;
 
-/// 24h cooldown file path.
-fn cooldown_path() -> Option<std::path::PathBuf> {
-    dirs::home_dir().map(|h| {
+/// Qdrant collection shared with memory_inject / memory_extract / memory_feedback.
+const COLLECTION: &str = "claude-memory";
+
+/// 24h cooldown file path (via FileSystemPort).
+fn cooldown_path(fs: &dyn FileSystemPort) -> Option<PathBuf> {
+    fs.home_dir().map(|h| {
         h.join(".claude")
             .join("sentinel")
             .join("state")
@@ -31,12 +36,12 @@ fn cooldown_path() -> Option<std::path::PathBuf> {
 }
 
 /// Check if 24h cooldown has elapsed.
-fn check_cooldown() -> bool {
-    let path = match cooldown_path() {
+fn check_cooldown(fs: &dyn FileSystemPort) -> bool {
+    let path = match cooldown_path(fs) {
         Some(p) => p,
         None => return true,
     };
-    let content = match std::fs::read_to_string(&path) {
+    let content = match fs.read_to_string(&path) {
         Ok(c) => c,
         Err(_) => return true, // No file = never run
     };
@@ -49,34 +54,15 @@ fn check_cooldown() -> bool {
 }
 
 /// Write cooldown timestamp.
-fn write_cooldown() {
-    let path = match cooldown_path() {
+fn write_cooldown(fs: &dyn FileSystemPort) {
+    let path = match cooldown_path(fs) {
         Some(p) => p,
         None => return,
     };
     if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+        let _ = fs.create_dir_all(parent);
     }
-    let _ = std::fs::write(&path, Utc::now().to_rfc3339());
-}
-
-/// Qdrant config (mirrors qdrant-adapters/config.rs).
-#[derive(serde::Deserialize)]
-struct QdrantConfig {
-    cluster_url: String,
-    api_key: String,
-    #[serde(default = "default_collection")]
-    collection: String,
-}
-
-fn default_collection() -> String {
-    "claude-memory".to_string()
-}
-
-fn load_qdrant_config() -> Option<QdrantConfig> {
-    let path = dirs::home_dir()?.join(".qdrant").join("config.json");
-    let content = std::fs::read_to_string(&path).ok()?;
-    serde_json::from_str(&content).ok()
+    let _ = fs.write(&path, Utc::now().to_rfc3339().as_bytes());
 }
 
 /// Load Anthropic API key — tries env var first, then Doppler.
@@ -124,29 +110,9 @@ struct Claim {
     verifiable_value: String,
 }
 
-/// Scroll Qdrant for memories not verified in the last N days.
-async fn scroll_unverified(
-    client: &reqwest::Client,
-    config: &QdrantConfig,
-) -> Vec<MemoryPoint> {
-    let body = serde_json::json!({
-        "limit": 100,
-        "with_payload": true
-    });
-
-    let url = format!(
-        "{}/collections/{}/points/scroll",
-        config.cluster_url, config.collection
-    );
-
-    let resp = match client
-        .post(&url)
-        .header("api-key", &config.api_key)
-        .header("Content-Type", "application/json")
-        .json(&body)
-        .send()
-        .await
-    {
+/// Scroll Qdrant for memories not verified in the last N days (via VectorStorePort).
+async fn scroll_unverified(vector_store: &dyn VectorStorePort) -> Vec<MemoryPoint> {
+    let results = match vector_store.scroll(COLLECTION, None, 100).await {
         Ok(r) => r,
         Err(e) => {
             warn!(error = %e, "Failed to scroll Qdrant");
@@ -154,44 +120,34 @@ async fn scroll_unverified(
         }
     };
 
-    let json: serde_json::Value = match resp.json().await {
-        Ok(j) => j,
-        Err(_) => return vec![],
-    };
-
-    let points = json
-        .get("result")
-        .and_then(|r| r.get("points"))
-        .and_then(|p| p.as_array())
-        .cloned()
-        .unwrap_or_default();
-
     let cutoff = Utc::now() - chrono::Duration::days(VERIFY_STALE_DAYS);
 
-    points
-        .iter()
+    results
+        .into_iter()
         .filter_map(|p| {
-            let id = p.get("id").map(|v| match v {
-                serde_json::Value::String(s) => s.clone(),
-                other => other.to_string(),
-            })?;
-            let payload = p.get("payload")?;
-            let name = payload.get("name").and_then(|v| v.as_str()).unwrap_or("unnamed").to_string();
-            let content = payload.get("content").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let id = p.id;
+            let payload = &p.payload;
+            let name = payload
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unnamed")
+                .to_string();
+            let content = payload
+                .get("content")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
             let last_verified = payload
                 .get("last_verified_at")
                 .and_then(|v| v.as_str())
                 .map(String::from);
 
-            // Filter: only include memories not verified recently
             let needs_verify = match &last_verified {
-                Some(ts) => {
-                    match chrono::DateTime::parse_from_rfc3339(ts) {
-                        Ok(dt) => dt.with_timezone(&Utc) < cutoff,
-                        Err(_) => true,
-                    }
-                }
-                None => true, // Never verified
+                Some(ts) => match chrono::DateTime::parse_from_rfc3339(ts) {
+                    Ok(dt) => dt.with_timezone(&Utc) < cutoff,
+                    Err(_) => true,
+                },
+                None => true,
             };
 
             if !needs_verify {
@@ -281,8 +237,9 @@ Return ONLY the JSON array, no other text."#
     })
 }
 
-/// Verify file_path claims with fs::exists(). Returns (verified, stale_reasons).
-fn verify_claims(claims: &[Claim]) -> (bool, Vec<String>) {
+/// Verify file_path claims with `fs.exists()` via FileSystemPort.
+/// Returns (verified, stale_reasons).
+fn verify_claims(fs: &dyn FileSystemPort, claims: &[Claim]) -> (bool, Vec<String>) {
     let mut stale_reasons = Vec::new();
     let mut any_stale = false;
 
@@ -294,15 +251,15 @@ fn verify_claims(claims: &[Claim]) -> (bool, Vec<String>) {
         let path = &claim.verifiable_value;
 
         // Try absolute path
-        if std::path::Path::new(path).exists() {
+        if fs.exists(std::path::Path::new(path)) {
             continue;
         }
 
         // Try expanding ~
         if path.starts_with("~/") || path.starts_with("~\\") {
-            if let Some(home) = dirs::home_dir() {
+            if let Some(home) = fs.home_dir() {
                 let expanded = home.join(&path[2..]);
-                if expanded.exists() {
+                if fs.exists(&expanded) {
                     continue;
                 }
             }
@@ -316,63 +273,50 @@ fn verify_claims(claims: &[Claim]) -> (bool, Vec<String>) {
     (!any_stale || stale_reasons.is_empty(), stale_reasons)
 }
 
-/// Update Qdrant payload with verification results.
+/// Update Qdrant payload with verification results (via VectorStorePort).
 async fn update_payload(
-    client: &reqwest::Client,
-    config: &QdrantConfig,
+    vector_store: &dyn VectorStorePort,
     point_id: &str,
     verified: bool,
     stale_reason: Option<&str>,
 ) {
     let now = Utc::now().to_rfc3339();
 
-    let mut payload = serde_json::json!({
+    let reason_str = stale_reason.unwrap_or("").to_string();
+    let payload = serde_json::json!({
         "verified": verified,
-        "last_verified_at": now
+        "last_verified_at": now,
+        "stale_reason": reason_str,
     });
 
-    if let Some(reason) = stale_reason {
-        payload["stale_reason"] = serde_json::Value::String(reason.to_string());
-    } else {
-        payload["stale_reason"] = serde_json::Value::String(String::new());
+    let ids = [point_id.to_string()];
+    if let Err(e) = vector_store.set_payload(COLLECTION, &ids, payload).await {
+        debug!(error = %e, "memory_verify set_payload failed");
     }
-
-    let body = serde_json::json!({
-        "payload": payload,
-        "points": [point_id]
-    });
-
-    let url = format!(
-        "{}/collections/{}/points/payload",
-        config.cluster_url, config.collection
-    );
-
-    let _ = client
-        .post(&url)
-        .header("api-key", &config.api_key)
-        .header("Content-Type", "application/json")
-        .json(&body)
-        .send()
-        .await;
 }
 
 /// Process SessionStart — verify stale memories.
-pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
+pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     // 1. Check 24h cooldown
-    if !check_cooldown() {
+    if !check_cooldown(ctx.fs) {
         debug!("Memory verify cooldown active — skipping");
         return HookOutput::allow();
     }
 
-    // 2. Load configs
-    let qdrant_config = match load_qdrant_config() {
-        Some(c) => c,
+    // 2. Require a configured vector store (Qdrant config now owned by the
+    //    infrastructure adapter — no more local ~/.qdrant/config.json read).
+    let vector_store = match ctx.vector_store {
+        Some(vs) => vs,
         None => {
-            debug!("No Qdrant config — skipping memory verify");
+            debug!("No vector store configured — skipping memory verify");
             return HookOutput::allow();
         }
     };
 
+    // 3. Anthropic API key — still sourced via env var or doppler fallback.
+    //    The Anthropic call in extract_claims_claude is not a Qdrant op,
+    //    so VectorStorePort doesn't cover it; direct reqwest stays here
+    //    until a dedicated LlmPort is introduced.
     let anthropic_key = match load_anthropic_key() {
         Some(k) => k,
         None => {
@@ -381,7 +325,9 @@ pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
         }
     };
 
-    // 3. Run async verification — handle both standalone and nested-runtime cases
+    let fs = ctx.fs;
+
+    // 4. Run async verification.
     let stale_count = run_async(async {
         let client = match reqwest::Client::builder()
             .timeout(constants::API_CALL_TIMEOUT_LONG)
@@ -391,8 +337,7 @@ pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
             Err(_) => return 0usize,
         };
 
-        // 4. Scroll for unverified memories
-        let memories = scroll_unverified(&client, &qdrant_config).await;
+        let memories = scroll_unverified(vector_store).await;
         if memories.is_empty() {
             debug!("No memories need verification");
             return 0;
@@ -402,31 +347,23 @@ pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
 
         let mut stale = 0usize;
 
-        // 5. Verify each memory
         for memory in &memories {
             let claims =
                 extract_claims_claude(&client, &anthropic_key, &memory.content).await;
 
             if claims.is_empty() {
                 // No claims — mark as verified (nothing to disprove)
-                update_payload(&client, &qdrant_config, &memory.id, true, None).await;
+                update_payload(vector_store, &memory.id, true, None).await;
                 continue;
             }
 
-            let (all_ok, reasons) = verify_claims(&claims);
+            let (all_ok, reasons) = verify_claims(fs, &claims);
 
             if all_ok {
-                update_payload(&client, &qdrant_config, &memory.id, true, None).await;
+                update_payload(vector_store, &memory.id, true, None).await;
             } else {
                 let reason = reasons.join("; ");
-                update_payload(
-                    &client,
-                    &qdrant_config,
-                    &memory.id,
-                    false,
-                    Some(&reason),
-                )
-                .await;
+                update_payload(vector_store, &memory.id, false, Some(&reason)).await;
                 stale += 1;
                 debug!(name = %memory.name, reason = %reason, "Memory flagged as stale");
             }
@@ -435,16 +372,15 @@ pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
         stale
     });
 
-    // 6. Write cooldown
-    write_cooldown();
+    // 5. Write cooldown
+    write_cooldown(ctx.fs);
 
-    // 7. Inject context if stale memories found
+    // 6. Inject context if stale memories found
     if stale_count > 0 {
         let msg = format!(
             "[Qdrant Memory] {} memories flagged as potentially stale",
             stale_count
         );
-        // SessionStart context injection must use the event that supports it
         let _ = input; // suppress unused warning
         return HookOutput::inject_context(HookEvent::SessionStart, &msg);
     }
