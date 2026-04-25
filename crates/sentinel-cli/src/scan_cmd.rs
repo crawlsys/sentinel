@@ -17,7 +17,7 @@ use sentinel_application::scanner;
 /// - `--manifest`: generate manifest.json with SHA-256 hashes
 /// - `--dry-run`: preview changes without writing (for --sync-counts)
 /// - `--dir <path>`: override marketplace root (default: `~/.claude/`)
-pub async fn run(
+pub fn run(
     counts_only: bool,
     validate_only: bool,
     sync_counts: bool,

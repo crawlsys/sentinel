@@ -97,7 +97,7 @@ pub fn verify_staged() -> Result<String> {
     Ok(actual_hash)
 }
 
-pub async fn run(binary: Option<String>) -> Result<()> {
+pub fn run(binary: Option<String>) -> Result<()> {
     let source = binary.map_or_else(default_binary_path, PathBuf::from);
 
     if !source.exists() {

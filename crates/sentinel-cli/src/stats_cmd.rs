@@ -3,7 +3,7 @@
 use anyhow::Result;
 use colored::Colorize;
 
-pub async fn run() -> Result<()> {
+pub fn run() -> Result<()> {
     println!("{}", "Sentinel Hook Statistics".bold());
     println!();
 

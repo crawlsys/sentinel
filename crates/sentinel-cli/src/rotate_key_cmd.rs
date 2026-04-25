@@ -6,7 +6,7 @@
 
 use anyhow::Result;
 
-pub async fn run() -> Result<()> {
+pub fn run() -> Result<()> {
     let new_version = sentinel_infrastructure::state_store::rotate_hmac_key()?;
 
     eprintln!("[sentinel] Key rotation complete. New version: v{new_version}");

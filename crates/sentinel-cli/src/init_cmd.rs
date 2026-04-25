@@ -10,7 +10,7 @@ use sentinel_application::project_init;
 use sentinel_domain::project::StandardFile;
 
 /// Run the init command.
-pub async fn run(dry_run: bool, force: bool, all: bool, dir: Option<String>) -> anyhow::Result<()> {
+pub fn run(dry_run: bool, force: bool, all: bool, dir: Option<String>) -> anyhow::Result<()> {
     if all {
         run_batch(dry_run, force)
     } else {

@@ -9,7 +9,7 @@
 
 use anyhow::{Context, Result};
 
-pub async fn run() -> Result<()> {
+pub fn run() -> Result<()> {
     let mut state_count = 0u32;
     let mut proof_count = 0u32;
     let mut errors = 0u32;

@@ -165,19 +165,19 @@ pub async fn run(
     json: bool,
 ) -> Result<()> {
     if list {
-        return list_breaks(json).await;
+        return list_breaks(json);
     }
 
     if status {
-        return show_status(session, json).await;
+        return show_status(session, json);
     }
 
     if cancel {
-        return cancel_break(session).await;
+        return cancel_break(session);
     }
 
     if history {
-        return show_history(json).await;
+        return show_history(json);
     }
 
     // Initiate a new break
@@ -415,7 +415,7 @@ impl BreakStatusJson {
 
 /// Show the status of a glass break for the specified session (or the most
 /// recently modified session if none given).
-async fn show_status(session: Option<String>, json: bool) -> Result<()> {
+fn show_status(session: Option<String>, json: bool) -> Result<()> {
     let session_id = session.or_else(find_current_session);
     let Some(sid) = session_id else {
         if json {
@@ -462,7 +462,7 @@ async fn show_status(session: Option<String>, json: bool) -> Result<()> {
 /// recently modified session if none given). Works from non-interactive
 /// contexts — cancelling can only *increase* enforcement, so the anti-AI
 /// TTY check doesn't apply here (only activation requires a terminal).
-async fn cancel_break(session: Option<String>) -> Result<()> {
+fn cancel_break(session: Option<String>) -> Result<()> {
     let session_id = session.or_else(find_current_session);
     let Some(sid) = session_id else {
         eprintln!("  No active session found.");
@@ -509,7 +509,7 @@ async fn cancel_break(session: Option<String>) -> Result<()> {
 /// `~/.claude/sentinel/state/`, decrypts via the `state_store`, and emits one
 /// record per session. Sessions with no active or historical break still
 /// appear with `active: false`.
-async fn list_breaks(json: bool) -> Result<()> {
+fn list_breaks(json: bool) -> Result<()> {
     let state_dir = if let Some(h) = dirs::home_dir() { h.join(".claude").join("sentinel").join("state") } else {
         if json {
             println!("[]");
@@ -597,7 +597,7 @@ async fn list_breaks(json: bool) -> Result<()> {
 }
 
 /// Show break history from breaks.jsonl
-async fn show_history(json_output: bool) -> Result<()> {
+fn show_history(json_output: bool) -> Result<()> {
     let path = breaks_log_path();
     if !path.exists() {
         if json_output {

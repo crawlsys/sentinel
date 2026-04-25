@@ -3,7 +3,7 @@
 use anyhow::Result;
 use colored::Colorize;
 
-pub async fn run(session: &str) -> Result<()> {
+pub fn run(session: &str) -> Result<()> {
     println!("{}", "Sentinel Proof Chain Verification".bold());
     println!("Session: {session}\n");
 
