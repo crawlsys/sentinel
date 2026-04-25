@@ -11,7 +11,6 @@
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use chrono::Timelike;
 use sentinel_domain::events::{HookInput, HookOutput};
@@ -108,7 +107,7 @@ pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
     crate::channel_events::cleanup_stale_sessions(ctx.fs, std::time::Duration::from_secs(86400));
 
     // 2. Sync marketplace repo (if found)
-    let sync_result = sync_marketplace(&claude_dir);
+    let sync_result = sync_marketplace(ctx.process, &claude_dir);
 
     // 3. Validate sync
     let validation = validate_sync(&claude_dir);
@@ -394,7 +393,7 @@ fn which_qdrant() -> Option<std::path::PathBuf> {
 }
 
 /// Sync marketplace repo to ~/.claude/
-fn sync_marketplace(claude_dir: &Path) -> SyncResult {
+fn sync_marketplace(process: &dyn super::ProcessPort, claude_dir: &Path) -> SyncResult {
     let repo_dir = match find_marketplace_repo() {
         Some(dir) => dir,
         None => return SyncResult::NoRepo,
@@ -402,7 +401,7 @@ fn sync_marketplace(claude_dir: &Path) -> SyncResult {
 
     // Check if we need to sync (compare last sync commit)
     let marker_file = claude_dir.join(".last-sync-commit");
-    let current_head = get_git_head(&repo_dir);
+    let current_head = get_git_head(process, &repo_dir);
 
     if let (Some(ref head), Ok(last)) = (&current_head, fs::read_to_string(&marker_file)) {
         if last.trim() == head.trim() {
@@ -435,7 +434,7 @@ fn sync_marketplace(claude_dir: &Path) -> SyncResult {
     }
 
     // Update sync marker with new HEAD
-    let new_head = get_git_head(&repo_dir);
+    let new_head = get_git_head(process, &repo_dir);
     if let Some(head) = &new_head {
         let _ = fs::write(&marker_file, head);
     }
@@ -446,41 +445,15 @@ fn sync_marketplace(claude_dir: &Path) -> SyncResult {
     }
 }
 
-/// Get HEAD commit hash
-fn get_git_head(repo: &Path) -> Option<String> {
-    Command::new("git")
-        .args(["rev-parse", "HEAD"])
-        .current_dir(repo)
-        .output()
-        .ok()
-        .and_then(|out| {
-            if out.status.success() {
-                Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
-            } else {
-                None
-            }
-        })
-}
-
-/// Fast-forward git pull
-fn git_pull(repo: &Path) -> bool {
-    // Fetch first
-    let fetch = Command::new("git")
-        .args(["fetch", "--quiet"])
-        .current_dir(repo)
-        .output();
-
-    if fetch.is_err() {
-        return false;
+/// Get HEAD commit hash via the injected process port.
+fn get_git_head(process: &dyn super::ProcessPort, repo: &Path) -> Option<String> {
+    let cwd = repo.to_str()?;
+    let out = process.run("git", &["rev-parse", "HEAD"], Some(cwd)).ok()?;
+    if out.success {
+        Some(out.stdout.trim().to_string())
+    } else {
+        None
     }
-
-    // Fast-forward merge
-    Command::new("git")
-        .args(["merge", "--ff-only", "@{u}"])
-        .current_dir(repo)
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
 }
 
 /// Recursively copy a directory, returns number of files copied

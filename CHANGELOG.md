@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Changed
+
+- **PR5 — `session_init` git ops via `ProcessPort` + delete dead `git_pull`**: `get_git_head(repo)` migrated to `get_git_head(process: &dyn ProcessPort, repo: &Path)` — uses `process.run("git", &["rev-parse", "HEAD"], Some(cwd))` instead of `Command::new("git").args(...).current_dir(repo).output()`. `sync_marketplace` threads `&dyn ProcessPort` through and the call site in `process()` passes `ctx.process`. The dead `git_pull` function is deleted entirely — `sync_marketplace` short-circuits with `let pull_ok = true;` and never calls it (changelog already noted this as a dead-code warning). Drops the `use std::process::Command;` import. Net 3 prod `Command::new("git")` calls deleted, 1 unused function removed, 1 unused import removed. After this PR: `std::process::Command` count in `crates/sentinel-application/src/`: **0**. Total prod IO leaks drop from 6 → 5. Workspace tests: 742 passing.
+
 ### Added
 
 - **`FileSystemPort::canonicalize`** — new method on the port trait with default impl returning `Ok(path.to_path_buf())` (no-op for stubs). The real adapter in `sentinel-infrastructure::filesystem` overrides with `std::fs::canonicalize`. Closes the last `std::fs::canonicalize` site that wasn't already behind a port.
