@@ -47,6 +47,29 @@ pub trait GitStatusPort {
     /// git registry entry — truly stale) from actively-used worktrees
     /// (registered, possibly in another agent session).
     fn list_worktree_names(&self, repo_path: &str) -> Vec<String>;
+
+    /// Resolve `git merge-base HEAD <base_ref>` and return the SHA, or `None`
+    /// if the ref doesn't resolve / merge-base fails. Used by
+    /// `pre_push_steel_test` to find the closest common ancestor against
+    /// candidate base refs (`origin/main`, `@{upstream}`, etc.) so frontend-
+    /// file detection scopes to the branch's own commits.
+    fn merge_base(&self, repo_path: &str, base_ref: &str) -> Option<String>;
+
+    /// Count commits in `<from>..HEAD` (exclusive `from`, inclusive HEAD).
+    /// Returns `None` if the range can't be evaluated (bad ref / not a repo).
+    /// Used by `pre_push_steel_test` to pick the merge-base candidate whose
+    /// distance from HEAD is shortest (most-recent common ancestor).
+    fn rev_list_count(&self, repo_path: &str, from: &str) -> Option<u32>;
+
+    /// Run `git diff --name-only <range>` and return the changed file paths.
+    /// `range` is the diff spec — `"HEAD"`, `"--cached"`, `"main..HEAD"`,
+    /// `"<sha>..HEAD"`, etc. Returns `None` on git failure (bad ref, not a
+    /// repo, etc.) so callers can distinguish "no diff" from "couldn't ask".
+    ///
+    /// Note: `--cached` is passed as the range string itself; the adapter
+    /// runs `git diff --name-only --cached` in that case. Any string that
+    /// starts with `--` is forwarded as a flag.
+    fn diff_names(&self, repo_path: &str, range: &str) -> Option<Vec<String>>;
 }
 
 // ---------------------------------------------------------------------------

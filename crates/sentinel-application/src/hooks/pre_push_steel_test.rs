@@ -225,37 +225,6 @@ fn repo_has_steel_config(cwd: Option<&str>) -> bool {
     repo_has_steel_config_in(cwd, None)
 }
 
-/// Resolve a merge-base against a base ref, returning the SHA if found.
-fn merge_base(dir: &str, base_ref: &str) -> Option<String> {
-    let out = std::process::Command::new("git")
-        .args(["merge-base", "HEAD", base_ref])
-        .current_dir(dir)
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let sha = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if sha.is_empty() { None } else { Some(sha) }
-}
-
-/// Count commits between `from` and HEAD (exclusive `from`, inclusive HEAD-path).
-/// Returns None if the range can't be evaluated. Used to pick the candidate
-/// base ref that is *most recent* (shortest HEAD-ward distance), so that after
-/// a rebase + force-push, `origin/main` (merge-base = my first commit) beats a
-/// stale `@{upstream}` (merge-base = whatever main was at last push).
-fn distance_from_head(dir: &str, from: &str) -> Option<u32> {
-    let out = std::process::Command::new("git")
-        .args(["rev-list", "--count", &format!("{from}..HEAD")])
-        .current_dir(dir)
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    String::from_utf8_lossy(&out.stdout).trim().parse().ok()
-}
-
 /// Check if the git diff (staged or branch) includes frontend file changes.
 /// Uses the working directory from the hook input.
 ///
@@ -271,7 +240,7 @@ fn distance_from_head(dir: &str, from: &str) -> Option<u32> {
 /// still points at the pre-rebase remote SHA; its merge-base with HEAD is far
 /// older than `origin/main`'s. Preferring the nearer base correctly scopes the
 /// diff to only the commits that are truly "new" on this branch vs. main.
-fn diff_has_frontend_files(cwd: Option<&str>) -> bool {
+fn diff_has_frontend_files(git: &dyn super::GitStatusPort, cwd: Option<&str>) -> bool {
     let dir = cwd.unwrap_or(".");
 
     // Candidate base refs. We evaluate ALL of them and pick the one whose
@@ -287,8 +256,8 @@ fn diff_has_frontend_files(cwd: Option<&str>) -> bool {
     let best_base = candidates
         .iter()
         .filter_map(|r| {
-            let base = merge_base(dir, r)?;
-            let distance = distance_from_head(dir, &base)?;
+            let base = git.merge_base(dir, r)?;
+            let distance = git.rev_list_count(dir, &base)?;
             Some((distance, base))
         })
         // Smallest distance = most recent common ancestor = tightest scope.
@@ -300,18 +269,13 @@ fn diff_has_frontend_files(cwd: Option<&str>) -> bool {
         return false;
     };
 
-    let output = std::process::Command::new("git")
-        .args(["diff", "--name-only", &format!("{base}..HEAD")])
-        .current_dir(dir)
-        .output();
-
-    let file_list = match output {
-        Ok(ref o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
-        _ => return false,
+    let files = match git.diff_names(dir, &format!("{base}..HEAD")) {
+        Some(f) => f,
+        None => return false,
     };
 
-    file_list
-        .lines()
+    files
+        .iter()
         .any(|line| FRONTEND_EXTENSIONS.iter().any(|ext| line.ends_with(ext)))
 }
 
@@ -373,7 +337,7 @@ pub fn process_post_tool(input: &HookInput, _ctx: &super::HookContext<'_>) -> Ho
 }
 
 /// Process a pre-push Steel test hook event (PreToolUse)
-pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
+pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
     // Only act on Bash tool calls
     let tool = match &input.tool_name {
         Some(name) if name == "Bash" => name.as_str(),
@@ -406,7 +370,7 @@ pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
     }
 
     // Check if the diff includes frontend files
-    if !diff_has_frontend_files(cwd) {
+    if !diff_has_frontend_files(ctx.git, cwd) {
         // Backend-only change — no Steel test needed
         return HookOutput::allow();
     }
@@ -615,8 +579,49 @@ mod tests {
     fn test_diff_has_frontend_files_non_git_dir() {
         // Non-git directory should return false (allow push)
         let tmpdir = tempfile::tempdir().unwrap();
-        let result = diff_has_frontend_files(Some(tmpdir.path().to_str().unwrap()));
+        let result = diff_has_frontend_files(&RealTestGit, Some(tmpdir.path().to_str().unwrap()));
         assert!(!result, "Non-git dir should return false (allow push)");
+    }
+
+    /// Test-only `GitStatusPort` impl that shells out to real git. Tests
+    /// drive `diff_has_frontend_files` against actual repos created in
+    /// `tempfile::tempdir()`, so they need real git resolution. Unrelated
+    /// methods return safe defaults — the tests exercise only the diff path.
+    struct RealTestGit;
+    impl super::super::GitStatusPort for RealTestGit {
+        fn has_uncommitted_changes(&self, _: &str) -> anyhow::Result<bool> { Ok(false) }
+        fn changed_files(&self, _: &str) -> anyhow::Result<Vec<String>> { Ok(vec![]) }
+        fn current_branch(&self, _: &str) -> anyhow::Result<String> { Ok("main".into()) }
+        fn is_worktree(&self, _: &str) -> bool { false }
+        fn has_unpushed_commits(&self, _: &str) -> anyhow::Result<bool> { Ok(false) }
+        fn repo_root(&self, _: &str) -> Option<String> { None }
+        fn list_worktree_names(&self, _: &str) -> Vec<String> { Vec::new() }
+        fn merge_base(&self, repo_path: &str, base_ref: &str) -> Option<String> {
+            let out = std::process::Command::new("git")
+                .args(["merge-base", "HEAD", base_ref])
+                .current_dir(repo_path)
+                .output().ok()?;
+            if !out.status.success() { return None; }
+            let sha = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if sha.is_empty() { None } else { Some(sha) }
+        }
+        fn rev_list_count(&self, repo_path: &str, from: &str) -> Option<u32> {
+            let out = std::process::Command::new("git")
+                .args(["rev-list", "--count", &format!("{from}..HEAD")])
+                .current_dir(repo_path)
+                .output().ok()?;
+            if !out.status.success() { return None; }
+            String::from_utf8_lossy(&out.stdout).trim().parse().ok()
+        }
+        fn diff_names(&self, repo_path: &str, range: &str) -> Option<Vec<String>> {
+            let out = std::process::Command::new("git")
+                .args(["diff", "--name-only", range])
+                .current_dir(repo_path)
+                .output().ok()?;
+            if !out.status.success() { return None; }
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            Some(stdout.lines().filter(|l| !l.is_empty()).map(String::from).collect())
+        }
     }
 
     /// Helper: run `git` in a directory and assert success.
@@ -668,7 +673,7 @@ mod tests {
 
         // With the old `origin/main..HEAD` logic this would see App.tsx and
         // return true. With merge-base, it should see only db.ts.
-        let result = diff_has_frontend_files(Some(repo.to_str().unwrap()));
+        let result = diff_has_frontend_files(&RealTestGit, Some(repo.to_str().unwrap()));
         assert!(
             !result,
             "Backend-only branch should not be flagged as frontend change"
@@ -774,7 +779,7 @@ mod tests {
         // The old "first resolving" logic picks @{upstream} → sees App.tsx →
         // falsely blocks. The fixed "most recent merge-base" logic picks
         // origin/main → sees only backend files → allows.
-        let result = diff_has_frontend_files(Some(repo.to_str().unwrap()));
+        let result = diff_has_frontend_files(&RealTestGit, Some(repo.to_str().unwrap()));
         assert!(
             !result,
             "Rebased backend-only branch must not be flagged because \
@@ -800,7 +805,7 @@ mod tests {
         git(repo, &["commit", "-q", "-m", "ui: new component"]);
 
         assert!(
-            diff_has_frontend_files(Some(repo.to_str().unwrap())),
+            diff_has_frontend_files(&RealTestGit, Some(repo.to_str().unwrap())),
             "Frontend change on own branch should be detected"
         );
     }

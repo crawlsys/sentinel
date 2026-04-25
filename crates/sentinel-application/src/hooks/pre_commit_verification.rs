@@ -257,39 +257,9 @@ const DOCS_ONLY_EXTENSIONS: &[&str] = &[
 ];
 
 /// Trait for running `git diff` — injectable so tests can stub it.
-trait GitDiffRunner {
-    /// Return the list of files changed (staged for commit, unpushed for push),
-    /// or None if the git command failed.
-    fn diff_names(&self, is_commit: bool) -> Option<Vec<String>>;
-}
-
-/// Production runner: shells out to `git`.
-struct RealGitDiff;
-
-impl GitDiffRunner for RealGitDiff {
-    fn diff_names(&self, is_commit: bool) -> Option<Vec<String>> {
-        let output = if is_commit {
-            std::process::Command::new("git")
-                .args(["diff", "--cached", "--name-only"])
-                .output()
-        } else {
-            std::process::Command::new("git")
-                .args(["diff", "--name-only", "origin/HEAD..HEAD"])
-                .output()
-        };
-
-        let output = match output {
-            Ok(o) if o.status.success() => o,
-            _ => return None,
-        };
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        Some(stdout.lines().filter(|l| !l.is_empty()).map(String::from).collect())
-    }
-}
-
 /// Check if a git commit/push only touches non-code files.
 /// Returns true if ALL files have docs-only extensions.
-fn is_docs_only_commit_with(command: &str, runner: &dyn GitDiffRunner) -> bool {
+fn is_docs_only_commit_with(command: &str, git: &dyn super::GitStatusPort, cwd: &str) -> bool {
     let is_commit = command.contains("commit");
     let is_push = command.contains("push");
 
@@ -297,7 +267,10 @@ fn is_docs_only_commit_with(command: &str, runner: &dyn GitDiffRunner) -> bool {
         return false;
     }
 
-    let files = match runner.diff_names(is_commit) {
+    // Staged diff for commits, branch diff for pushes — same ranges as the
+    // legacy `RealGitDiff` impl this replaced.
+    let range = if is_commit { "--cached" } else { "origin/HEAD..HEAD" };
+    let files = match git.diff_names(cwd, range) {
         Some(f) => f,
         None => return false, // Can't determine — don't skip
     };
@@ -321,26 +294,17 @@ fn is_docs_only_commit_with(command: &str, runner: &dyn GitDiffRunner) -> bool {
 pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
     let session_id = input.session_id.as_deref().unwrap_or("unknown");
     let override_path = default_override_path(ctx.fs, session_id);
-    process_with_override(input, &override_path, session_id, ctx.fs)
+    process_with_override(input, &override_path, session_id, ctx.fs, ctx.git)
 }
 
-/// Internal: process with an explicit override file path (for testability).
+/// Internal: process with explicit override path + git port (for testability).
+/// Tests call this directly with a stub `GitStatusPort` for diff determinism.
 fn process_with_override(
     input: &HookInput,
     override_path: &std::path::Path,
     session_id: &str,
     fs: &dyn super::FileSystemPort,
-) -> HookOutput {
-    process_with_override_and_git(input, override_path, session_id, fs, &RealGitDiff)
-}
-
-/// Internal: process with an injectable git-diff runner for test determinism.
-fn process_with_override_and_git(
-    input: &HookInput,
-    override_path: &std::path::Path,
-    session_id: &str,
-    fs: &dyn super::FileSystemPort,
-    git: &dyn GitDiffRunner,
+    git: &dyn super::GitStatusPort,
 ) -> HookOutput {
     // Only act on Bash tool calls
     let tool = match &input.tool_name {
@@ -384,7 +348,8 @@ fn process_with_override_and_git(
 
     // Skip verification for docs-only commits/pushes (markdown, config, YAML, etc.)
     // These files have no tests to run — requiring evidence is nonsensical.
-    if is_docs_only_commit_with(command, git) {
+    let cwd = input.cwd.as_deref().unwrap_or(".");
+    if is_docs_only_commit_with(command, git, cwd) {
         return HookOutput::allow();
     }
 
@@ -505,7 +470,13 @@ mod tests {
             tool_input: Some(serde_json::json!({"command": "git commit -m 'test'"})),
             ..Default::default()
         };
-        let output = process_with_override(&input, &override_path, "test-sess", &crate::hooks::test_support::StubFs);
+        let output = process_with_override(
+            &input,
+            &override_path,
+            "test-sess",
+            &crate::hooks::test_support::StubFs,
+            &crate::hooks::test_support::StubGit,
+        );
         assert_eq!(output.blocked, Some(true));
         assert!(output.reason.as_ref().unwrap().contains("BLOCKED"));
         assert!(output.reason.as_ref().unwrap().contains("Committing"));
@@ -521,14 +492,25 @@ mod tests {
             tool_input: Some(serde_json::json!({"command": "git push origin main"})),
             ..Default::default()
         };
-        // Stub git: pretend there are code files changed (not docs-only)
+        // Stub git: pretend there are code files changed (not docs-only).
+        // Implements GitStatusPort directly — diff_names is the only method
+        // is_docs_only_commit_with reaches; everything else returns defaults.
         struct StubCodeDiff;
-        impl GitDiffRunner for StubCodeDiff {
-            fn diff_names(&self, _is_commit: bool) -> Option<Vec<String>> {
+        impl super::super::GitStatusPort for StubCodeDiff {
+            fn has_uncommitted_changes(&self, _: &str) -> anyhow::Result<bool> { Ok(false) }
+            fn changed_files(&self, _: &str) -> anyhow::Result<Vec<String>> { Ok(vec![]) }
+            fn current_branch(&self, _: &str) -> anyhow::Result<String> { Ok("main".into()) }
+            fn is_worktree(&self, _: &str) -> bool { false }
+            fn has_unpushed_commits(&self, _: &str) -> anyhow::Result<bool> { Ok(false) }
+            fn repo_root(&self, _: &str) -> Option<String> { None }
+            fn list_worktree_names(&self, _: &str) -> Vec<String> { Vec::new() }
+            fn merge_base(&self, _: &str, _: &str) -> Option<String> { None }
+            fn rev_list_count(&self, _: &str, _: &str) -> Option<u32> { None }
+            fn diff_names(&self, _: &str, _: &str) -> Option<Vec<String>> {
                 Some(vec!["src/main.rs".to_string()])
             }
         }
-        let output = process_with_override_and_git(
+        let output = process_with_override(
             &input,
             &override_path,
             "test-sess",
@@ -640,7 +622,13 @@ mod tests {
             tool_input: Some(serde_json::json!({"command": "git commit -m 'override'"})),
             ..Default::default()
         };
-        let output = process_with_override(&input, &override_path, session_id, &real_fs);
+        let output = process_with_override(
+            &input,
+            &override_path,
+            session_id,
+            &real_fs,
+            &crate::hooks::test_support::StubGit,
+        );
         assert!(output.blocked.is_none());
 
         // Verify that a plain `touch` doesn't work
@@ -717,7 +705,13 @@ mod tests {
             tool_input: Some(serde_json::json!({"command": "git commit --amend"})),
             ..Default::default()
         };
-        let output = process_with_override(&input, &override_path, "test-sess", &crate::hooks::test_support::StubFs);
+        let output = process_with_override(
+            &input,
+            &override_path,
+            "test-sess",
+            &crate::hooks::test_support::StubFs,
+            &crate::hooks::test_support::StubGit,
+        );
         assert_eq!(output.blocked, Some(true));
     }
 
@@ -810,13 +804,23 @@ mod tests {
     #[test]
     fn test_is_docs_only_not_commit() {
         // Use an explicit stub so the test doesn't depend on the ambient git repo state.
+        // Reports zero diffed files via GitStatusPort.diff_names.
         struct NoFiles;
-        impl GitDiffRunner for NoFiles {
-            fn diff_names(&self, _is_commit: bool) -> Option<Vec<String>> { Some(vec![]) }
+        impl super::super::GitStatusPort for NoFiles {
+            fn has_uncommitted_changes(&self, _: &str) -> anyhow::Result<bool> { Ok(false) }
+            fn changed_files(&self, _: &str) -> anyhow::Result<Vec<String>> { Ok(vec![]) }
+            fn current_branch(&self, _: &str) -> anyhow::Result<String> { Ok("main".into()) }
+            fn is_worktree(&self, _: &str) -> bool { false }
+            fn has_unpushed_commits(&self, _: &str) -> anyhow::Result<bool> { Ok(false) }
+            fn repo_root(&self, _: &str) -> Option<String> { None }
+            fn list_worktree_names(&self, _: &str) -> Vec<String> { Vec::new() }
+            fn merge_base(&self, _: &str, _: &str) -> Option<String> { None }
+            fn rev_list_count(&self, _: &str, _: &str) -> Option<u32> { None }
+            fn diff_names(&self, _: &str, _: &str) -> Option<Vec<String>> { Some(vec![]) }
         }
         // Non-commit/push commands short-circuit before touching git.
-        assert!(!is_docs_only_commit_with("ls -la", &NoFiles));
+        assert!(!is_docs_only_commit_with("ls -la", &NoFiles, "."));
         // A push with no diff'd files returns false (can't determine → don't skip).
-        assert!(!is_docs_only_commit_with("git push origin main", &NoFiles));
+        assert!(!is_docs_only_commit_with("git push origin main", &NoFiles, "."));
     }
 }
