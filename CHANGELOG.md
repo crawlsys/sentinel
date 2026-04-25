@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Changed
+
+- **`verification_gate` migrated to `FileSystemPort`**: 4 prod-side `std::fs` calls deleted (transcript read, offset file read/write, one-shot reminder removal). `read_offset(fs, session_id)`, `write_offset(fs, session_id, offset)`, `parse_transcript(fs, transcript_path, session_id)` thread `&dyn FileSystemPort` through. The state-clear-after-inject path uses `ctx.fs.remove_file(&path)` (which silently swallows `ErrorKind::NotFound` — matches the previous `let _ = std::fs::remove_file(...)` semantics). Module-level `use std::fs;` dropped; one test still uses `std::fs::remove_file` for setup, qualified inline. Production-side direct-IO count in this file: 0.
+
+- **`skill_router` migrated to `FileSystemPort`**: 7 prod-side calls deleted across 4 helpers — `extract_banner(fs, skill)`, `telemetry_dir(fs)`, `write_telemetry_state(fs, ...)`, `write_routing_entry(fs, ...)`, `is_valid_skill(fs, ...)`, `build_match_output(fs, ...)`, `build_no_match_output(fs)`. The pub `process(input, classifier, fs)` and `build_no_match_output(fs)` API surface change ripples to `crates/sentinel-cli/src/hook_cmd.rs:186,200` — both call sites updated to pass `&real_fs`. Tests updated to inject `crate::hooks::test_support::StubFs` (note: `is_valid_skill` test now confirms only the path-traversal/nonexistent-name cases don't blow up since StubFs.exists returns false; previous test relied on real `~/.claude/skills/` lookup which was always undefined in CI). Production-side direct-IO count in this file: 0.
+
 ### Added
 
 - **`FileSystemPort` extended with `copy`, `remove_file`, `remove_dir`** — new methods needed by the remaining hex-migration tail (session_init's metrics-dir migration, skill_router/verification_gate state-marker cleanup). All three have safe **default impls** on the trait (`Ok(())` no-ops), so the 24 existing test stubs across `crates/sentinel-application/src/hooks/**/*.rs` need zero changes; only the production `RealFileSystem` adapter overrides with real `std::fs::copy` / `remove_file` / `remove_dir`. `remove_file` and `remove_dir` swallow `ErrorKind::NotFound` to support best-effort cleanup of state markers that may not exist yet (matches existing call-site patterns of `let _ = std::fs::remove_file(...)`).
