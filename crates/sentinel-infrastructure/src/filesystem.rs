@@ -65,6 +65,36 @@ impl FileSystemPort for RealFileSystem {
         file.write_all(content)
             .with_context(|| format!("append write {}", path.display()))
     }
+
+    fn copy(&self, src: &Path, dst: &Path) -> Result<()> {
+        if let Some(parent) = dst.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("create_dir_all {}", parent.display()))?;
+        }
+        std::fs::copy(src, dst)
+            .with_context(|| format!("copy {} -> {}", src.display(), dst.display()))?;
+        Ok(())
+    }
+
+    fn remove_file(&self, path: &Path) -> Result<()> {
+        match std::fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            // Treat "not found" as success — callers use this for best-effort
+            // cleanup of state markers that may not exist yet.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(anyhow::Error::new(e)
+                .context(format!("remove_file {}", path.display()))),
+        }
+    }
+
+    fn remove_dir(&self, path: &Path) -> Result<()> {
+        match std::fs::remove_dir(path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(anyhow::Error::new(e)
+                .context(format!("remove_dir {}", path.display()))),
+        }
+    }
 }
 
 #[cfg(test)]

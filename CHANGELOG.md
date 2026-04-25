@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added
+
+- **`FileSystemPort` extended with `copy`, `remove_file`, `remove_dir`** — new methods needed by the remaining hex-migration tail (session_init's metrics-dir migration, skill_router/verification_gate state-marker cleanup). All three have safe **default impls** on the trait (`Ok(())` no-ops), so the 24 existing test stubs across `crates/sentinel-application/src/hooks/**/*.rs` need zero changes; only the production `RealFileSystem` adapter overrides with real `std::fs::copy` / `remove_file` / `remove_dir`. `remove_file` and `remove_dir` swallow `ErrorKind::NotFound` to support best-effort cleanup of state markers that may not exist yet (matches existing call-site patterns of `let _ = std::fs::remove_file(...)`).
+
+### Changed
+
+- **`plan_organizer` migrated to `FileSystemPort`**: 4 prod-side `std::fs` calls + 1 `dirs::home_dir()` deleted. `next_versioned_path(fs, dir, slug)` and `process()` now take `&dyn FileSystemPort`; uses `ctx.fs.home_dir`, `ctx.fs.create_dir_all`, `ctx.fs.read_to_string`, `ctx.fs.write`, `ctx.fs.exists`. Three `next_versioned_path` tests get an inline `RealFs` stub that delegates to `std::fs` for the tempfile-backed checks. Production-side direct-IO count in this file: 0.
+
+- **`doc_cleanup::scan_docs` migrated to `FileSystemPort`**: 2 prod-side `std::fs` calls deleted (was iterating `std::fs::DirEntry` for `file_type` + `file_name` then `std::fs::read_to_string`). Now takes `&dyn FileSystemPort`, iterates `Vec<PathBuf>` from `fs.read_dir`, uses `fs.is_dir` for directory checks and `path.file_name()` for naming. Test module gets an inline `RealTestFs` stub for the 4 `scan_docs` test calls. Drops the `use std::fs;` module-level import. Production-side direct-IO count in this file: 0.
+
 ### Changed
 
 - **`session_init::log_session_start` migrated to `FileSystemPort`**: the SessionStart logger that writes one line to `~/.claude/sentinel/metrics/sessions.jsonl` now takes `&dyn FileSystemPort` and uses `fs.create_dir_all` + `fs.append` instead of `std::fs::create_dir_all` + `std::fs::OpenOptions::new().create(true).append(true).open(...)` + `writeln!`. Process binds `ctx.fs` and threads it through. Net 2 prod-side `std::fs` calls deleted. Bounded change — `claude_dir()`, `user_name()`, `load_user_config()`, and the larger `regenerate_global_claude_md()` API surface all stay on `dirs::home_dir()` for now since they have cross-crate callers (CLI's `claude_md_cmd`, `task_created`/`task_completed` hooks via `catch_unwind` of a fn pointer) — those need their own follow-up migration to thread `fs` through the public API.

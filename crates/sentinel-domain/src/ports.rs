@@ -163,6 +163,35 @@ pub trait FileSystemPort: Send + Sync {
 
     /// Append bytes to a file (creates if needed, does not truncate).
     fn append(&self, path: &Path, content: &[u8]) -> anyhow::Result<()>;
+
+    /// Copy a file from `src` to `dst`. Required for the metrics-dir migration
+    /// in `session_init` (move = copy + remove for cross-device safety).
+    ///
+    /// Default impl: returns Ok(()) without doing anything. Stub adapters in
+    /// tests that exercise the copy path must override; the real adapter in
+    /// `sentinel-infrastructure` overrides with `std::fs::copy`. Default
+    /// exists so the 20+ existing test stubs don't need to change.
+    fn copy(&self, _src: &Path, _dst: &Path) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    /// Remove a single file. No-op if the file doesn't exist; errors only on
+    /// permission failures or unexpected IO errors. Used by hooks that maintain
+    /// short-lived state markers (skill_router, verification_gate, session_init).
+    ///
+    /// Default impl: Ok(()). See `copy` for rationale.
+    fn remove_file(&self, _path: &Path) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    /// Remove an empty directory. Errors if the directory is non-empty —
+    /// callers should clear contents first. Used by `session_init` to prune
+    /// the legacy `~/.claude/metrics/` directory after migrating its contents.
+    ///
+    /// Default impl: Ok(()). See `copy` for rationale.
+    fn remove_dir(&self, _path: &Path) -> anyhow::Result<()> {
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------

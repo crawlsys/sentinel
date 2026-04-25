@@ -10,10 +10,9 @@
 //! can still read and edit it.
 
 use sentinel_domain::events::{HookEvent, HookInput, HookOutput};
-use std::fs;
 use std::path::{Path, PathBuf};
 
-use super::HookContext;
+use super::{FileSystemPort, HookContext};
 
 /// Known project directory names → plan subdirectory mappings.
 /// Falls back to extracting the last path component of `cwd`.
@@ -53,10 +52,10 @@ fn extract_plan_path(tool_result: Option<&serde_json::Value>) -> Option<PathBuf>
 
 /// Find the next available version number for a given slug in the target dir.
 /// Returns the path to write, e.g. `~/.claude/plans/sentinel/{slug}-v3.md`.
-fn next_versioned_path(target_dir: &Path, slug: &str) -> PathBuf {
+fn next_versioned_path(fs: &dyn FileSystemPort, target_dir: &Path, slug: &str) -> PathBuf {
     for n in 1..1000 {
         let candidate = target_dir.join(format!("{slug}-v{n}.md"));
-        if !candidate.exists() {
+        if !fs.exists(&candidate) {
             return candidate;
         }
     }
@@ -66,7 +65,7 @@ fn next_versioned_path(target_dir: &Path, slug: &str) -> PathBuf {
 
 /// Process an ExitPlanMode PostToolUse event.
 /// Copies the plan file into `~/.claude/plans/{project}/{slug}-v{N}.md`.
-pub fn process(input: &HookInput, _ctx: &HookContext<'_>) -> HookOutput {
+pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     // Only fire on ExitPlanMode
     if input.tool_name.as_deref() != Some("ExitPlanMode") {
         return HookOutput::allow();
@@ -92,20 +91,20 @@ pub fn process(input: &HookInput, _ctx: &HookContext<'_>) -> HookOutput {
         .to_string();
 
     // Build target directory
-    let home = match dirs::home_dir() {
+    let home = match ctx.fs.home_dir() {
         Some(h) => h,
         None => return HookOutput::allow(),
     };
     let target_dir = home.join(".claude").join("plans").join(&project);
 
     // Create target dir
-    if let Err(e) = fs::create_dir_all(&target_dir) {
+    if let Err(e) = ctx.fs.create_dir_all(&target_dir) {
         tracing::warn!(error = %e, dir = ?target_dir, "Failed to create plans dir");
         return HookOutput::allow();
     }
 
     // Read the plan content
-    let plan_content = match fs::read_to_string(&plan_path) {
+    let plan_content = match ctx.fs.read_to_string(&plan_path) {
         Ok(c) => c,
         Err(e) => {
             tracing::warn!(error = %e, path = ?plan_path, "Failed to read plan file");
@@ -114,8 +113,8 @@ pub fn process(input: &HookInput, _ctx: &HookContext<'_>) -> HookOutput {
     };
 
     // Write versioned copy
-    let target_path = next_versioned_path(&target_dir, &slug);
-    if let Err(e) = fs::write(&target_path, &plan_content) {
+    let target_path = next_versioned_path(ctx.fs, &target_dir, &slug);
+    if let Err(e) = ctx.fs.write(&target_path, plan_content.as_bytes()) {
         tracing::warn!(error = %e, path = ?target_path, "Failed to write plan copy");
         return HookOutput::allow();
     }
@@ -219,27 +218,53 @@ mod tests {
         assert_eq!(extract_plan_path(Some(&resp)), None);
     }
 
+    /// Real-FS stub for next_versioned_path tests that exercise actual
+    /// tempfile directories. Only needs `exists` to be accurate; defaults
+    /// from FileSystemPort cover the rest.
+    struct RealFs;
+    impl FileSystemPort for RealFs {
+        fn home_dir(&self) -> Option<PathBuf> { dirs::home_dir() }
+        fn read_to_string(&self, p: &Path) -> anyhow::Result<String> {
+            Ok(std::fs::read_to_string(p)?)
+        }
+        fn write(&self, p: &Path, c: &[u8]) -> anyhow::Result<()> {
+            Ok(std::fs::write(p, c)?)
+        }
+        fn create_dir_all(&self, p: &Path) -> anyhow::Result<()> {
+            Ok(std::fs::create_dir_all(p)?)
+        }
+        fn read_dir(&self, p: &Path) -> anyhow::Result<Vec<PathBuf>> {
+            Ok(std::fs::read_dir(p)?.filter_map(|e| e.ok().map(|e| e.path())).collect())
+        }
+        fn exists(&self, p: &Path) -> bool { p.exists() }
+        fn is_dir(&self, p: &Path) -> bool { p.is_dir() }
+        fn metadata(&self, p: &Path) -> anyhow::Result<std::fs::Metadata> {
+            Ok(std::fs::metadata(p)?)
+        }
+        fn append(&self, _: &Path, _: &[u8]) -> anyhow::Result<()> { Ok(()) }
+    }
+
     #[test]
     fn test_next_versioned_path_empty_dir() {
         let tmp = TempDir::new().unwrap();
-        let path = next_versioned_path(tmp.path(), "my-plan");
+        let path = next_versioned_path(&RealFs, tmp.path(), "my-plan");
         assert_eq!(path, tmp.path().join("my-plan-v1.md"));
     }
 
     #[test]
     fn test_next_versioned_path_increments() {
         let tmp = TempDir::new().unwrap();
-        fs::write(tmp.path().join("my-plan-v1.md"), "").unwrap();
-        fs::write(tmp.path().join("my-plan-v2.md"), "").unwrap();
-        let path = next_versioned_path(tmp.path(), "my-plan");
+        std::fs::write(tmp.path().join("my-plan-v1.md"), "").unwrap();
+        std::fs::write(tmp.path().join("my-plan-v2.md"), "").unwrap();
+        let path = next_versioned_path(&RealFs, tmp.path(), "my-plan");
         assert_eq!(path, tmp.path().join("my-plan-v3.md"));
     }
 
     #[test]
     fn test_next_versioned_path_isolated_per_slug() {
         let tmp = TempDir::new().unwrap();
-        fs::write(tmp.path().join("foo-v1.md"), "").unwrap();
-        let path = next_versioned_path(tmp.path(), "bar");
+        std::fs::write(tmp.path().join("foo-v1.md"), "").unwrap();
+        let path = next_versioned_path(&RealFs, tmp.path(), "bar");
         assert_eq!(path, tmp.path().join("bar-v1.md"));
     }
 }

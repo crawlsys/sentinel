@@ -10,7 +10,6 @@
 use regex::Regex;
 use sentinel_domain::constants;
 use sentinel_domain::events::{HookEvent, HookInput, HookOutput};
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -91,12 +90,19 @@ fn write_cooldown(fs: &dyn FileSystemPort) {
 }
 
 /// Recursively scan `dir` for junk `.md` files up to `max_depth`.
-fn scan_docs(dir: &Path, cwd: &Path, depth: usize, max_depth: usize, results: &mut Vec<JunkDoc>) {
+fn scan_docs(
+    fs: &dyn FileSystemPort,
+    dir: &Path,
+    cwd: &Path,
+    depth: usize,
+    max_depth: usize,
+    results: &mut Vec<JunkDoc>,
+) {
     if depth > max_depth {
         return;
     }
 
-    let entries = match fs::read_dir(dir) {
+    let entries = match fs.read_dir(dir) {
         Ok(e) => e,
         Err(_) => return,
     };
@@ -104,20 +110,18 @@ fn scan_docs(dir: &Path, cwd: &Path, depth: usize, max_depth: usize, results: &m
     let todo_re =
         Regex::new(r"(?i)^#.*\n+\s*(TODO|TBD|Coming soon|Add content)").expect("valid regex");
 
-    for entry in entries.flatten() {
-        let file_type = match entry.file_type() {
-            Ok(ft) => ft,
-            Err(_) => continue,
+    for path in entries {
+        let name_buf = match path.file_name() {
+            Some(n) => n.to_owned(),
+            None => continue,
         };
+        let name_str = name_buf.to_string_lossy();
 
-        let name = entry.file_name();
-        let name_str = name.to_string_lossy();
-
-        if file_type.is_dir() {
+        if fs.is_dir(&path) {
             if SKIP_DIRS.contains(&name_str.as_ref()) {
                 continue;
             }
-            scan_docs(&entry.path(), cwd, depth + 1, max_depth, results);
+            scan_docs(fs, &path, cwd, depth + 1, max_depth, results);
             continue;
         }
 
@@ -125,15 +129,14 @@ fn scan_docs(dir: &Path, cwd: &Path, depth: usize, max_depth: usize, results: &m
             continue;
         }
 
-        let content = match fs::read_to_string(entry.path()) {
+        let content = match fs.read_to_string(&path) {
             Ok(c) => c,
             Err(_) => continue,
         };
 
-        let relative = entry
-            .path()
+        let relative = path
             .strip_prefix(cwd)
-            .unwrap_or(&entry.path())
+            .unwrap_or(&path)
             .to_string_lossy()
             .to_string();
 
@@ -184,7 +187,7 @@ pub fn process_stop(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     }
 
     let mut results: Vec<JunkDoc> = Vec::new();
-    scan_docs(cwd, cwd, 0, 3, &mut results);
+    scan_docs(ctx.fs, cwd, cwd, 0, 3, &mut results);
 
     if results.is_empty() {
         // No junk — clear any previous state
@@ -274,6 +277,31 @@ pub fn process_prompt(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+
+    /// Real-FS port impl for tests that exercise actual tempfile directories.
+    struct RealTestFs;
+    impl FileSystemPort for RealTestFs {
+        fn home_dir(&self) -> Option<PathBuf> { dirs::home_dir() }
+        fn read_to_string(&self, p: &Path) -> anyhow::Result<String> {
+            Ok(std::fs::read_to_string(p)?)
+        }
+        fn write(&self, p: &Path, c: &[u8]) -> anyhow::Result<()> {
+            Ok(std::fs::write(p, c)?)
+        }
+        fn create_dir_all(&self, p: &Path) -> anyhow::Result<()> {
+            Ok(std::fs::create_dir_all(p)?)
+        }
+        fn read_dir(&self, p: &Path) -> anyhow::Result<Vec<PathBuf>> {
+            Ok(std::fs::read_dir(p)?.filter_map(|e| e.ok().map(|e| e.path())).collect())
+        }
+        fn exists(&self, p: &Path) -> bool { p.exists() }
+        fn is_dir(&self, p: &Path) -> bool { p.is_dir() }
+        fn metadata(&self, p: &Path) -> anyhow::Result<std::fs::Metadata> {
+            Ok(std::fs::metadata(p)?)
+        }
+        fn append(&self, _: &Path, _: &[u8]) -> anyhow::Result<()> { Ok(()) }
+    }
 
     #[test]
     fn test_empty_dir_no_junk() {
@@ -307,7 +335,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("notes.md"), "# Notes\n\nTODO").unwrap();
         let mut results = Vec::new();
-        scan_docs(dir.path(), dir.path(), 0, 3, &mut results);
+        scan_docs(&RealTestFs, dir.path(), dir.path(), 0, 3, &mut results);
         assert!(!results.is_empty());
         assert!(results[0].reason.contains("empty/stub"));
     }
@@ -321,7 +349,7 @@ mod tests {
         )
         .unwrap();
         let mut results = Vec::new();
-        scan_docs(dir.path(), dir.path(), 0, 3, &mut results);
+        scan_docs(&RealTestFs, dir.path(), dir.path(), 0, 3, &mut results);
         assert!(!results.is_empty());
         assert!(results[0].reason.contains("TODO-only"));
     }
@@ -333,7 +361,7 @@ mod tests {
         fs::create_dir(&nm).unwrap();
         fs::write(nm.join("junk.md"), "").unwrap();
         let mut results = Vec::new();
-        scan_docs(dir.path(), dir.path(), 0, 3, &mut results);
+        scan_docs(&RealTestFs, dir.path(), dir.path(), 0, 3, &mut results);
         assert!(results.is_empty());
     }
 
@@ -344,7 +372,7 @@ mod tests {
         fs::create_dir_all(&deep).unwrap();
         fs::write(deep.join("deep.md"), "").unwrap();
         let mut results = Vec::new();
-        scan_docs(dir.path(), dir.path(), 0, 3, &mut results);
+        scan_docs(&RealTestFs, dir.path(), dir.path(), 0, 3, &mut results);
         assert!(results.is_empty());
     }
 
