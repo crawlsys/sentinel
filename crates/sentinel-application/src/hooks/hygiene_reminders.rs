@@ -179,12 +179,26 @@ pub fn process_prompt(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
         );
     }
 
-    if !state.stale_worktrees.is_empty() {
+    // Re-validate stale worktrees at read time. The state file is written by
+    // the Stop-phase `process()` and read by every UserPromptSubmit; without
+    // this filter, a stale entry persists across many prompts even after the
+    // user (or `ExitWorktree`) has removed the directory, until Stop fires
+    // again. Validating against the live filesystem here makes the hook self-
+    // healing: the reminder disappears the next prompt after cleanup.
+    let worktree_dir = PathBuf::from(&state.repo_root).join(".claude").join("worktrees");
+    let still_stale: Vec<String> = state
+        .stale_worktrees
+        .iter()
+        .filter(|name| ctx.fs.is_dir(&worktree_dir.join(name)))
+        .cloned()
+        .collect();
+
+    if !still_stale.is_empty() {
         reminders.push(format!(
             "[Worktree Cleanup] {} stale worktree(s) found: {}. \
              Clean up with `ExitWorktree(action: \"remove\")` or `git worktree remove`.",
-            state.stale_worktrees.len(),
-            state.stale_worktrees.join(", ")
+            still_stale.len(),
+            still_stale.join(", ")
         ));
     }
 
@@ -274,5 +288,95 @@ mod tests {
         assert!(!is_code_file(&"README.md".to_string()));
         assert!(!is_code_file(&"CHANGELOG.md".to_string()));
         assert!(!is_code_file(&"config.toml".to_string()));
+    }
+
+    /// Regression: process_prompt must drop stale_worktrees entries whose
+    /// directory no longer exists on disk. Before the fix, the hook kept
+    /// re-injecting the reminder on every prompt until the next Stop reran
+    /// `process()` — this could persist across many turns after the user
+    /// (or `ExitWorktree`) had already cleaned up.
+    #[test]
+    fn test_stale_worktrees_filtered_when_dir_removed() {
+        use crate::hooks::FileSystemPort;
+        use std::path::{Path, PathBuf};
+
+        // FS stub that reports `is_dir(...)` = true for `/repo/.claude/worktrees`
+        // (the parent dir, so the reminder code path is reachable) but false
+        // for the `/repo/.claude/worktrees/<name>` child the state names —
+        // i.e. the worktree was removed since state was last written.
+        struct DirGoneFs;
+        impl FileSystemPort for DirGoneFs {
+            fn home_dir(&self) -> Option<PathBuf> { Some(PathBuf::from("/mock/home")) }
+            fn read_to_string(&self, p: &Path) -> anyhow::Result<String> {
+                // Inject the cached state file the hook reads on UserPromptSubmit.
+                let state = ReminderState {
+                    repo_root: "/repo".to_string(),
+                    stale_worktrees: vec!["already-removed".to_string()],
+                    ..Default::default()
+                };
+                if p.to_string_lossy().contains("hygiene-reminders") {
+                    Ok(serde_json::to_string(&state)?)
+                } else {
+                    anyhow::bail!("not found")
+                }
+            }
+            fn write(&self, _: &Path, _: &[u8]) -> anyhow::Result<()> { Ok(()) }
+            fn create_dir_all(&self, _: &Path) -> anyhow::Result<()> { Ok(()) }
+            fn read_dir(&self, _: &Path) -> anyhow::Result<Vec<PathBuf>> { Ok(vec![]) }
+            fn exists(&self, _: &Path) -> bool { true }
+            fn is_dir(&self, p: &Path) -> bool {
+                // Parent worktrees dir exists; the orphan child does not.
+                !p.to_string_lossy().contains("already-removed")
+            }
+            fn metadata(&self, _: &Path) -> anyhow::Result<std::fs::Metadata> {
+                anyhow::bail!("not used in this test")
+            }
+            fn append(&self, _: &Path, _: &[u8]) -> anyhow::Result<()> { Ok(()) }
+        }
+
+        // Stub git that returns `/repo` as the repo_root for any cwd lookup
+        // the hook does. Other methods are unreachable in this code path.
+        struct RepoRootGit;
+        impl crate::hooks::GitStatusPort for RepoRootGit {
+            fn has_uncommitted_changes(&self, _: &str) -> anyhow::Result<bool> { Ok(false) }
+            fn changed_files(&self, _: &str) -> anyhow::Result<Vec<String>> { Ok(vec![]) }
+            fn current_branch(&self, _: &str) -> anyhow::Result<String> { Ok("main".into()) }
+            fn is_worktree(&self, _: &str) -> bool { false }
+            fn has_unpushed_commits(&self, _: &str) -> anyhow::Result<bool> { Ok(false) }
+            fn repo_root(&self, _: &str) -> Option<String> { Some("/repo".into()) }
+            fn list_worktree_names(&self, _: &str) -> Vec<String> { Vec::new() }
+            fn merge_base(&self, _: &str, _: &str) -> Option<String> { None }
+            fn rev_list_count(&self, _: &str, _: &str) -> Option<u32> { None }
+            fn diff_names(&self, _: &str, _: &str) -> Option<Vec<String>> { None }
+        }
+
+        let fs = DirGoneFs;
+        let git = RepoRootGit;
+        let stub_proc = crate::hooks::test_support::StubProcess;
+        let stub_mcp = crate::hooks::test_support::StubMemoryMcp;
+        let ctx = crate::hooks::HookContext {
+            git: &git,
+            vector_store: None,
+            fs: &fs,
+            process: &stub_proc,
+            llm: None,
+            memory_mcp: &stub_mcp,
+        };
+
+        let input = HookInput {
+            cwd: Some("/repo".to_string()),
+            ..Default::default()
+        };
+
+        let output = process_prompt(&input, &ctx);
+        // Reminder must NOT be injected when the named worktree dir is gone.
+        let injected = output.hook_specific_output
+            .as_ref()
+            .and_then(|o| o.additional_context.as_deref())
+            .unwrap_or("");
+        assert!(
+            !injected.contains("Worktree Cleanup"),
+            "stale dir was removed; reminder should not fire. Got: {injected:?}"
+        );
     }
 }
