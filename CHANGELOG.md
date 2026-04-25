@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Changed
+
+- **`session_init::log_session_start` migrated to `FileSystemPort`**: the SessionStart logger that writes one line to `~/.claude/sentinel/metrics/sessions.jsonl` now takes `&dyn FileSystemPort` and uses `fs.create_dir_all` + `fs.append` instead of `std::fs::create_dir_all` + `std::fs::OpenOptions::new().create(true).append(true).open(...)` + `writeln!`. Process binds `ctx.fs` and threads it through. Net 2 prod-side `std::fs` calls deleted. Bounded change — `claude_dir()`, `user_name()`, `load_user_config()`, and the larger `regenerate_global_claude_md()` API surface all stay on `dirs::home_dir()` for now since they have cross-crate callers (CLI's `claude_md_cmd`, `task_created`/`task_completed` hooks via `catch_unwind` of a fn pointer) — those need their own follow-up migration to thread `fs` through the public API.
+
 ### Fixed
 
 - **`hygiene_reminders` — stale-worktree reminder no longer persists across prompts after the directory is removed**: the hook is two-phase — Stop computes `stale_worktrees` against `git worktree list` and writes state to disk; UserPromptSubmit reads state and injects reminders. The bug: once a stale entry was captured in state, the reminder fired on every UserPromptSubmit until the *next* Stop re-ran the detection, even after the user (or `ExitWorktree`) had already cleaned up the directory. In long sessions this produced 20+ false-positive reminders for a directory that had been gone for many turns. Fix: `process_prompt` now re-validates each cached `stale_worktrees` entry against `ctx.fs.is_dir(...)` at read time and drops entries whose directory no longer exists. Hook is now self-healing — the reminder disappears on the very next prompt after cleanup, no Stop required. Regression test `test_stale_worktrees_filtered_when_dir_removed` added: cached state names "already-removed" but `is_dir` returns false for that path, so no reminder injects.

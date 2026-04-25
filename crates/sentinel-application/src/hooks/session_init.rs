@@ -99,7 +99,7 @@ pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
     let claude_dir = claude_dir();
 
     // 1. Log session start
-    log_session_start(&claude_dir, session_id, cwd);
+    log_session_start(ctx.fs, &claude_dir, session_id, cwd);
 
     // 1.5. One-time migration: move ~/.claude/metrics/ → ~/.claude/sentinel/metrics/
     migrate_metrics_dir(&claude_dir);
@@ -236,9 +236,14 @@ fn claude_dir() -> PathBuf {
 }
 
 /// Log session start to metrics/sessions.jsonl
-fn log_session_start(claude_dir: &Path, session_id: &str, cwd: &str) {
+fn log_session_start(
+    fs: &dyn super::FileSystemPort,
+    claude_dir: &Path,
+    session_id: &str,
+    cwd: &str,
+) {
     let metrics_dir = claude_dir.join("sentinel").join("metrics");
-    let _ = fs::create_dir_all(&metrics_dir);
+    let _ = fs.create_dir_all(&metrics_dir);
 
     let timestamp = chrono::Utc::now().to_rfc3339();
     let platform = std::env::consts::OS;
@@ -252,11 +257,8 @@ fn log_session_start(claude_dir: &Path, session_id: &str, cwd: &str) {
     });
 
     let sessions_file = metrics_dir.join("sessions.jsonl");
-    let _ = fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&sessions_file)
-        .and_then(|mut f| writeln!(f, "{}", entry));
+    let line = format!("{entry}\n");
+    let _ = fs.append(&sessions_file, line.as_bytes());
 }
 
 /// One-time migration: move `~/.claude/metrics/*` → `~/.claude/sentinel/metrics/`.
