@@ -92,7 +92,7 @@ const SYNC_DIRS_RECURSIVE: &[&str] = &[];
 const MIN_SKILL_DIRS: usize = sentinel_domain::constants::MIN_SKILL_DIRS;
 
 /// Process SessionStart event
-pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
+pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
     let session_id = input.session_id.as_deref().unwrap_or("unknown");
     let cwd = input.cwd.as_deref().unwrap_or(".");
 
@@ -144,7 +144,7 @@ pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
     let init_result: Option<sentinel_domain::project::InitResult> = None;
 
     // 6.5. Background Qdrant memory sync — catches files missed between sessions
-    spawn_qdrant_sync();
+    spawn_qdrant_sync(ctx.process);
 
     // 7. Build startup context
     let context =
@@ -345,7 +345,7 @@ fn is_marketplace_repo(dir: &Path) -> bool {
 /// Spawn a background Qdrant memory sync.
 /// Runs `qdrant sync` in a detached process so it doesn't block session startup.
 /// This catches any memory files written between sessions that the Stop hook missed.
-fn spawn_qdrant_sync() {
+fn spawn_qdrant_sync(process: &dyn super::ProcessPort) {
     // Check if qdrant CLI exists
     let qdrant_bin = which_qdrant();
     let Some(bin) = qdrant_bin else {
@@ -354,13 +354,9 @@ fn spawn_qdrant_sync() {
     };
 
     // Fire and forget — don't block startup
-    match std::process::Command::new(bin)
-        .arg("sync")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-    {
-        Ok(_) => tracing::debug!("Spawned background qdrant sync"),
+    let bin_str = bin.to_string_lossy().to_string();
+    match process.spawn_detached(&bin_str, &["sync"]) {
+        Ok(()) => tracing::debug!("Spawned background qdrant sync"),
         Err(e) => tracing::debug!(error = %e, "Failed to spawn qdrant sync"),
     }
 }

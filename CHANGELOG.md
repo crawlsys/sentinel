@@ -8,6 +8,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
+- **`GitStatusPort` extended with `merge_base`, `rev_list_count`, `diff_names`** to absorb the last 5 prod-side `std::process::Command::new("git")` sites. Implemented on `RealGit` in `sentinel-infrastructure::git` (uses the same `git` invocations the inlined helpers used). All 5 stub `GitStatusPort` impls (`mod::test_support::StubGit`, `git_hygiene::StubGit`, `git_hygiene::PathAwareStubGit`, `commit_hygiene::TestGit`, `stop_failure::StubGit`) updated with `None`-returning defaults for the new methods.
+
+### Changed
+
+- **`pre_commit_verification` deletes the redundant `GitDiffRunner` trait + `RealGitDiff` impl, routes diffs through `GitStatusPort.diff_names`**: `is_docs_only_commit_with(command, git, cwd)` now takes `&dyn GitStatusPort` and a cwd. The internal `process_with_override_and_git` helper (which only existed to inject a `GitDiffRunner` stub) collapses into `process_with_override` taking a `git: &dyn GitStatusPort` parameter — one fewer layer of indirection. Test stubs `StubCodeDiff` and `NoFiles` re-implemented as `GitStatusPort` impls. Net 2 prod-side `Command::new("git")` calls deleted + 1 trait + 1 prod struct removed.
+
+- **`pre_push_steel_test` `merge_base` / `distance_from_head` / `diff_has_frontend_files` rewired through `GitStatusPort`**: the three local helpers (`merge_base(dir, ref)`, `distance_from_head(dir, from)`, and the `git diff --name-only <range>` invocation inside `diff_has_frontend_files`) replaced by `git.merge_base`, `git.rev_list_count`, `git.diff_names`. `diff_has_frontend_files` now takes `&dyn GitStatusPort` as its first parameter; `process` is wired to pass `ctx.git`. Tests get a `RealTestGit` impl that shells out to real git — needed because they exercise actual repos created in `tempfile::tempdir()`. Net 3 prod-side `Command::new("git")` calls deleted, 2 helper functions removed.
+
+- **`session_init` qdrant binary spawn migrated to `ProcessPort.spawn_detached`**: `spawn_qdrant_sync(process)` now takes `&dyn ProcessPort` and calls `process.spawn_detached(&qdrant_bin, &["sync"])` instead of `Command::new(bin).arg("sync").stdout(Null).stderr(Null).spawn()`. Hook signature changes `_ctx` → `ctx`. Net 1 prod-side `Command::new` deleted.
+
+After this batch: production-side `Command::new("git" | bin)` count in `crates/sentinel-application/src/` (excluding tests) is **0**.
+
+### Added
+
 - **`MemoryMcpPort` domain port + `MemoryMcpClient` adapter impl**: new domain port in `sentinel_domain::ports` exposing a generic `call_tool(name, args) -> JSON` surface for the Memory engine MCP server. Implemented on the existing `sentinel_infrastructure::memory_mcp_client::MemoryMcpClient` (no logic change — it just wraps the inherent `call_tool` method that already does the MCP handshake). Wired into `HookContext` as `memory_mcp: &dyn MemoryMcpPort`, always present, constructed at the composition root from `MemoryMcpClient::from_env()`. `extract_tool_payload` upgraded to read `result.structuredContent` (preferred) before falling back to `result.content[0].text`, matching what the inlined transports were doing.
 
 ### Changed

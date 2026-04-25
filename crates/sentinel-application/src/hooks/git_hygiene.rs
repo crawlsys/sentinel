@@ -201,6 +201,9 @@ mod tests {
         fn list_worktree_names(&self, _: &str) -> Vec<String> {
             Vec::new()
         }
+        fn merge_base(&self, _: &str, _: &str) -> Option<String> { None }
+        fn rev_list_count(&self, _: &str, _: &str) -> Option<u32> { None }
+        fn diff_names(&self, _: &str, _: &str) -> Option<Vec<String>> { None }
     }
 
     /// Stub that returns a different branch (+ worktree status + repo_root)
@@ -244,6 +247,9 @@ mod tests {
         fn list_worktree_names(&self, _: &str) -> Vec<String> {
             Vec::new()
         }
+        fn merge_base(&self, _: &str, _: &str) -> Option<String> { None }
+        fn rev_list_count(&self, _: &str, _: &str) -> Option<u32> { None }
+        fn diff_names(&self, _: &str, _: &str) -> Option<Vec<String>> { None }
     }
 
     /// Regression: session cwd is the primary repo on main, but the edit

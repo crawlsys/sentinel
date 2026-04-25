@@ -470,6 +470,9 @@ mod tests {
         fn has_unpushed_commits(&self, _: &str) -> anyhow::Result<bool> { Ok(false) }
         fn repo_root(&self, _: &str) -> Option<String> { None }
         fn list_worktree_names(&self, _: &str) -> Vec<String> { Vec::new() }
+        fn merge_base(&self, _: &str, _: &str) -> Option<String> { None }
+        fn rev_list_count(&self, _: &str, _: &str) -> Option<u32> { None }
+        fn diff_names(&self, _: &str, _: &str) -> Option<Vec<String>> { None }
     }
 
     enum TestProcessResult {
