@@ -1,45 +1,26 @@
 //! Session Index Hook — index session transcript to Qdrant on PreCompact
 //!
 //! Fires on PreCompact. Reads the session transcript JSONL, chunks it into
-//! user+assistant exchanges, and upserts each chunk to Qdrant Cloud's
+//! user+assistant exchanges, and upserts each chunk to the Qdrant
 //! `claude-sessions` collection. This makes full conversation history
 //! semantically searchable across sessions.
 //!
-//! Uses raw reqwest (not MCP tools — hooks can't call MCP tools).
-//! Same pattern as memory_inject.rs / memory_extract.rs.
+//! Uses `VectorStorePort` + `FileSystemPort` — hooks must not call MCP
+//! tools or touch `std::fs`/`reqwest` directly.
 
 use sentinel_domain::constants;
 use sentinel_domain::events::{HookInput, HookOutput};
+use sentinel_domain::ports::VectorPoint;
 use sha2::{Digest, Sha256};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tracing::{debug, info, warn};
 
-// ---------------------------------------------------------------------------
-// Qdrant config (mirrors memory_inject.rs)
-// ---------------------------------------------------------------------------
+use super::{FileSystemPort, HookContext};
 
-#[derive(serde::Deserialize)]
-struct QdrantConfig {
-    cluster_url: String,
-    api_key: String,
-    #[serde(default = "default_model")]
-    model: String,
-}
-
-fn default_model() -> String {
-    "sentence-transformers/all-MiniLM-L6-v2".to_string()
-}
-
-fn load_config() -> Option<QdrantConfig> {
-    let path = dirs::home_dir()?.join(".qdrant").join("config.json");
-    let content = std::fs::read_to_string(&path).ok()?;
-    serde_json::from_str(&content).ok()
-}
-
-/// Collection name for session data (NOT claude-memory)
+/// Collection name for session data (NOT claude-memory).
 const COLLECTION: &str = "claude-sessions";
 
-/// Minimum combined content length for a chunk to be worth indexing
+/// Minimum combined content length for a chunk to be worth indexing.
 const MIN_CHUNK_CHARS: usize = constants::MIN_CHUNK_CHARS;
 
 // ---------------------------------------------------------------------------
@@ -194,9 +175,9 @@ fn extract_files(content: &serde_json::Value) -> Vec<String> {
     files
 }
 
-/// Parse a transcript JSONL file into exchanges
-fn parse_transcript(path: &str) -> Vec<Exchange> {
-    let content = match std::fs::read_to_string(path) {
+/// Parse a transcript JSONL file into exchanges using the injected filesystem port.
+fn parse_transcript(fs: &dyn FileSystemPort, path: &str) -> Vec<Exchange> {
+    let content = match fs.read_to_string(Path::new(path)) {
         Ok(c) => c,
         Err(e) => {
             warn!(path, error = %e, "Failed to read transcript");
@@ -291,123 +272,49 @@ fn parse_transcript(path: &str) -> Vec<Exchange> {
 }
 
 // ---------------------------------------------------------------------------
-// Qdrant upsert — batch upsert exchanges
+// Build VectorPoint batch from exchanges
 // ---------------------------------------------------------------------------
 
-fn upsert_exchanges(
-    config: &QdrantConfig,
+fn build_points(
     exchanges: &[Exchange],
     session_id: &str,
     project: &str,
     proj_hash: &str,
-) -> usize {
-    if exchanges.is_empty() {
-        return 0;
-    }
+) -> Vec<VectorPoint> {
+    let now = chrono::Utc::now().to_rfc3339();
 
-    super::run_async(async {
-        let client = match reqwest::Client::builder()
-            .timeout(constants::API_CALL_TIMEOUT_LONG)
-            .build()
-        {
-            Ok(c) => c,
-            Err(_) => return 0,
-        };
+    exchanges
+        .iter()
+        .enumerate()
+        .filter(|(_, ex)| ex.is_substantive())
+        .map(|(i, ex)| {
+            let id = content_to_uuid(session_id, i);
+            let content = ex.combined_content();
 
-        let url = format!(
-            "{}/collections/{}/points?wait=true",
-            config.cluster_url, COLLECTION
-        );
+            // Truncate content for embedding (model has token limits)
+            let embed_text = if content.len() > 2000 {
+                format!("{}...", &content[..1997])
+            } else {
+                content.clone()
+            };
 
-        let now = chrono::Utc::now().to_rfc3339();
-
-        // Build points array — one per exchange
-        let points: Vec<serde_json::Value> = exchanges
-            .iter()
-            .enumerate()
-            .filter(|(_, ex)| ex.is_substantive())
-            .map(|(i, ex)| {
-                let id = content_to_uuid(session_id, i);
-                let content = ex.combined_content();
-
-                // Truncate content for embedding (model has token limits)
-                let embed_text = if content.len() > 2000 {
-                    format!("{}...", &content[..1997])
-                } else {
-                    content.clone()
-                };
-
-                serde_json::json!({
-                    "id": id,
-                    "vector": {
-                        "text-dense": {
-                            "text": embed_text,
-                            "model": config.model
-                        }
-                    },
-                    "payload": {
-                        "session_id": session_id,
-                        "project": project,
-                        "project_hash": proj_hash,
-                        "timestamp": now,
-                        "chunk_type": "exchange",
-                        "chunk_index": i,
-                        "tool_names": ex.tool_names,
-                        "files_touched": ex.files_touched,
-                        "content": content
-                    }
-                })
-            })
-            .collect();
-
-        if points.is_empty() {
-            return 0;
-        }
-
-        let total = points.len();
-
-        // Batch in groups of 20 to avoid oversized requests
-        let mut upserted = 0;
-        for batch in points.chunks(20) {
-            let body = serde_json::json!({ "points": batch });
-
-            match client
-                .put(&url)
-                .header("api-key", &config.api_key)
-                .header("Content-Type", "application/json")
-                .json(&body)
-                .send()
-                .await
-            {
-                Ok(resp) if resp.status().is_success() => {
-                    upserted += batch.len();
-                }
-                Ok(resp) => {
-                    let status = resp.status();
-                    let body_text = resp.text().await.unwrap_or_default();
-                    warn!(
-                        status = %status,
-                        body = %body_text,
-                        "Qdrant upsert returned non-success"
-                    );
-                }
-                Err(e) => {
-                    warn!(error = %e, "Qdrant upsert request failed");
-                }
+            VectorPoint {
+                id,
+                text: embed_text,
+                payload: serde_json::json!({
+                    "session_id": session_id,
+                    "project": project,
+                    "project_hash": proj_hash,
+                    "timestamp": now,
+                    "chunk_type": "exchange",
+                    "chunk_index": i,
+                    "tool_names": ex.tool_names,
+                    "files_touched": ex.files_touched,
+                    "content": content,
+                }),
             }
-        }
-
-        if upserted > 0 {
-            info!(
-                upserted,
-                total,
-                session = session_id,
-                "Session chunks indexed to Qdrant"
-            );
-        }
-
-        upserted
-    })
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -415,7 +322,7 @@ fn upsert_exchanges(
 // ---------------------------------------------------------------------------
 
 /// Process PreCompact — read transcript, chunk into exchanges, upsert to Qdrant.
-pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
+pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     let session_id = match input.session_id.as_deref() {
         Some(id) if !id.is_empty() => id,
         _ => {
@@ -432,17 +339,17 @@ pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
         }
     };
 
-    // Verify transcript file exists
-    if !PathBuf::from(transcript_path).exists() {
+    // Verify transcript file exists (via FileSystemPort)
+    if !ctx.fs.exists(&PathBuf::from(transcript_path)) {
         debug!(path = transcript_path, "Transcript file not found");
         return HookOutput::allow();
     }
 
-    // Load Qdrant config
-    let config = match load_config() {
-        Some(c) => c,
+    // Require vector store to be configured
+    let vector_store = match ctx.vector_store {
+        Some(vs) => vs,
         None => {
-            debug!("No Qdrant config found — skipping session index");
+            debug!("No Qdrant vector store configured — skipping session index");
             return HookOutput::allow();
         }
     };
@@ -452,7 +359,7 @@ pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
     let proj_hash = project_hash(cwd);
 
     // Parse transcript into exchanges
-    let exchanges = parse_transcript(transcript_path);
+    let exchanges = parse_transcript(ctx.fs, transcript_path);
     if exchanges.is_empty() {
         debug!("No exchanges found in transcript");
         return HookOutput::allow();
@@ -465,16 +372,32 @@ pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
         "Parsed exchanges from transcript"
     );
 
-    // Upsert to Qdrant
-    let upserted = upsert_exchanges(&config, &exchanges, session_id, &project, &proj_hash);
+    let points = build_points(&exchanges, session_id, &project, &proj_hash);
+    if points.is_empty() {
+        debug!("No substantive exchanges to upsert");
+        return HookOutput::allow();
+    }
 
-    info!(
-        upserted,
-        total = total_exchanges,
-        session = session_id,
-        project = project,
-        "Session index complete"
-    );
+    let upserted = points.len();
+    let ok = super::run_async(async {
+        match vector_store.upsert_points(COLLECTION, points).await {
+            Ok(()) => true,
+            Err(e) => {
+                warn!(error = %e, "Session index upsert failed");
+                false
+            }
+        }
+    });
+
+    if ok {
+        info!(
+            upserted,
+            total = total_exchanges,
+            session = session_id,
+            project = project,
+            "Session index complete"
+        );
+    }
 
     // Never block — this is observational
     HookOutput::allow()
@@ -587,7 +510,8 @@ mod tests {
     #[test]
     fn test_process_no_session() {
         let input = HookInput::default();
-        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
+        let ctx = crate::hooks::test_support::stub_ctx();
+        let output = process(&input, &ctx);
         assert!(output.blocked.is_none());
     }
 
@@ -598,7 +522,8 @@ mod tests {
             cwd: Some(".".to_string()),
             ..Default::default()
         };
-        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
+        let ctx = crate::hooks::test_support::stub_ctx();
+        let output = process(&input, &ctx);
         assert!(output.blocked.is_none());
     }
 
@@ -610,29 +535,64 @@ mod tests {
             cwd: Some(".".to_string()),
             ..Default::default()
         };
-        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
+        let ctx = crate::hooks::test_support::stub_ctx();
+        let output = process(&input, &ctx);
         assert!(output.blocked.is_none());
     }
 
     #[test]
     fn test_parse_transcript_empty() {
-        let exchanges = parse_transcript("/nonexistent/path");
+        let fs = crate::hooks::test_support::StubFs;
+        let exchanges = parse_transcript(&fs, "/nonexistent/path");
         assert!(exchanges.is_empty());
+    }
+
+    /// In-memory FileSystemPort that returns a preloaded string from read_to_string.
+    #[cfg(test)]
+    struct InMemoryFs(String);
+
+    #[cfg(test)]
+    impl FileSystemPort for InMemoryFs {
+        fn home_dir(&self) -> Option<PathBuf> {
+            Some(PathBuf::from("/mock/home"))
+        }
+        fn read_to_string(&self, _path: &Path) -> anyhow::Result<String> {
+            Ok(self.0.clone())
+        }
+        fn write(&self, _path: &Path, _content: &[u8]) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn create_dir_all(&self, _path: &Path) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn read_dir(&self, _path: &Path) -> anyhow::Result<Vec<PathBuf>> {
+            Ok(vec![])
+        }
+        fn exists(&self, _path: &Path) -> bool {
+            true
+        }
+        fn is_dir(&self, _path: &Path) -> bool {
+            false
+        }
+        fn metadata(&self, _path: &Path) -> anyhow::Result<std::fs::Metadata> {
+            anyhow::bail!("no metadata in stub")
+        }
+        fn append(&self, _path: &Path, _content: &[u8]) -> anyhow::Result<()> {
+            Ok(())
+        }
     }
 
     #[test]
     fn test_parse_transcript_valid() {
-        // Create a temp file with JSONL content
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("test.jsonl");
         let content = r#"{"type":"human","message":{"content":"Hello"}}
 {"type":"assistant","message":{"content":"Hi there! How can I help?"}}
 {"type":"human","message":{"content":"Explain ownership"}}
 {"type":"assistant","message":{"content":[{"type":"text","text":"Ownership is a key concept in Rust."},{"type":"tool_use","name":"Read","input":{"file_path":"/src/main.rs"}}]}}
-"#;
-        std::fs::write(&path, content).unwrap();
+"#
+        .to_string();
+        let fs = InMemoryFs(content);
 
-        let exchanges = parse_transcript(path.to_str().unwrap());
+        let exchanges = parse_transcript(&fs, "/any/path.jsonl");
         assert_eq!(exchanges.len(), 2);
         assert_eq!(exchanges[0].user_text, "Hello");
         assert!(exchanges[0].assistant_text.contains("Hi there"));
