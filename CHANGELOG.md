@@ -8,6 +8,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Changed
 
+- **`memory_verify` hook migrated to hex ports**: the SessionStart hook that re-verifies stored memory claims against Qdrant on a 24h cooldown no longer constructs its own Qdrant HTTP calls and no longer reads `~/.qdrant/config.json` via `dirs::home_dir` + `std::fs::read_to_string`. `scroll_unverified` now calls `ctx.vector_store.scroll(COLLECTION, None, 100)`; `update_payload` routes through `ctx.vector_store.set_payload`; cooldown read/write + claim file-existence checks (including `~/` expansion) all go through `ctx.fs`. Deletes the local `QdrantConfig` struct + `load_qdrant_config` helper. Intentionally kept: the `reqwest::Client` used to call the Anthropic Messages API in `extract_claims_claude` — that's an LLM call, not a Qdrant op, so `VectorStorePort` doesn't cover it; direct reqwest stays until an `LlmPort` is introduced. Production-side direct-IO count: `std::fs::=0, reqwest::=2 (Anthropic), dirs::=0`. Net −64 lines. All 594 sentinel-application tests pass (this hook has no dedicated unit tests; full suite covers regressions).
+
+### Changed
+
 - **`memory_feedback` hook migrated to hex ports**: the Stop hook that tracks used/corrected memory injections no longer builds its own `reqwest::Client` for the Qdrant `access_count` boost, nor calls `std::fs::create_dir_all` + `OpenOptions::append` for the corrections log, nor reads Qdrant config from `~/.qdrant/config.json` via `dirs::home_dir` + `std::fs::read_to_string`. `boost_memory` now routes through `ctx.vector_store.get_points` + `.set_payload`; `log_correction` uses `ctx.fs.create_dir_all` + `ctx.fs.append`; the state-file read goes through `ctx.fs`. Deletes the local `QdrantConfig` struct and `load_config` helper — Qdrant config lives entirely in the infrastructure adapter. Production-side direct-IO count in this file: `std::fs::=0, reqwest::=0, dirs::=0`. All 11 memory_feedback unit tests continue to pass.
 
 ### Fixed
