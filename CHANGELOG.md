@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Changed
+
+- **PR10 — `SessionId` value object gains validating smart constructor; duplicated `sanitize_session_id` deleted**: closes the highest-leverage P1 finding from the deeper DDD audit. Three changes:
+  1. **`SessionId::try_new(impl Into<String>) -> Result<SessionId, SessionIdError>`** added to `sentinel-domain::session`. Validates non-empty, ≤128 chars, no `..` (path-traversal), and ASCII alphanumeric/`-`/`_` only — the same four rules previously duplicated in `state_store::sanitize_session_id` and `proof_store::sanitize_session_id`. Plus `SessionId::validate(&str) -> Result<(), SessionIdError>` for the no-allocation case used by infrastructure wrappers, and `SessionId::new_unchecked(...)` for reconstituting from already-validated persistent state. **Removed**: the previous infallible `From<String>` / `From<&str>` impls (they sidestepped validation and made `SessionId::new("../../etc/passwd")` compile).
+  2. **`SessionIdError`** enum with four variants (`Empty`, `TooLong { len }`, `PathTraversal`, `UnsafeCharacter`) and manual `Display` + `std::error::Error` impls — no thiserror in domain.
+  3. **`state_store::sanitize_session_id` and `proof_store::sanitize_session_id`** now both delegate to `SessionId::validate(...)` in two lines each. ~40 LOC of byte-for-byte-duplicated validation deleted. The legacy `anyhow::Result<()>` return type is preserved so all 8 existing call sites continue to work without changes.
+  - **Why this matters (Attack #121)**: the previous design ran the same regex/char-class check in two places. A future change that loosened one validator would have silently widened the attack surface for path traversal in the other. The validation now lives at the type-system boundary — any `SessionId` value has passed *the canonical* check, and `try_new` is the only construction path that doesn't require explicitly-marked `unchecked` calls.
+  - **Documented serde gotcha**: derived `Deserialize` is infallible and bypasses `try_new` — a regression test (`serde_deserializes_invalid_string_into_session_id`) pins this behaviour and points readers at re-validating after deserializing untrusted input.
+  - Tests: 744 passing (was 739; +5 new SessionId validation tests).
+
 ### Removed
 
 - **PR7 — clippy warnings sweep**: zeroes out the 9 lingering build warnings that had accumulated.

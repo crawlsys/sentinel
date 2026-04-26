@@ -44,26 +44,16 @@ fn proof_dir() -> PathBuf {
         .join("proofs")
 }
 
-/// Validate session ID for safe filesystem use (mirrors `state_store::sanitize_session_id`).
-/// **Attack #121 fix**: Without this, `session_id = "../../etc/passwd"` writes proof
-/// files outside the intended directory via path traversal.
+/// Validate session ID for safe filesystem use.
+///
+/// Delegates to `sentinel_domain::SessionId::validate` — the validation rules
+/// live in the domain layer; this wrapper preserves the legacy
+/// `anyhow::Result<()>` return type for existing call sites.
+///
+/// **Attack #121 fix**: Without this, `session_id = "../../etc/passwd"` writes
+/// proof files outside the intended directory via path traversal.
 fn sanitize_session_id(session_id: &str) -> Result<()> {
-    if session_id.is_empty() {
-        anyhow::bail!("Session ID is empty");
-    }
-    if session_id.len() > 128 {
-        anyhow::bail!("Session ID too long (max 128 chars): {}", session_id.len());
-    }
-    if session_id.contains("..") {
-        anyhow::bail!("Session ID contains path traversal: '{session_id}'");
-    }
-    if !session_id
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-    {
-        anyhow::bail!("Session ID contains unsafe characters: '{session_id}'");
-    }
-    Ok(())
+    sentinel_domain::SessionId::validate(session_id).map_err(|e| anyhow::anyhow!("{e}"))
 }
 
 /// Append a proof to the session's proof file (JSONL format)

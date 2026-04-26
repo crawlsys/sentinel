@@ -48,28 +48,18 @@ type HmacSha256 = Hmac<Sha256>;
 /// **Attack #43**: Without this, `session_id = "../../.bashrc"` writes outside
 /// the state directory via path traversal.
 /// Validate session ID for safe filesystem use.
-/// **Attack #121 fix**: Without this, `session_id = "../../etc/passwd"` writes state
-/// files outside the intended directory via path traversal.
-/// **Attack #146 note**: Made public so the daemon API can reuse it for request validation.
+///
+/// Delegates to `sentinel_domain::SessionId::validate` — the validation rules
+/// live in the domain layer (`crates/sentinel-domain/src/session.rs`); this
+/// wrapper preserves the legacy `anyhow::Result<()>` return type so existing
+/// call sites don't need to change.
+///
+/// **Attack #121 fix**: Without this, `session_id = "../../etc/passwd"` writes
+/// state files outside the intended directory via path traversal.
+/// **Attack #146 note**: Public so the daemon API can reuse it for request
+/// validation.
 pub fn sanitize_session_id(session_id: &str) -> Result<()> {
-    if session_id.is_empty() {
-        anyhow::bail!("Session ID is empty");
-    }
-    if session_id.len() > 128 {
-        anyhow::bail!("Session ID too long (max 128 chars): {}", session_id.len());
-    }
-    if session_id.contains("..") {
-        anyhow::bail!("Session ID contains path traversal: '{session_id}'");
-    }
-    if !session_id
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-    {
-        anyhow::bail!(
-            "Session ID contains unsafe characters (only alphanumeric, hyphen, underscore allowed): '{session_id}'"
-        );
-    }
-    Ok(())
+    sentinel_domain::SessionId::validate(session_id).map_err(|e| anyhow::anyhow!("{e}"))
 }
 
 /// State storage directory
