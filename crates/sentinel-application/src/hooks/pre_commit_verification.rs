@@ -208,26 +208,11 @@ fn transcript_has_test_evidence(fs: &dyn super::FileSystemPort, transcript_path:
     false
 }
 
-/// Build configuration files that indicate a repo has a test/build toolchain.
-/// If NONE of these exist in the repo root, the repo is content-only and
-/// verification is skipped entirely (no tests to run).
-const BUILD_CONFIG_FILES: &[&str] = &[
-    "package.json",
-    "Cargo.toml",
-    "pyproject.toml",
-    "setup.py",
-    "setup.cfg",
-    "go.mod",
-    "Makefile",
-    "makefile",
-    "Dockerfile",
-    "pom.xml",
-    "build.gradle",
-    "build.gradle.kts",
-    "Gemfile",
-    "mix.exs",
-    "CMakeLists.txt",
-];
+// `BUILD_CONFIG_MARKERS`, `DOCS_ONLY_EXTENSIONS`, and the `is_docs_only_path`
+// classifier live in `sentinel_domain::repo_kind` — pure rules with no IO.
+// The hook keeps the IO half of `is_content_only_repo` (does file X exist?)
+// and consults the marker list from the domain.
+use sentinel_domain::repo_kind::{is_docs_only_path, BUILD_CONFIG_MARKERS};
 
 /// Check if the current working directory is a content-only repo
 /// (no build config files → no test toolchain → nothing to verify).
@@ -240,21 +225,10 @@ fn is_content_only_repo(cwd: Option<&str>) -> bool {
         },
     };
 
-    !BUILD_CONFIG_FILES
+    !BUILD_CONFIG_MARKERS
         .iter()
         .any(|f| dir.join(f).exists())
 }
-
-/// Non-code file extensions that never require test evidence.
-const DOCS_ONLY_EXTENSIONS: &[&str] = &[
-    ".md", ".mdx", ".txt", ".json", ".yaml", ".yml", ".toml", ".ini", ".cfg",
-    ".conf", ".env", ".env.example", ".editorconfig", ".gitignore", ".gitattributes",
-    ".prettierrc", ".eslintrc", ".dockerignore", ".nvmrc", ".node-version",
-    ".tool-versions", ".ruby-version", ".python-version",
-    ".csv", ".tsv", ".xml", ".svg", ".png", ".jpg", ".jpeg", ".gif", ".ico",
-    ".woff", ".woff2", ".ttf", ".eot", ".otf",
-    "LICENSE", "CHANGELOG", "SECURITY",
-];
 
 /// Trait for running `git diff` — injectable so tests can stub it.
 /// Check if a git commit/push only touches non-code files.
@@ -280,13 +254,8 @@ fn is_docs_only_commit_with(command: &str, git: &dyn super::GitStatusPort, cwd: 
         return false;
     }
 
-    // Check every file against docs-only extensions
-    files.iter().all(|file| {
-        let lower = file.to_lowercase();
-        DOCS_ONLY_EXTENSIONS
-            .iter()
-            .any(|ext| lower.ends_with(&ext.to_lowercase()))
-    })
+    // Check every file against the domain docs-only classifier.
+    files.iter().all(|f| is_docs_only_path(f))
 }
 
 /// Process a pre-commit verification hook event (PreToolUse).
@@ -781,26 +750,24 @@ mod tests {
             ".gitignore", ".editorconfig", "LICENSE",
         ];
         for f in &docs_files {
-            let lower = f.to_lowercase();
             assert!(
-                DOCS_ONLY_EXTENSIONS.iter().any(|ext| lower.ends_with(&ext.to_lowercase())),
-                "Expected '{}' to be recognized as docs-only",
-                f
+                is_docs_only_path(f),
+                "Expected '{f}' to be recognized as docs-only",
             );
         }
 
-        // These should NOT be docs-only
+        // These should NOT be docs-only (`.toml` IS in the list, so it's
+        // an exception we explicitly check).
         let code_files = vec![
             "main.rs", "index.ts", "app.tsx", "server.py", "handler.go",
-            "style.css", "Cargo.toml",  // toml IS in the list, but .rs is not
+            "style.css", "Cargo.toml",
         ];
         for f in &code_files {
-            let lower = f.to_lowercase();
-            let is_docs = DOCS_ONLY_EXTENSIONS.iter().any(|ext| lower.ends_with(&ext.to_lowercase()));
+            let is_docs = is_docs_only_path(f);
             if f.ends_with(".toml") {
                 assert!(is_docs, ".toml should be docs-only");
             } else {
-                assert!(!is_docs, "Expected '{}' to NOT be docs-only", f);
+                assert!(!is_docs, "Expected '{f}' to NOT be docs-only");
             }
         }
     }

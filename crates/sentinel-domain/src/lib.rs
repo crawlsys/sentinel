@@ -11,6 +11,7 @@ pub mod file_kind;
 pub mod mcp_tool;
 pub mod override_phrase;
 pub mod path_safety;
+pub mod repo_kind;
 pub mod dependency;
 pub mod events;
 pub mod interceptor;

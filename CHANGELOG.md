@@ -8,6 +8,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
+- **`sentinel-domain::repo_kind`** — new module owning the rules for repo-shape classification: `BUILD_CONFIG_MARKERS` list (15 build-toolchain marker filenames like `package.json`, `Cargo.toml`, `pyproject.toml`), `DOCS_ONLY_EXTENSIONS` list (40 entries), and the pure helper `is_docs_only_path(&str) -> bool`. 8 unit tests including: typical docs files match, image asset extensions match, bare filenames match as suffix (LICENSE, CHANGELOG, SECURITY), case-insensitive match, code extensions reject, mid-path `.md` rejection (`docs.md/foo.bin`), and a sanity check that pins the existence of the most-common marker filenames so a refactor can't accidentally empty the security boundary.
+
+### Changed
+
+- **PR17 — extract repo-kind classifier from `pre_commit_verification` hook**: closes another P2 logic-placement finding. The hook had two related concerns inline:
+  1. The list of build-config marker filenames (`BUILD_CONFIG_FILES`) — a domain rule about "what makes a repo testable?".
+  2. The list of docs-only extensions (`DOCS_ONLY_EXTENSIONS`) plus the per-file classifier — a domain rule about "what's a non-code change?".
+  Both lists and the `is_docs_only_path` predicate now live in `sentinel_domain::repo_kind`. The hook keeps the IO half of `is_content_only_repo` (does file X exist on disk?) but consults the marker list from the domain. The 22-line inline classifier in `is_docs_only_commit_with` collapses to a single `is_docs_only_path(f)` call.
+  - The duplicated docs-only test in the hook is rewritten to use the domain helper.
+  - Tests: 803 passing (was 795; +8 new domain tests). 0 failing.
+
+### Added
+
 - **`sentinel-domain::mcp_tool`** — new module with `is_dangerous_mcp_tool(&str) -> bool` plus the `SAFE_METHOD_SUFFIXES` (35 entries) and `SAFE_METHOD_PREFIXES` (7 entries) lists. Security-relevant: the fall-through behaviour (unknown suffix → DANGEROUS) is the boundary for MCP tool gating; new MCP servers don't get an automatic bypass. 6 unit tests covering each safe-suffix, each safe-prefix, case-insensitive matching, fail-closed default, defensive handling of malformed names (no `__`, only `mcp__server`).
 - **`sentinel-domain::path_safety`** — new module with `is_safe_name(&str) -> bool` plus the `SAFE_NAME_MAX_LEN = 64` constant. The homoglyph-attack guard (Cyrillic `а` U+0430 vs Latin `a` U+0061) is documented inline. 7 unit tests including specific homoglyph-rejection cases (Cyrillic, Greek, full-width Latin) plus path-traversal char rejection (`/`, `\`, `..`).
 - **`sentinel-domain::file_kind`** — new module with `is_code_file(&str) -> bool` plus the `CODE_EXTENSIONS` list (`rs`, `ts`, `tsx`, `js`, `jsx`, `py`, `go`). Match is case-insensitive (so `Cargo.toml.RS` matches `rs`). 5 unit tests covering each extension, case insensitivity, dot-required boundary (`foors` ≠ `.rs`), nested paths (`./components/Button.tsx`).
