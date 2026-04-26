@@ -8,6 +8,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
+- **`sentinel-domain::error_classifier`** — new module owning the rule "which error log entries deserve to be surfaced into the next user prompt?". Houses `is_actionable_error(&str) -> bool` plus two named constant lists (`NON_ACTIONABLE_ERROR_CATEGORIES`, `NON_ACTIONABLE_ERROR_SUBSTRINGS`) so the suppress list is reviewable and changes to it show up clearly in diffs. 5 unit tests covering: each non-actionable category, substring match, exact-vs-substring distinction (e.g. `rate_limit` is non-actionable but `rate_limited_v2` passes through), arbitrary actionable categories.
+
+### Changed
+
+- **PR14 — extract error classifier from `error_reporter` hook**: closes the last P2 logic-placement finding from the deeper DDD audit. The hook had been bundling two separate concerns into one predicate: well-formedness (non-empty required fields) and actionability (is this category worth reporting?). Split:
+  - **Well-formedness** stays in the hook — it's a property of the JSONL DTO, depends on serde-deserialization shape, hook concern.
+  - **Actionability** moves to `sentinel_domain::error_classifier::is_actionable_error(&str)` — a pure rule on the error category string. The hook's `is_actionable_error(&ErrorEntry)` becomes a 4-line wrapper that combines both checks.
+  - Tests: 764 passing (was 759; +5 new domain tests). 0 failing.
+
+### Added
+
 - **PR13 — 4 new domain constants**: closes the P3 magic-number findings from the deeper DDD audit.
   - `RUN_ASYNC_TIMEOUT = 3s` — hard wall-clock cap on any async hook work. Was a private const at `hooks/mod.rs:147`; the value lives in the domain so it stays in sync with related timeouts (`API_CALL_TIMEOUT`, `VECTOR_BATCH_TIMEOUT`).
   - `DEP_CHECK_CACHE_TTL = 24h` — was `CACHE_TTL` private to `dep_check.rs`.

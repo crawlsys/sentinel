@@ -5,6 +5,7 @@
 
 pub mod commit;
 pub mod constants;
+pub mod error_classifier;
 pub mod dependency;
 pub mod events;
 pub mod interceptor;

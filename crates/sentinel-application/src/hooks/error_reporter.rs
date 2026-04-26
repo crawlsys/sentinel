@@ -112,21 +112,16 @@ fn read_unresolved_errors(fs: &dyn FileSystemPort, path: &PathBuf) -> Vec<ErrorE
         .collect()
 }
 
+/// Hook-level filter: well-formed entries that the domain classifier deems
+/// actionable. Well-formedness (non-empty required fields) is a hook concern
+/// because it depends on the JSONL DTO shape; the actionability decision
+/// itself lives in `sentinel_domain::error_classifier`.
 fn is_actionable_error(entry: &ErrorEntry) -> bool {
-    if entry.id.trim().is_empty()
-        || entry.component.trim().is_empty()
-        || entry.severity.trim().is_empty()
-        || entry.error.trim().is_empty()
-    {
-        return false;
-    }
-
-    // These are common runtime/session conditions and prompt-size failures, not
-    // durable infrastructure defects worth injecting into every prompt.
-    !matches!(
-        entry.error.as_str(),
-        "rate_limit" | "auth_error" | "invalid_request"
-    ) && !entry.error.contains("prompt is too long")
+    let well_formed = !entry.id.trim().is_empty()
+        && !entry.component.trim().is_empty()
+        && !entry.severity.trim().is_empty()
+        && !entry.error.trim().is_empty();
+    well_formed && sentinel_domain::error_classifier::is_actionable_error(&entry.error)
 }
 
 /// Check if cooldown has expired
