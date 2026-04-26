@@ -104,7 +104,10 @@ pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
     migrate_metrics_dir(&claude_dir);
 
     // 1.6. Clean up stale channel event directories (older than 24h)
-    crate::channel_events::cleanup_stale_sessions(ctx.fs, std::time::Duration::from_secs(86400));
+    crate::channel_events::cleanup_stale_sessions(
+        ctx.fs,
+        sentinel_domain::constants::STALE_SESSION_EVENTS_AGE,
+    );
 
     // 2. Sync marketplace repo (if found)
     let sync_result = sync_marketplace(ctx.process, &claude_dir);

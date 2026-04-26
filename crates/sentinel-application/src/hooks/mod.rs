@@ -144,7 +144,10 @@ pub const HOOK_NAMES: &[&str] = &[
 
 /// Hard wall-clock timeout for all async hook work.
 /// No Qdrant/API call may block a hook longer than this.
-const RUN_ASYNC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+/// Re-exported from `sentinel_domain::constants::RUN_ASYNC_TIMEOUT` for the
+/// existing call-site name; the domain owns the value so it can stay in sync
+/// with related timeouts (`API_CALL_TIMEOUT`, `VECTOR_BATCH_TIMEOUT`).
+const RUN_ASYNC_TIMEOUT: std::time::Duration = sentinel_domain::constants::RUN_ASYNC_TIMEOUT;
 
 /// Run an async block safely with a hard wall-clock timeout.
 ///

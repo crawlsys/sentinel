@@ -112,3 +112,28 @@ pub const MAX_ERRORS_IN_CONTEXT: usize = 3;
 
 /// Min skill directories expected (sanity check).
 pub const MIN_SKILL_DIRS: usize = 40;
+
+// ---------------------------------------------------------------------------
+// Async/runtime timeouts and freshness windows
+// ---------------------------------------------------------------------------
+
+/// Hard wall-clock timeout for any async hook work. No Qdrant/API/MCP call may
+/// block a hook longer than this. Used by `hooks::run_async`.
+pub const RUN_ASYNC_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// How long the marketplace dependency-check cache (`dep_check.rs`) is
+/// considered fresh before it is rebuilt. One day is long enough that the
+/// check rarely re-runs in normal use, short enough that adding a new
+/// crate-level dep gets noticed within a working day.
+pub const DEP_CHECK_CACHE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// How recent a `plans/*.md` file must be to satisfy the resumed-session
+/// fallback in `tool_usage_gate`. One week balances "session resumed days
+/// later" against "stale plan from a different feature still on disk".
+pub const PLAN_FILE_FRESH_WINDOW: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+
+/// How old a session-events directory must be before
+/// `channel_events::cleanup_stale_sessions` removes it during SessionStart.
+/// One day matches `DEP_CHECK_CACHE_TTL` numerically but the meanings are
+/// independent — kept distinct so they can drift apart later.
+pub const STALE_SESSION_EVENTS_AGE: Duration = Duration::from_secs(24 * 60 * 60);

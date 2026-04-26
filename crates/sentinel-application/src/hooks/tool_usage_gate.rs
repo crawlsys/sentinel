@@ -111,8 +111,9 @@ pub fn detect_plan_mode_from_transcript(fs: &dyn FileSystemPort, transcript_path
 }
 
 /// How recent a plan file must be to count as "approved this session".
-/// 7 days covers resumed sessions while still requiring a plan per week.
-const PLAN_FILE_FRESH_WINDOW: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+/// Owned by the domain layer so the freshness policy lives next to other
+/// time-window constants (`STALE_SESSION_EVENTS_AGE`, `DEP_CHECK_CACHE_TTL`).
+const PLAN_FILE_FRESH_WINDOW: Duration = sentinel_domain::constants::PLAN_FILE_FRESH_WINDOW;
 
 /// Marker file prefix for sequential thinking usage.
 const SEQUENTIAL_MARKER_PREFIX: &str = "claude-sequential-used-";

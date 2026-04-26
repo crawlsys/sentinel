@@ -8,6 +8,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
+- **PR13 — 4 new domain constants**: closes the P3 magic-number findings from the deeper DDD audit.
+  - `RUN_ASYNC_TIMEOUT = 3s` — hard wall-clock cap on any async hook work. Was a private const at `hooks/mod.rs:147`; the value lives in the domain so it stays in sync with related timeouts (`API_CALL_TIMEOUT`, `VECTOR_BATCH_TIMEOUT`).
+  - `DEP_CHECK_CACHE_TTL = 24h` — was `CACHE_TTL` private to `dep_check.rs`.
+  - `PLAN_FILE_FRESH_WINDOW = 7d` — was inline-literal in `tool_usage_gate.rs`.
+  - `STALE_SESSION_EVENTS_AGE = 24h` — was an inline `Duration::from_secs(86400)` argument in `session_init.rs:107`. Distinct from `DEP_CHECK_CACHE_TTL` despite the same numeric value — the meanings are independent and may drift apart.
+  - 4 call sites updated to import from `sentinel_domain::constants`. The hook-private `const`s are kept (renamed to clarify they re-export the domain value) so existing call-site identifiers remain stable.
+
+### Added
+
 - **`sentinel-domain::commit`** — new module for commit-message domain predicates. Houses the `VALID_PREFIXES` list (11 conventional-commit types), `is_conventional(message)` (subject parser + prefix check), and `has_linear_ref(message, prefixes)` (case-insensitive, word-boundary-anchored, regex-escaped prefix match). 16 unit tests covering edge cases that the hook's earlier inline tests missed: word-boundary rejection (`xFPCRM-42`), missing description (`feat:`, `feat: `), regex-special chars in prefixes (escaping is correct), empty prefix list, multiline subject parsing.
 
 ### Changed

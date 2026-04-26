@@ -13,12 +13,11 @@
 
 use sentinel_domain::events::{HookEvent, HookInput, HookOutput};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
+
+use sentinel_domain::constants::DEP_CHECK_CACHE_TTL;
 
 use super::{FileSystemPort, HookContext, ProcessPort};
-
-/// How long to cache results before re-checking (24 hours).
-const CACHE_TTL: Duration = Duration::from_secs(86400);
 
 /// Detected project type and the command to check for outdated deps.
 #[derive(Debug)]
@@ -85,7 +84,7 @@ fn is_cache_fresh(fs: &dyn FileSystemPort, path: &Path) -> bool {
     if let Ok(meta) = fs.metadata(path) {
         if let Ok(modified) = meta.modified() {
             if let Ok(age) = SystemTime::now().duration_since(modified) {
-                return age < CACHE_TTL;
+                return age < DEP_CHECK_CACHE_TTL;
             }
         }
     }
