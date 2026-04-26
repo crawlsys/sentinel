@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added
+
+- **`sentinel-domain::commit`** — new module for commit-message domain predicates. Houses the `VALID_PREFIXES` list (11 conventional-commit types), `is_conventional(message)` (subject parser + prefix check), and `has_linear_ref(message, prefixes)` (case-insensitive, word-boundary-anchored, regex-escaped prefix match). 16 unit tests covering edge cases that the hook's earlier inline tests missed: word-boundary rejection (`xFPCRM-42`), missing description (`feat:`, `feat: `), regex-special chars in prefixes (escaping is correct), empty prefix list, multiline subject parsing.
+
+### Changed
+
+- **PR12 — extract commit predicates from `commit_message_validator` hook into domain**: closes a P2 finding from the deeper DDD audit. `is_conventional` and `has_linear_ref` were pure functions with no hook context — domain rules buried in an application-layer hook. Both now live in `sentinel-domain::commit`; the hook re-exports via `use sentinel_domain::commit::{has_linear_ref, is_conventional}` and references `sentinel_domain::commit::VALID_PREFIXES` for its block-message rendering. 6 duplicated unit tests in the hook are deleted (the domain tests are stronger and live next to the rules).
+  - Tests: 759 passing (was 749; +16 new domain tests, −6 deleted hook duplicates). 0 failing.
+
 ### Changed
 
 - **PR11 — close aggregate boundary leak in `proof_engine`**: the second P1 finding from the deeper DDD audit. `proof_engine::submit_evidence` was reaching directly into `SessionState.failed_submissions` to do `entry().or_insert_with(...)`, `count += 1`, `last_failure = Some(now)`, and `remove(&phase_key)` — three places where rate-limit invariants lived outside the aggregate. The cooldown formula (`base_cooldown_secs * count` after `MAX_RAPID_FAILURES`) was also inlined in `proof_engine`, away from the data it operates on.

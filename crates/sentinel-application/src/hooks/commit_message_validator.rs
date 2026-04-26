@@ -12,10 +12,11 @@ use regex::Regex;
 use sentinel_domain::events::{HookInput, HookOutput};
 use std::path::PathBuf;
 
-const VALID_PREFIXES: &[&str] = &[
-    "feat", "fix", "chore", "docs", "refactor", "test",
-    "style", "perf", "ci", "build", "revert",
-];
+// Domain predicates (`is_conventional`, `has_linear_ref`) and the
+// `VALID_PREFIXES` list have moved to `sentinel_domain::commit` — they were
+// pure rules with no hook context. The hook keeps the orchestration:
+// parse the bash command, load project config, decide what to block.
+use sentinel_domain::commit::{has_linear_ref, is_conventional};
 
 fn extract_commit_message(command: &str) -> Option<String> {
     let heredoc_re = Regex::new(r#"(?s)<<'?EOF'?\s*\n(.*?)\n\s*EOF"#).ok()?;
@@ -34,23 +35,6 @@ fn extract_commit_message(command: &str) -> Option<String> {
     }
 
     None
-}
-
-fn is_conventional(message: &str) -> bool {
-    let subject = message.lines().next().unwrap_or(message).trim();
-    if subject.is_empty() {
-        return false;
-    }
-    let prefix_re = match Regex::new(r"^(\w+)(?:\([^)]*\))?:\s*.+") {
-        Ok(re) => re,
-        Err(_) => return false,
-    };
-    let caps = match prefix_re.captures(subject) {
-        Some(c) => c,
-        None => return false,
-    };
-    let prefix = caps[1].to_lowercase();
-    VALID_PREFIXES.contains(&prefix.as_str())
 }
 
 fn projects_dir(fs: &dyn super::FileSystemPort) -> Option<PathBuf> {
@@ -205,18 +189,6 @@ fn effective_cwd_from_command(command: &str) -> Option<String> {
     Some(path.to_string())
 }
 
-fn has_linear_ref(message: &str, prefixes: &[String]) -> bool {
-    for prefix in prefixes {
-        let pat = format!(r"(?i)\b{}-\d+\b", regex::escape(prefix));
-        if let Ok(re) = Regex::new(&pat) {
-            if re.is_match(message) {
-                return true;
-            }
-        }
-    }
-    false
-}
-
 pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
     if input.tool_name.as_deref() != Some("Bash") {
         return HookOutput::allow();
@@ -248,7 +220,7 @@ pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
     };
 
     if !is_conventional(&message) {
-        let valid_list = VALID_PREFIXES
+        let valid_list = sentinel_domain::commit::VALID_PREFIXES
             .iter()
             .map(|p| format!("`{p}:`"))
             .collect::<Vec<_>>()
@@ -454,27 +426,9 @@ mod tests {
         assert!(extracted.contains("Ref FPCRM-123"));
     }
 
-    #[test]
-    fn test_is_conventional_all_types() {
-        for prefix in VALID_PREFIXES {
-            let msg = format!("{prefix}: some change");
-            assert!(is_conventional(&msg), "Expected '{msg}' to be conventional");
-        }
-    }
-
-    #[test]
-    fn test_is_conventional_with_scope() {
-        assert!(is_conventional("feat(hooks): add pre-compact"));
-        assert!(is_conventional("fix(dashboard): layout issue"));
-    }
-
-    #[test]
-    fn test_not_conventional() {
-        assert!(!is_conventional("updated stuff"));
-        assert!(!is_conventional("WIP"));
-        assert!(!is_conventional(""));
-        assert!(!is_conventional("random: not a valid type"));
-    }
+    // is_conventional / has_linear_ref tests live in
+    // `sentinel-domain::commit::tests`. The hook tests here cover the
+    // orchestration: bash-command parsing, project lookup, block decisions.
 
     #[test]
     fn test_allows_git_push() {
@@ -495,29 +449,6 @@ mod tests {
         };
         let ctx = crate::hooks::test_support::stub_ctx();
         assert!(process(&input, &ctx).blocked.is_none());
-    }
-
-    #[test]
-    fn test_has_linear_ref_matches_subject() {
-        let prefixes = vec!["FPCRM".to_string(), "FPFIELD".to_string()];
-        assert!(has_linear_ref("feat: add X (FPCRM-361)", &prefixes));
-        assert!(has_linear_ref("fix: stuff fpcrm-42", &prefixes));
-        assert!(has_linear_ref("feat: thing (FPFIELD-9)", &prefixes));
-    }
-
-    #[test]
-    fn test_has_linear_ref_matches_body() {
-        let prefixes = vec!["FPCRM".to_string()];
-        let msg = "feat: add X\n\nRef FPCRM-123\n\nCo-Authored-By: Claude";
-        assert!(has_linear_ref(msg, &prefixes));
-    }
-
-    #[test]
-    fn test_has_linear_ref_rejects_missing() {
-        let prefixes = vec!["FPCRM".to_string()];
-        assert!(!has_linear_ref("feat: add X", &prefixes));
-        assert!(!has_linear_ref("feat: add FPCRM-abc", &prefixes));
-        assert!(!has_linear_ref("feat: add XFPCRM-1", &prefixes));
     }
 
     #[test]
