@@ -310,6 +310,69 @@ impl SessionState {
         self.tool_calls += 1;
     }
 
+    // ─── Submission failure tracking (rate limiting) ──────────────────────
+    //
+    // Replaces three former direct mutations of `failed_submissions` from
+    // `proof_engine`. Keeping the mutation surface inside the aggregate lets
+    // future invariants (e.g. cap the map size, expire stale entries) live
+    // in one place.
+
+    /// If a recent failure for `phase_key` is still within the cooldown
+    /// window, return the remaining seconds. `None` means submission is
+    /// allowed.
+    ///
+    /// Cooldown formula: `base_cooldown_secs` when `count < max_rapid`,
+    /// otherwise `base_cooldown_secs * count` (linear backoff). The two
+    /// thresholds are passed in so the caller can use the project-wide
+    /// constants (`PROOF_RESUBMIT_COOLDOWN_SECS`, `PROOF_MAX_RAPID_FAILURES`)
+    /// or override for tests.
+    #[must_use]
+    pub fn submission_cooldown_remaining(
+        &self,
+        phase_key: &str,
+        max_rapid: u32,
+        base_cooldown_secs: i64,
+    ) -> Option<i64> {
+        let attempts = self.failed_submissions.get(phase_key)?;
+        let last = attempts.last_failure?;
+        let elapsed = (Utc::now() - last).num_seconds();
+        let cooldown = if attempts.count >= max_rapid {
+            base_cooldown_secs * i64::from(attempts.count)
+        } else {
+            base_cooldown_secs
+        };
+        if elapsed < cooldown {
+            Some(cooldown - elapsed)
+        } else {
+            None
+        }
+    }
+
+    /// Borrow the submission-attempts record for the given phase key.
+    /// Used by the proof engine to surface the failure count in
+    /// human-readable error messages.
+    #[must_use]
+    pub fn submission_attempts(&self, phase_key: &str) -> Option<&SubmissionAttempts> {
+        self.failed_submissions.get(phase_key)
+    }
+
+    /// Record a failed submission for `phase_key`. Bumps the attempt count
+    /// and stamps `last_failure` to now. Creates the entry if missing.
+    pub fn record_submission_failure(&mut self, phase_key: impl Into<String>) {
+        let entry = self
+            .failed_submissions
+            .entry(phase_key.into())
+            .or_default();
+        entry.count += 1;
+        entry.last_failure = Some(Utc::now());
+    }
+
+    /// Clear submission-failure tracking for `phase_key` (called after a
+    /// successful submission so the next attempt is unrestricted).
+    pub fn clear_submission_failure(&mut self, phase_key: &str) {
+        self.failed_submissions.remove(phase_key);
+    }
+
     /// Record the SHA-256 hash of a phase file's content on first `Read()`.
     /// Returns `Ok(())` if this is the first read or the hash matches.
     /// Returns `Err(reason)` if the content has changed (tampering detected).
@@ -553,5 +616,72 @@ mod tests {
         assert!(!state.workflows.contains_key("overflow_skill"));
         // But active_skill is still set for routing
         assert_eq!(state.active_skill.as_deref(), Some("overflow_skill"));
+    }
+
+    // ─── submission failure tracking ──────────────────────────────────────
+
+    #[test]
+    fn cooldown_remaining_none_for_unseen_phase_key() {
+        let state = SessionState::new("sess-cd-1");
+        assert_eq!(
+            state.submission_cooldown_remaining("linear:claim", 3, 30),
+            None,
+            "an unseen phase_key has no failure history → no cooldown"
+        );
+    }
+
+    #[test]
+    fn record_then_cooldown_blocks_briefly() {
+        let mut state = SessionState::new("sess-cd-2");
+        state.record_submission_failure("linear:claim");
+        // base_cooldown=30s and we just stamped now → there must be cooldown
+        let remaining = state
+            .submission_cooldown_remaining("linear:claim", 3, 30)
+            .expect("cooldown active immediately after a failure");
+        assert!(remaining > 0 && remaining <= 30);
+    }
+
+    #[test]
+    fn linear_backoff_kicks_in_at_max_rapid() {
+        let mut state = SessionState::new("sess-cd-3");
+        // 3 failures = MAX_RAPID — backoff should multiply by count
+        for _ in 0..3 {
+            state.record_submission_failure("linear:claim");
+        }
+        let remaining = state
+            .submission_cooldown_remaining("linear:claim", 3, 30)
+            .expect("3 failures still inside the multiplied window");
+        // 3 × 30 = 90s window minus a few ms of test clock drift
+        assert!(
+            remaining > 80 && remaining <= 90,
+            "expected ~90s remaining, got {remaining}"
+        );
+    }
+
+    #[test]
+    fn clear_submission_failure_resets() {
+        let mut state = SessionState::new("sess-cd-4");
+        state.record_submission_failure("linear:claim");
+        assert!(state.submission_attempts("linear:claim").is_some());
+        state.clear_submission_failure("linear:claim");
+        assert!(state.submission_attempts("linear:claim").is_none());
+        assert_eq!(
+            state.submission_cooldown_remaining("linear:claim", 3, 30),
+            None
+        );
+    }
+
+    #[test]
+    fn submission_attempts_count_increments() {
+        let mut state = SessionState::new("sess-cd-5");
+        for expected in 1..=4_u32 {
+            state.record_submission_failure("linear:claim");
+            assert_eq!(
+                state
+                    .submission_attempts("linear:claim")
+                    .map(|a| a.count),
+                Some(expected),
+            );
+        }
     }
 }

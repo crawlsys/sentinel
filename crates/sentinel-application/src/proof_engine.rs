@@ -13,7 +13,7 @@ use tracing::{debug, info};
 use sentinel_domain::evidence::Evidence;
 use sentinel_domain::judge::JudgeModel;
 use sentinel_domain::proof::{PhaseProof, ProofChain};
-use sentinel_domain::state::{SessionState, SubmissionAttempts};
+use sentinel_domain::state::SessionState;
 
 use crate::judge_service::JudgeService;
 
@@ -49,27 +49,25 @@ impl ProofEngine {
         started_at: chrono::DateTime<Utc>,
         workflow: Option<&sentinel_domain::workflow::SkillWorkflow>,
     ) -> Result<PhaseProof> {
-        // Check resubmission rate limit
+        // Check resubmission rate limit. Cooldown logic + state inspection
+        // both live on `SessionState` — we just ask whether a wait is needed.
         let phase_key = format!("{skill}:{phase_id}");
         {
             let state = self.state.read().await;
-            if let Some(attempts) = state.failed_submissions.get(&phase_key) {
-                if let Some(last) = attempts.last_failure {
-                    let elapsed = (Utc::now() - last).num_seconds();
-                    let cooldown = if attempts.count >= Self::MAX_RAPID_FAILURES {
-                        Self::RESUBMIT_COOLDOWN_SECS * attempts.count as i64
-                    } else {
-                        Self::RESUBMIT_COOLDOWN_SECS
-                    };
-                    if elapsed < cooldown {
-                        bail!(
-                            "Phase '{}' resubmission blocked — wait {}s (failed {} time(s))",
-                            phase_id,
-                            cooldown - elapsed,
-                            attempts.count
-                        );
-                    }
-                }
+            if let Some(remaining) = state.submission_cooldown_remaining(
+                &phase_key,
+                Self::MAX_RAPID_FAILURES,
+                Self::RESUBMIT_COOLDOWN_SECS,
+            ) {
+                let count = state
+                    .submission_attempts(&phase_key)
+                    .map_or(0, |a| a.count);
+                bail!(
+                    "Phase '{}' resubmission blocked — wait {}s (failed {} time(s))",
+                    phase_id,
+                    remaining,
+                    count
+                );
             }
         }
 
@@ -88,16 +86,10 @@ impl ProofEngine {
         );
 
         if !verdict.sufficient {
-            // Track the failure for rate limiting
-            {
-                let mut state = self.state.write().await;
-                let attempts = state
-                    .failed_submissions
-                    .entry(phase_key)
-                    .or_insert_with(SubmissionAttempts::default);
-                attempts.count += 1;
-                attempts.last_failure = Some(Utc::now());
-            }
+            self.state
+                .write()
+                .await
+                .record_submission_failure(phase_key);
             bail!(
                 "Phase '{}' evidence insufficient: {}",
                 phase_id,
@@ -106,10 +98,10 @@ impl ProofEngine {
         }
 
         // Clear failure tracking on success
-        {
-            let mut state = self.state.write().await;
-            state.failed_submissions.remove(&phase_key);
-        }
+        self.state
+            .write()
+            .await
+            .clear_submission_failure(&phase_key);
 
         // Compute hashes, build proof, and add to chain under a single write lock
         // to prevent TOCTOU races on concurrent submissions

@@ -8,6 +8,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Changed
 
+- **PR11 — close aggregate boundary leak in `proof_engine`**: the second P1 finding from the deeper DDD audit. `proof_engine::submit_evidence` was reaching directly into `SessionState.failed_submissions` to do `entry().or_insert_with(...)`, `count += 1`, `last_failure = Some(now)`, and `remove(&phase_key)` — three places where rate-limit invariants lived outside the aggregate. The cooldown formula (`base_cooldown_secs * count` after `MAX_RAPID_FAILURES`) was also inlined in `proof_engine`, away from the data it operates on.
+  - Three new methods on `SessionState`:
+    - `submission_cooldown_remaining(phase_key, max_rapid, base_cooldown_secs) -> Option<i64>` — encapsulates the linear-backoff formula; returns the wait time in seconds, or `None` when no cooldown applies.
+    - `record_submission_failure(phase_key)` — bumps the count and stamps `last_failure`.
+    - `clear_submission_failure(phase_key)` — removes the entry on success.
+    - Plus `submission_attempts(phase_key) -> Option<&SubmissionAttempts>` for read-only inspection (so the proof engine can include the failure count in its error messages without re-reaching for the field).
+  - `proof_engine.rs` rewritten: 21 lines of inline state poking → 3 method calls. The `SubmissionAttempts` import is dropped; the proof engine no longer knows the internal shape of the rate-limiter.
+  - 5 new unit tests on `SessionState` cover: unseen phase key returns no cooldown; immediate failure produces a cooldown; linear backoff at `MAX_RAPID_FAILURES`; clear resets state; count increments per failure.
+  - Tests: **749 passing** (was 744; +5). 0 failing.
+
 - **PR10 — `SessionId` value object gains validating smart constructor; duplicated `sanitize_session_id` deleted**: closes the highest-leverage P1 finding from the deeper DDD audit. Three changes:
   1. **`SessionId::try_new(impl Into<String>) -> Result<SessionId, SessionIdError>`** added to `sentinel-domain::session`. Validates non-empty, ≤128 chars, no `..` (path-traversal), and ASCII alphanumeric/`-`/`_` only — the same four rules previously duplicated in `state_store::sanitize_session_id` and `proof_store::sanitize_session_id`. Plus `SessionId::validate(&str) -> Result<(), SessionIdError>` for the no-allocation case used by infrastructure wrappers, and `SessionId::new_unchecked(...)` for reconstituting from already-validated persistent state. **Removed**: the previous infallible `From<String>` / `From<&str>` impls (they sidestepped validation and made `SessionId::new("../../etc/passwd")` compile).
   2. **`SessionIdError`** enum with four variants (`Empty`, `TooLong { len }`, `PathTraversal`, `UnsafeCharacter`) and manual `Display` + `std::error::Error` impls — no thiserror in domain.
