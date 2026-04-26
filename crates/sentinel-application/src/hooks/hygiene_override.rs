@@ -16,7 +16,6 @@
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use regex::Regex;
 use sentinel_domain::events::{HookInput, HookOutput};
 use sha2::{Digest, Sha256};
 
@@ -102,46 +101,13 @@ fn now_secs() -> u64 {
 /// Shorter window limits exposure from accidental or social-engineered overrides.
 const OVERRIDE_TTL_SECS: u64 = sentinel_domain::constants::OVERRIDE_TTL_SECS;
 
-/// Check if prompt matches hygiene override patterns
-fn is_hygiene_override(prompt: &str) -> bool {
-    let patterns = [
-        r"override\s+(hygiene|git|commit)",
-        r"hygiene\s+override",
-        r"force\s+continue",
-        r"skip\s+hygiene",
-    ];
-    patterns
-        .iter()
-        .any(|p| Regex::new(p).map(|re| re.is_match(prompt)).unwrap_or(false))
-}
-
-/// Check if prompt matches verification override patterns
-fn is_verification_override(prompt: &str) -> bool {
-    let patterns = [
-        r"override\s+verification",
-        r"verification\s+override",
-        r"skip\s+verification",
-        r"skip\s+tests?",
-        r"override\s+test",
-    ];
-    patterns
-        .iter()
-        .any(|p| Regex::new(p).map(|re| re.is_match(prompt)).unwrap_or(false))
-}
-
-/// Check if prompt matches Doppler override patterns.
-/// Requires explicit high-friction language because Doppler writes touch secrets.
-fn is_doppler_override(prompt: &str) -> bool {
-    let patterns = [
-        r"override\s+doppler",
-        r"doppler\s+override",
-        r"allow\s+doppler\s+(write|writes|mutation|mutations)",
-        r"authorize\s+doppler\s+(write|writes|mutation|mutations)",
-    ];
-    patterns
-        .iter()
-        .any(|p| Regex::new(p).map(|re| re.is_match(prompt)).unwrap_or(false))
-}
+// Override-phrase predicates have moved to `sentinel_domain::override_phrase`
+// where the patterns are reviewable + tested in isolation. The hook is still
+// responsible for what to *do* once a phrase matches (write a signed token,
+// reset cooldown).
+use sentinel_domain::override_phrase::{
+    is_doppler_override, is_hygiene_override, is_verification_override,
+};
 
 /// Write a signed override file.
 /// Content format: `{timestamp}:{signature}` — a simple `touch` won't produce valid content.

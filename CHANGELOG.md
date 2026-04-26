@@ -8,6 +8,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
+- **`sentinel-domain::override_phrase`** — new module owning the rule "what counts as a user opting out of hygiene/verification/Doppler-write protection?". Three named constant lists (`HYGIENE_OVERRIDE_PATTERNS`, `VERIFICATION_OVERRIDE_PATTERNS`, `DOPPLER_OVERRIDE_PATTERNS`) and three predicates (`is_hygiene_override`, `is_verification_override`, `is_doppler_override`). 9 unit tests including a disjointness check (a phrase that matches one override must not accidentally match another) so future pattern edits don't cross-contaminate. Doppler protection is intentionally high-friction — generic "override" alone does not match; the user has to name Doppler.
+- **`sentinel-domain::exchange`** — new module owning the rule "is a (user, assistant) pair substantive enough to index into the memory engine?". Houses `is_substantive_exchange(user, assistant)` plus `TRIVIAL_USER_PHRASES` (23 entries) and `TRIVIAL_REPLY_MAX_LEN`. 7 unit tests covering: short-combined drop, non-trivial-with-long-reply pass, trivial-with-short-reply drop, trivial-with-long-reply override, case-insensitive trim handling, exact-match-not-substring rule (`"yes please walk me through this"` is substantive even though it starts with "yes").
+
+### Changed
+
+- **PR15 — extract two more predicate clusters into the domain layer**:
+  - `is_hygiene_override` / `is_verification_override` / `is_doppler_override` move from `hooks::hygiene_override` to `sentinel_domain::override_phrase`. The hook re-exports via `use` so call sites are unchanged. The unused `regex::Regex` import is dropped (the domain module owns the regex compilation now).
+  - `is_substantive_exchange` moves from `hooks::memory_extract` to `sentinel_domain::exchange`. The hook-private `MIN_EXCHANGE_LENGTH` re-export const becomes unused and is removed (the domain module imports the constant directly).
+  - Tests: 778 passing (was 764; +14 new domain tests). 0 failing.
+
+### Added
+
 - **`sentinel-domain::error_classifier`** — new module owning the rule "which error log entries deserve to be surfaced into the next user prompt?". Houses `is_actionable_error(&str) -> bool` plus two named constant lists (`NON_ACTIONABLE_ERROR_CATEGORIES`, `NON_ACTIONABLE_ERROR_SUBSTRINGS`) so the suppress list is reviewable and changes to it show up clearly in diffs. 5 unit tests covering: each non-actionable category, substring match, exact-vs-substring distinction (e.g. `rate_limit` is non-actionable but `rate_limited_v2` passes through), arbitrary actionable categories.
 
 ### Changed

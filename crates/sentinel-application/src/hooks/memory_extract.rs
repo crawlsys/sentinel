@@ -246,10 +246,6 @@ fn capture_memory_via_mcp(
 const REINDEX_TOOL_CALL_THRESHOLD: u64 = constants::REINDEX_TOOL_CALL_THRESHOLD;
 const SESSION_COLLECTION: &str = "claude-sessions";
 
-/// Minimum combined user+assistant text length to index an exchange.
-/// Filters out trivial "yes"/"ok"/"done" turns.
-const MIN_EXCHANGE_LENGTH: usize = constants::MIN_EXCHANGE_LENGTH;
-
 #[derive(serde::Serialize, serde::Deserialize, Default)]
 struct SessionIndexState {
     tool_calls_since_index: u64,
@@ -318,27 +314,9 @@ fn project_hash(cwd: &str) -> String {
     result[..4].iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// Check if an exchange is substantive enough to index.
-/// Filters out trivial turns like "yes", "ok", "done", single-word responses.
-fn is_substantive_exchange(user: &str, assistant: &str) -> bool {
-    let combined_len = user.len() + assistant.len();
-    if combined_len < MIN_EXCHANGE_LENGTH {
-        return false;
-    }
-
-    // Skip exchanges where the user message is trivial
-    let user_trimmed = user.trim().to_lowercase();
-    let trivial_patterns = [
-        "yes", "no", "ok", "okay", "done", "thanks", "thank you", "got it",
-        "sure", "y", "n", "yep", "nope", "continue", "go", "next", "fix it",
-        "all", "yee", "cool", "nice", "great", "perfect",
-    ];
-    if trivial_patterns.contains(&user_trimmed.as_str()) && assistant.len() < 200 {
-        return false;
-    }
-
-    true
-}
+// `is_substantive_exchange` has moved to `sentinel_domain::exchange`. Re-export
+// the symbol via `use` so the call sites below don't need to qualify it.
+use sentinel_domain::exchange::is_substantive_exchange;
 
 /// Lightweight session re-index: parse the last ~10 exchanges from the
 /// transcript and upsert substantive ones via `VectorStorePort` to the

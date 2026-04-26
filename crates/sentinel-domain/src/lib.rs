@@ -6,6 +6,8 @@
 pub mod commit;
 pub mod constants;
 pub mod error_classifier;
+pub mod exchange;
+pub mod override_phrase;
 pub mod dependency;
 pub mod events;
 pub mod interceptor;
