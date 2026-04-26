@@ -112,7 +112,9 @@ pub fn process_stop(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     let changelog_path = PathBuf::from(&repo_root).join("CHANGELOG.md");
     if ctx.fs.exists(&changelog_path) {
         if let Ok(files) = ctx.git.changed_files(cwd) {
-            let has_code_changes = files.iter().any(is_code_file);
+            let has_code_changes = files
+                .iter()
+                .any(|f| sentinel_domain::file_kind::is_code_file(f));
             let changelog_changed = files.iter().any(|f| f.contains("CHANGELOG"));
             state.changelog_stale = has_code_changes && !changelog_changed;
         }
@@ -128,15 +130,8 @@ pub fn process_stop(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     HookOutput::allow()
 }
 
-fn is_code_file(f: &String) -> bool {
-    f.ends_with(".rs")
-        || f.ends_with(".ts")
-        || f.ends_with(".tsx")
-        || f.ends_with(".js")
-        || f.ends_with(".jsx")
-        || f.ends_with(".py")
-        || f.ends_with(".go")
-}
+// `is_code_file` has moved to `sentinel_domain::file_kind`.
+// The hook calls it inline above (single call site).
 
 // ── UserPromptSubmit phase: inject reminders ───────────────────────────
 
@@ -280,15 +275,7 @@ mod tests {
         assert_ne!(state.repo_root, "/repos/other-project");
     }
 
-    #[test]
-    fn test_is_code_file() {
-        assert!(is_code_file(&"src/main.rs".to_string()));
-        assert!(is_code_file(&"app/page.tsx".to_string()));
-        assert!(is_code_file(&"lib/utils.py".to_string()));
-        assert!(!is_code_file(&"README.md".to_string()));
-        assert!(!is_code_file(&"CHANGELOG.md".to_string()));
-        assert!(!is_code_file(&"config.toml".to_string()));
-    }
+    // is_code_file tests live in `sentinel_domain::file_kind::tests`.
 
     /// Regression: process_prompt must drop stale_worktrees entries whose
     /// directory no longer exists on disk. Before the fix, the hook kept

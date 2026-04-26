@@ -8,6 +8,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
+- **`sentinel-domain::mcp_tool`** — new module with `is_dangerous_mcp_tool(&str) -> bool` plus the `SAFE_METHOD_SUFFIXES` (35 entries) and `SAFE_METHOD_PREFIXES` (7 entries) lists. Security-relevant: the fall-through behaviour (unknown suffix → DANGEROUS) is the boundary for MCP tool gating; new MCP servers don't get an automatic bypass. 6 unit tests covering each safe-suffix, each safe-prefix, case-insensitive matching, fail-closed default, defensive handling of malformed names (no `__`, only `mcp__server`).
+- **`sentinel-domain::path_safety`** — new module with `is_safe_name(&str) -> bool` plus the `SAFE_NAME_MAX_LEN = 64` constant. The homoglyph-attack guard (Cyrillic `а` U+0430 vs Latin `a` U+0061) is documented inline. 7 unit tests including specific homoglyph-rejection cases (Cyrillic, Greek, full-width Latin) plus path-traversal char rejection (`/`, `\`, `..`).
+- **`sentinel-domain::file_kind`** — new module with `is_code_file(&str) -> bool` plus the `CODE_EXTENSIONS` list (`rs`, `ts`, `tsx`, `js`, `jsx`, `py`, `go`). Match is case-insensitive (so `Cargo.toml.RS` matches `rs`). 5 unit tests covering each extension, case insensitivity, dot-required boundary (`foors` ≠ `.rs`), nested paths (`./components/Button.tsx`).
+
+### Changed
+
+- **PR16 — extract 3 more classifiers from hooks into the domain layer**:
+  - `is_dangerous_mcp_tool` moves from `hooks::phase_gate` to `sentinel_domain::mcp_tool`. Net −60 LOC of inline lists in the hook.
+  - `is_safe_name` moves from `hooks::phase_gate` to `sentinel_domain::path_safety`. Net −10 LOC.
+  - `is_code_file` moves from `hooks::hygiene_reminders` to `sentinel_domain::file_kind`. The hook's duplicated test deleted; the domain tests are stronger. Drops the `&String` parameter signature in favour of `&str` (what the hook had to offer all along — file paths from git diff arrive as `String` values, but `String: Deref<Target = str>` makes the `&str` taker more general).
+  - All 3 hooks re-export via `use` so call-site identifiers are unchanged.
+  - Tests: 795 passing (was 778; +18 new domain tests, −1 deleted hook duplicate). 0 failing.
+
+### Added
+
 - **`sentinel-domain::override_phrase`** — new module owning the rule "what counts as a user opting out of hygiene/verification/Doppler-write protection?". Three named constant lists (`HYGIENE_OVERRIDE_PATTERNS`, `VERIFICATION_OVERRIDE_PATTERNS`, `DOPPLER_OVERRIDE_PATTERNS`) and three predicates (`is_hygiene_override`, `is_verification_override`, `is_doppler_override`). 9 unit tests including a disjointness check (a phrase that matches one override must not accidentally match another) so future pattern edits don't cross-contaminate. Doppler protection is intentionally high-friction — generic "override" alone does not match; the user has to name Doppler.
 - **`sentinel-domain::exchange`** — new module owning the rule "is a (user, assistant) pair substantive enough to index into the memory engine?". Houses `is_substantive_exchange(user, assistant)` plus `TRIVIAL_USER_PHRASES` (23 entries) and `TRIVIAL_REPLY_MAX_LEN`. 7 unit tests covering: short-combined drop, non-trivial-with-long-reply pass, trivial-with-short-reply drop, trivial-with-long-reply override, case-insensitive trim handling, exact-match-not-substring rule (`"yes please walk me through this"` is substantive even though it starts with "yes").
 

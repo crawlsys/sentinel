@@ -167,20 +167,9 @@ fn extract_phase_file(fs: &dyn super::FileSystemPort, tool_input: &serde_json::V
     })
 }
 
-/// Validate a path segment contains only safe ASCII characters.
-/// Allows: a-z, A-Z, 0-9, hyphens, underscores, dots (for .md extension).
-///
-/// Explicitly rejects ALL non-ASCII characters, including Unicode confusables
-/// (e.g., Cyrillic 'а' U+0430 vs Latin 'a' U+0061) that could bypass
-/// skill name matching via homoglyph attacks.
-fn is_safe_name(name: &str) -> bool {
-    !name.is_empty()
-        && name.len() <= 64
-        && name.is_ascii()
-        && name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
-}
+// `is_safe_name` lives in `sentinel_domain::path_safety` — same rule, shared
+// across hooks. Re-export so call sites here don't need to qualify.
+use sentinel_domain::path_safety::is_safe_name;
 
 /// Process a phase-gate hook event (PreToolUse)
 ///
@@ -1113,78 +1102,10 @@ fn check_protected_path_write(
     None
 }
 
-/// Classify an MCP tool as dangerous (write/exec capability).
-///
-/// MCP tools follow the pattern `mcp__<server>__<method>`. A tool is dangerous
-/// if its method suffix indicates file writing, command execution, code patching,
-/// or state mutation. Read-only tools (get, list, search, read) are safe.
-///
-/// This is a denylist approach — unknown suffixes default to DANGEROUS (fail-closed)
-/// so new MCP servers don't automatically bypass enforcement.
-fn is_dangerous_mcp_tool(tool_name: &str) -> bool {
-    // Extract the method suffix (last segment after the final `__`)
-    let suffix = tool_name
-        .rsplit("__")
-        .next()
-        .unwrap_or(tool_name)
-        .to_lowercase();
-
-    // Explicitly safe suffixes — read-only operations
-    let safe_suffixes = [
-        "get",
-        "list",
-        "search",
-        "read",
-        "view",
-        "show",
-        "status",
-        "info",
-        "check",
-        "verify",
-        "validate",
-        "count",
-        "stats",
-        "whoami",
-        "viewer",
-        "describe",
-        "current_account",
-        "list_accounts",
-        "switch_account",
-        "add_account",
-        "remove_account",
-        "download",
-        "fetch",
-        "describe",
-        "discover",
-        "screenshot",
-        "pdf",
-        "get_text",
-        "is_visible",
-        "wait",
-        "wait_for_selector",
-        "wait_for_navigation",
-        "get_tabs",
-        "list_instances",
-        "mcp_restart_server",
-        "sequentialthinking",
-    ];
-
-    // If the suffix starts with a safe prefix, allow it
-    let safe_prefixes = [
-        "get_", "list_", "search_", "read_", "check_", "resolve_", "verify_",
-    ];
-
-    if safe_suffixes.contains(&suffix.as_str()) {
-        return false;
-    }
-
-    if safe_prefixes.iter().any(|p| suffix.starts_with(p)) {
-        return false;
-    }
-
-    // Everything else is dangerous (fail-closed)
-    true
-}
+// `is_dangerous_mcp_tool` has moved to `sentinel_domain::mcp_tool` along
+// with the safe-suffixes / safe-prefixes lists. The phase gate is still the
+// only consumer; the domain location makes the lists reviewable.
+use sentinel_domain::mcp_tool::is_dangerous_mcp_tool;
 
 /// Extract the skill name from a normalized path like `.../skills/loom/SKILL.md`.
 /// Returns the skill directory name (e.g., "loom") or None if path doesn't match.
