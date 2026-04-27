@@ -14,23 +14,24 @@ pub mod commit_message_validator;
 pub mod context_monitor;
 pub mod cwd_changed;
 pub mod db_ops_gate;
+pub mod dep_check;
 pub mod doc_cleanup;
 pub mod doc_drift;
 pub mod doppler_auth0_gate;
-pub mod dep_check;
 pub mod error_reporter;
 pub mod evidence_collector;
 pub mod execution_log;
 pub mod git_hygiene;
+pub mod hookdeck_decoders;
 pub mod hygiene_override;
 pub mod hygiene_reminders;
 pub mod linear_lifecycle;
 pub mod mcp_health;
-pub mod orchestration_nudge;
 pub mod memory_extract;
 pub mod memory_feedback;
 pub mod memory_inject;
 pub mod memory_verify;
+pub mod orchestration_nudge;
 pub mod permission_denied;
 pub mod phase_gate;
 pub mod phase_validator;
@@ -276,27 +277,72 @@ pub mod test_support {
         fn merge_base(&self, _: &str, _: &str) -> Option<String> { None }
         fn rev_list_count(&self, _: &str, _: &str) -> Option<u32> { None }
         fn diff_names(&self, _: &str, _: &str) -> Option<Vec<String>> { None }
+        fn has_uncommitted_changes(&self, _: &str) -> anyhow::Result<bool> {
+            Ok(false)
+        }
+        fn changed_files(&self, _: &str) -> anyhow::Result<Vec<String>> {
+            Ok(vec![])
+        }
+        fn current_branch(&self, _: &str) -> anyhow::Result<String> {
+            Ok("main".into())
+        }
+        fn is_worktree(&self, _: &str) -> bool {
+            false
+        }
+        fn has_unpushed_commits(&self, _: &str) -> anyhow::Result<bool> {
+            Ok(false)
+        }
+        fn repo_root(&self, _: &str) -> Option<String> {
+            None
+        }
+        fn list_worktree_names(&self, _: &str) -> Vec<String> {
+            Vec::new()
+        }
     }
 
     pub struct StubFs;
     impl FileSystemPort for StubFs {
-        fn home_dir(&self) -> Option<PathBuf> { Some(PathBuf::from("/mock/home")) }
-        fn read_to_string(&self, _: &Path) -> anyhow::Result<String> { anyhow::bail!("not found") }
-        fn write(&self, _: &Path, _: &[u8]) -> anyhow::Result<()> { Ok(()) }
-        fn create_dir_all(&self, _: &Path) -> anyhow::Result<()> { Ok(()) }
-        fn read_dir(&self, _: &Path) -> anyhow::Result<Vec<PathBuf>> { Ok(vec![]) }
-        fn exists(&self, _: &Path) -> bool { false }
-        fn is_dir(&self, _: &Path) -> bool { false }
-        fn metadata(&self, _: &Path) -> anyhow::Result<std::fs::Metadata> { anyhow::bail!("no") }
-        fn append(&self, _: &Path, _: &[u8]) -> anyhow::Result<()> { Ok(()) }
+        fn home_dir(&self) -> Option<PathBuf> {
+            Some(PathBuf::from("/mock/home"))
+        }
+        fn read_to_string(&self, _: &Path) -> anyhow::Result<String> {
+            anyhow::bail!("not found")
+        }
+        fn write(&self, _: &Path, _: &[u8]) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn create_dir_all(&self, _: &Path) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn read_dir(&self, _: &Path) -> anyhow::Result<Vec<PathBuf>> {
+            Ok(vec![])
+        }
+        fn exists(&self, _: &Path) -> bool {
+            false
+        }
+        fn is_dir(&self, _: &Path) -> bool {
+            false
+        }
+        fn metadata(&self, _: &Path) -> anyhow::Result<std::fs::Metadata> {
+            anyhow::bail!("no")
+        }
+        fn append(&self, _: &Path, _: &[u8]) -> anyhow::Result<()> {
+            Ok(())
+        }
     }
 
     pub struct StubProcess;
     impl ProcessPort for StubProcess {
         fn run(&self, _: &str, _: &[&str], _: Option<&str>) -> anyhow::Result<ProcessOutput> {
-            Ok(ProcessOutput { success: true, stdout: String::new(), stderr: String::new() })
+            Ok(ProcessOutput {
+                success: true,
+                stdout: String::new(),
+                stderr: String::new(),
+            })
         }
-        fn spawn_detached(&self, _: &str, _: &[&str]) -> anyhow::Result<()> { Ok(()) }
+        fn spawn_detached(&self, _: &str, _: &[&str]) -> anyhow::Result<()> {
+            Ok(())
+        }
     }
 
     /// Stub `EnvPort` backed by an in-memory map. Tests inject scenarios
@@ -357,5 +403,11 @@ pub mod test_support {
         let memory_mcp: &'static StubMemoryMcp = Box::leak(Box::new(StubMemoryMcp));
         let env: &'static StubEnv = Box::leak(Box::new(StubEnv::new()));
         HookContext { git, vector_store: None, fs, process, llm: None, memory_mcp, env }
+        HookContext {
+            git,
+            vector_store: None,
+            fs,
+            process,
+        }
     }
 }

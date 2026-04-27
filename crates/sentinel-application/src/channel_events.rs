@@ -97,6 +97,7 @@ pub fn emit(
     let resolved_session_id = session_id
         .map(String::from)
         .or_else(|| detect_session_id(env));
+    let resolved_session_id = session_id.map(String::from).or_else(detect_session_id);
 
     let dir = events_dir_for_session(fs, resolved_session_id.as_deref());
     if let Err(e) = fs.create_dir_all(&dir) {
@@ -208,6 +209,50 @@ pub fn cleanup_stale_sessions(fs: &dyn FileSystemPort, max_age: std::time::Durat
     }
 }
 
+/// Build a [`ChannelEvent`] from a Hookdeck webhook, using the typed decoders
+/// to produce a human-readable `summary` and preserving the raw JSON body
+/// under `meta.raw` so consumers can still drill into the full payload.
+///
+/// This is the glue between the `hookdeck_decoders` module and the channel
+/// emission pipeline. The hookdeck channel bridge (in `vulcan-hookdeck`)
+/// should call this when it wants a typed one-line summary — the bridge
+/// doesn't depend on sentinel-application today, but any sidecar that writes
+/// event files into `~/.claude/sentinel/events/{session_id}/` can use this
+/// to build its payload.
+pub fn channel_event_from_webhook(
+    source: &str,
+    event_type: Option<&str>,
+    body: &serde_json::Value,
+    extra_meta: serde_json::Map<String, serde_json::Value>,
+) -> ChannelEvent {
+    let decoded = crate::hooks::hookdeck_decoders::decode(source, event_type, body);
+
+    let mut meta = extra_meta;
+    meta.insert(
+        "source".to_string(),
+        serde_json::Value::String(source.to_string()),
+    );
+    if let Some(et) = event_type {
+        meta.insert(
+            "event_type".to_string(),
+            serde_json::Value::String(et.to_string()),
+        );
+    }
+    // Preserve raw JSON so downstream consumers can still drill in if needed.
+    // Session-visible content uses only `summary`.
+    meta.insert("raw".to_string(), decoded.raw);
+
+    ChannelEvent {
+        event: format!("hookdeck.{source}"),
+        summary: decoded.summary,
+        ts: Utc::now().to_rfc3339(),
+        session_id: detect_session_id(),
+        project: None,
+        source_agent: Some("hookdeck".into()),
+        meta,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -278,9 +323,59 @@ mod tests {
 
     #[test]
     fn test_project_from_cwd() {
-        assert_eq!(project_from_cwd(Some("/Users/gary/projects/sentinel")), Some("sentinel".to_string()));
-        assert_eq!(project_from_cwd(Some("C:\\Users\\gary\\sentinel")), Some("sentinel".to_string()));
+        assert_eq!(
+            project_from_cwd(Some("/Users/gary/projects/sentinel")),
+            Some("sentinel".to_string())
+        );
+        assert_eq!(
+            project_from_cwd(Some("C:\\Users\\gary\\sentinel")),
+            Some("sentinel".to_string())
+        );
         assert_eq!(project_from_cwd(None), None);
+    }
+
+    #[test]
+    fn channel_event_from_webhook_uses_typed_decoder() {
+        let body = serde_json::json!({
+            "action": "create",
+            "type": "Comment",
+            "data": {
+                "body": "hi",
+                "issue": { "identifier": "FPCRM-1", "team": { "key": "FPCRM" } }
+            },
+            "actor": { "name": "Pedro" }
+        });
+        let ev = channel_event_from_webhook("linear", None, &body, serde_json::Map::new());
+        assert_eq!(ev.summary, "[LINEAR] Pedro commented on FPCRM-1: \"hi\"");
+        assert_eq!(ev.event, "hookdeck.linear");
+        assert_eq!(ev.source_agent.as_deref(), Some("hookdeck"));
+        assert_eq!(
+            ev.meta.get("source").and_then(|v| v.as_str()),
+            Some("linear")
+        );
+        // Raw JSON is preserved for drill-in.
+        assert!(ev.meta.get("raw").is_some());
+    }
+
+    #[test]
+    fn channel_event_from_webhook_falls_back_cleanly() {
+        let body = serde_json::json!({
+            "action": "weird",
+            "data": { "id": "x1" }
+        });
+        let ev = channel_event_from_webhook(
+            "unknown_src",
+            Some("thing.event"),
+            &body,
+            serde_json::Map::new(),
+        );
+        assert_eq!(ev.summary, "[HOOKDECK:unknown_src] thing.event on x1");
+        // Never 400-line JSON — summary stays one short line.
+        assert!(ev.summary.len() < 200);
+        assert_eq!(
+            ev.meta.get("event_type").and_then(|v| v.as_str()),
+            Some("thing.event")
+        );
     }
 
     #[test]
