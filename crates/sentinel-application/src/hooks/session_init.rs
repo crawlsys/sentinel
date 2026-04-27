@@ -847,15 +847,14 @@ The workflow needs a `LINEAR_API_KEY` repo secret (workspace-scoped). Assignee a
 3. [Session Automation](#session-automation)
 4. [Date Context](#date-context)
 5. [Marketplace Architecture](#marketplace-architecture)
-6. [Using Slash Commands](#using-slash-commands)
-7. [Using Agents & Agent Teams](#using-agents--agent-teams)
-8. [Using Skills](#using-skills)
-9. [Changelog & Version Tracking](#changelog--version-tracking)
-10. [Plans & Documentation](#plans--documentation)
-11. [Session Resume](#session-resume)
-12. [Context Management](#context-management)
-13. [`Autopilot` | `Planned` Mode Switch](#autopilot--planned-mode-switch)
-14. [Marketplace Stats](#marketplace-stats)
+6. [Using Agents & Agent Teams](#using-agents--agent-teams)
+7. [Using Skills](#using-skills)
+8. [Changelog & Version Tracking](#changelog--version-tracking)
+9. [Plans & Documentation](#plans--documentation)
+10. [Session Resume](#session-resume)
+11. [Context Management](#context-management)
+12. [`Autopilot` | `Planned` Mode Switch](#autopilot--planned-mode-switch)
+13. [Marketplace Stats](#marketplace-stats)
 
 ---
 
@@ -971,7 +970,6 @@ The Claude Code Marketplace is a modular ecosystem of components that extend Cla
 ├── CLAUDE.md              <- Auto-generated on every session (live version)
 ├── settings.json          <- User preferences (no hooks)
 ├── skills/                <- {skills} skill directories (SKILL.md each)
-├── commands/              <- {commands} slash commands (.md files)
 ├── agents/                <- {agents} agent definitions (.md files)
 ├── plans/                 <- Implementation plans (markdown, per-project)
 ├── scripts/               <- Utility scripts (.js)
@@ -1164,26 +1162,6 @@ The skill router auto-detects the active project from issue prefixes (e.g. `FIR-
 \\* Two-phase hooks: Stop detects state and writes to disk, UserPromptSubmit reads state and injects instructions.
 
 **Context injection**: Plain stdout is injected into model context ONLY for SessionStart and UserPromptSubmit. Structured `hookSpecificOutput.additionalContext` works for PreToolUse, PostToolUse, PostToolUseFailure, UserPromptSubmit, SessionStart, Setup, and SubagentStart.
-
----
-
-## Using Slash Commands
-
-Slash commands are user-invocable shortcuts. Invoke them with the `Skill` tool:
-
-| Command | Description | Usage |
-|---------|-------------|-------|
-| `/commit` | Smart git commit with conventional format | `Skill(skill: "commit")` |
-| `/test` | Run tests with coverage | `Skill(skill: "test")` |
-| `/review` | 6-layer code review pipeline | `Skill(skill: "review")` |
-| `/explore` | Explore codebase structure | `Skill(skill: "explore")` |
-| `/plan` | Enter built-in Plan Mode (Shift+Tab → design → `ExitPlanMode`) | `Skill(skill: "plan")` |
-| `/debug` | Debug with root cause analysis | `Skill(skill: "debug")` |
-| `/pr` | Create pull request | `Skill(skill: "pr")` |
-| `/skills` | List all available skills | `Skill(skill: "skills")` |
-| `/session` | Get current session ID | `Skill(skill: "session")` |
-
-When user types `/command`, use the `Skill` tool -- NOT a manual implementation.
 
 ---
 
@@ -1566,7 +1544,6 @@ CIRCUMSTANCE**
 - **Skills:** {skills}
 - **MCP Servers:** {mcp} registered ({mcp_repos} repos)
 - **CLIs:** {cli_repos} repos
-- **Slash Commands:** {commands}
 - **Hooks:** {hooks} (sentinel engine)
 - **Agents:** {agents}
 
@@ -1577,7 +1554,6 @@ CIRCUMSTANCE**
         date_str = date_str,
         skills = counts.skills,
         hooks = counts.hooks,
-        commands = counts.commands,
         agents = counts.agents,
         mcp = counts.mcp_servers,
         mcp_repos = counts.mcp_repos,
