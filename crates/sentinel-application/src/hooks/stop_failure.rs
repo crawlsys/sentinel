@@ -35,7 +35,10 @@ fn parse_reset_minutes(error_details: &str) -> Option<u64> {
     let lower = error_details.to_lowercase();
 
     // Pattern: "retry after <seconds>" or "retry-after: <seconds>"
-    if let Some(idx) = lower.find("retry after").or_else(|| lower.find("retry-after")) {
+    if let Some(idx) = lower
+        .find("retry after")
+        .or_else(|| lower.find("retry-after"))
+    {
         let after = &lower[idx..];
         if let Some(secs) = extract_first_number(after) {
             let minutes = (secs + 59) / 60; // round up
@@ -157,14 +160,15 @@ fn parse_absolute_time_flexible(s: &str) -> Option<u64> {
     let is_pm = lower.contains("pm");
     let is_am = lower.contains("am");
 
-    let digits_only = lower
-        .replace("pm", "").replace("am", "")
-        .trim().to_string();
+    let digits_only = lower.replace("pm", "").replace("am", "").trim().to_string();
 
     let (hour, minute) = if digits_only.contains(':') {
         let parts: Vec<&str> = digits_only.split(':').collect();
         let h: u64 = parts.first()?.trim().parse().ok()?;
-        let m: u64 = parts.get(1).and_then(|p| p.trim().parse().ok()).unwrap_or(0);
+        let m: u64 = parts
+            .get(1)
+            .and_then(|p| p.trim().parse().ok())
+            .unwrap_or(0);
         (h, m)
     } else {
         let h: u64 = digits_only.trim().parse().ok()?;
@@ -218,7 +222,8 @@ fn rotate_accounts(
     cooldown_minutes: u64,
 ) -> anyhow::Result<super::ProcessOutput> {
     let cooldown_arg = format!("--cooldown-minutes={cooldown_minutes}");
-    ctx.process.run("accounts", &["rotate", cooldown_arg.as_str()], None)
+    ctx.process
+        .run("accounts", &["rotate", cooldown_arg.as_str()], None)
 }
 
 fn summarize_process_failure(output: &super::ProcessOutput) -> String {
@@ -266,7 +271,9 @@ pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
         });
 
         let line = format!("{}\n", entry);
-        let _ = ctx.fs.append(&metrics_dir.join("errors.jsonl"), line.as_bytes());
+        let _ = ctx
+            .fs
+            .append(&metrics_dir.join("errors.jsonl"), line.as_bytes());
     }
 
     // If this is a rate limit error, rotate immediately and stop this session
@@ -312,7 +319,8 @@ pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
                 );
 
                 ntfy_push::push_attention(
-                    ctx.fs, ctx.env,
+                    ctx.fs,
+                    ctx.env,
                     "Claude rate-limited (auto-recovered)",
                     &format!(
                         "Cooldown {cooldown_minutes}m. {rotate_msg} \
@@ -352,9 +360,13 @@ pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
                 );
 
                 ntfy_push::push_attention(
-                    ctx.fs, ctx.env,
+                    ctx.fs,
+                    ctx.env,
                     "Claude rate-limited: rotation FAILED",
-                    &format!("Cooldown {cooldown_minutes}m. {}. Manual intervention needed.", truncate_for_push(&detail)),
+                    &format!(
+                        "Cooldown {cooldown_minutes}m. {}. Manual intervention needed.",
+                        truncate_for_push(&detail)
+                    ),
                     5,
                     &["rotating_light", "x"],
                 );
@@ -380,9 +392,13 @@ pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
                 );
 
                 ntfy_push::push_attention(
-                    ctx.fs, ctx.env,
+                    ctx.fs,
+                    ctx.env,
                     "Claude rate-limited: rotation could not start",
-                    &format!("Cooldown {cooldown_minutes}m. {}. Manual intervention needed.", truncate_for_push(&e.to_string())),
+                    &format!(
+                        "Cooldown {cooldown_minutes}m. {}. Manual intervention needed.",
+                        truncate_for_push(&e.to_string())
+                    ),
                     5,
                     &["rotating_light", "x"],
                 );
@@ -403,9 +419,135 @@ pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
         }
     }
 
-    // Non-rate-limit API error — turn aborted, push so Gary knows.
+    // Authentication errors — the in-process token was rejected by Anthropic.
+    //
+    // This happens when (a) the access_token expired and we somehow served a
+    // stale one, (b) the refresh_token was revoked, or (c) the session's
+    // `.credentials.json` got out of sync with the slot it claims to be on.
+    // In all three cases the right move is to rotate to the next live slot
+    // and let the fanout swap fresh tokens into every session — *without*
+    // penalizing the current slot, because the slot itself isn't necessarily
+    // exhausted (it's just stale or revoked, which the rotator will detect
+    // when it tries to mint a token for it).
+    //
+    // Cooldown=0 means "rotate now, don't mark this slot as rate-limited."
+    // If the slot's refresh_token is genuinely revoked, the rotator will
+    // skip past it via its invalid_grant detection.
+    let is_auth_error = error.contains("authentication_failed")
+        || error.contains("authentication_error")
+        || error.contains("invalid_credentials")
+        || error_details.contains("authentication_error")
+        || error_details.contains("Invalid credentials")
+        || error_details.contains("\"401\"")
+        || error_details.starts_with("401 ");
+
+    if is_auth_error {
+        match rotate_accounts(ctx, 0) {
+            Ok(output) if output.success => {
+                let summary = output.stdout.trim();
+                let rotate_msg = if summary.is_empty() {
+                    "Auto-rotated account.".to_string()
+                } else {
+                    format!("Auto-rotated account: {}", summary.replace("**", ""))
+                };
+
+                tracing::info!(
+                    session_id = input.session_id.as_deref().unwrap_or("unknown"),
+                    "Auth error detected, account rotated, fanout complete (in-place token swap)"
+                );
+
+                ntfy_push::push_attention(
+                    ctx.fs,
+                    ctx.env,
+                    "Claude auth failure (auto-recovered)",
+                    &format!(
+                        "401/auth error on current slot. {rotate_msg} \
+                         Tokens swapped in-place; next request uses the new account."
+                    ),
+                    4,
+                    &["key", "rotating_light"],
+                );
+
+                return HookOutput {
+                    system_message: Some(format!(
+                        "[Auth Error] Token rejected by Anthropic. \
+                         {rotate_msg} Tokens were swapped in-place across all live `c` sessions; \
+                         the next API request will use the new account automatically. \
+                         Just retry the message that failed."
+                    )),
+                    continue_: Some(false),
+                    stop_reason: Some(
+                        "Token rejected. Rotated to the next account; \
+                         next request will use it automatically."
+                            .to_string(),
+                    ),
+                    ..HookOutput::default()
+                };
+            }
+            Ok(output) => {
+                let detail = summarize_process_failure(&output);
+                tracing::warn!(detail, "Auth error detected but account rotation failed");
+
+                ntfy_push::push_attention(
+                    ctx.fs,
+                    ctx.env,
+                    "Claude auth failure: rotation FAILED",
+                    &format!(
+                        "401/auth error and rotation didn't recover: {}. Manual intervention needed.",
+                        truncate_for_push(&detail)
+                    ),
+                    5,
+                    &["key", "x"],
+                );
+
+                return HookOutput {
+                    system_message: Some(format!(
+                        "[Auth Error] Token rejected by Anthropic and auto-rotation failed: {detail}. \
+                         Run `account_login <slot>` to re-auth, or close this session and relaunch `c`."
+                    )),
+                    continue_: Some(false),
+                    stop_reason: Some(
+                        "Token rejected. Auto-rotation failed and this session cannot continue."
+                            .to_string(),
+                    ),
+                    ..HookOutput::default()
+                };
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "Auth error detected but accounts CLI could not be executed");
+
+                ntfy_push::push_attention(
+                    ctx.fs,
+                    ctx.env,
+                    "Claude auth failure: rotation could not start",
+                    &format!(
+                        "401/auth error and rotation didn't start: {}. Manual intervention needed.",
+                        truncate_for_push(&e.to_string())
+                    ),
+                    5,
+                    &["key", "x"],
+                );
+
+                return HookOutput {
+                    system_message: Some(format!(
+                        "[Auth Error] Token rejected by Anthropic and auto-rotation could not start: {e}. \
+                         Run `account_login <slot>` to re-auth, or close this session and relaunch `c`."
+                    )),
+                    continue_: Some(false),
+                    stop_reason: Some(
+                        "Token rejected. Auto-rotation could not start and this session cannot continue."
+                            .to_string(),
+                    ),
+                    ..HookOutput::default()
+                };
+            }
+        }
+    }
+
+    // Non-rate-limit, non-auth API error — turn aborted, push so Gary knows.
     ntfy_push::push_attention(
-        ctx.fs, ctx.env,
+        ctx.fs,
+        ctx.env,
         &format!("Claude turn aborted: {error}"),
         &truncate_for_push(error_details),
         4,
@@ -436,27 +578,44 @@ mod tests {
     }
 
     impl FileSystemPort for TestFs {
-        fn home_dir(&self) -> Option<PathBuf> { Some(self.home.clone()) }
-        fn read_to_string(&self, path: &Path) -> anyhow::Result<String> { Ok(fs::read_to_string(path)?) }
+        fn home_dir(&self) -> Option<PathBuf> {
+            Some(self.home.clone())
+        }
+        fn read_to_string(&self, path: &Path) -> anyhow::Result<String> {
+            Ok(fs::read_to_string(path)?)
+        }
         fn write(&self, path: &Path, content: &[u8]) -> anyhow::Result<()> {
             if let Some(parent) = path.parent() {
                 fs::create_dir_all(parent)?;
             }
             Ok(fs::write(path, content)?)
         }
-        fn create_dir_all(&self, path: &Path) -> anyhow::Result<()> { Ok(fs::create_dir_all(path)?) }
-        fn read_dir(&self, path: &Path) -> anyhow::Result<Vec<PathBuf>> {
-            Ok(fs::read_dir(path)?.filter_map(|e| e.ok().map(|e| e.path())).collect())
+        fn create_dir_all(&self, path: &Path) -> anyhow::Result<()> {
+            Ok(fs::create_dir_all(path)?)
         }
-        fn exists(&self, path: &Path) -> bool { path.exists() }
-        fn is_dir(&self, path: &Path) -> bool { path.is_dir() }
-        fn metadata(&self, path: &Path) -> anyhow::Result<std::fs::Metadata> { Ok(fs::metadata(path)?) }
+        fn read_dir(&self, path: &Path) -> anyhow::Result<Vec<PathBuf>> {
+            Ok(fs::read_dir(path)?
+                .filter_map(|e| e.ok().map(|e| e.path()))
+                .collect())
+        }
+        fn exists(&self, path: &Path) -> bool {
+            path.exists()
+        }
+        fn is_dir(&self, path: &Path) -> bool {
+            path.is_dir()
+        }
+        fn metadata(&self, path: &Path) -> anyhow::Result<std::fs::Metadata> {
+            Ok(fs::metadata(path)?)
+        }
         fn append(&self, path: &Path, content: &[u8]) -> anyhow::Result<()> {
             use std::io::Write;
             if let Some(parent) = path.parent() {
                 fs::create_dir_all(parent)?;
             }
-            let mut file = fs::OpenOptions::new().create(true).append(true).open(path)?;
+            let mut file = fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)?;
             file.write_all(content)?;
             Ok(())
         }
@@ -464,16 +623,36 @@ mod tests {
 
     struct StubGit;
     impl GitStatusPort for StubGit {
-        fn has_uncommitted_changes(&self, _: &str) -> anyhow::Result<bool> { Ok(false) }
-        fn changed_files(&self, _: &str) -> anyhow::Result<Vec<String>> { Ok(vec![]) }
-        fn current_branch(&self, _: &str) -> anyhow::Result<String> { Ok("main".into()) }
-        fn is_worktree(&self, _: &str) -> bool { false }
-        fn has_unpushed_commits(&self, _: &str) -> anyhow::Result<bool> { Ok(false) }
-        fn repo_root(&self, _: &str) -> Option<String> { None }
-        fn list_worktree_names(&self, _: &str) -> Vec<String> { Vec::new() }
-        fn merge_base(&self, _: &str, _: &str) -> Option<String> { None }
-        fn rev_list_count(&self, _: &str, _: &str) -> Option<u32> { None }
-        fn diff_names(&self, _: &str, _: &str) -> Option<Vec<String>> { None }
+        fn has_uncommitted_changes(&self, _: &str) -> anyhow::Result<bool> {
+            Ok(false)
+        }
+        fn changed_files(&self, _: &str) -> anyhow::Result<Vec<String>> {
+            Ok(vec![])
+        }
+        fn current_branch(&self, _: &str) -> anyhow::Result<String> {
+            Ok("main".into())
+        }
+        fn is_worktree(&self, _: &str) -> bool {
+            false
+        }
+        fn has_unpushed_commits(&self, _: &str) -> anyhow::Result<bool> {
+            Ok(false)
+        }
+        fn repo_root(&self, _: &str) -> Option<String> {
+            None
+        }
+        fn list_worktree_names(&self, _: &str) -> Vec<String> {
+            Vec::new()
+        }
+        fn merge_base(&self, _: &str, _: &str) -> Option<String> {
+            None
+        }
+        fn rev_list_count(&self, _: &str, _: &str) -> Option<u32> {
+            None
+        }
+        fn diff_names(&self, _: &str, _: &str) -> Option<Vec<String>> {
+            None
+        }
     }
 
     /// Test fixture for [`TestProcess::run`]. The `Err` variant is used by
@@ -498,7 +677,9 @@ mod tests {
             }
         }
 
-        fn spawn_detached(&self, _: &str, _: &[&str]) -> anyhow::Result<()> { Ok(()) }
+        fn spawn_detached(&self, _: &str, _: &[&str]) -> anyhow::Result<()> {
+            Ok(())
+        }
     }
 
     #[test]
@@ -508,7 +689,8 @@ mod tests {
             .extra
             .insert("error".to_string(), serde_json::json!("auth_error"));
 
-        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
+        let ctx = crate::hooks::test_support::stub_ctx();
+        let output = process(&input, &ctx);
         assert!(output.blocked.is_none());
         assert!(output.system_message.is_none());
     }
@@ -523,7 +705,8 @@ mod tests {
             .extra
             .insert("error_details".to_string(), serde_json::json!(""));
 
-        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
+        let ctx = crate::hooks::test_support::stub_ctx();
+        let output = process(&input, &ctx);
         assert!(output.system_message.is_some());
         let msg = output.system_message.as_ref().unwrap();
         assert!(msg.contains("cooldown: 300m"));
@@ -543,7 +726,8 @@ mod tests {
             serde_json::json!("retry after 7200"),
         );
 
-        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
+        let ctx = crate::hooks::test_support::stub_ctx();
+        let output = process(&input, &ctx);
         let msg = output.system_message.as_ref().unwrap();
         assert!(msg.contains("cooldown: 120m"));
         assert_eq!(output.continue_, Some(false));
@@ -613,7 +797,8 @@ mod tests {
             serde_json::json!("You've hit your session limit · resets 4pm (CDT)"),
         );
 
-        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
+        let ctx = crate::hooks::test_support::stub_ctx();
+        let output = process(&input, &ctx);
         assert!(output.system_message.is_some());
         let msg = output.system_message.as_ref().unwrap();
         assert!(msg.contains("cooldown:"));
@@ -674,8 +859,14 @@ mod tests {
         let msg = output.system_message.expect("system_message present");
         assert!(msg.contains("swapped in-place"), "msg: {msg}");
         assert!(msg.contains("retry"), "msg: {msg}");
-        assert!(msg.contains("claude4"), "msg should mention old account: {msg}");
-        assert!(msg.contains("claude5"), "msg should mention new account: {msg}");
+        assert!(
+            msg.contains("claude4"),
+            "msg should mention old account: {msg}"
+        );
+        assert!(
+            msg.contains("claude5"),
+            "msg should mention new account: {msg}"
+        );
         assert!(
             !msg.contains("Restarting"),
             "msg must not promise a restart that doesn't happen: {msg}"
@@ -691,5 +882,130 @@ mod tests {
             !request_path.exists(),
             "hook should not persist the vestigial relaunch-request file"
         );
+    }
+
+    /// On `authentication_failed` (typical 401 from Anthropic), the hook
+    /// must rotate to the next slot the same way it does for `rate_limit`,
+    /// but with cooldown=0 (auth errors mean stale token, not exhausted
+    /// account — the slot itself isn't burning quota).
+    #[test]
+    fn test_stop_failure_auth_error_rotates_in_place() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fs: &'static TestFs = Box::leak(Box::new(TestFs {
+            home: tmp.path().to_path_buf(),
+        }));
+        let git: &'static StubGit = Box::leak(Box::new(StubGit));
+        let process_port: &'static TestProcess = Box::leak(Box::new(TestProcess {
+            output: TestProcessResult::Ok(ProcessOutput {
+                success: true,
+                stdout: "Auto-rotated: **claude2** -> **claude3**".to_string(),
+                stderr: String::new(),
+            }),
+        }));
+        let memory_mcp: &'static crate::hooks::test_support::StubMemoryMcp =
+            Box::leak(Box::new(crate::hooks::test_support::StubMemoryMcp));
+        let env: &'static crate::hooks::test_support::StubEnv =
+            Box::leak(Box::new(crate::hooks::test_support::StubEnv::new()));
+        let ctx = HookContext {
+            git,
+            vector_store: None,
+            fs,
+            process: process_port,
+            llm: None,
+            memory_mcp,
+            env,
+        };
+
+        let mut input = HookInput::default();
+        input.session_id = Some("session-auth".to_string());
+        input
+            .extra
+            .insert("error".to_string(), serde_json::json!("authentication_failed"));
+        input
+            .extra
+            .insert("error_details".to_string(), serde_json::json!(""));
+
+        let output = process(&input, &ctx);
+
+        // Same shape as rate_limit: stop the turn cleanly so the user retries.
+        assert_eq!(output.continue_, Some(false));
+        let msg = output.system_message.expect("system_message present");
+        assert!(msg.contains("[Auth Error]"), "msg: {msg}");
+        assert!(msg.contains("swapped in-place"), "msg: {msg}");
+        assert!(msg.contains("claude2"), "msg should mention old account: {msg}");
+        assert!(msg.contains("claude3"), "msg should mention new account: {msg}");
+    }
+
+    /// `error: "invalid_request"` (e.g. prompt-too-long 400s) MUST NOT
+    /// trigger account rotation. Those are user input problems, not auth
+    /// problems — rotating away from a healthy slot would be silly.
+    #[test]
+    fn test_stop_failure_invalid_request_does_not_rotate() {
+        let mut input = HookInput::default();
+        input
+            .extra
+            .insert("error".to_string(), serde_json::json!("invalid_request"));
+        input.extra.insert(
+            "error_details".to_string(),
+            serde_json::json!("400 prompt is too long: 200993 tokens > 200000 maximum"),
+        );
+
+        let ctx = crate::hooks::test_support::stub_ctx();
+        let output = process(&input, &ctx);
+        // No rotation message, no continue_:false — just the standard
+        // turn-aborted ntfy push and HookOutput::allow().
+        assert!(output.system_message.is_none());
+        assert!(output.continue_.is_none() || output.continue_ == Some(true));
+    }
+
+    /// 401 error_details payloads (the form Claude Code reports when
+    /// Anthropic returns "Invalid credentials") must trigger rotation
+    /// even if the top-level `error` field doesn't say "auth".
+    #[test]
+    fn test_stop_failure_401_in_details_rotates() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fs: &'static TestFs = Box::leak(Box::new(TestFs {
+            home: tmp.path().to_path_buf(),
+        }));
+        let git: &'static StubGit = Box::leak(Box::new(StubGit));
+        let process_port: &'static TestProcess = Box::leak(Box::new(TestProcess {
+            output: TestProcessResult::Ok(ProcessOutput {
+                success: true,
+                stdout: "Auto-rotated: **claude5** -> **claude1**".to_string(),
+                stderr: String::new(),
+            }),
+        }));
+        let memory_mcp: &'static crate::hooks::test_support::StubMemoryMcp =
+            Box::leak(Box::new(crate::hooks::test_support::StubMemoryMcp));
+        let env: &'static crate::hooks::test_support::StubEnv =
+            Box::leak(Box::new(crate::hooks::test_support::StubEnv::new()));
+        let ctx = HookContext {
+            git,
+            vector_store: None,
+            fs,
+            process: process_port,
+            llm: None,
+            memory_mcp,
+            env,
+        };
+
+        let mut input = HookInput::default();
+        input.session_id = Some("session-401".to_string());
+        input
+            .extra
+            .insert("error".to_string(), serde_json::json!("api_error"));
+        input.extra.insert(
+            "error_details".to_string(),
+            serde_json::json!(
+                "401 {\"type\":\"error\",\"error\":{\"type\":\"authentication_error\",\"message\":\"Invalid credentials\"}}"
+            ),
+        );
+
+        let output = process(&input, &ctx);
+        assert_eq!(output.continue_, Some(false));
+        let msg = output.system_message.expect("system_message present");
+        assert!(msg.contains("[Auth Error]"), "msg: {msg}");
+        assert!(msg.contains("claude5"), "msg should mention old: {msg}");
+        assert!(msg.contains("claude1"), "msg should mention new: {msg}");
     }
 }
