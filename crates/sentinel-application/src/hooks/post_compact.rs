@@ -54,36 +54,6 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hooks::FileSystemPort;
-    use std::path::{Path, PathBuf};
-
-    struct MockFs;
-
-    impl FileSystemPort for MockFs {
-        fn home_dir(&self) -> Option<PathBuf> { Some(PathBuf::from("/mock/home")) }
-        fn read_to_string(&self, _path: &Path) -> anyhow::Result<String> { anyhow::bail!("not found") }
-        fn write(&self, _path: &Path, _content: &[u8]) -> anyhow::Result<()> { Ok(()) }
-        fn create_dir_all(&self, _path: &Path) -> anyhow::Result<()> { Ok(()) }
-        fn read_dir(&self, _path: &Path) -> anyhow::Result<Vec<PathBuf>> { Ok(vec![]) }
-        fn exists(&self, _path: &Path) -> bool { false }
-        fn is_dir(&self, _path: &Path) -> bool { false }
-        fn metadata(&self, _path: &Path) -> anyhow::Result<std::fs::Metadata> { anyhow::bail!("no") }
-        fn append(&self, _path: &Path, _content: &[u8]) -> anyhow::Result<()> { Ok(()) }
-    }
-
-    struct StubGit;
-    impl crate::hooks::GitStatusPort for StubGit {
-        fn has_uncommitted_changes(&self, _: &str) -> anyhow::Result<bool> { Ok(false) }
-        fn changed_files(&self, _: &str) -> anyhow::Result<Vec<String>> { Ok(vec![]) }
-        fn current_branch(&self, _: &str) -> anyhow::Result<String> { Ok("main".into()) }
-        fn is_worktree(&self, _: &str) -> bool { false }
-        fn has_unpushed_commits(&self, _: &str) -> anyhow::Result<bool> { Ok(false) }
-        fn repo_root(&self, _: &str) -> Option<String> { None }
-        fn list_worktree_names(&self, _: &str) -> Vec<String> { Vec::new() }
-        fn merge_base(&self, _: &str, _: &str) -> Option<String> { None }
-        fn rev_list_count(&self, _: &str, _: &str) -> Option<u32> { None }
-        fn diff_names(&self, _: &str, _: &str) -> Option<Vec<String>> { None }
-    }
 
     #[test]
     fn test_post_compact_without_skill() {

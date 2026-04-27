@@ -16,23 +16,11 @@
 //! The `error` field is `"rate_limit"` and the content/error_details contains
 //! the human-readable message above.
 
-use std::path::{Path, PathBuf};
-
-use serde::Serialize;
 use sentinel_domain::events::{HookInput, HookOutput};
 
 use crate::ntfy_push;
 
 const DEFAULT_RATE_LIMIT_COOLDOWN_MINUTES: u64 = 300;
-const RATE_LIMIT_RELAUNCH_FILE: &str = "rate-limit-relaunch.json";
-
-#[derive(Debug, Serialize)]
-struct RateLimitRelaunchRequest {
-    session_id: Option<String>,
-    cwd: Option<String>,
-    requested_at_ms: u64,
-    cooldown_minutes: u64,
-}
 
 /// Parse error_details to extract a cooldown duration in minutes.
 ///
@@ -225,37 +213,6 @@ fn parse_absolute_time_flexible(s: &str) -> Option<u64> {
     }
 }
 
-fn handler_dir(home: &Path) -> PathBuf {
-    home.join(".claude").join("claude-code-handler")
-}
-
-fn relaunch_request_path(home: &Path) -> PathBuf {
-    handler_dir(home).join(RATE_LIMIT_RELAUNCH_FILE)
-}
-
-fn persist_relaunch_request(
-    input: &HookInput,
-    ctx: &super::HookContext<'_>,
-    cooldown_minutes: u64,
-) -> anyhow::Result<()> {
-    let home = ctx
-        .fs
-        .home_dir()
-        .ok_or_else(|| anyhow::anyhow!("home directory unavailable"))?;
-    let dir = handler_dir(&home);
-    ctx.fs.create_dir_all(&dir)?;
-
-    let request = RateLimitRelaunchRequest {
-        session_id: input.session_id.clone(),
-        cwd: input.cwd.clone(),
-        requested_at_ms: chrono::Utc::now().timestamp_millis().max(0) as u64,
-        cooldown_minutes,
-    };
-    let json = serde_json::to_vec_pretty(&request)?;
-    ctx.fs.write(&relaunch_request_path(&home), &json)?;
-    Ok(())
-}
-
 fn rotate_accounts(
     ctx: &super::HookContext<'_>,
     cooldown_minutes: u64,
@@ -334,64 +291,57 @@ pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
                     format!("Auto-rotated account: {}", summary.replace("**", ""))
                 };
 
-                match persist_relaunch_request(input, ctx, cooldown_minutes) {
-                    Ok(()) => {
-                        tracing::info!(
-                            cooldown_minutes,
-                            session_id = input.session_id.as_deref().unwrap_or("unknown"),
-                            "Rate limit detected, account rotated, relaunch requested"
-                        );
+                // `accounts rotate` ran synchronously and finished its
+                // fan-out: every live `c`-launched session now has new
+                // tokens atomically written to its
+                // `~/.claude/session-env/<id>/.credentials.json`. Claude
+                // Code calls `Ue9()` (mtime check) inside `k$()` before
+                // every API request — so the next request after this
+                // hook returns will read the fresh tokens automatically.
+                //
+                // We DON'T persist a relaunch request file: nothing in
+                // claude-code-handler-rust consumes it (verified: zero
+                // refs to `relaunch_request` / `RATE_LIMIT_RELAUNCH_FILE`
+                // anywhere in the handler crate). It was vestigial from
+                // an earlier design. The mtime-watch fanout makes
+                // restart-style recovery unnecessary.
+                tracing::info!(
+                    cooldown_minutes,
+                    session_id = input.session_id.as_deref().unwrap_or("unknown"),
+                    "Rate limit detected, account rotated, fanout complete (in-place token swap)"
+                );
 
-                        ntfy_push::push_attention(
-                            ctx.fs, ctx.env,
-                            "Claude rate-limited (auto-recovering)",
-                            &format!("Cooldown {cooldown_minutes}m. {rotate_msg} Relaunch queued."),
-                            5,
-                            &["rotating_light"],
-                        );
+                ntfy_push::push_attention(
+                    ctx.fs, ctx.env,
+                    "Claude rate-limited (auto-recovered)",
+                    &format!(
+                        "Cooldown {cooldown_minutes}m. {rotate_msg} \
+                         Tokens swapped in-place; next request uses the new account."
+                    ),
+                    5,
+                    &["rotating_light"],
+                );
 
-                        return HookOutput {
-                            system_message: Some(format!(
-                                "[Rate Limit] Account hit rate limit (cooldown: {cooldown_minutes}m). \
-                                 {rotate_msg} Restarting on the next available account."
-                            )),
-                            continue_: Some(false),
-                            stop_reason: Some(
-                                "Account rate-limited. Rotated to the next account and requesting relaunch."
-                                    .to_string(),
-                            ),
-                            ..HookOutput::default()
-                        };
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            error = %e,
-                            cooldown_minutes,
-                            "Rate limit rotation succeeded but relaunch request could not be persisted"
-                        );
-
-                        ntfy_push::push_attention(
-                            ctx.fs, ctx.env,
-                            "Claude rate-limited: relaunch setup failed",
-                            &format!("Cooldown {cooldown_minutes}m. {rotate_msg} Manually relaunch `c`."),
-                            5,
-                            &["rotating_light", "warning"],
-                        );
-
-                        return HookOutput {
-                            system_message: Some(format!(
-                                "[Rate Limit] Account hit rate limit (cooldown: {cooldown_minutes}m). \
-                                 {rotate_msg} Close this session and relaunch `c`."
-                            )),
-                            continue_: Some(false),
-                            stop_reason: Some(
-                                "Account rate-limited. Rotated to the next account, but relaunch setup failed."
-                                    .to_string(),
-                            ),
-                            ..HookOutput::default()
-                        };
-                    }
-                }
+                return HookOutput {
+                    system_message: Some(format!(
+                        "[Rate Limit] Account hit rate limit (cooldown: {cooldown_minutes}m). \
+                         {rotate_msg} Tokens were swapped in-place across all live `c` sessions; \
+                         the next API request will use the new account automatically. \
+                         No restart needed — just retry the message that failed."
+                    )),
+                    // Stop the current turn cleanly. The user retries
+                    // their message; the retry's k$()/Ue9() detects the
+                    // updated .credentials.json mtime, clears the OAuth
+                    // cache, and reads the new tokens. No restart, no
+                    // session loss, no manual intervention.
+                    continue_: Some(false),
+                    stop_reason: Some(
+                        "Account rate-limited. Rotated to the next account; \
+                         next request will use it automatically."
+                            .to_string(),
+                    ),
+                    ..HookOutput::default()
+                };
             }
             Ok(output) => {
                 let detail = summarize_process_failure(&output);
@@ -526,6 +476,11 @@ mod tests {
         fn diff_names(&self, _: &str, _: &str) -> Option<Vec<String>> { None }
     }
 
+    /// Test fixture for [`TestProcess::run`]. The `Err` variant is used by
+    /// future tests that exercise the "rotation failed" failure mode; it's
+    /// preserved here so the harness covers both shell-success and shell-
+    /// failure paths without touching the production code shape.
+    #[allow(dead_code)]
     enum TestProcessResult {
         Ok(ProcessOutput),
         Err(String),
@@ -665,8 +620,15 @@ mod tests {
         assert_eq!(output.continue_, Some(false));
     }
 
+    /// On rate_limit detection, the hook stops the current turn cleanly
+    /// and emits a system message describing the in-place token swap.
+    /// It does NOT persist a relaunch-request file (no consumer exists)
+    /// and it does NOT request a process restart — the
+    /// `~/.claude/session-env/<id>/.credentials.json` mtime watch in
+    /// Claude Code's k$()/Ue9() handles the swap automatically on the
+    /// next API request.
     #[test]
-    fn test_stop_failure_writes_relaunch_request() {
+    fn test_stop_failure_rate_limit_rotates_in_place() {
         let tmp = tempfile::tempdir().unwrap();
         let fs: &'static TestFs = Box::leak(Box::new(TestFs {
             home: tmp.path().to_path_buf(),
@@ -705,15 +667,29 @@ mod tests {
         );
 
         let output = process(&input, &ctx);
-        assert_eq!(output.continue_, Some(false));
 
+        // Turn stops cleanly so the user can retry their message.
+        assert_eq!(output.continue_, Some(false));
+        // System message describes the in-place swap, not a phantom restart.
+        let msg = output.system_message.expect("system_message present");
+        assert!(msg.contains("swapped in-place"), "msg: {msg}");
+        assert!(msg.contains("retry"), "msg: {msg}");
+        assert!(msg.contains("claude4"), "msg should mention old account: {msg}");
+        assert!(msg.contains("claude5"), "msg should mention new account: {msg}");
+        assert!(
+            !msg.contains("Restarting"),
+            "msg must not promise a restart that doesn't happen: {msg}"
+        );
+
+        // The hook MUST NOT write the dead-letter relaunch-request file.
         let request_path = tmp
             .path()
             .join(".claude")
             .join("claude-code-handler")
-            .join(RATE_LIMIT_RELAUNCH_FILE);
-        let request_json = fs::read_to_string(request_path).unwrap();
-        assert!(request_json.contains("session-123"));
-        assert!(request_json.contains(r"C:\\Users\\garys"));
+            .join("rate-limit-relaunch.json");
+        assert!(
+            !request_path.exists(),
+            "hook should not persist the vestigial relaunch-request file"
+        );
     }
 }
