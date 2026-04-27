@@ -100,8 +100,9 @@ pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
     // 1. Log session start
     log_session_start(ctx.fs, &claude_dir, session_id, cwd);
 
-    // 1.5. One-time migration: move ~/.claude/metrics/ → ~/.claude/sentinel/metrics/
+    // 1.5. One-time migrations
     migrate_metrics_dir(&claude_dir);
+    migrate_last_sync_commit(&claude_dir);
 
     // 1.6. Clean up stale channel event directories (older than 24h)
     crate::channel_events::cleanup_stale_sessions(
@@ -320,6 +321,32 @@ fn migrate_metrics_dir(claude_dir: &Path) {
     }
 }
 
+/// One-time migration: move `~/.claude/.last-sync-commit` → `~/.claude/sentinel/state/last-sync-commit`.
+///
+/// Runs on every SessionStart but only does work when the old file exists.
+fn migrate_last_sync_commit(claude_dir: &Path) {
+    let old_file = claude_dir.join(".last-sync-commit");
+    if !old_file.exists() {
+        return;
+    }
+
+    let new_file = claude_dir.join("sentinel").join("state").join("last-sync-commit");
+    if new_file.exists() {
+        // Already migrated — remove the stale old copy
+        let _ = fs::remove_file(&old_file);
+        return;
+    }
+
+    if let Some(parent) = new_file.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+
+    if fs::copy(&old_file, &new_file).is_ok() {
+        let _ = fs::remove_file(&old_file);
+        tracing::info!("Migrated .last-sync-commit to ~/.claude/sentinel/state/last-sync-commit");
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Marketplace repo discovery + sync
 // ---------------------------------------------------------------------------
@@ -400,7 +427,7 @@ fn sync_marketplace(process: &dyn super::ProcessPort, claude_dir: &Path) -> Sync
     };
 
     // Check if we need to sync (compare last sync commit)
-    let marker_file = claude_dir.join(".last-sync-commit");
+    let marker_file = claude_dir.join("sentinel").join("state").join("last-sync-commit");
     let current_head = get_git_head(process, &repo_dir);
 
     if let (Some(ref head), Ok(last)) = (&current_head, fs::read_to_string(&marker_file)) {
