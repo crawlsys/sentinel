@@ -6,6 +6,7 @@
 pub mod hooks;
 pub mod logs;
 pub mod memories;
+pub mod memory;
 pub mod proofs;
 pub mod scan;
 pub mod sessions;
@@ -32,6 +33,7 @@ pub fn router(state: AppState) -> Router {
         .nest("/api/workflows", workflows::router())
         .nest("/api/hooks", hooks::router())
         .nest("/api/memories", memories::router())
+        .nest("/api/memory", memory::router())
         .nest("/api/sentinel", sessions::router())
         .nest("/api", scan::router())
         .nest("/api", logs::router())

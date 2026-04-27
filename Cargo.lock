@@ -2090,6 +2090,7 @@ dependencies = [
  "colored",
  "dirs",
  "getrandom 0.2.17",
+ "reqwest 0.12.28",
  "sentinel-application",
  "sentinel-domain",
  "sentinel-infrastructure",
