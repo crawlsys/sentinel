@@ -582,9 +582,9 @@ fn count_components(claude_dir: &Path) -> ComponentCounts {
 // CLAUDE.md generation
 // ---------------------------------------------------------------------------
 
-/// List project config names from ~/.claude/projects/*.md (excluding _template)
+/// List project config names from ~/.claude/sentinel/projects/*.md (excluding _template)
 fn list_project_configs(claude_dir: &Path) -> Vec<String> {
-    let projects_dir = claude_dir.join("projects");
+    let projects_dir = claude_dir.join("sentinel").join("projects");
     if !projects_dir.exists() {
         return Vec::new();
     }
@@ -628,7 +628,7 @@ fn list_linear_accounts(claude_dir: &Path) -> Vec<String> {
     let mut accounts = Vec::new();
 
     // Scan project configs for linear_account fields
-    let projects_dir = claude_dir.join("projects");
+    let projects_dir = claude_dir.join("sentinel").join("projects");
     if projects_dir.exists() {
         if let Ok(entries) = fs::read_dir(&projects_dir) {
             for entry in entries.filter_map(|e| e.ok()) {
@@ -968,14 +968,18 @@ The Claude Code Marketplace is a modular ecosystem of components that extend Cla
 ~/.claude.json             <- MCP server registrations (user-scope)
 ~/.claude/
 ├── CLAUDE.md              <- Auto-generated on every session (live version)
-├── settings.json          <- User preferences (no hooks)
+├── settings.json          <- Claude Code user preferences
 ├── skills/                <- {skills} skill directories (SKILL.md each)
 ├── agents/                <- {agents} agent definitions (.md files)
 ├── plans/                 <- Implementation plans (markdown, per-project)
 ├── scripts/               <- Utility scripts (.js)
 ├── docs/                  <- Reference docs (auto-generated)
-└── sentinel/
-    ├── config/            <- Sentinel hook engine configuration
+└── sentinel/              <- ALL sentinel-owned state and config
+    ├── config/
+    │   ├── settings.json  <- Hooks, permissions, env (passed via --settings flag)
+    │   ├── hooks.toml     <- Hook event-to-handler mapping
+    │   └── workflows.toml <- Skill workflow step definitions
+    ├── projects/          <- Per-project configs ({{name}}.md with YAML frontmatter)
     ├── state/             <- Session state, precomputed memories
     ├── metrics/           <- All metrics and analytics (JSONL)
     ├── telemetry/         <- Skill telemetry
@@ -1126,7 +1130,7 @@ sentinel steel-test check             # Check if valid browser test exists
 
 ### Project Configs
 
-Per-project settings live in `~/.claude/projects/{{name}}.md` with YAML frontmatter:
+Per-project settings live in `~/.claude/sentinel/projects/{{name}}.md` with YAML frontmatter:
 
 - **Doppler**: project name, config names (dev/stg/prd)
 - **Linear**: team ID, team key, issue prefix, project IDs, labels
@@ -1700,11 +1704,11 @@ fn build_startup_context(
 // Linear team key caching (marketplace → sentinel)
 // ---------------------------------------------------------------------------
 
-/// Read all ~/.claude/projects/*.md files, extract linear_teams keys from
+/// Read all ~/.claude/sentinel/projects/*.md files, extract linear_teams keys from
 /// YAML frontmatter, and write them to ~/.claude/sentinel/linear-teams.json
 /// so the skill router can consume them without hardcoding.
 fn cache_linear_team_keys(claude_dir: &Path) {
-    let projects_dir = claude_dir.join("projects");
+    let projects_dir = claude_dir.join("sentinel").join("projects");
     if !projects_dir.exists() {
         return;
     }
@@ -2196,8 +2200,8 @@ mod tests {
     #[test]
     fn test_list_project_configs() {
         let dir = tempfile::tempdir().unwrap();
-        let projects = dir.path().join("projects");
-        fs::create_dir(&projects).unwrap();
+        let projects = dir.path().join("sentinel").join("projects");
+        fs::create_dir_all(&projects).unwrap();
         fs::write(projects.join("alpha.md"), "# Alpha").unwrap();
         fs::write(projects.join("beta.md"), "# Beta").unwrap();
         fs::write(projects.join("_template.md"), "# Template").unwrap();
@@ -2226,8 +2230,8 @@ mod tests {
     #[test]
     fn test_cache_linear_team_keys() {
         let dir = tempfile::tempdir().unwrap();
-        let projects = dir.path().join("projects");
-        fs::create_dir(&projects).unwrap();
+        let projects = dir.path().join("sentinel").join("projects");
+        fs::create_dir_all(&projects).unwrap();
 
         // Write a project config with YAML frontmatter
         fs::write(
