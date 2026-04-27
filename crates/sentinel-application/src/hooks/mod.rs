@@ -277,27 +277,6 @@ pub mod test_support {
         fn merge_base(&self, _: &str, _: &str) -> Option<String> { None }
         fn rev_list_count(&self, _: &str, _: &str) -> Option<u32> { None }
         fn diff_names(&self, _: &str, _: &str) -> Option<Vec<String>> { None }
-        fn has_uncommitted_changes(&self, _: &str) -> anyhow::Result<bool> {
-            Ok(false)
-        }
-        fn changed_files(&self, _: &str) -> anyhow::Result<Vec<String>> {
-            Ok(vec![])
-        }
-        fn current_branch(&self, _: &str) -> anyhow::Result<String> {
-            Ok("main".into())
-        }
-        fn is_worktree(&self, _: &str) -> bool {
-            false
-        }
-        fn has_unpushed_commits(&self, _: &str) -> anyhow::Result<bool> {
-            Ok(false)
-        }
-        fn repo_root(&self, _: &str) -> Option<String> {
-            None
-        }
-        fn list_worktree_names(&self, _: &str) -> Vec<String> {
-            Vec::new()
-        }
     }
 
     pub struct StubFs;
