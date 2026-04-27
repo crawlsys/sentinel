@@ -97,7 +97,6 @@ pub fn emit(
     let resolved_session_id = session_id
         .map(String::from)
         .or_else(|| detect_session_id(env));
-    let resolved_session_id = session_id.map(String::from).or_else(detect_session_id);
 
     let dir = events_dir_for_session(fs, resolved_session_id.as_deref());
     if let Err(e) = fs.create_dir_all(&dir) {
@@ -246,7 +245,10 @@ pub fn channel_event_from_webhook(
         event: format!("hookdeck.{source}"),
         summary: decoded.summary,
         ts: Utc::now().to_rfc3339(),
-        session_id: detect_session_id(),
+        session_id: std::env::var("CLAUDE_SESSION_ID")
+            .ok()
+            .or_else(|| std::env::var("SESSION_ID").ok())
+            .filter(|s| !s.is_empty()),
         project: None,
         source_agent: Some("hookdeck".into()),
         meta,

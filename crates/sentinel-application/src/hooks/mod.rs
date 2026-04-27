@@ -403,11 +403,5 @@ pub mod test_support {
         let memory_mcp: &'static StubMemoryMcp = Box::leak(Box::new(StubMemoryMcp));
         let env: &'static StubEnv = Box::leak(Box::new(StubEnv::new()));
         HookContext { git, vector_store: None, fs, process, llm: None, memory_mcp, env }
-        HookContext {
-            git,
-            vector_store: None,
-            fs,
-            process,
-        }
     }
 }
