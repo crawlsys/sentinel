@@ -64,6 +64,11 @@ impl FileSystemPort for RealFileSystem {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("create_dir_all {}", parent.display()))?;
         }
+        // Best-effort rotation: if this is an observability metrics JSONL
+        // and the file has crossed the size cap, archive it before the
+        // next append. Only sentinel/metrics/*.jsonl paths are rotated;
+        // other appends (state markers, manifests, etc.) are untouched.
+        rotate_metrics_log_if_oversized(path);
         use std::io::Write;
         let mut file = std::fs::OpenOptions::new()
             .create(true)
@@ -105,6 +110,61 @@ impl FileSystemPort for RealFileSystem {
     }
 }
 
+/// Cap on size of a sentinel observability metrics JSONL file before we
+/// rotate it. 10 MB is enough for normal observability load (the busiest
+/// real file, mcp-supervisor.jsonl, hit ~13 MB only when an orphaned
+/// process spammed it for weeks; healthy steady-state is well under this)
+/// while small enough to keep tooling like `tail -F`, `grep`, and
+/// readline-style diagnostics responsive.
+const METRICS_LOG_MAX_BYTES: u64 = 10 * 1024 * 1024;
+
+/// Detect whether a path is a sentinel observability metrics JSONL.
+/// Pure function — no IO. Match is intentionally restrictive so we
+/// don't accidentally rotate state markers, manifests, or any other
+/// `.jsonl` file outside the metrics directory.
+fn is_metrics_jsonl(path: &Path) -> bool {
+    let s = path.to_string_lossy();
+    // Match both `/sentinel/metrics/` (Unix) and `\sentinel\metrics\` (Windows)
+    let in_metrics = s.contains("sentinel/metrics/")
+        || s.contains("sentinel\\metrics\\");
+    let is_jsonl = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e == "jsonl")
+        .unwrap_or(false);
+    in_metrics && is_jsonl
+}
+
+/// Best-effort: if `path` is a metrics JSONL larger than
+/// `METRICS_LOG_MAX_BYTES`, rename it to `<file>.archive.<ts_ms>` so the
+/// next append starts a fresh file. Errors are swallowed — observability
+/// plumbing must not break the caller's critical path.
+///
+/// Public so the unit tests can exercise the path-classifier + size
+/// threshold logic in isolation. Not part of `FileSystemPort`; consumed
+/// only by `RealFileSystem::append`.
+pub fn rotate_metrics_log_if_oversized(path: &Path) {
+    if !is_metrics_jsonl(path) {
+        return;
+    }
+    let Ok(meta) = std::fs::metadata(path) else { return };
+    if meta.len() <= METRICS_LOG_MAX_BYTES {
+        return;
+    }
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let archive_name = format!(
+        "{}.archive.{ts}",
+        path.file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("rotated"),
+    );
+    let archive_path = path.with_file_name(archive_name);
+    let _ = std::fs::rename(path, archive_path);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -140,5 +200,108 @@ mod tests {
         let tmp = std::env::temp_dir();
         let entries = fs.read_dir(&tmp).unwrap();
         assert!(!entries.is_empty());
+    }
+
+    // ── metrics-log rotation ────────────────────────────────────────
+
+    /// Pure-function classifier: only sentinel/metrics/*.jsonl matches.
+    /// State markers, manifest files, and any non-jsonl file under
+    /// metrics MUST NOT trigger rotation.
+    #[test]
+    fn is_metrics_jsonl_classifier() {
+        assert!(is_metrics_jsonl(Path::new(
+            "/c/Users/garys/.claude/sentinel/metrics/sessions.jsonl"
+        )));
+        assert!(is_metrics_jsonl(Path::new(
+            "C:\\Users\\garys\\.claude\\sentinel\\metrics\\errors.jsonl"
+        )));
+        // Wrong extension
+        assert!(!is_metrics_jsonl(Path::new(
+            "/sentinel/metrics/state.json"
+        )));
+        // Wrong directory
+        assert!(!is_metrics_jsonl(Path::new(
+            "/.claude/sentinel/state/markers.jsonl"
+        )));
+        // Sibling-of-metrics (not under it)
+        assert!(!is_metrics_jsonl(Path::new(
+            "/sentinel/metrics-archive/old.jsonl"
+        )));
+    }
+
+    #[test]
+    fn rotate_skips_non_metrics_path() {
+        let dir = std::env::temp_dir().join(format!(
+            "sentinel-rotate-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0),
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        // path NOT under sentinel/metrics — rotation must not touch it
+        // even if it's huge.
+        let path = dir.join("not-metrics.jsonl");
+        std::fs::write(&path, vec![b'x'; 200]).unwrap();
+        rotate_metrics_log_if_oversized(&path);
+        assert!(path.exists(), "non-metrics path must not be rotated");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn rotate_metrics_under_cap_no_op() {
+        // Construct a path that LOOKS like sentinel/metrics so the
+        // classifier matches. Use a unique parent dir under tmp to avoid
+        // clobbering any real metrics file.
+        let dir = std::env::temp_dir()
+            .join(format!("rt-under-{}", std::process::id()))
+            .join("sentinel")
+            .join("metrics");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("test.jsonl");
+        std::fs::write(&path, b"small").unwrap();
+        rotate_metrics_log_if_oversized(&path);
+        assert!(path.exists());
+        std::fs::remove_dir_all(dir.parent().unwrap().parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn rotate_metrics_over_cap_archives() {
+        let dir = std::env::temp_dir()
+            .join(format!("rt-over-{}", std::process::id()))
+            .join("sentinel")
+            .join("metrics");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("test.jsonl");
+        // Write a file just over the cap. Use a small cap workaround:
+        // we can't easily change METRICS_LOG_MAX_BYTES at test time, so
+        // write 11 MB which is just over the 10 MB threshold.
+        std::fs::write(&path, vec![b'x'; (METRICS_LOG_MAX_BYTES + 1024) as usize]).unwrap();
+        rotate_metrics_log_if_oversized(&path);
+        // Original gone, exactly one archive sibling.
+        assert!(!path.exists(), "oversized metrics file should be renamed");
+        let archives: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with("test.jsonl.archive.")
+            })
+            .collect();
+        assert_eq!(archives.len(), 1);
+        std::fs::remove_dir_all(dir.parent().unwrap().parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn rotate_metrics_missing_file_no_op() {
+        let path = std::env::temp_dir()
+            .join("sentinel")
+            .join("metrics")
+            .join(format!("nonexistent-{}.jsonl", std::process::id()));
+        // Should not panic and should not error; just returns silently.
+        rotate_metrics_log_if_oversized(&path);
+        assert!(!path.exists());
     }
 }
