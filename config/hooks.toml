@@ -59,6 +59,13 @@ has_api_call = false
 # === PreToolUse ===
 
 [[hooks]]
+id = "skill-invocation-gate"
+event = "PreToolUse"
+description = "Block tool use when skill_router detected a skill that has not been invoked"
+depends_on = ["skill-router"]
+has_api_call = false
+
+[[hooks]]
 id = "phase-gate"
 event = "PreToolUse"
 description = "Block tool use if skill phases are skipped"
@@ -112,6 +119,13 @@ depends_on = []
 has_api_call = false
 
 # === PostToolUse ===
+
+[[hooks]]
+id = "skill-invocation-gate-clear"
+event = "PostToolUse"
+description = "Clear skill-invocation-gate pending state when the detected skill is invoked or its SKILL.md is read"
+depends_on = []
+has_api_call = false
 
 [[hooks]]
 id = "evidence-collector"

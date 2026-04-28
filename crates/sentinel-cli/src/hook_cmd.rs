@@ -306,6 +306,12 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
         }
 
         HookEvent::PreToolUse => {
+            // Skill invocation gate — block tools when a skill was detected
+            // by skill_router but not yet invoked. Allowlists Read/Glob/Grep/
+            // Skill/Task* so the gate doesn't refuse to let Claude clear it.
+            let skill_gate_output = hooks::skill_invocation_gate::process_pretool(&input, &ctx);
+            output.merge(&skill_gate_output);
+
             // Phase gate — check workflow state + track Read() calls on phase files
             let gate_output = hooks::phase_gate::process(&input, &mut state, &workflows, ctx.fs);
             output.merge(&gate_output);
@@ -352,6 +358,12 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
         }
 
         HookEvent::PostToolUse => {
+            // Skill invocation gate — clear pending-skill state when the
+            // detected skill is finally invoked (Skill tool with matching
+            // name) or its SKILL.md is read.
+            let skill_gate_post = hooks::skill_invocation_gate::process_posttool(&input, &ctx);
+            output.merge(&skill_gate_post);
+
             // MCP health — detect MCP server failures and log to errors.jsonl
             let mcp_output = hooks::mcp_health::process(&input, &ctx);
             output.merge(&mcp_output);

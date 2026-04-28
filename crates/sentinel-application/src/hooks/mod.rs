@@ -46,6 +46,7 @@ pub mod session_end;
 pub mod session_index;
 pub mod session_init;
 pub mod setup;
+pub mod skill_invocation_gate;
 pub mod skill_router;
 pub mod skill_telemetry;
 pub mod stop_failure;
@@ -121,6 +122,7 @@ pub const HOOK_NAMES: &[&str] = &[
     "session_index",
     "session_init",
     "setup",
+    "skill_invocation_gate",
     "skill_router",
     "skill_telemetry",
     "stop_failure",

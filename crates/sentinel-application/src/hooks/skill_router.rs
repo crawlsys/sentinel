@@ -53,6 +53,66 @@ fn telemetry_dir(fs: &dyn FileSystemPort) -> Option<std::path::PathBuf> {
     fs.home_dir().map(|h| h.join(".claude").join("sentinel").join("telemetry"))
 }
 
+/// Path to the pending-skill state file for the given session. Lives under
+/// the sentinel state directory so the `skill_invocation_gate` PreToolUse
+/// hook can pick it up on the next tool call. Scoped per session so two
+/// concurrent agent sessions don't fight over each other's pending skills.
+pub(crate) fn pending_skill_state_path(
+    fs: &dyn FileSystemPort,
+    session_id: &str,
+) -> Option<std::path::PathBuf> {
+    let dir = fs
+        .home_dir()?
+        .join(".claude")
+        .join("sentinel")
+        .join("state");
+    let _ = fs.create_dir_all(&dir);
+    // Hash the session id so the file name stays bounded length and
+    // filesystem-safe even if the session id contains weird chars.
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(session_id.as_bytes());
+    let h: String = hasher.finalize()[..6]
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    Some(dir.join(format!("skill-pending-{h}.json")))
+}
+
+/// State written by `build_match_output` after a skill is detected.
+/// Read by `skill_invocation_gate` on the next PreToolUse call to decide
+/// whether to block.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub(crate) struct PendingSkillState {
+    pub skill: String,
+    pub skill_path: String,
+    pub detected_at: String,
+    pub session_id: String,
+}
+
+/// Persist the pending-skill marker so the invocation gate can enforce
+/// "you must invoke the detected skill before doing anything else."
+fn write_pending_skill_state(
+    fs: &dyn FileSystemPort,
+    skill: &str,
+    skill_path: &str,
+    session_id: &str,
+) {
+    let path = match pending_skill_state_path(fs, session_id) {
+        Some(p) => p,
+        None => return,
+    };
+    let state = PendingSkillState {
+        skill: skill.to_string(),
+        skill_path: skill_path.to_string(),
+        detected_at: chrono::Utc::now().to_rfc3339(),
+        session_id: session_id.to_string(),
+    };
+    if let Ok(json) = serde_json::to_string(&state) {
+        let _ = fs.write(&path, json.as_bytes());
+    }
+}
+
 /// Write telemetry state files so skill_telemetry can track the execution.
 fn write_telemetry_state(fs: &dyn FileSystemPort, skill: &str, run_id: &str) {
     let dir = match telemetry_dir(fs) {
@@ -166,6 +226,14 @@ fn build_match_output(fs: &dyn FileSystemPort, skill: &str, input: &HookInput, p
 
     write_telemetry_state(fs, skill, &run_id);
     write_routing_entry(fs, skill, &run_id, source, input, prompt);
+
+    // Persist pending-skill state for `skill_invocation_gate` to enforce.
+    // Without this, the MANDATORY message below is just a polite request
+    // — Claude can ignore it and use other tools without invoking the skill.
+    if let Some(session_id) = input.session_id.as_deref() {
+        let skill_path_str = format!("~/.claude/skills/{}/SKILL.md", skill);
+        write_pending_skill_state(fs, skill, &skill_path_str, session_id);
+    }
 
     // Log the routing source for diagnostics
     tracing::info!(skill = skill, source = source, "Skill routed");
