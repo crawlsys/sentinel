@@ -16,7 +16,7 @@
 //!    TTL so a skill the user explicitly skipped doesn't deadlock the session.
 
 use chrono::Utc;
-use sentinel_domain::events::{HookEnvelope, HookEvent, HookInput, HookOutput};
+use sentinel_domain::events::{HookEnvelope, HookInput, HookOutput};
 
 use super::{skill_router::PendingSkillState, FileSystemPort, HookContext};
 

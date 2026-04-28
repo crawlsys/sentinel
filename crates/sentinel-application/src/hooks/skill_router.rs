@@ -239,25 +239,70 @@ fn build_match_output(fs: &dyn FileSystemPort, skill: &str, input: &HookInput, p
     tracing::info!(skill = skill, source = source, "Skill routed");
 
     let skill_path = format!("~/.claude/skills/{}/SKILL.md", skill);
-    let banner = extract_banner(fs, skill);
+    // Always render a banner — falls back to a synthesized one built from the
+    // skill's frontmatter description when the SKILL.md doesn't have an
+    // explicit `## Activation Banner` section. Keeps the visual cue
+    // consistent across all 76+ skills regardless of authoring discipline.
+    let banner = extract_banner(fs, skill).unwrap_or_else(|| synthesize_banner(fs, skill));
 
-    let context = if let Some(ref b) = banner {
-        format!(
-            "{}\n\n[Skill Router] Detected skill: {}. \
-             MANDATORY: You MUST Read(\"{}\") BEFORE responding. \
-             This is a non-negotiable requirement.",
-            b, skill, skill_path
-        )
-    } else {
-        format!(
-            "[Skill Router] Detected skill: {}. \
-             MANDATORY: You MUST Read(\"{}\") BEFORE responding. \
-             This is a non-negotiable requirement.",
-            skill, skill_path
-        )
-    };
+    let context = format!(
+        "{}\n\n[Skill Router] Detected skill: {}. \
+         MANDATORY: You MUST Read(\"{}\") BEFORE responding. \
+         This is a non-negotiable requirement.",
+        banner, skill, skill_path
+    );
 
     HookOutput::inject_context(HookEvent::UserPromptSubmit, context)
+}
+
+/// Build a fallback activation banner from the skill's frontmatter
+/// `description` when the SKILL.md doesn't define a `## Activation Banner`
+/// section. The synthesized banner is a single-line box with the skill name
+/// + truncated description so the user still sees a visual cue.
+fn synthesize_banner(fs: &dyn FileSystemPort, skill: &str) -> String {
+    let description = read_skill_description(fs, skill).unwrap_or_default();
+    let title = skill.to_uppercase();
+    let subtitle = if description.is_empty() {
+        "Skill detected — see SKILL.md for usage.".to_string()
+    } else {
+        // Hard cap so a verbose description doesn't blow up the banner.
+        let trimmed = description.trim();
+        if trimmed.len() > 160 {
+            format!("{}…", &trimmed[..159])
+        } else {
+            trimmed.to_string()
+        }
+    };
+    format!(
+        "┌─────────────────────────────────────────────────────────────┐\n\
+         │  📋  {title}\n\
+         │  {subtitle}\n\
+         └─────────────────────────────────────────────────────────────┘"
+    )
+}
+
+/// Pull the `description:` field out of a SKILL.md YAML frontmatter block.
+/// Returns None if the file can't be read or the frontmatter is malformed.
+fn read_skill_description(fs: &dyn FileSystemPort, skill: &str) -> Option<String> {
+    let skill_md = fs
+        .home_dir()?
+        .join(".claude")
+        .join("skills")
+        .join(skill)
+        .join("SKILL.md");
+    let content = fs.read_to_string(&skill_md).ok()?;
+
+    // Frontmatter is delimited by `---` lines at the top of the file.
+    let body = content.strip_prefix("---")?;
+    let end = body.find("\n---")?;
+    let frontmatter = &body[..end];
+
+    for line in frontmatter.lines() {
+        if let Some(rest) = line.strip_prefix("description:") {
+            return Some(rest.trim().trim_matches('"').trim_matches('\'').to_string());
+        }
+    }
+    None
 }
 
 /// Build output for no match
@@ -287,6 +332,95 @@ mod tests {
             .as_ref()
             .and_then(|h| h.additional_context.as_deref());
         assert!(ctx.unwrap().contains("No skill matched"));
+    }
+
+    #[test]
+    fn test_synthesize_banner_falls_back_to_default_subtitle() {
+        // StubFs returns no SKILL.md content, so read_skill_description
+        // yields None and synthesize_banner uses the default subtitle.
+        let banner = synthesize_banner(&StubFs, "qdrant");
+        assert!(banner.contains("QDRANT"));
+        assert!(banner.contains("Skill detected"));
+        assert!(banner.starts_with("┌"));
+        assert!(banner.ends_with("┘"));
+    }
+
+    #[test]
+    fn test_synthesize_banner_truncates_long_descriptions() {
+        // Build an FS stub that returns a SKILL.md with a 500-char description
+        struct LongDescFs;
+        impl crate::hooks::FileSystemPort for LongDescFs {
+            fn home_dir(&self) -> Option<std::path::PathBuf> {
+                Some(std::path::PathBuf::from("/mock/home"))
+            }
+            fn read_to_string(&self, _: &std::path::Path) -> anyhow::Result<String> {
+                let long_desc = "x".repeat(500);
+                Ok(format!("---\nname: foo\ndescription: {long_desc}\n---\n# Body\n"))
+            }
+            fn write(&self, _: &std::path::Path, _: &[u8]) -> anyhow::Result<()> { Ok(()) }
+            fn create_dir_all(&self, _: &std::path::Path) -> anyhow::Result<()> { Ok(()) }
+            fn read_dir(&self, _: &std::path::Path) -> anyhow::Result<Vec<std::path::PathBuf>> { Ok(vec![]) }
+            fn exists(&self, _: &std::path::Path) -> bool { true }
+            fn is_dir(&self, _: &std::path::Path) -> bool { false }
+            fn metadata(&self, _: &std::path::Path) -> anyhow::Result<std::fs::Metadata> {
+                anyhow::bail!("nope")
+            }
+            fn append(&self, _: &std::path::Path, _: &[u8]) -> anyhow::Result<()> { Ok(()) }
+        }
+        let banner = synthesize_banner(&LongDescFs, "foo");
+        // Description is hard-capped at 160 chars + "…", so the banner
+        // can't include the full 500-char string verbatim.
+        assert!(!banner.contains(&"x".repeat(500)));
+        assert!(banner.contains("…"));
+    }
+
+    #[test]
+    fn test_read_skill_description_extracts_quoted_value() {
+        struct QuotedFs;
+        impl crate::hooks::FileSystemPort for QuotedFs {
+            fn home_dir(&self) -> Option<std::path::PathBuf> {
+                Some(std::path::PathBuf::from("/mock/home"))
+            }
+            fn read_to_string(&self, _: &std::path::Path) -> anyhow::Result<String> {
+                Ok("---\nname: foo\ndescription: \"hello world\"\n---\n# Body\n".to_string())
+            }
+            fn write(&self, _: &std::path::Path, _: &[u8]) -> anyhow::Result<()> { Ok(()) }
+            fn create_dir_all(&self, _: &std::path::Path) -> anyhow::Result<()> { Ok(()) }
+            fn read_dir(&self, _: &std::path::Path) -> anyhow::Result<Vec<std::path::PathBuf>> { Ok(vec![]) }
+            fn exists(&self, _: &std::path::Path) -> bool { true }
+            fn is_dir(&self, _: &std::path::Path) -> bool { false }
+            fn metadata(&self, _: &std::path::Path) -> anyhow::Result<std::fs::Metadata> {
+                anyhow::bail!("nope")
+            }
+            fn append(&self, _: &std::path::Path, _: &[u8]) -> anyhow::Result<()> { Ok(()) }
+        }
+        assert_eq!(
+            read_skill_description(&QuotedFs, "foo").as_deref(),
+            Some("hello world"),
+        );
+    }
+
+    #[test]
+    fn test_read_skill_description_returns_none_for_missing_frontmatter() {
+        struct NoFrontmatterFs;
+        impl crate::hooks::FileSystemPort for NoFrontmatterFs {
+            fn home_dir(&self) -> Option<std::path::PathBuf> {
+                Some(std::path::PathBuf::from("/mock/home"))
+            }
+            fn read_to_string(&self, _: &std::path::Path) -> anyhow::Result<String> {
+                Ok("# Just a heading\nNo frontmatter here.\n".to_string())
+            }
+            fn write(&self, _: &std::path::Path, _: &[u8]) -> anyhow::Result<()> { Ok(()) }
+            fn create_dir_all(&self, _: &std::path::Path) -> anyhow::Result<()> { Ok(()) }
+            fn read_dir(&self, _: &std::path::Path) -> anyhow::Result<Vec<std::path::PathBuf>> { Ok(vec![]) }
+            fn exists(&self, _: &std::path::Path) -> bool { true }
+            fn is_dir(&self, _: &std::path::Path) -> bool { false }
+            fn metadata(&self, _: &std::path::Path) -> anyhow::Result<std::fs::Metadata> {
+                anyhow::bail!("nope")
+            }
+            fn append(&self, _: &std::path::Path, _: &[u8]) -> anyhow::Result<()> { Ok(()) }
+        }
+        assert_eq!(read_skill_description(&NoFrontmatterFs, "foo"), None);
     }
 
     #[test]

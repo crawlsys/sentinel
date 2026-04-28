@@ -1186,6 +1186,42 @@ fn run_validation(
         }
     }
 
+    // --- Category 6: Skill Activation Banner ---
+    // skill_router prepends an activation banner to its detection message
+    // when the skill's SKILL.md has a `## Activation Banner` section.
+    // Skills without one fall through to a bare `[Skill Router] Detected
+    // skill: X` line, which is the inconsistency we want to flag here.
+    // Status is `warn` not `fail` so this doesn't break CI for skills
+    // that haven't been migrated yet.
+    for skill in skills {
+        let skill_md = root_dir.join("skills").join(&skill.name).join("SKILL.md");
+        let Ok(content) = fs::read_to_string(&skill_md) else {
+            continue;
+        };
+        if content.contains("## Activation Banner") {
+            results.push(ValidationResult {
+                category: "Skill Banner".to_string(),
+                rule: format!("{} has activation banner", skill.name),
+                status: "pass".to_string(),
+                message: format!("{}/SKILL.md has `## Activation Banner` section", skill.name),
+                expected: None,
+                actual: None,
+            });
+        } else {
+            results.push(ValidationResult {
+                category: "Skill Banner".to_string(),
+                rule: format!("{} has activation banner", skill.name),
+                status: "warn".to_string(),
+                message: format!(
+                    "{}/SKILL.md missing `## Activation Banner` — router will fall back to a bare detection message",
+                    skill.name
+                ),
+                expected: None,
+                actual: None,
+            });
+        }
+    }
+
     // --- Summary ---
     let duration_ms = start.elapsed().as_millis() as u64;
     let passed = results.iter().filter(|r| r.status == "pass").count();
