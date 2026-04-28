@@ -1136,7 +1136,10 @@ fn check_protected_textual(normalized: &str) -> Option<&'static str> {
     }
 
     // 2. Sentinel config/state directory
-    if normalized.contains("/.claude/sentinel/") || normalized.ends_with("/.claude/sentinel") {
+    // Exempt: linear-assigned.json is a cache file written by the Linear cron, not infrastructure.
+    if (normalized.contains("/.claude/sentinel/") || normalized.ends_with("/.claude/sentinel"))
+        && !normalized.ends_with("/sentinel/linear-assigned.json")
+    {
         return Some("sentinel config/state directory");
     }
 
@@ -1225,9 +1228,12 @@ fn check_protected_canonical(
     let relative = canonical_parent.strip_prefix(&claude_canonical).ok()?;
     let components: Vec<_> = relative.components().collect();
 
-    // sentinel/ directory
+    // sentinel/ directory — exempt linear-assigned.json (Linear cron cache file)
     if components.first().and_then(|c| c.as_os_str().to_str()) == Some("sentinel") {
-        return Some("sentinel config/state directory");
+        let filename = target.file_name().and_then(|f| f.to_str()).unwrap_or("");
+        if filename != "linear-assigned.json" {
+            return Some("sentinel config/state directory");
+        }
     }
 
     // skills/ directory checks
@@ -1913,5 +1919,29 @@ mod tests {
         // it is a dependency, not enforcement infrastructure)
         let vulcan = "/c/Users/garys/Documents/GitHub/vulcan-mcp-sdk-rust/crates/vulcan/src/lib.rs";
         assert_eq!(check_protected_textual(vulcan), None);
+    }
+
+    #[test]
+    fn test_linear_assigned_json_exempt_from_sentinel_dir_block() {
+        // linear-assigned.json is a Linear cron cache file, not infrastructure.
+        // It must be writable during active workflow sessions.
+        let cache = "/c/Users/garys/.claude/sentinel/linear-assigned.json";
+        assert_eq!(
+            check_protected_textual(cache),
+            None,
+            "linear-assigned.json should be exempt from sentinel dir protection"
+        );
+
+        // Other sentinel files remain protected
+        let state = "/c/Users/garys/.claude/sentinel/state/session123.json";
+        assert_eq!(
+            check_protected_textual(state),
+            Some("sentinel config/state directory")
+        );
+        let config = "/c/Users/garys/.claude/sentinel/config/settings.json";
+        assert_eq!(
+            check_protected_textual(config),
+            Some("sentinel config/state directory")
+        );
     }
 }
