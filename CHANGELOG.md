@@ -8,6 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Changed
 
+- **Worktree/branch cleanup discipline (hygiene_reminders + worktree_reminder + pr_auto_monitor)**: surface merged `worktree-*` branches as actionable cleanup commands, both local (`git branch -d`) and remote (`git push origin --delete`). Detection runs on `Stop` (via hygiene_reminders) and on the worktree-reminder injection path. The merge-to-main detector in pr_auto_monitor now names the merged branch and lists the exact `ExitWorktree` + branch-delete commands so orphaned refs don't pile up. Required new `GitStatusPort::merged_local_branches` and `GitStatusPort::merged_remote_branches` ports.
+
 - **task_rehydrate**: always ask before rehydrating persistent tasks from a previous session — removed the Autopilot auto-rehydrate bypass so both Autopilot and Planned modes prompt for confirmation.
 
 - **session_init**: removed the Linear assigned-to-me cache refresh cron (every 10 min) from the CLAUDE.md template. Linear issues are now fetched on demand only. Deleted stale `~/.claude/sentinel/linear-assigned.json`.
