@@ -1,0 +1,318 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CCAM HQ</title>
+<style>
+  :root {
+    --bg: #0f1117;
+    --surface: #1a1d27;
+    --border: #2a2d3a;
+    --text: #e2e8f0;
+    --muted: #64748b;
+    --green: #22c55e;
+    --yellow: #eab308;
+    --red: #ef4444;
+    --blue: #3b82f6;
+    --purple: #a855f7;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font-family: 'SF Mono', 'Fira Code', monospace; font-size: 13px; line-height: 1.5; }
+  header { padding: 16px 24px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 12px; }
+  header h1 { font-size: 16px; font-weight: 600; letter-spacing: 0.05em; }
+  header .subtitle { color: var(--muted); font-size: 11px; }
+  header .refresh-badge { margin-left: auto; color: var(--muted); font-size: 11px; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; padding: 16px 24px; }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+  .card-header { padding: 10px 14px; border-bottom: 1px solid var(--border); font-weight: 600; font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); display: flex; justify-content: space-between; align-items: center; }
+  .card-body { padding: 0; }
+  table { width: 100%; border-collapse: collapse; }
+  th { padding: 8px 14px; text-align: left; font-size: 10px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); border-bottom: 1px solid var(--border); font-weight: 500; }
+  td { padding: 8px 14px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+  tr:last-child td { border-bottom: none; }
+  tr:hover td { background: rgba(255,255,255,0.02); }
+  .badge { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 4px; font-size: 10px; font-weight: 600; letter-spacing: 0.04em; }
+  .badge-green { background: rgba(34,197,94,0.12); color: var(--green); }
+  .badge-yellow { background: rgba(234,179,8,0.12); color: var(--yellow); }
+  .badge-red { background: rgba(239,68,68,0.12); color: var(--red); }
+  .badge-blue { background: rgba(59,130,246,0.12); color: var(--blue); }
+  .badge-purple { background: rgba(168,85,247,0.12); color: var(--purple); }
+  .badge-gray { background: rgba(100,116,139,0.12); color: var(--muted); }
+  .dot { width: 6px; height: 6px; border-radius: 50%; display: inline-block; }
+  .dot-green { background: var(--green); }
+  .dot-yellow { background: var(--yellow); }
+  .dot-red { background: var(--red); }
+  .dot-gray { background: var(--muted); }
+  .util-bar { width: 80px; height: 6px; background: var(--border); border-radius: 3px; overflow: hidden; display: inline-block; vertical-align: middle; margin-right: 6px; }
+  .util-fill { height: 100%; border-radius: 3px; transition: width 0.3s; }
+  .star { color: var(--yellow); }
+  .full-width { grid-column: 1 / -1; }
+  .empty { padding: 24px 14px; color: var(--muted); text-align: center; font-size: 12px; }
+  .rotation-summary { padding: 12px 14px; display: flex; gap: 24px; flex-wrap: wrap; }
+  .rotation-stat { display: flex; flex-direction: column; gap: 2px; }
+  .rotation-stat .label { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }
+  .rotation-stat .value { font-size: 14px; font-weight: 600; }
+  .linear-issue { padding: 8px 14px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 10px; }
+  .linear-issue:last-child { border-bottom: none; }
+  .linear-issue .title { flex: 1; }
+  .linear-issue a { color: var(--text); text-decoration: none; }
+  .linear-issue a:hover { color: var(--blue); }
+  #error-banner { display: none; padding: 10px 24px; background: rgba(239,68,68,0.1); border-bottom: 1px solid rgba(239,68,68,0.2); color: var(--red); font-size: 12px; }
+</style>
+</head>
+<body>
+
+<div id="error-banner"></div>
+
+<header>
+  <div>
+    <h1>⚡ CCAM HQ</h1>
+    <div class="subtitle">Claude Code Accounts Manager</div>
+  </div>
+  <div class="refresh-badge">Auto-refresh: <span id="countdown">10</span>s &nbsp;|&nbsp; Last update: <span id="last-update">—</span></div>
+</header>
+
+<div class="grid">
+  <!-- Accounts -->
+  <div class="card">
+    <div class="card-header">Accounts <span id="accounts-count" style="color:var(--text)"></span></div>
+    <div class="card-body">
+      <table>
+        <thead><tr>
+          <th>Profile</th>
+          <th>Plan</th>
+          <th>Token</th>
+          <th>Utilization</th>
+          <th>Status</th>
+        </tr></thead>
+        <tbody id="accounts-tbody"><tr><td colspan="5" class="empty">Loading…</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Sessions -->
+  <div class="card">
+    <div class="card-header">Sessions <span id="sessions-count" style="color:var(--text)"></span></div>
+    <div class="card-body">
+      <table>
+        <thead><tr>
+          <th>Session Dir</th>
+          <th>Account</th>
+          <th>PID</th>
+          <th>Uptime</th>
+        </tr></thead>
+        <tbody id="sessions-tbody"><tr><td colspan="4" class="empty">Loading…</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Rotation -->
+  <div class="card">
+    <div class="card-header">Rotation State</div>
+    <div class="card-body" id="rotation-body">
+      <div class="empty">Loading…</div>
+    </div>
+  </div>
+
+  <!-- Linear -->
+  <div class="card">
+    <div class="card-header">Linear — Assigned to Me <span id="linear-count" style="color:var(--text)"></span></div>
+    <div class="card-body" id="linear-body">
+      <div class="empty">Loading…</div>
+    </div>
+  </div>
+</div>
+
+<script>
+const TOKEN_KEY = 'ccam_token';
+const PORT_KEY  = 'ccam_port';
+
+function getAuth() {
+  // Read token from URL params first (for initial setup), then localStorage
+  const params = new URLSearchParams(location.search);
+  if (params.get('token')) {
+    localStorage.setItem(TOKEN_KEY, params.get('token'));
+    localStorage.setItem(PORT_KEY, params.get('port') || location.port || '3001');
+    history.replaceState({}, '', location.pathname);
+  }
+  return {
+    token: localStorage.getItem(TOKEN_KEY) || '',
+    port: localStorage.getItem(PORT_KEY) || location.port || '3001',
+  };
+}
+
+async function apiFetch(path) {
+  const { token, port } = getAuth();
+  const base = `http://127.0.0.1:${port}`;
+  const res = await fetch(`${base}${path}`, {
+    headers: { 'Authorization': `Bearer ${token}` }
+  });
+  if (!res.ok) throw new Error(`${path} → ${res.status}`);
+  return res.json();
+}
+
+function planBadge(tier, sub) {
+  if (!tier || tier === 'unknown' || tier === 'none') return '<span class="badge badge-gray">Unknown</span>';
+  if (tier === 'five_hour') return '<span class="badge badge-purple">Max</span>';
+  if (tier.includes('20x')) return '<span class="badge badge-blue">Max 20x</span>';
+  if (tier === 'one_hour') return '<span class="badge badge-blue">Pro</span>';
+  return `<span class="badge badge-gray">${tier}</span>`;
+}
+
+function tokenBadge(status, mins) {
+  if (status === 'live') {
+    const h = Math.floor(mins / 60), m = mins % 60;
+    return `<span class="badge badge-green">${h}h ${m}m</span>`;
+  }
+  if (status === 'expiring_soon') return `<span class="badge badge-yellow">⚠ ${mins}m</span>`;
+  if (status === 'expired') return '<span class="badge badge-red">Expired</span>';
+  return '<span class="badge badge-gray">—</span>';
+}
+
+function utilBar(pct) {
+  if (pct == null) return '<span style="color:var(--muted)">—</span>';
+  const color = pct >= 90 ? 'var(--red)' : pct >= 70 ? 'var(--yellow)' : 'var(--green)';
+  return `<div class="util-bar"><div class="util-fill" style="width:${pct}%;background:${color}"></div></div>${pct}%`;
+}
+
+function priorityDot(p) {
+  if (p === 1) return '<span class="dot dot-red" title="Urgent"></span>';
+  if (p === 2) return '<span class="dot dot-yellow" title="High"></span>';
+  if (p === 3) return '<span class="dot dot-green" title="Medium"></span>';
+  return '<span class="dot dot-gray" title="Low/None"></span>';
+}
+
+async function refreshAll() {
+  try {
+    const [accounts, sessions, rotation, utilization, linear] = await Promise.all([
+      apiFetch('/api/accounts'),
+      apiFetch('/api/sessions'),
+      apiFetch('/api/rotation'),
+      apiFetch('/api/utilization'),
+      apiFetch('/api/linear'),
+    ]);
+
+    document.getElementById('error-banner').style.display = 'none';
+    renderAccounts(accounts, utilization);
+    renderSessions(sessions);
+    renderRotation(rotation);
+    renderLinear(linear);
+    document.getElementById('last-update').textContent = new Date().toLocaleTimeString();
+  } catch (e) {
+    const b = document.getElementById('error-banner');
+    b.textContent = `API error: ${e.message} — is sentinel daemon running? (sentinel daemon --port 3001)`;
+    b.style.display = 'block';
+  }
+}
+
+function renderAccounts(data, util) {
+  const tbody = document.getElementById('accounts-tbody');
+  const accounts = data.accounts || [];
+  document.getElementById('accounts-count').textContent = `(${accounts.length})`;
+  if (!accounts.length) { tbody.innerHTML = '<tr><td colspan="5" class="empty">No accounts found</td></tr>'; return; }
+
+  const utilProfiles = util?.profiles || {};
+
+  tbody.innerHTML = accounts.map(a => {
+    const active = a.is_active ? '<span class="star" title="Active">★</span> ' : '';
+    const name = `${active}<strong>${a.name}</strong>`;
+    const plan = planBadge(a.rate_limit_tier, a.subscription_type);
+    const token = tokenBadge(a.token_status, a.token_expires_in_minutes);
+    const up = utilProfiles[a.name];
+    const utilPct = up ? up.five_hour_pct : null;
+    const utilCell = utilBar(utilPct);
+    let statusBadge;
+    if (a.on_cooldown) {
+      statusBadge = `<span class="badge badge-red">Cooldown ${a.cooldown_reason ? '· ' + a.cooldown_reason.replace('_', ' ') : ''}</span>`;
+    } else if (a.token_status === 'expired') {
+      statusBadge = '<span class="badge badge-red">Needs login</span>';
+    } else if (a.is_active) {
+      statusBadge = '<span class="badge badge-green">Active</span>';
+    } else {
+      statusBadge = '<span class="badge badge-gray">Standby</span>';
+    }
+    return `<tr><td>${name}</td><td>${plan}</td><td>${token}</td><td>${utilCell}</td><td>${statusBadge}</td></tr>`;
+  }).join('');
+}
+
+function renderSessions(data) {
+  const tbody = document.getElementById('sessions-tbody');
+  const sessions = data.sessions || [];
+  document.getElementById('sessions-count').textContent = `(${sessions.filter(s => s.pid_alive).length} live)`;
+  if (!sessions.length) { tbody.innerHTML = '<tr><td colspan="4" class="empty">No sessions found</td></tr>'; return; }
+
+  tbody.innerHTML = sessions.map(s => {
+    const alive = s.pid_alive
+      ? '<span class="dot dot-green" title="Alive"></span>'
+      : '<span class="dot dot-gray" title="Dead"></span>';
+    const dir = s.session_env_dir.length > 28 ? '…' + s.session_env_dir.slice(-25) : s.session_env_dir;
+    const uptime = s.uptime_minutes > 60
+      ? `${Math.floor(s.uptime_minutes/60)}h ${s.uptime_minutes%60}m`
+      : `${s.uptime_minutes}m`;
+    const profile = s.account_profile || '<span style="color:var(--muted)">—</span>';
+    return `<tr><td title="${s.session_env_dir}">${dir}</td><td>${profile}</td><td>${alive} ${s.pid}</td><td>${uptime}</td></tr>`;
+  }).join('');
+}
+
+function renderRotation(data) {
+  const body = document.getElementById('rotation-body');
+  const cooldowns = data.cooldowns || {};
+  const cdEntries = Object.entries(cooldowns);
+
+  body.innerHTML = `
+    <div class="rotation-summary">
+      <div class="rotation-stat"><span class="label">Active</span><span class="value" style="color:var(--green)">${data.last_assigned || '—'}</span></div>
+      <div class="rotation-stat"><span class="label">Rotations</span><span class="value">${data.rotation_count || 0}</span></div>
+      <div class="rotation-stat"><span class="label">On Cooldown</span><span class="value" style="color:${cdEntries.length ? 'var(--red)' : 'var(--green)'}">${cdEntries.length}</span></div>
+    </div>
+    ${cdEntries.length ? `
+    <table>
+      <thead><tr><th>Profile</th><th>Reason</th><th>Remaining</th></tr></thead>
+      <tbody>${cdEntries.map(([name, entry]) => `
+        <tr>
+          <td>${name}</td>
+          <td><span class="badge badge-red">${(entry.reason||'').replace(/_/g,' ')}</span></td>
+          <td>${entry.hours_remaining}h</td>
+        </tr>`).join('')}
+      </tbody>
+    </table>` : '<div class="empty" style="padding:12px 14px;text-align:left;color:var(--green)">✓ No cooldowns active</div>'}
+  `;
+}
+
+function renderLinear(data) {
+  const body = document.getElementById('linear-body');
+  const issues = data.issues || [];
+  document.getElementById('linear-count').textContent = issues.length ? `(${issues.length})` : '';
+
+  if (!issues.length) {
+    body.innerHTML = '<div class="empty">No issues assigned</div>';
+    return;
+  }
+
+  body.innerHTML = issues.map(iss => `
+    <div class="linear-issue">
+      ${priorityDot(iss.priority)}
+      <div class="title"><a href="${iss.url}" target="_blank">${iss.title}</a></div>
+      <span class="badge badge-blue">${iss.state}</span>
+      ${iss.team ? `<span style="color:var(--muted);font-size:11px">${iss.team}</span>` : ''}
+    </div>
+  `).join('');
+}
+
+// Countdown + auto-refresh
+let timeLeft = 10;
+setInterval(() => {
+  timeLeft--;
+  document.getElementById('countdown').textContent = timeLeft;
+  if (timeLeft <= 0) {
+    timeLeft = 10;
+    refreshAll();
+  }
+}, 1000);
+
+// Initial load
+refreshAll();
+</script>
+</body>
+</html>
