@@ -10,6 +10,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 - **task_rehydrate**: always ask before rehydrating persistent tasks from a previous session — removed the Autopilot auto-rehydrate bypass so both Autopilot and Planned modes prompt for confirmation.
 
+- **session_init**: removed the Linear assigned-to-me cache refresh cron (every 10 min) from the CLAUDE.md template. Linear issues are now fetched on demand only. Deleted stale `~/.claude/sentinel/linear-assigned.json`.
+
 - **Sentinel-owned paths consolidated under `~/.claude/sentinel/`**: all sentinel state and config now live under the `sentinel/` subtree so `~/.claude/` root contains only Claude Code native files. Specific moves: `sentinel-settings.json` → `sentinel/config/settings.json` (loaded via `claude --settings` flag in `claude-code-handler`); per-project config files `projects/*.md` → `sentinel/projects/`; sync marker `.last-sync-commit` → `sentinel/state/last-sync-commit`; metrics JSONL files → `sentinel/metrics/` (already done in a prior release). One-time on-disk migrations run automatically on `SessionStart` via `migrate_metrics_dir()` and new `migrate_last_sync_commit()` — no manual intervention needed on upgrade.
 
 ### Added
