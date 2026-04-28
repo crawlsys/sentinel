@@ -217,40 +217,27 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
         ));
     }
 
-    // Autopilot bypass: if SENTINEL_AUTOPILOT=1, auto-rehydrate without
-    // pausing to ask. Gary explicitly wants Autopilot to keep momentum, and
-    // these tasks belong to this project's cwd (the hash is scoped) so
-    // there's no cross-project leakage risk.
-    let autopilot = ctx
-        .env
-        .var("SENTINEL_AUTOPILOT")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
-
-    if autopilot {
-        if has_blocking {
-            context.push_str(
-                "\n\nINSTRUCTION (Autopilot — auto-rehydrate): Recreate these as live tasks using TaskCreate + TaskUpdate(addBlockedBy). \
-                 Use exact subjects and descriptions. Wire blocking chains exactly as shown. \
-                 Then mark the first in_progress task as in_progress to resume work.",
-            );
-        } else {
-            context.push_str(
-                "\n\nINSTRUCTION (Autopilot — auto-rehydrate): Recreate these as live tasks using TaskCreate with the exact subjects and descriptions shown above. \
-                 Then mark any in_progress task as in_progress to resume work.",
-            );
-        }
+    // Always ask before rehydrating — regardless of Autopilot/Planned mode.
+    // Gary may have moved on from stale work and doesn't want tasks
+    // auto-recreated without consent.
+    let ask_instruction = if has_blocking {
+        format!(
+            "\n\nINSTRUCTION (ASK FIRST): Do NOT auto-recreate these tasks. \
+             Ask Gary: \"Found {} incomplete task(s) from a previous session — rehydrate them? (y/n)\". \
+             If yes, recreate using TaskCreate + TaskUpdate(addBlockedBy) to wire blocking chains exactly as shown. \
+             If no or unclear, skip silently and proceed with the user's opening prompt.",
+            incomplete.len()
+        )
     } else {
-        // Planned mode: ASK before rehydrating. Gary explicitly wants this —
-        // rehydration can be noisy and he may not want to resume stale work.
-        context.push_str(
-            "\n\nINSTRUCTION (Planned — ASK FIRST): Do NOT auto-recreate these tasks. \
-             Ask Gary: \"Found N incomplete task(s) persisted from a previous session in this project — rehydrate them? (y/n)\". \
-             If yes, recreate using TaskCreate (+ TaskUpdate(addBlockedBy) to wire any blocking chains shown). \
-             If no or unclear, skip rehydration silently and proceed with whatever the user's opening prompt is. \
-             Never recreate without an explicit yes — Gary may have moved on from this work.",
-        );
-    }
+        format!(
+            "\n\nINSTRUCTION (ASK FIRST): Do NOT auto-recreate these tasks. \
+             Ask Gary: \"Found {} incomplete task(s) from a previous session — rehydrate them? (y/n)\". \
+             If yes, recreate using TaskCreate with the exact subjects and descriptions shown above. \
+             If no or unclear, skip silently and proceed with the user's opening prompt.",
+            incomplete.len()
+        )
+    };
+    context.push_str(&ask_instruction);
 
     HookOutput::inject_context(HookEvent::SessionStart, &context)
 }
