@@ -329,6 +329,7 @@ mod tests {
             project_from_cwd(Some("/Users/gary/projects/sentinel")),
             Some("sentinel".to_string())
         );
+        #[cfg(windows)]
         assert_eq!(
             project_from_cwd(Some("C:\\Users\\gary\\sentinel")),
             Some("sentinel".to_string())

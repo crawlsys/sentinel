@@ -1094,7 +1094,7 @@ The launcher/engine split allows hot-swapping without restarting Claude Code:
 
 **Dev workflow:**
 ```bash
-cd ~/repos/claude-plugins/sentinel
+cd ~/repos/claude-systems/sentinel
 cargo build --release -p sentinel       # Builds sentinel-engine
 sentinel stage                          # Stage with integrity verification
 # Next hook invocation: launcher detects .staged file, swaps it in
