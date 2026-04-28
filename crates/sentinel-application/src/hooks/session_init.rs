@@ -126,8 +126,7 @@ pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
     // 5. Generate CLAUDE.md with dynamic counts + project data + live tasks.
     //    The Active Tasks section is kept in sync by TaskCreated / TaskCompleted
     //    hook handlers that call `regenerate_global_claude_md()`.
-    //    Linear issue data is NOT embedded — read on demand from the cache at
-    //    ~/.claude/sentinel/linear-assigned.json via `mcp__linear__list_issues`.
+    //    Linear issue data is fetched on demand — no cache file is maintained.
     let counts = count_components(&claude_dir);
     let project_names = list_project_configs(&claude_dir);
     let linear_accounts = list_linear_accounts(&claude_dir);
@@ -938,12 +937,6 @@ These rules apply to ALL sessions regardless of mode:
    ```
    CronCreate(cron: "33 * * * *", recurring: true,
      prompt: "Run TaskList. Report any tasks that are in_progress but appear stale (no recent activity). Remind Gary of pending work.")
-   ```
-
-4. **Linear Assigned-to-Me Cache Refresh** — every 10 minutes
-   ```
-   CronCreate(cron: "*/10 * * * *", recurring: true,
-     prompt: "Refresh the Linear assigned-to-me cache at ~/.claude/sentinel/linear-assigned.json. For each configured Linear account in ~/.claude.json, call mcp__linear__list_issues with assignee=me and state.type != completed, and merge results into a single JSON object with fields: updated_at (ISO8601) and issues (array of id, title, state, priority, project, team, url). Write it to ~/.claude/sentinel/linear-assigned.json. If a Linear account is unreachable, skip it and continue — partial data is better than none. Not every session has Linear work; if nothing is assigned, write an empty issues array.")
    ```
 
 ### Sentinel Channel Events (push — no cron needed)
