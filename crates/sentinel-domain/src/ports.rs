@@ -70,6 +70,17 @@ pub trait GitStatusPort {
     /// runs `git diff --name-only --cached` in that case. Any string that
     /// starts with `--` is forwarded as a flag.
     fn diff_names(&self, repo_path: &str, range: &str) -> Option<Vec<String>>;
+
+    /// Return local branch names that are fully merged into `base_ref`.
+    /// Runs `git branch --merged <base_ref>` and excludes the base ref itself
+    /// plus `main`/`master`/`HEAD`. Returns empty Vec on error.
+    fn merged_local_branches(&self, repo_path: &str, base_ref: &str) -> Vec<String>;
+
+    /// Return remote branch names (without `origin/` prefix) that are fully
+    /// merged into `base_ref`. Runs `git branch -r --merged <base_ref>` and
+    /// excludes `HEAD`, `main`, `master`, and `<base_ref>` itself.
+    /// Returns empty Vec on error.
+    fn merged_remote_branches(&self, repo_path: &str, base_ref: &str) -> Vec<String>;
 }
 
 // ---------------------------------------------------------------------------

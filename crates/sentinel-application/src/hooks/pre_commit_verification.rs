@@ -478,6 +478,8 @@ mod tests {
             fn diff_names(&self, _: &str, _: &str) -> Option<Vec<String>> {
                 Some(vec!["src/main.rs".to_string()])
             }
+            fn merged_local_branches(&self, _: &str, _: &str) -> Vec<String> { Vec::new() }
+            fn merged_remote_branches(&self, _: &str, _: &str) -> Vec<String> { Vec::new() }
         }
         let output = process_with_override(
             &input,
@@ -788,6 +790,8 @@ mod tests {
             fn merge_base(&self, _: &str, _: &str) -> Option<String> { None }
             fn rev_list_count(&self, _: &str, _: &str) -> Option<u32> { None }
             fn diff_names(&self, _: &str, _: &str) -> Option<Vec<String>> { Some(vec![]) }
+            fn merged_local_branches(&self, _: &str, _: &str) -> Vec<String> { Vec::new() }
+            fn merged_remote_branches(&self, _: &str, _: &str) -> Vec<String> { Vec::new() }
         }
         // Non-commit/push commands short-circuit before touching git.
         assert!(!is_docs_only_commit_with("ls -la", &NoFiles, "."));

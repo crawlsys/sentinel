@@ -653,6 +653,8 @@ mod tests {
         fn diff_names(&self, _: &str, _: &str) -> Option<Vec<String>> {
             None
         }
+        fn merged_local_branches(&self, _: &str, _: &str) -> Vec<String> { Vec::new() }
+        fn merged_remote_branches(&self, _: &str, _: &str) -> Vec<String> { Vec::new() }
     }
 
     /// Test fixture for [`TestProcess::run`]. The `Err` variant is used by

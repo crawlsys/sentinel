@@ -666,6 +666,8 @@ mod tests {
             let stdout = String::from_utf8_lossy(&out.stdout);
             Some(stdout.lines().filter(|l| !l.is_empty()).map(String::from).collect())
         }
+        fn merged_local_branches(&self, _: &str, _: &str) -> Vec<String> { Vec::new() }
+        fn merged_remote_branches(&self, _: &str, _: &str) -> Vec<String> { Vec::new() }
     }
 
     /// Helper: run `git` in a directory and assert success.

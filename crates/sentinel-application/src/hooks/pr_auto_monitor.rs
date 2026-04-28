@@ -47,21 +47,40 @@ pub fn process(input: &HookInput) -> HookOutput {
         );
     }
 
-    // Detect merge to main — verify push + changelog
+    // Detect merge to main — verify push + changelog. When the branch being
+    // merged is named `worktree-*`, surface the exact cleanup commands so
+    // the orphaned local + remote refs don't pile up the way they did before.
     if (cmd.contains("git merge") && (cmd.contains("main") || cmd.contains("--no-edit")))
         || cmd.contains("git merge --no-edit")
     {
-        return HookOutput::inject_context(
-            HookEvent::PostToolUse,
+        let mut msg = String::from(
             "[PR Auto-Monitor] Merge to main detected. Verify:\n\
              1. Push to remote: `git push`\n\
              2. Check CHANGELOG.md was updated\n\
-             3. Clean up the merged worktree"
-                .to_string(),
+             3. Clean up: `ExitWorktree(action: \"remove\")` for the active worktree, \
+             `git branch -d <branch>` for the merged local branch, and \
+             `git push origin --delete <branch>` if the branch was pushed to origin",
         );
+        if let Some(branch) = extract_worktree_branch_name(cmd) {
+            msg.push_str(&format!(
+                "\n\nMerged branch: `{branch}` — run:\n  \
+                 git branch -d {branch}\n  \
+                 git push origin --delete {branch}"
+            ));
+        }
+        return HookOutput::inject_context(HookEvent::PostToolUse, msg);
     }
 
     HookOutput::allow()
+}
+
+/// Pull the first `worktree-*` token out of a `git merge ...` command so the
+/// reminder can name the exact branch the user just merged. Returns `None`
+/// when the merge wasn't of a worktree branch (e.g. plain `git merge main`).
+fn extract_worktree_branch_name(cmd: &str) -> Option<String> {
+    cmd.split_whitespace()
+        .find(|tok| tok.starts_with("worktree-"))
+        .map(str::to_string)
 }
 
 fn extract_bash_command(input: &HookInput) -> Option<&str> {

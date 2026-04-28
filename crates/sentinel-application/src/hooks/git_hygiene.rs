@@ -246,6 +246,8 @@ mod tests {
         fn merge_base(&self, _: &str, _: &str) -> Option<String> { None }
         fn rev_list_count(&self, _: &str, _: &str) -> Option<u32> { None }
         fn diff_names(&self, _: &str, _: &str) -> Option<Vec<String>> { None }
+        fn merged_local_branches(&self, _: &str, _: &str) -> Vec<String> { Vec::new() }
+        fn merged_remote_branches(&self, _: &str, _: &str) -> Vec<String> { Vec::new() }
     }
 
     /// Stub that returns a different branch (+ worktree status + repo_root)
@@ -292,6 +294,8 @@ mod tests {
         fn merge_base(&self, _: &str, _: &str) -> Option<String> { None }
         fn rev_list_count(&self, _: &str, _: &str) -> Option<u32> { None }
         fn diff_names(&self, _: &str, _: &str) -> Option<Vec<String>> { None }
+        fn merged_local_branches(&self, _: &str, _: &str) -> Vec<String> { Vec::new() }
+        fn merged_remote_branches(&self, _: &str, _: &str) -> Vec<String> { Vec::new() }
     }
 
     /// Regression: session cwd is the primary repo on main, but the edit
@@ -516,6 +520,8 @@ mod tests {
         fn merge_base(&self, _: &str, _: &str) -> Option<String> { None }
         fn rev_list_count(&self, _: &str, _: &str) -> Option<u32> { None }
         fn diff_names(&self, _: &str, _: &str) -> Option<Vec<String>> { None }
+        fn merged_local_branches(&self, _: &str, _: &str) -> Vec<String> { Vec::new() }
+        fn merged_remote_branches(&self, _: &str, _: &str) -> Vec<String> { Vec::new() }
     }
 
     fn make_repo_with(sentinel_files: &[&str]) -> tempfile::TempDir {

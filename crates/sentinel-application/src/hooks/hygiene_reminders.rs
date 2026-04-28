@@ -23,6 +23,12 @@ struct ReminderState {
     stale_worktrees: Vec<String>,
     #[serde(default)]
     changelog_stale: bool,
+    /// Local branches merged into main and named `worktree-*` — safe to delete.
+    #[serde(default)]
+    merged_local_worktree_branches: Vec<String>,
+    /// Remote branches merged into main and named `worktree-*` — safe to push-delete.
+    #[serde(default)]
+    merged_remote_worktree_branches: Vec<String>,
     /// The repo root this state was computed for — sanity check on load.
     #[serde(default)]
     repo_root: String,
@@ -105,7 +111,23 @@ pub fn process_stop(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
         }
     }
 
-    // 3. Changelog staleness — code files changed but CHANGELOG.md not touched.
+    // 3a. Merged worktree-* branches (local + remote) — orphaned branches that
+    //     are fully merged into main. Surfaces the cleanup commands so Gary
+    //     can prune them without manually running `git branch --merged`.
+    state.merged_local_worktree_branches = ctx
+        .git
+        .merged_local_branches(&repo_root, "main")
+        .into_iter()
+        .filter(|b| b.starts_with("worktree-"))
+        .collect();
+    state.merged_remote_worktree_branches = ctx
+        .git
+        .merged_remote_branches(&repo_root, "main")
+        .into_iter()
+        .filter(|b| b.starts_with("worktree-"))
+        .collect();
+
+    // 4. Changelog staleness — code files changed but CHANGELOG.md not touched.
     //    Uses uncommitted changed files (git status). After a commit this clears
     //    naturally since changed_files returns empty. That's correct behaviour:
     //    if you committed without updating CHANGELOG, doc_drift catches it instead.
@@ -197,6 +219,34 @@ pub fn process_prompt(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
         ));
     }
 
+    if !state.merged_local_worktree_branches.is_empty() {
+        let cmds = state
+            .merged_local_worktree_branches
+            .iter()
+            .map(|b| format!("  git branch -d {b}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        reminders.push(format!(
+            "[Branch Cleanup] {} local `worktree-*` branch(es) merged into main \
+             — safe to delete:\n{cmds}",
+            state.merged_local_worktree_branches.len()
+        ));
+    }
+
+    if !state.merged_remote_worktree_branches.is_empty() {
+        let cmds = state
+            .merged_remote_worktree_branches
+            .iter()
+            .map(|b| format!("  git push origin --delete {b}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        reminders.push(format!(
+            "[Remote Branch Cleanup] {} remote `worktree-*` branch(es) merged into main \
+             — safe to delete:\n{cmds}",
+            state.merged_remote_worktree_branches.len()
+        ));
+    }
+
     if state.changelog_stale {
         reminders.push(
             "[Changelog] Code files were changed but CHANGELOG.md was not updated. \
@@ -230,6 +280,8 @@ mod tests {
             unpushed_commits: true,
             stale_worktrees: vec!["feat+old".to_string()],
             changelog_stale: true,
+            merged_local_worktree_branches: vec!["worktree-feat+x".to_string()],
+            merged_remote_worktree_branches: vec!["worktree-fix+y".to_string()],
             repo_root: "/repos/sentinel".to_string(),
         };
         let json = serde_json::to_string(&state).unwrap();
@@ -237,6 +289,8 @@ mod tests {
         assert!(parsed.unpushed_commits);
         assert_eq!(parsed.stale_worktrees.len(), 1);
         assert!(parsed.changelog_stale);
+        assert_eq!(parsed.merged_local_worktree_branches, vec!["worktree-feat+x"]);
+        assert_eq!(parsed.merged_remote_worktree_branches, vec!["worktree-fix+y"]);
         assert_eq!(parsed.repo_root, "/repos/sentinel");
     }
 
@@ -270,6 +324,7 @@ mod tests {
             stale_worktrees: vec!["old-branch".to_string()],
             changelog_stale: true,
             repo_root: "/repos/sentinel".to_string(),
+            ..Default::default()
         };
         // Simulate: state says sentinel, but current repo_root is "other-project"
         assert_ne!(state.repo_root, "/repos/other-project");
@@ -335,6 +390,8 @@ mod tests {
             fn merge_base(&self, _: &str, _: &str) -> Option<String> { None }
             fn rev_list_count(&self, _: &str, _: &str) -> Option<u32> { None }
             fn diff_names(&self, _: &str, _: &str) -> Option<Vec<String>> { None }
+            fn merged_local_branches(&self, _: &str, _: &str) -> Vec<String> { Vec::new() }
+            fn merged_remote_branches(&self, _: &str, _: &str) -> Vec<String> { Vec::new() }
         }
 
         let fs = DirGoneFs;

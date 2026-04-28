@@ -188,6 +188,57 @@ pub fn list_worktree_names(repo_path: &str) -> Vec<String> {
         .collect()
 }
 
+/// Return local branches fully merged into `base_ref`, excluding the base ref,
+/// `main`, `master`, and the current branch marker `*`.
+pub fn merged_local_branches(repo_path: &str, base_ref: &str) -> Vec<String> {
+    let Ok(output) = run_git(
+        &["branch", "--merged", base_ref],
+        repo_path,
+        "Failed to list merged local branches",
+    ) else {
+        return Vec::new();
+    };
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    text.lines()
+        .map(|l| l.trim_start_matches('*').trim().to_string())
+        .filter(|b| {
+            !b.is_empty()
+                && b != base_ref
+                && b != "main"
+                && b != "master"
+                && !b.starts_with('(')
+        })
+        .collect()
+}
+
+/// Return remote branches (without `origin/` prefix) fully merged into
+/// `base_ref`, excluding `HEAD`, `main`, `master`, and `<base_ref>`.
+pub fn merged_remote_branches(repo_path: &str, base_ref: &str) -> Vec<String> {
+    let Ok(output) = run_git(
+        &["branch", "-r", "--merged", base_ref],
+        repo_path,
+        "Failed to list merged remote branches",
+    ) else {
+        return Vec::new();
+    };
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    text.lines()
+        .map(|l| l.trim())
+        .filter_map(|l| l.strip_prefix("origin/"))
+        .map(str::trim)
+        .filter(|b| {
+            !b.is_empty()
+                && !b.starts_with("HEAD")
+                && *b != "main"
+                && *b != "master"
+                && *b != base_ref
+        })
+        .map(str::to_string)
+        .collect()
+}
+
 /// Infrastructure adapter implementing `GitStatusPort`.
 ///
 /// Delegates to the free functions above. Constructed at the composition
@@ -234,5 +285,13 @@ impl GitStatusPort for RealGit {
 
     fn diff_names(&self, repo_path: &str, range: &str) -> Option<Vec<String>> {
         diff_names(repo_path, range)
+    }
+
+    fn merged_local_branches(&self, repo_path: &str, base_ref: &str) -> Vec<String> {
+        merged_local_branches(repo_path, base_ref)
+    }
+
+    fn merged_remote_branches(&self, repo_path: &str, base_ref: &str) -> Vec<String> {
+        merged_remote_branches(repo_path, base_ref)
     }
 }

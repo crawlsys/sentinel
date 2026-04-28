@@ -49,7 +49,7 @@ fn suggests_code_changes(prompt: &str) -> bool {
         .any(|p| Regex::new(p).map(|re| re.is_match(&lower)).unwrap_or(false))
 }
 
-pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
+pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
     let cwd = match &input.cwd {
         Some(c) => c.as_str(),
         None => return HookOutput::allow(),
@@ -75,14 +75,39 @@ pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
         return HookOutput::allow();
     }
 
-    HookOutput::inject_context(
-        HookEvent::UserPromptSubmit,
+    let mut msg = String::from(
         "🟡 [Worktree Reminder] You are in a git repository. \
          Use `EnterWorktree` to create an isolated worktree before making code changes. \
          This is a user preference that applies to ALL repos. \
          While working, use `AskUserQuestion` whenever you hit a decision point or \
          unclear requirement — do not guess.",
-    )
+    );
+
+    // Attach a list of merged `worktree-*` branches so cleanup is one
+    // copy-paste away. Only run git when we know we'll inject — keeps the hot
+    // path cheap for prompts that don't trigger the reminder.
+    if let Some(repo_root) = ctx.git.repo_root(cwd) {
+        let merged_local: Vec<String> = ctx
+            .git
+            .merged_local_branches(&repo_root, "main")
+            .into_iter()
+            .filter(|b| b.starts_with("worktree-"))
+            .collect();
+        if !merged_local.is_empty() {
+            let cmds = merged_local
+                .iter()
+                .map(|b| format!("  git branch -d {b}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            msg.push_str(&format!(
+                "\n\n[Branch Cleanup] {} local `worktree-*` branch(es) merged into main \
+                 — safe to delete:\n{cmds}",
+                merged_local.len()
+            ));
+        }
+    }
+
+    HookOutput::inject_context(HookEvent::UserPromptSubmit, msg)
 }
 
 #[cfg(test)]
