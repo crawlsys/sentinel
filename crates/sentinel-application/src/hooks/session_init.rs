@@ -1656,10 +1656,15 @@ fn build_startup_context(
 ) -> String {
     let mut parts = Vec::new();
 
-    // Session info
+    // Session info — include sentinel engine version + hook count so the
+    // running build is always visible in the session header. Version comes
+    // from CARGO_PKG_VERSION (compile-time); hook count is the live length
+    // of HOOK_NAMES so it can't drift from the registered handlers.
     parts.push(format!(
-        "[SessionStart] session_id: {} | engine: sentinel",
-        session_id
+        "[SessionStart] session_id: {} | engine: sentinel v{} | hooks: {}",
+        session_id,
+        env!("CARGO_PKG_VERSION"),
+        super::HOOK_NAMES.len(),
     ));
 
     // Sync status

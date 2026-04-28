@@ -8,6 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
+- **Sentinel engine version + hook count in SessionStart banner**: the `[SessionStart]` line now reads `session_id: X | engine: sentinel v0.4.0 | hooks: 54` so the running build is always visible at the top of every session. Version comes from `CARGO_PKG_VERSION` (compile-time); hook count is `HOOK_NAMES.len()` so it can't drift from the registered handlers.
+
 - **Canonical hook output envelope (`HookEnvelope` + `HookTier`)**: new types in `sentinel-domain::events` plus `HookOutput::inject_envelope(event, envelope)` constructor. Renders as `[<HookName>] <emoji> <message>` with 🟢 Info / 🟡 Warn / 🔴 Block tier emojis so the user sees a consistent prefix across all 54 hooks instead of the ad-hoc mix of brackets, emoji, and box-drawing currently in use. Phase A only — existing `inject_context` call sites are unchanged. Migration of the 50+ legacy callers will land in follow-up tasks (one batch per hook group).
 
 ### Changed
