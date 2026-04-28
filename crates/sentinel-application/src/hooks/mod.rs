@@ -7,6 +7,7 @@
 pub mod account_cascade;
 pub mod activity_tracker;
 mod block_context;
+pub mod bug_task_gate;
 pub mod build_auto_monitor;
 pub mod build_notify;
 pub mod commit_hygiene;
@@ -86,6 +87,7 @@ pub fn metrics_dir(home: &std::path::Path) -> std::path::PathBuf {
 pub const HOOK_NAMES: &[&str] = &[
     "account_cascade",
     "activity_tracker",
+    "bug_task_gate",
     "build_auto_monitor",
     "commit_hygiene",
     "commit_message_validator",

@@ -306,6 +306,11 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
         }
 
         HookEvent::PreToolUse => {
+            // Bug task gate — block mutating tools when a bug signal was
+            // observed in tool output but no TaskCreate has filed it yet.
+            let bug_gate_output = hooks::bug_task_gate::process_pretool(&input, &ctx);
+            output.merge(&bug_gate_output);
+
             // Skill invocation gate — block tools when a skill was detected
             // by skill_router but not yet invoked. Allowlists Read/Glob/Grep/
             // Skill/Task* so the gate doesn't refuse to let Claude clear it.
@@ -358,6 +363,12 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
         }
 
         HookEvent::PostToolUse => {
+            // Bug task gate — scan tool output for bug signals (cargo test
+            // FAILED, error[Exxxx], panicked at) and record pending-bug
+            // state. Also clears state when a TaskCreate references the bug.
+            let bug_gate_post = hooks::bug_task_gate::process_posttool(&input, &ctx);
+            output.merge(&bug_gate_post);
+
             // Skill invocation gate — clear pending-skill state when the
             // detected skill is finally invoked (Skill tool with matching
             // name) or its SKILL.md is read.

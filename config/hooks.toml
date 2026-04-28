@@ -59,6 +59,13 @@ has_api_call = false
 # === PreToolUse ===
 
 [[hooks]]
+id = "bug-task-gate"
+event = "PreToolUse"
+description = "Block mutating tools when a bug signal was observed and no TaskCreate has filed it yet"
+depends_on = []
+has_api_call = false
+
+[[hooks]]
 id = "skill-invocation-gate"
 event = "PreToolUse"
 description = "Block tool use when skill_router detected a skill that has not been invoked"
@@ -119,6 +126,13 @@ depends_on = []
 has_api_call = false
 
 # === PostToolUse ===
+
+[[hooks]]
+id = "bug-task-gate-detect"
+event = "PostToolUse"
+description = "Scan tool output for bug signals; clear pending-bug state when a TaskCreate references the bug"
+depends_on = []
+has_api_call = false
 
 [[hooks]]
 id = "skill-invocation-gate-clear"
