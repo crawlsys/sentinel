@@ -271,15 +271,176 @@ fn recent_pending_task_hint(fs: &dyn FileSystemPort, _session_id: &str) -> Optio
     None
 }
 
-/// Process a PreToolUse event. Blocks Edit/Write if preconditions aren't met.
+/// Strip leading `cd <dir> && ` / `cd <dir>; ` prefixes so the classifier
+/// sees the meaningful payload of compound commands like `cd repo && rm -rf .`
+fn strip_cd_prefix(cmd: &str) -> &str {
+    let trimmed = cmd.trim_start();
+    if !trimmed.starts_with("cd ") {
+        return trimmed;
+    }
+    // Find the connector (`&&` or `;`) and keep what's after it.
+    let split_idx = trimmed
+        .find("&&")
+        .map(|i| i + 2)
+        .or_else(|| trimmed.find(';').map(|i| i + 1));
+    match split_idx {
+        Some(i) => trimmed[i..].trim_start(),
+        None => trimmed,
+    }
+}
+
+/// Read-only Bash prefixes — these never need a task. Conservative list:
+/// only commands that genuinely don't change repo / system state.
+const READ_ONLY_BASH_PREFIXES: &[&str] = &[
+    "ls", "ll", "cat", "head", "tail", "wc", "find", "tree", "du", "stat",
+    "pwd", "which", "whoami", "id", "uname", "date", "echo", "printf",
+    "git status", "git log", "git diff", "git show", "git branch -a",
+    "git branch -r", "git branch -v", "git ls-files", "git rev-parse",
+    "git config --get", "git config --list", "git remote -v",
+    "git worktree list", "git stash list", "git tag", "git describe",
+    "git blame", "git shortlog", "git reflog",
+    "gh pr view", "gh pr list", "gh pr checks", "gh pr diff",
+    "gh issue view", "gh issue list",
+    "gh run view", "gh run list", "gh repo view", "gh release list",
+    "gh auth status", "gh api",
+    "cargo check", "cargo clippy", "cargo metadata", "cargo tree",
+    "cargo doc --no-deps", "cargo fmt --check", "cargo --version",
+    "cargo search",
+    "npm ls", "npm view", "npm outdated", "npm config get",
+    "pnpm ls", "yarn list",
+    "rustc --version", "rustup show", "node --version", "python --version",
+    "docker ps", "docker images", "docker version",
+    "kubectl get", "kubectl describe",
+];
+
+/// Mutating Bash prefixes / patterns — these must be gated.
+/// Order: longest/most-specific first so prefix matches don't shadow.
+const MUTATING_BASH_PATTERNS: &[&str] = &[
+    "git commit", "git push", "git merge", "git rebase",
+    "git reset --hard", "git clean -f", "git branch -d", "git branch -D",
+    "git restore", "git checkout --", "git checkout -b", "git tag -d",
+    "git stash drop", "git stash clear", "git stash pop", "git stash apply",
+    "git worktree remove", "git worktree add",
+    "gh pr create", "gh pr merge", "gh pr close", "gh pr edit", "gh pr review",
+    "gh issue create", "gh issue close", "gh issue edit",
+    "gh release create", "gh release edit", "gh release delete",
+    "cargo build", "cargo run", "cargo install", "cargo update",
+    "cargo publish", "cargo test", "cargo bench",
+    "npm install", "npm i ", "npm run", "npm publish", "npm uninstall",
+    "yarn install", "yarn add", "yarn remove", "yarn run",
+    "pnpm install", "pnpm add", "pnpm remove", "pnpm run",
+    "pip install", "pip uninstall",
+    "rm ", "rm -", "mv ", "cp ", "mkdir ", "touch ", "chmod ", "chown ",
+    "ln -",
+    "make ", "make\n",
+    "docker run", "docker build", "docker push", "docker rm", "docker rmi",
+    "kubectl apply", "kubectl delete", "kubectl create", "kubectl edit",
+];
+
+/// Decide whether a Bash tool call is mutating (and therefore should be
+/// gated by the task-creation requirement).
+///
+/// Algorithm:
+/// 1. Strip a leading `cd <dir> && ` so we see the real command.
+/// 2. If it starts with any read-only prefix → not mutating.
+/// 3. If it contains an output redirection (`>`, `>>`) → mutating.
+/// 4. If it starts with any mutating prefix → mutating.
+/// 5. Otherwise → not mutating (default-allow on uncertainty so we don't
+///    nag on novel-but-harmless commands).
+fn bash_command_is_mutating(input: &HookInput) -> bool {
+    let cmd = match input
+        .tool_input
+        .as_ref()
+        .and_then(|v| v.get("command"))
+        .and_then(|v| v.as_str())
+    {
+        Some(c) => c,
+        None => return false,
+    };
+    let payload = strip_cd_prefix(cmd);
+    let lower = payload.to_lowercase();
+
+    // Output redirection always counts as mutating, regardless of the
+    // command prefix — `echo hi > /tmp/file` writes to disk even though
+    // `echo` is otherwise read-only. Skip stderr-merge (`2>&1`) and pipes
+    // by requiring the char immediately before `>` to be a non-digit
+    // (so `2>` isn't treated as a real redirection target marker).
+    let bytes = payload.as_bytes();
+    for (i, &c) in bytes.iter().enumerate() {
+        if c == b'>' {
+            let prev = if i == 0 { b' ' } else { bytes[i - 1] };
+            // `2>&1` / `2>/dev/null` start with a digit — not what we want
+            // to flag. `>>` is append redirection — flag the first `>`,
+            // but check the char before the run of `>`s.
+            if !prev.is_ascii_digit() {
+                return true;
+            }
+        }
+    }
+
+    // Read-only prefix list — `git status`, `ls`, `cargo check`, etc.
+    for ro in READ_ONLY_BASH_PREFIXES {
+        if lower.starts_with(ro) {
+            return false;
+        }
+    }
+
+    for m in MUTATING_BASH_PATTERNS {
+        if lower.starts_with(m) {
+            return true;
+        }
+    }
+
+    false
+}
+
+/// MCP tool names follow the `mcp__<server>__<verb>_<resource>` convention.
+/// Tools containing read-only verbs are allowed; everything else is gated.
+fn is_mutating_mcp_tool(tool: &str) -> bool {
+    // Strip `mcp__<server>__` so we're matching against the verb part.
+    let verb_part = tool
+        .strip_prefix("mcp__")
+        .and_then(|rest| rest.split_once("__").map(|(_, v)| v))
+        .unwrap_or(tool)
+        .to_lowercase();
+
+    // Read-only verb fragments — if the tool name contains any of these,
+    // treat as read-only and let it through without a task.
+    const READ_ONLY_FRAGMENTS: &[&str] = &[
+        "_get", "get_", "_list", "list_", "_view", "view_", "_search",
+        "_check", "_status", "_show", "_describe", "_inspect", "_health",
+        "_count", "_query", "_resolve", "_fetch", "_read", "whoami",
+        "_info", "_export", "current_account", "list_accounts",
+    ];
+    for f in READ_ONLY_FRAGMENTS {
+        if verb_part.contains(f) {
+            return false;
+        }
+    }
+    // Default: assume mutating for the long tail of MCP tools so the gate
+    // catches new write surfaces without needing to enumerate every verb.
+    true
+}
+
+/// Process a PreToolUse event. Blocks Edit/Write — and now also clearly-
+/// mutating Bash commands and MCP write tools — if preconditions aren't met.
+/// Read-only Bash (`git status`, `ls`, `cargo check`, …) and read-only MCP
+/// tools (`*_get_*`, `*_list_*`, …) are still allowed without a task so the
+/// gate doesn't block exploration.
 pub fn process(input: &HookInput, fs: &dyn FileSystemPort, env: &dyn EnvPort) -> HookOutput {
     let tool = match &input.tool_name {
         Some(t) => t.as_str(),
         None => return HookOutput::allow(),
     };
 
-    // Only gate Edit and Write — not Bash or MCP tools
-    if tool != "Edit" && tool != "Write" {
+    // Decide whether this specific tool call is in scope.
+    let in_scope = match tool {
+        "Edit" | "Write" => true,
+        "Bash" => bash_command_is_mutating(input),
+        other if other.starts_with("mcp__") => is_mutating_mcp_tool(other),
+        _ => false,
+    };
+    if !in_scope {
         return HookOutput::allow();
     }
 
@@ -522,7 +683,9 @@ mod tests {
     }
 
     #[test]
-    fn test_allows_non_edit_write_tools() {
+    fn test_allows_bash_without_command_field() {
+        // Bash with no `command` in tool_input — bash_command_is_mutating
+        // returns false defensively, so the gate stays out of the way.
         let fs = MockFs::new();
         let input = HookInput {
             tool_name: Some("Bash".to_string()),
@@ -533,14 +696,109 @@ mod tests {
     }
 
     #[test]
-    fn test_allows_mcp_tools() {
+    fn test_allows_read_only_bash_commands() {
+        // `git status` is read-only — should not be gated even with no
+        // sequential-thinking marker / no task / no plan.
+        let fs = MockFs::new();
+        let input = HookInput {
+            tool_name: Some("Bash".to_string()),
+            tool_input: Some(serde_json::json!({"command": "git status"})),
+            session_id: Some("test-session".to_string()),
+            ..Default::default()
+        };
+        assert!(process(&input, &fs, &crate::hooks::test_support::StubEnv::new()).blocked.is_none());
+    }
+
+    #[test]
+    fn test_blocks_mutating_bash_without_preconditions() {
+        // `git commit -m foo` is mutating — without sequential thinking,
+        // task creation, plan mode, etc. it should be blocked.
+        let fs = MockFs::new();
+        let input = HookInput {
+            tool_name: Some("Bash".to_string()),
+            tool_input: Some(serde_json::json!({"command": "git commit -m \"foo\""})),
+            session_id: Some("test-session".to_string()),
+            ..Default::default()
+        };
+        let output = process(&input, &fs, &crate::hooks::test_support::StubEnv::new());
+        assert_eq!(
+            output.blocked, Some(true),
+            "mutating bash should be gated; got: {output:?}",
+        );
+    }
+
+    #[test]
+    fn test_allows_read_only_mcp_tools() {
+        // `mcp__linear__list_issues` is read-only — bypasses the gate.
+        let fs = MockFs::new();
+        let input = HookInput {
+            tool_name: Some("mcp__linear__list_issues".to_string()),
+            session_id: Some("test-session".to_string()),
+            ..Default::default()
+        };
+        assert!(process(&input, &fs, &crate::hooks::test_support::StubEnv::new()).blocked.is_none());
+    }
+
+    #[test]
+    fn test_blocks_mutating_mcp_tool_without_preconditions() {
+        // `mcp__linear__create_issue` is a write tool — gated.
         let fs = MockFs::new();
         let input = HookInput {
             tool_name: Some("mcp__linear__create_issue".to_string()),
             session_id: Some("test-session".to_string()),
             ..Default::default()
         };
-        assert!(process(&input, &fs, &crate::hooks::test_support::StubEnv::new()).blocked.is_none());
+        let output = process(&input, &fs, &crate::hooks::test_support::StubEnv::new());
+        assert_eq!(
+            output.blocked, Some(true),
+            "mutating MCP tool should be gated; got: {output:?}",
+        );
+    }
+
+    #[test]
+    fn test_bash_classifier_strips_cd_prefix() {
+        let input = HookInput {
+            tool_input: Some(serde_json::json!({"command": "cd /tmp && rm -rf old/"})),
+            ..Default::default()
+        };
+        assert!(bash_command_is_mutating(&input));
+    }
+
+    #[test]
+    fn test_bash_classifier_detects_redirection() {
+        let input = HookInput {
+            tool_input: Some(serde_json::json!({"command": "echo hi > /tmp/foo"})),
+            ..Default::default()
+        };
+        assert!(bash_command_is_mutating(&input));
+    }
+
+    #[test]
+    fn test_bash_classifier_treats_pipe_as_read_only() {
+        let input = HookInput {
+            tool_input: Some(serde_json::json!({"command": "git log --oneline | head -5"})),
+            ..Default::default()
+        };
+        assert!(!bash_command_is_mutating(&input));
+    }
+
+    #[test]
+    fn test_mcp_classifier_recognizes_get_and_list() {
+        assert!(!is_mutating_mcp_tool("mcp__linear__list_issues"));
+        assert!(!is_mutating_mcp_tool("mcp__doppler__get_secret"));
+        assert!(!is_mutating_mcp_tool("mcp__sentry__list_issues"));
+        assert!(!is_mutating_mcp_tool("mcp__github__pr_view"));
+        assert!(!is_mutating_mcp_tool("mcp__accounts__current_account"));
+    }
+
+    #[test]
+    fn test_mcp_classifier_blocks_unknown_verbs_by_default() {
+        assert!(is_mutating_mcp_tool("mcp__linear__create_issue"));
+        assert!(is_mutating_mcp_tool("mcp__doppler__set_secret"));
+        assert!(is_mutating_mcp_tool("mcp__github__pr_merge"));
+        // A novel verb we haven't enumerated should default to mutating
+        // so new write tools don't slip through unguarded.
+        assert!(is_mutating_mcp_tool("mcp__future__commit_changes"));
     }
 
     #[test]
