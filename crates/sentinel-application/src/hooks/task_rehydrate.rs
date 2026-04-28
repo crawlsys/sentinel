@@ -65,7 +65,11 @@ fn project_hash(cwd: &str) -> String {
 
 /// Get the persistent tasks directory for a project
 fn persistent_tasks_dir(fs: &dyn FileSystemPort, project_hash: &str) -> Option<PathBuf> {
-    fs.home_dir().map(|h| h.join(".claude").join("persistent-tasks").join(project_hash))
+    fs.home_dir().map(|h| {
+        h.join(".claude")
+            .join("persistent-tasks")
+            .join(project_hash)
+    })
 }
 
 /// Read tasks from the persistent JSON file
@@ -283,12 +287,14 @@ mod tests {
         let ctx = crate::hooks::test_support::stub_ctx();
         let output = process(&input, &ctx);
         // Should allow (no tasks to inject)
-        assert!(output.hook_specific_output.is_none() || {
-            output
-                .hook_specific_output
-                .as_ref()
-                .and_then(|h| h.additional_context.as_ref())
-                .is_none()
-        });
+        assert!(
+            output.hook_specific_output.is_none() || {
+                output
+                    .hook_specific_output
+                    .as_ref()
+                    .and_then(|h| h.additional_context.as_ref())
+                    .is_none()
+            }
+        );
     }
 }

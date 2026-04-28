@@ -154,11 +154,7 @@ pub struct InvocationContext<'a> {
 /// return the `HookOutput` so the dispatcher can `output.merge(&result)`
 /// as before. The closure shape is intentionally non-async — every
 /// existing dispatcher call site is sync.
-pub fn time_and_record<F>(
-    fs: &dyn FileSystemPort,
-    ctx: &InvocationContext<'_>,
-    f: F,
-) -> HookOutput
+pub fn time_and_record<F>(fs: &dyn FileSystemPort, ctx: &InvocationContext<'_>, f: F) -> HookOutput
 where
     F: FnOnce() -> HookOutput,
 {

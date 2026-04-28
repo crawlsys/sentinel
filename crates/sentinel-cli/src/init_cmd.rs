@@ -25,8 +25,10 @@ pub fn run(dry_run: bool, force: bool, all: bool, dir: Option<String>) -> anyhow
 fn run_single(repo: &PathBuf, dry_run: bool, force: bool) -> anyhow::Result<()> {
     let audit = project_init::audit(repo);
 
-    let dir_name = repo
-        .file_name().map_or_else(|| repo.display().to_string(), |n| n.to_string_lossy().to_string());
+    let dir_name = repo.file_name().map_or_else(
+        || repo.display().to_string(),
+        |n| n.to_string_lossy().to_string(),
+    );
 
     eprintln!(
         "{} {} — Project Standards Audit",
@@ -41,7 +43,8 @@ fn run_single(repo: &PathBuf, dry_run: bool, force: bool) -> anyhow::Result<()> 
         audit
             .metadata
             .rust_flavor
-            .as_ref().map_or_else(|| "-".into(), std::string::ToString::to_string)
+            .as_ref()
+            .map_or_else(|| "-".into(), std::string::ToString::to_string)
     );
     eprintln!("Name: {}", audit.metadata.name);
     eprintln!();

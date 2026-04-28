@@ -344,7 +344,8 @@ mod tests {
             tool_name: Some("Bash".to_string()),
             ..Default::default()
         };
-        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
+        let ctx = crate::hooks::test_support::stub_ctx();
+        let output = process(&input, &ctx);
         assert!(output.blocked.is_none());
     }
 
@@ -360,7 +361,8 @@ mod tests {
             session_id: Some("test-session".to_string()),
             ..Default::default()
         };
-        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
+        let ctx = crate::hooks::test_support::stub_ctx();
+        let output = process(&input, &ctx);
         assert!(output.blocked.is_none());
     }
 
@@ -376,7 +378,8 @@ mod tests {
             session_id: Some("test-session".to_string()),
             ..Default::default()
         };
-        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
+        let ctx = crate::hooks::test_support::stub_ctx();
+        let output = process(&input, &ctx);
         assert!(output.blocked.is_none());
     }
 
@@ -390,7 +393,8 @@ mod tests {
             })),
             ..Default::default()
         };
-        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
+        let ctx = crate::hooks::test_support::stub_ctx();
+        let output = process(&input, &ctx);
         assert!(output.blocked.is_none());
     }
 
@@ -448,23 +452,42 @@ mod tests {
     /// A real-FS test adapter for roundtrip tests.
     struct TestFs;
     impl FileSystemPort for TestFs {
-        fn home_dir(&self) -> Option<PathBuf> { dirs::home_dir() }
+        fn home_dir(&self) -> Option<PathBuf> {
+            dirs::home_dir()
+        }
         fn read_to_string(&self, p: &std::path::Path) -> anyhow::Result<String> {
             Ok(std::fs::read_to_string(p)?)
         }
         fn write(&self, p: &std::path::Path, c: &[u8]) -> anyhow::Result<()> {
-            if let Some(par) = p.parent() { std::fs::create_dir_all(par)?; }
+            if let Some(par) = p.parent() {
+                std::fs::create_dir_all(par)?;
+            }
             Ok(std::fs::write(p, c)?)
         }
-        fn create_dir_all(&self, p: &std::path::Path) -> anyhow::Result<()> { Ok(std::fs::create_dir_all(p)?) }
-        fn read_dir(&self, _: &std::path::Path) -> anyhow::Result<Vec<PathBuf>> { Ok(vec![]) }
-        fn exists(&self, p: &std::path::Path) -> bool { p.exists() }
-        fn is_dir(&self, p: &std::path::Path) -> bool { p.is_dir() }
-        fn metadata(&self, p: &std::path::Path) -> anyhow::Result<std::fs::Metadata> { Ok(std::fs::metadata(p)?) }
+        fn create_dir_all(&self, p: &std::path::Path) -> anyhow::Result<()> {
+            Ok(std::fs::create_dir_all(p)?)
+        }
+        fn read_dir(&self, _: &std::path::Path) -> anyhow::Result<Vec<PathBuf>> {
+            Ok(vec![])
+        }
+        fn exists(&self, p: &std::path::Path) -> bool {
+            p.exists()
+        }
+        fn is_dir(&self, p: &std::path::Path) -> bool {
+            p.is_dir()
+        }
+        fn metadata(&self, p: &std::path::Path) -> anyhow::Result<std::fs::Metadata> {
+            Ok(std::fs::metadata(p)?)
+        }
         fn append(&self, p: &std::path::Path, c: &[u8]) -> anyhow::Result<()> {
-            if let Some(par) = p.parent() { std::fs::create_dir_all(par)?; }
+            if let Some(par) = p.parent() {
+                std::fs::create_dir_all(par)?;
+            }
             use std::io::Write;
-            let mut f = std::fs::OpenOptions::new().create(true).append(true).open(p)?;
+            let mut f = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(p)?;
             Ok(f.write_all(c)?)
         }
     }
@@ -526,7 +549,8 @@ mod tests {
     #[test]
     fn test_allows_no_tool_name() {
         let input = HookInput::default();
-        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
+        let ctx = crate::hooks::test_support::stub_ctx();
+        let output = process(&input, &ctx);
         assert!(output.blocked.is_none());
     }
 
@@ -537,7 +561,8 @@ mod tests {
             tool_input: None,
             ..Default::default()
         };
-        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
+        let ctx = crate::hooks::test_support::stub_ctx();
+        let output = process(&input, &ctx);
         assert!(output.blocked.is_none());
     }
 }

@@ -37,7 +37,8 @@ const ERROR_PATTERNS: &[&str] = &[
 
 /// Path to the errors JSONL file
 fn errors_file_path(fs: &dyn FileSystemPort) -> Option<PathBuf> {
-    fs.home_dir().map(|h| super::metrics_dir(&h).join("errors.jsonl"))
+    fs.home_dir()
+        .map(|h| super::metrics_dir(&h).join("errors.jsonl"))
 }
 
 /// Extract the MCP server name from a tool name like `mcp__linear__get_issue`
@@ -155,9 +156,18 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
             "warning"
         };
         let mut meta = serde_json::Map::new();
-        meta.insert("server".into(), serde_json::Value::String(server_name.to_string()));
-        meta.insert("tool".into(), serde_json::Value::String(tool_name.to_string()));
-        meta.insert("severity".into(), serde_json::Value::String(severity.to_string()));
+        meta.insert(
+            "server".into(),
+            serde_json::Value::String(server_name.to_string()),
+        );
+        meta.insert(
+            "tool".into(),
+            serde_json::Value::String(tool_name.to_string()),
+        );
+        meta.insert(
+            "severity".into(),
+            serde_json::Value::String(severity.to_string()),
+        );
         crate::channel_events::emit(
             ctx.fs, ctx.env,
             "mcp_server_failure",

@@ -7,12 +7,7 @@ use sentinel_domain::ports::{ProcessOutput, ProcessPort};
 pub struct RealProcess;
 
 impl ProcessPort for RealProcess {
-    fn run(
-        &self,
-        command: &str,
-        args: &[&str],
-        cwd: Option<&str>,
-    ) -> Result<ProcessOutput> {
+    fn run(&self, command: &str, args: &[&str], cwd: Option<&str>) -> Result<ProcessOutput> {
         let mut cmd = std::process::Command::new(command);
         cmd.args(args)
             .stdout(std::process::Stdio::piped())
@@ -22,7 +17,9 @@ impl ProcessPort for RealProcess {
             cmd.current_dir(dir);
         }
 
-        let output = cmd.output().with_context(|| format!("failed to run: {command}"))?;
+        let output = cmd
+            .output()
+            .with_context(|| format!("failed to run: {command}"))?;
 
         Ok(ProcessOutput {
             success: output.status.success(),
@@ -31,11 +28,7 @@ impl ProcessPort for RealProcess {
         })
     }
 
-    fn spawn_detached(
-        &self,
-        command: &str,
-        args: &[&str],
-    ) -> Result<()> {
+    fn spawn_detached(&self, command: &str, args: &[&str]) -> Result<()> {
         std::process::Command::new(command)
             .args(args)
             .stdout(std::process::Stdio::null())

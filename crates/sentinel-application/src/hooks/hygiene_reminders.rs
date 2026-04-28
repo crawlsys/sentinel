@@ -202,7 +202,9 @@ pub fn process_prompt(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     // user (or `ExitWorktree`) has removed the directory, until Stop fires
     // again. Validating against the live filesystem here makes the hook self-
     // healing: the reminder disappears the next prompt after cleanup.
-    let worktree_dir = PathBuf::from(&state.repo_root).join(".claude").join("worktrees");
+    let worktree_dir = PathBuf::from(&state.repo_root)
+        .join(".claude")
+        .join("worktrees");
     let still_stale: Vec<String> = state
         .stale_worktrees
         .iter()
@@ -289,8 +291,14 @@ mod tests {
         assert!(parsed.unpushed_commits);
         assert_eq!(parsed.stale_worktrees.len(), 1);
         assert!(parsed.changelog_stale);
-        assert_eq!(parsed.merged_local_worktree_branches, vec!["worktree-feat+x"]);
-        assert_eq!(parsed.merged_remote_worktree_branches, vec!["worktree-fix+y"]);
+        assert_eq!(
+            parsed.merged_local_worktree_branches,
+            vec!["worktree-feat+x"]
+        );
+        assert_eq!(
+            parsed.merged_remote_worktree_branches,
+            vec!["worktree-fix+y"]
+        );
         assert_eq!(parsed.repo_root, "/repos/sentinel");
     }
 
@@ -348,7 +356,9 @@ mod tests {
         // i.e. the worktree was removed since state was last written.
         struct DirGoneFs;
         impl FileSystemPort for DirGoneFs {
-            fn home_dir(&self) -> Option<PathBuf> { Some(PathBuf::from("/mock/home")) }
+            fn home_dir(&self) -> Option<PathBuf> {
+                Some(PathBuf::from("/mock/home"))
+            }
             fn read_to_string(&self, p: &Path) -> anyhow::Result<String> {
                 // Inject the cached state file the hook reads on UserPromptSubmit.
                 let state = ReminderState {
@@ -362,10 +372,18 @@ mod tests {
                     anyhow::bail!("not found")
                 }
             }
-            fn write(&self, _: &Path, _: &[u8]) -> anyhow::Result<()> { Ok(()) }
-            fn create_dir_all(&self, _: &Path) -> anyhow::Result<()> { Ok(()) }
-            fn read_dir(&self, _: &Path) -> anyhow::Result<Vec<PathBuf>> { Ok(vec![]) }
-            fn exists(&self, _: &Path) -> bool { true }
+            fn write(&self, _: &Path, _: &[u8]) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn create_dir_all(&self, _: &Path) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn read_dir(&self, _: &Path) -> anyhow::Result<Vec<PathBuf>> {
+                Ok(vec![])
+            }
+            fn exists(&self, _: &Path) -> bool {
+                true
+            }
             fn is_dir(&self, p: &Path) -> bool {
                 // Parent worktrees dir exists; the orphan child does not.
                 !p.to_string_lossy().contains("already-removed")
@@ -373,25 +391,51 @@ mod tests {
             fn metadata(&self, _: &Path) -> anyhow::Result<std::fs::Metadata> {
                 anyhow::bail!("not used in this test")
             }
-            fn append(&self, _: &Path, _: &[u8]) -> anyhow::Result<()> { Ok(()) }
+            fn append(&self, _: &Path, _: &[u8]) -> anyhow::Result<()> {
+                Ok(())
+            }
         }
 
         // Stub git that returns `/repo` as the repo_root for any cwd lookup
         // the hook does. Other methods are unreachable in this code path.
         struct RepoRootGit;
         impl crate::hooks::GitStatusPort for RepoRootGit {
-            fn has_uncommitted_changes(&self, _: &str) -> anyhow::Result<bool> { Ok(false) }
-            fn changed_files(&self, _: &str) -> anyhow::Result<Vec<String>> { Ok(vec![]) }
-            fn current_branch(&self, _: &str) -> anyhow::Result<String> { Ok("main".into()) }
-            fn is_worktree(&self, _: &str) -> bool { false }
-            fn has_unpushed_commits(&self, _: &str) -> anyhow::Result<bool> { Ok(false) }
-            fn repo_root(&self, _: &str) -> Option<String> { Some("/repo".into()) }
-            fn list_worktree_names(&self, _: &str) -> Vec<String> { Vec::new() }
-            fn merge_base(&self, _: &str, _: &str) -> Option<String> { None }
-            fn rev_list_count(&self, _: &str, _: &str) -> Option<u32> { None }
-            fn diff_names(&self, _: &str, _: &str) -> Option<Vec<String>> { None }
-            fn merged_local_branches(&self, _: &str, _: &str) -> Vec<String> { Vec::new() }
-            fn merged_remote_branches(&self, _: &str, _: &str) -> Vec<String> { Vec::new() }
+            fn has_uncommitted_changes(&self, _: &str) -> anyhow::Result<bool> {
+                Ok(false)
+            }
+            fn changed_files(&self, _: &str) -> anyhow::Result<Vec<String>> {
+                Ok(vec![])
+            }
+            fn current_branch(&self, _: &str) -> anyhow::Result<String> {
+                Ok("main".into())
+            }
+            fn is_worktree(&self, _: &str) -> bool {
+                false
+            }
+            fn has_unpushed_commits(&self, _: &str) -> anyhow::Result<bool> {
+                Ok(false)
+            }
+            fn repo_root(&self, _: &str) -> Option<String> {
+                Some("/repo".into())
+            }
+            fn list_worktree_names(&self, _: &str) -> Vec<String> {
+                Vec::new()
+            }
+            fn merge_base(&self, _: &str, _: &str) -> Option<String> {
+                None
+            }
+            fn rev_list_count(&self, _: &str, _: &str) -> Option<u32> {
+                None
+            }
+            fn diff_names(&self, _: &str, _: &str) -> Option<Vec<String>> {
+                None
+            }
+            fn merged_local_branches(&self, _: &str, _: &str) -> Vec<String> {
+                Vec::new()
+            }
+            fn merged_remote_branches(&self, _: &str, _: &str) -> Vec<String> {
+                Vec::new()
+            }
         }
 
         let fs = DirGoneFs;
@@ -416,7 +460,8 @@ mod tests {
 
         let output = process_prompt(&input, &ctx);
         // Reminder must NOT be injected when the named worktree dir is gone.
-        let injected = output.hook_specific_output
+        let injected = output
+            .hook_specific_output
             .as_ref()
             .and_then(|o| o.additional_context.as_deref())
             .unwrap_or("");

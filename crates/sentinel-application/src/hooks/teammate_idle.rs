@@ -45,9 +45,14 @@ pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
         serde_json::Value::String(team_name.to_string()),
     );
     crate::channel_events::emit(
-        ctx.fs, ctx.env,
-        "teammate_idle", &summary, meta,
-        input.session_id.as_deref(), input.cwd.as_deref(), Some(teammate_name),
+        ctx.fs,
+        ctx.env,
+        "teammate_idle",
+        &summary,
+        meta,
+        input.session_id.as_deref(),
+        input.cwd.as_deref(),
+        Some(teammate_name),
     );
 
     HookOutput::inject_context(HookEvent::TeammateIdle, &context)
@@ -68,7 +73,8 @@ mod tests {
             .extra
             .insert("team_name".to_string(), serde_json::json!("my-project"));
 
-        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
+        let ctx = crate::hooks::test_support::stub_ctx();
+        let output = process(&input, &ctx);
         assert!(output.hook_specific_output.is_some());
         let ctx = output.hook_specific_output.unwrap().additional_context;
         let ctx = ctx.as_deref().unwrap();
@@ -80,7 +86,8 @@ mod tests {
     #[test]
     fn test_teammate_idle_handles_missing_fields() {
         let input = HookInput::default();
-        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
+        let ctx = crate::hooks::test_support::stub_ctx();
+        let output = process(&input, &ctx);
         assert!(output.hook_specific_output.is_some());
         let ctx = output.hook_specific_output.unwrap().additional_context;
         let ctx = ctx.as_deref().unwrap();

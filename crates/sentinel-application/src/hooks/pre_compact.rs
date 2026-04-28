@@ -50,7 +50,10 @@ fn snapshot_file(fs: &dyn FileSystemPort) -> Option<PathBuf> {
 }
 
 /// Read the activity summary written by activity_tracker::process_stop
-fn read_activity_summary(fs: &dyn FileSystemPort, session_id: &str) -> (Vec<String>, Vec<String>, Vec<(String, usize)>) {
+fn read_activity_summary(
+    fs: &dyn FileSystemPort,
+    session_id: &str,
+) -> (Vec<String>, Vec<String>, Vec<(String, usize)>) {
     let path = match metrics_dir(fs) {
         Some(d) => d.join(format!("activity-summary-{session_id}.json")),
         None => return (Vec::new(), Vec::new(), Vec::new()),
@@ -136,7 +139,10 @@ fn detect_git_branch(fs: &dyn FileSystemPort, cwd: &str) -> Option<String> {
 }
 
 /// Read session state from the state store
-fn read_session_state(fs: &dyn FileSystemPort, session_id: &str) -> (Option<String>, Vec<String>, u64) {
+fn read_session_state(
+    fs: &dyn FileSystemPort,
+    session_id: &str,
+) -> (Option<String>, Vec<String>, u64) {
     let home = match fs.home_dir() {
         Some(h) => h,
         None => return (None, Vec::new(), 0),
@@ -214,7 +220,9 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     if let Some(path) = snapshot_file(ctx.fs) {
         let _ = ctx.fs.write(
             &path,
-            serde_json::to_string_pretty(&snapshot).unwrap_or_default().as_bytes(),
+            serde_json::to_string_pretty(&snapshot)
+                .unwrap_or_default()
+                .as_bytes(),
         );
     }
 

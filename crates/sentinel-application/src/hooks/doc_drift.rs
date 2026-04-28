@@ -880,7 +880,6 @@ mod tests {
         assert!(existing.contains("/test:README.md"));
     }
 
-
     // -----------------------------------------------------------------------
     // Concurrency race test -- RED (expected to fail on unpatched code)
     // -----------------------------------------------------------------------
@@ -901,33 +900,50 @@ mod tests {
     }
     impl TempDirFs {
         fn new(root: &std::path::Path) -> Self {
-            Self { home: root.to_path_buf() }
+            Self {
+                home: root.to_path_buf(),
+            }
         }
     }
     impl super::super::FileSystemPort for TempDirFs {
-        fn home_dir(&self) -> Option<std::path::PathBuf> { Some(self.home.clone()) }
+        fn home_dir(&self) -> Option<std::path::PathBuf> {
+            Some(self.home.clone())
+        }
         fn read_to_string(&self, path: &Path) -> anyhow::Result<String> {
             Ok(std::fs::read_to_string(path)?)
         }
         fn write(&self, path: &Path, content: &[u8]) -> anyhow::Result<()> {
-            if let Some(p) = path.parent() { std::fs::create_dir_all(p)?; }
+            if let Some(p) = path.parent() {
+                std::fs::create_dir_all(p)?;
+            }
             Ok(std::fs::write(path, content)?)
         }
         fn create_dir_all(&self, path: &Path) -> anyhow::Result<()> {
             Ok(std::fs::create_dir_all(path)?)
         }
         fn read_dir(&self, path: &Path) -> anyhow::Result<Vec<std::path::PathBuf>> {
-            Ok(std::fs::read_dir(path)?.filter_map(|e| e.ok().map(|e| e.path())).collect())
+            Ok(std::fs::read_dir(path)?
+                .filter_map(|e| e.ok().map(|e| e.path()))
+                .collect())
         }
-        fn exists(&self, path: &Path) -> bool { path.exists() }
-        fn is_dir(&self, path: &Path) -> bool { path.is_dir() }
+        fn exists(&self, path: &Path) -> bool {
+            path.exists()
+        }
+        fn is_dir(&self, path: &Path) -> bool {
+            path.is_dir()
+        }
         fn metadata(&self, path: &Path) -> anyhow::Result<std::fs::Metadata> {
             Ok(std::fs::metadata(path)?)
         }
         fn append(&self, path: &Path, content: &[u8]) -> anyhow::Result<()> {
             use std::io::Write as _;
-            if let Some(p) = path.parent() { std::fs::create_dir_all(p)?; }
-            let mut f = std::fs::OpenOptions::new().create(true).append(true).open(path)?;
+            if let Some(p) = path.parent() {
+                std::fs::create_dir_all(p)?;
+            }
+            let mut f = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)?;
             Ok(f.write_all(content)?)
         }
     }
@@ -949,27 +965,32 @@ mod tests {
             // Seed the file: 5 unresolved entries for cwd_a.
             // resolve_drift_for_cwd(cwd_a) will rewrite the whole file to mark
             // these resolved -- this is the window where Thread A can be clobbered.
-            let seed: String = (0..5u32).map(|i| {
-                let e = DriftEntry {
-                    doc: format!("README{i}.md"),
-                    reason: "Missing".into(),
-                    cwd: cwd_a.into(),
-                    ts: "2026-04-17".into(),
-                    resolved: false,
-                };
-                serde_json::to_string(&e).unwrap() + "
+            let seed: String = (0..5u32)
+                .map(|i| {
+                    let e = DriftEntry {
+                        doc: format!("README{i}.md"),
+                        reason: "Missing".into(),
+                        cwd: cwd_a.into(),
+                        ts: "2026-04-17".into(),
+                        resolved: false,
+                    };
+                    serde_json::to_string(&e).unwrap()
+                        + "
 "
-            }).collect();
+                })
+                .collect();
             std::fs::write(&drift_path, seed).unwrap();
 
             // Entries Thread A will append -- different cwd so resolve should ignore them.
-            let new_entries: Vec<DriftEntry> = (0..5u32).map(|i| DriftEntry {
-                doc: format!("CHANGELOG{i}.md"),
-                reason: "New beta drift".into(),
-                cwd: cwd_b.into(),
-                ts: "2026-04-17".into(),
-                resolved: false,
-            }).collect();
+            let new_entries: Vec<DriftEntry> = (0..5u32)
+                .map(|i| DriftEntry {
+                    doc: format!("CHANGELOG{i}.md"),
+                    reason: "New beta drift".into(),
+                    cwd: cwd_b.into(),
+                    ts: "2026-04-17".into(),
+                    resolved: false,
+                })
+                .collect();
 
             use std::sync::Arc;
             let fs_a = Arc::new(TempDirFs::new(tmp.path()));
@@ -990,19 +1011,24 @@ mod tests {
             hb.join().unwrap();
 
             let final_content = std::fs::read_to_string(&drift_path).unwrap_or_default();
-            let survived = new_entries.iter().filter(|exp| {
-                final_content.lines().any(|l| {
-                    serde_json::from_str::<DriftEntry>(l)
-                        .map(|e| e.cwd == exp.cwd && e.doc == exp.doc)
-                        .unwrap_or(false)
+            let survived = new_entries
+                .iter()
+                .filter(|exp| {
+                    final_content.lines().any(|l| {
+                        serde_json::from_str::<DriftEntry>(l)
+                            .map(|e| e.cwd == exp.cwd && e.doc == exp.doc)
+                            .unwrap_or(false)
+                    })
                 })
-            }).count();
+                .count();
 
             if survived < new_entries.len() {
                 data_loss_seen = true;
                 eprintln!(
                     "iteration {}: DATA LOSS -- only {}/{} cwd_b entries survived",
-                    iteration, survived, new_entries.len()
+                    iteration,
+                    survived,
+                    new_entries.len()
                 );
                 break;
             }
@@ -1015,5 +1041,4 @@ mod tests {
             "BUG: resolve_drift_for_cwd clobbered entries written concurrently by              write_drift_entries -- the read->filter->rewrite is not protected by a lock"
         );
     }
-
 }

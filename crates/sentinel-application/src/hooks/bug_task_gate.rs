@@ -50,8 +50,15 @@ const ALLOWED_TOOLS: &[&str] = &[
 /// Keywords that indicate a TaskCreate / TaskUpdate is filing the bug. Match
 /// case-insensitively against subject + description fields.
 const BUG_KEYWORDS: &[&str] = &[
-    "bug", "fix", "error", "regression", "broken", "failure",
-    "failing", "panic", "crash",
+    "bug",
+    "fix",
+    "error",
+    "regression",
+    "broken",
+    "failure",
+    "failing",
+    "panic",
+    "crash",
 ];
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -164,7 +171,11 @@ fn snippet_around(text: &str, marker: &str) -> String {
         // Return up to 200 chars centered on the marker for storage.
         let start = idx.saturating_sub(40);
         let end = (idx + marker.len() + 160).min(text.len());
-        text[start..end].lines().next().unwrap_or(marker).to_string()
+        text[start..end]
+            .lines()
+            .next()
+            .unwrap_or(marker)
+            .to_string()
     } else {
         marker.to_string()
     }

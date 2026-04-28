@@ -174,12 +174,11 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
         })
         .collect();
 
-    let resolutions_path = super::metrics_dir(
-        &ctx.fs.home_dir().unwrap_or_else(|| PathBuf::from(".")),
-    )
-    .join(".error-resolutions.json")
-        .to_string_lossy()
-        .replace('\\', "/");
+    let resolutions_path =
+        super::metrics_dir(&ctx.fs.home_dir().unwrap_or_else(|| PathBuf::from(".")))
+            .join(".error-resolutions.json")
+            .to_string_lossy()
+            .replace('\\', "/");
 
     let extra = errors.len().saturating_sub(error_lines.len());
     let context = format!(
@@ -224,20 +223,36 @@ mod tests {
         }
     }
     impl FileSystemPort for MapFs {
-        fn home_dir(&self) -> Option<PathBuf> { Some(PathBuf::from("/mock/home")) }
+        fn home_dir(&self) -> Option<PathBuf> {
+            Some(PathBuf::from("/mock/home"))
+        }
         fn read_to_string(&self, p: &std::path::Path) -> anyhow::Result<String> {
             self.files
                 .get(p)
                 .cloned()
                 .ok_or_else(|| anyhow::anyhow!("not found"))
         }
-        fn write(&self, _: &std::path::Path, _: &[u8]) -> anyhow::Result<()> { Ok(()) }
-        fn create_dir_all(&self, _: &std::path::Path) -> anyhow::Result<()> { Ok(()) }
-        fn read_dir(&self, _: &std::path::Path) -> anyhow::Result<Vec<PathBuf>> { Ok(vec![]) }
-        fn exists(&self, p: &std::path::Path) -> bool { self.files.contains_key(p) }
-        fn is_dir(&self, _: &std::path::Path) -> bool { false }
-        fn metadata(&self, _: &std::path::Path) -> anyhow::Result<std::fs::Metadata> { anyhow::bail!("no") }
-        fn append(&self, _: &std::path::Path, _: &[u8]) -> anyhow::Result<()> { Ok(()) }
+        fn write(&self, _: &std::path::Path, _: &[u8]) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn create_dir_all(&self, _: &std::path::Path) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn read_dir(&self, _: &std::path::Path) -> anyhow::Result<Vec<PathBuf>> {
+            Ok(vec![])
+        }
+        fn exists(&self, p: &std::path::Path) -> bool {
+            self.files.contains_key(p)
+        }
+        fn is_dir(&self, _: &std::path::Path) -> bool {
+            false
+        }
+        fn metadata(&self, _: &std::path::Path) -> anyhow::Result<std::fs::Metadata> {
+            anyhow::bail!("no")
+        }
+        fn append(&self, _: &std::path::Path, _: &[u8]) -> anyhow::Result<()> {
+            Ok(())
+        }
     }
 
     #[test]

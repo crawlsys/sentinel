@@ -26,9 +26,14 @@ pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
         serde_json::Value::String(agent_type.to_string()),
     );
     crate::channel_events::emit(
-        ctx.fs, ctx.env,
-        "agent_completed", &summary, meta,
-        input.session_id.as_deref(), input.cwd.as_deref(), Some(agent_type),
+        ctx.fs,
+        ctx.env,
+        "agent_completed",
+        &summary,
+        meta,
+        input.session_id.as_deref(),
+        input.cwd.as_deref(),
+        Some(agent_type),
     );
 
     HookOutput::allow()
@@ -45,7 +50,8 @@ mod tests {
             .extra
             .insert("agent_type".to_string(), serde_json::json!("debugger"));
 
-        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
+        let ctx = crate::hooks::test_support::stub_ctx();
+        let output = process(&input, &ctx);
         assert!(output.blocked.is_none());
     }
 }

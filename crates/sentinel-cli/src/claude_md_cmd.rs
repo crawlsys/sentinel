@@ -200,9 +200,7 @@ fn mcp_router_single_target(entry: &Value) -> Option<String> {
         .unwrap_or_default();
     words.extend(args);
 
-    let is_router = words
-        .first()
-        .is_some_and(|w| strip_exe(w) == "mcp-router");
+    let is_router = words.first().is_some_and(|w| strip_exe(w) == "mcp-router");
     if !is_router {
         return None;
     }
@@ -333,10 +331,7 @@ mod tests {
     #[test]
     fn mcp_router_single_target_parses_exe_suffix() {
         let v = json!({ "command": "mcp-router.exe --single doppler-mcp" });
-        assert_eq!(
-            mcp_router_single_target(&v).as_deref(),
-            Some("doppler-mcp")
-        );
+        assert_eq!(mcp_router_single_target(&v).as_deref(), Some("doppler-mcp"));
     }
 
     #[test]
@@ -374,7 +369,11 @@ mod tests {
         // Stage one real binary in a fake bin dir; leave another one absent.
         let bin_dir = tmp.path().join("bin");
         std::fs::create_dir_all(&bin_dir).unwrap();
-        let present_name = if cfg!(windows) { "real-mcp.exe" } else { "real-mcp" };
+        let present_name = if cfg!(windows) {
+            "real-mcp.exe"
+        } else {
+            "real-mcp"
+        };
         let present_path = bin_dir.join(present_name);
         std::fs::write(&present_path, b"#!/bin/sh\n").unwrap();
 
@@ -417,7 +416,10 @@ mod tests {
         assert_eq!(touched[0]["server"], "real");
         assert_eq!(skipped.len(), 2, "expected 2 skipped, got {skipped:?}");
 
-        let new_mtime = std::fs::metadata(&present_path).unwrap().modified().unwrap();
+        let new_mtime = std::fs::metadata(&present_path)
+            .unwrap()
+            .modified()
+            .unwrap();
         assert!(new_mtime > old, "mtime should have advanced");
     }
 }

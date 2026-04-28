@@ -145,9 +145,7 @@ const GIT_BLOCKED_RULES: &[GitRule] = &[
         pattern: "rebase --onto",
         reason: "Rewrites commit history",
         risk: RiskLevel::Medium,
-        alternatives: &[
-            "git merge <branch>    # Merge instead of rebase",
-        ],
+        alternatives: &["git merge <branch>    # Merge instead of rebase"],
     },
     GitRule {
         pattern: "filter-branch",
@@ -385,10 +383,7 @@ pub fn classify_risk(args_joined: &str) -> (RiskLevel, &'static str) {
 // ============================================================================
 
 /// Resolve an npx package name to a local Rust CLI binary.
-pub fn resolve_npx_redirect(
-    package: &str,
-    redirects: &HashMap<String, String>,
-) -> Option<String> {
+pub fn resolve_npx_redirect(package: &str, redirects: &HashMap<String, String>) -> Option<String> {
     redirects.get(package).cloned()
 }
 
@@ -450,10 +445,22 @@ mod tests {
     #[test]
     fn test_allow_safe_commands() {
         assert_eq!(evaluate_git_command("status"), InterceptorPolicy::Allow);
-        assert_eq!(evaluate_git_command("commit -m test"), InterceptorPolicy::Allow);
-        assert_eq!(evaluate_git_command("push origin main"), InterceptorPolicy::Allow);
-        assert_eq!(evaluate_git_command("pull --rebase"), InterceptorPolicy::Allow);
-        assert_eq!(evaluate_git_command("log --oneline"), InterceptorPolicy::Allow);
+        assert_eq!(
+            evaluate_git_command("commit -m test"),
+            InterceptorPolicy::Allow
+        );
+        assert_eq!(
+            evaluate_git_command("push origin main"),
+            InterceptorPolicy::Allow
+        );
+        assert_eq!(
+            evaluate_git_command("pull --rebase"),
+            InterceptorPolicy::Allow
+        );
+        assert_eq!(
+            evaluate_git_command("log --oneline"),
+            InterceptorPolicy::Allow
+        );
     }
 
     #[test]
@@ -479,7 +486,9 @@ mod tests {
     #[test]
     fn test_block_clean() {
         match evaluate_git_command("clean -fd") {
-            InterceptorPolicy::Block { risk, alternatives, .. } => {
+            InterceptorPolicy::Block {
+                risk, alternatives, ..
+            } => {
                 assert_eq!(risk, RiskLevel::High);
                 assert!(!alternatives.is_empty());
             }
@@ -571,6 +580,10 @@ mod tests {
     #[test]
     fn test_default_redirects_count() {
         let r = default_npx_redirects();
-        assert!(r.len() >= 20, "expected at least 20 redirects, got {}", r.len());
+        assert!(
+            r.len() >= 20,
+            "expected at least 20 redirects, got {}",
+            r.len()
+        );
     }
 }

@@ -76,8 +76,8 @@ async fn status() -> Json<serde_json::Value> {
     };
 
     // Check config
-    let config_exists = dirs::home_dir()
-        .is_some_and(|h| h.join(".qdrant").join("config.json").exists());
+    let config_exists =
+        dirs::home_dir().is_some_and(|h| h.join(".qdrant").join("config.json").exists());
 
     Json(serde_json::json!({
         "qdrant_configured": config_exists,

@@ -89,7 +89,11 @@ impl MultiModelJudge {
             );
         }
         info!(
-            provider = if judge.is_some() { "openrouter" } else { "none" },
+            provider = if judge.is_some() {
+                "openrouter"
+            } else {
+                "none"
+            },
             model = JUDGE_MODEL,
             "Adversarial judge initialized"
         );
@@ -114,9 +118,7 @@ impl sentinel_application::judge_service::JudgeService for MultiModelJudge {
         _model: JudgeModel,
     ) -> Result<JudgeVerdict> {
         let provider = self.judge.as_ref().ok_or_else(|| {
-            anyhow::anyhow!(
-                "Adversarial judge not available — set OPENROUTER_API_KEY"
-            )
+            anyhow::anyhow!("Adversarial judge not available — set OPENROUTER_API_KEY")
         })?;
 
         info!(

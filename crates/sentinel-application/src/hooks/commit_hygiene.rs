@@ -226,11 +226,21 @@ mod tests {
         fn repo_root(&self, _: &str) -> Option<String> {
             None
         }
-        fn merge_base(&self, _: &str, _: &str) -> Option<String> { None }
-        fn rev_list_count(&self, _: &str, _: &str) -> Option<u32> { None }
-        fn diff_names(&self, _: &str, _: &str) -> Option<Vec<String>> { None }
-        fn merged_local_branches(&self, _: &str, _: &str) -> Vec<String> { Vec::new() }
-        fn merged_remote_branches(&self, _: &str, _: &str) -> Vec<String> { Vec::new() }
+        fn merge_base(&self, _: &str, _: &str) -> Option<String> {
+            None
+        }
+        fn rev_list_count(&self, _: &str, _: &str) -> Option<u32> {
+            None
+        }
+        fn diff_names(&self, _: &str, _: &str) -> Option<Vec<String>> {
+            None
+        }
+        fn merged_local_branches(&self, _: &str, _: &str) -> Vec<String> {
+            Vec::new()
+        }
+        fn merged_remote_branches(&self, _: &str, _: &str) -> Vec<String> {
+            Vec::new()
+        }
     }
 
     fn make_ctx(git: &dyn GitStatusPort) -> HookContext<'_> {

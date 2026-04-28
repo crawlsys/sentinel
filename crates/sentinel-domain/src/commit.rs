@@ -12,8 +12,7 @@ use regex::Regex;
 /// Source of truth — the hook's `VALID_PREFIXES` was previously a sibling
 /// const; this is the single canonical list.
 pub const VALID_PREFIXES: &[&str] = &[
-    "feat", "fix", "chore", "docs", "refactor", "test", "style", "perf", "ci",
-    "build", "revert",
+    "feat", "fix", "chore", "docs", "refactor", "test", "style", "perf", "ci", "build", "revert",
 ];
 
 /// Check whether a commit message subject (first line) follows the

@@ -44,7 +44,11 @@ fn file_path_from_input(input: &HookInput) -> Option<String> {
 ///
 /// Worktree-aware: when `.git` is a file (`gitdir: <abs path>`), the real
 /// gitdir is followed so the sentinel-file lookups land in the right place.
-fn is_merge_in_progress(fs: &dyn super::FileSystemPort, repo_dir: &str, git: &dyn GitStatusPort) -> bool {
+fn is_merge_in_progress(
+    fs: &dyn super::FileSystemPort,
+    repo_dir: &str,
+    git: &dyn GitStatusPort,
+) -> bool {
     let Some(root) = git.repo_root(repo_dir) else {
         return false;
     };
@@ -73,7 +77,12 @@ fn is_merge_in_progress(fs: &dyn super::FileSystemPort, repo_dir: &str, git: &dy
 /// Returns `true` if we can't determine a repo root (be conservative —
 /// hook continues to apply). Returns `false` only when we have a repo root
 /// and the file is clearly outside it.
-fn is_path_inside_repo(fs: &dyn super::FileSystemPort, file_path: &str, cwd: &str, git: &dyn GitStatusPort) -> bool {
+fn is_path_inside_repo(
+    fs: &dyn super::FileSystemPort,
+    file_path: &str,
+    cwd: &str,
+    git: &dyn GitStatusPort,
+) -> bool {
     let Some(repo_root) = git.repo_root(cwd) else {
         return true;
     };
@@ -81,7 +90,9 @@ fn is_path_inside_repo(fs: &dyn super::FileSystemPort, file_path: &str, cwd: &st
     let target = std::path::Path::new(file_path);
     // Canonicalize best-effort; fall back to raw paths on error.
     let canon_root = fs.canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
-    let canon_target = fs.canonicalize(target).unwrap_or_else(|_| target.to_path_buf());
+    let canon_target = fs
+        .canonicalize(target)
+        .unwrap_or_else(|_| target.to_path_buf());
     canon_target.starts_with(&canon_root)
 }
 
@@ -90,7 +101,11 @@ fn is_path_inside_repo(fs: &dyn super::FileSystemPort, file_path: &str, cwd: &st
 /// Checks:
 /// 1. Warn if editing directly on main/master (not in a worktree)
 /// 2. Block if too many uncommitted files
-pub fn process(input: &HookInput, git: &dyn GitStatusPort, fs: &dyn super::FileSystemPort) -> HookOutput {
+pub fn process(
+    input: &HookInput,
+    git: &dyn GitStatusPort,
+    fs: &dyn super::FileSystemPort,
+) -> HookOutput {
     let tool = match &input.tool_name {
         Some(t) => t.as_str(),
         None => return HookOutput::allow(),
@@ -243,11 +258,21 @@ mod tests {
         fn list_worktree_names(&self, _: &str) -> Vec<String> {
             Vec::new()
         }
-        fn merge_base(&self, _: &str, _: &str) -> Option<String> { None }
-        fn rev_list_count(&self, _: &str, _: &str) -> Option<u32> { None }
-        fn diff_names(&self, _: &str, _: &str) -> Option<Vec<String>> { None }
-        fn merged_local_branches(&self, _: &str, _: &str) -> Vec<String> { Vec::new() }
-        fn merged_remote_branches(&self, _: &str, _: &str) -> Vec<String> { Vec::new() }
+        fn merge_base(&self, _: &str, _: &str) -> Option<String> {
+            None
+        }
+        fn rev_list_count(&self, _: &str, _: &str) -> Option<u32> {
+            None
+        }
+        fn diff_names(&self, _: &str, _: &str) -> Option<Vec<String>> {
+            None
+        }
+        fn merged_local_branches(&self, _: &str, _: &str) -> Vec<String> {
+            Vec::new()
+        }
+        fn merged_remote_branches(&self, _: &str, _: &str) -> Vec<String> {
+            Vec::new()
+        }
     }
 
     /// Stub that returns a different branch (+ worktree status + repo_root)
@@ -291,11 +316,21 @@ mod tests {
         fn list_worktree_names(&self, _: &str) -> Vec<String> {
             Vec::new()
         }
-        fn merge_base(&self, _: &str, _: &str) -> Option<String> { None }
-        fn rev_list_count(&self, _: &str, _: &str) -> Option<u32> { None }
-        fn diff_names(&self, _: &str, _: &str) -> Option<Vec<String>> { None }
-        fn merged_local_branches(&self, _: &str, _: &str) -> Vec<String> { Vec::new() }
-        fn merged_remote_branches(&self, _: &str, _: &str) -> Vec<String> { Vec::new() }
+        fn merge_base(&self, _: &str, _: &str) -> Option<String> {
+            None
+        }
+        fn rev_list_count(&self, _: &str, _: &str) -> Option<u32> {
+            None
+        }
+        fn diff_names(&self, _: &str, _: &str) -> Option<Vec<String>> {
+            None
+        }
+        fn merged_local_branches(&self, _: &str, _: &str) -> Vec<String> {
+            Vec::new()
+        }
+        fn merged_remote_branches(&self, _: &str, _: &str) -> Vec<String> {
+            Vec::new()
+        }
     }
 
     /// Regression: session cwd is the primary repo on main, but the edit
@@ -314,7 +349,9 @@ mod tests {
             ..Default::default()
         };
         assert!(
-            process(&input, &git, &crate::hooks::test_support::StubFs).blocked.is_none(),
+            process(&input, &git, &crate::hooks::test_support::StubFs)
+                .blocked
+                .is_none(),
             "worktree edits from main cwd should not be blocked"
         );
     }
@@ -348,13 +385,21 @@ mod tests {
             cwd: Some(".".to_string()),
             ..Default::default()
         };
-        assert!(process(&input, &git, &crate::hooks::test_support::StubFs).blocked.is_none());
+        assert!(process(&input, &git, &crate::hooks::test_support::StubFs)
+            .blocked
+            .is_none());
     }
 
     #[test]
     fn test_allows_when_no_tool_name() {
         let git = StubGit::default_with(false, vec![]);
-        assert!(process(&HookInput::default(), &git, &crate::hooks::test_support::StubFs).blocked.is_none());
+        assert!(process(
+            &HookInput::default(),
+            &git,
+            &crate::hooks::test_support::StubFs
+        )
+        .blocked
+        .is_none());
     }
 
     #[test]
@@ -365,7 +410,9 @@ mod tests {
             cwd: Some(".".to_string()),
             ..Default::default()
         };
-        assert!(process(&input, &git, &crate::hooks::test_support::StubFs).blocked.is_none());
+        assert!(process(&input, &git, &crate::hooks::test_support::StubFs)
+            .blocked
+            .is_none());
     }
 
     #[test]
@@ -390,7 +437,10 @@ mod tests {
             cwd: Some(".".to_string()),
             ..Default::default()
         };
-        assert_eq!(process(&input, &git, &crate::hooks::test_support::StubFs).blocked, Some(true));
+        assert_eq!(
+            process(&input, &git, &crate::hooks::test_support::StubFs).blocked,
+            Some(true)
+        );
     }
 
     #[test]
@@ -401,7 +451,9 @@ mod tests {
             cwd: Some(".".to_string()),
             ..Default::default()
         };
-        assert!(process(&input, &git, &crate::hooks::test_support::StubFs).blocked.is_none());
+        assert!(process(&input, &git, &crate::hooks::test_support::StubFs)
+            .blocked
+            .is_none());
     }
 
     #[test]
@@ -413,7 +465,11 @@ mod tests {
             ..Default::default()
         };
         let output = process(&input, &git, &crate::hooks::test_support::StubFs);
-        assert_eq!(output.blocked, Some(true), "Should hard-block edits on main without worktree");
+        assert_eq!(
+            output.blocked,
+            Some(true),
+            "Should hard-block edits on main without worktree"
+        );
     }
 
     #[test]
@@ -441,7 +497,9 @@ mod tests {
             cwd: Some(".".to_string()),
             ..Default::default()
         };
-        assert!(process(&input, &git, &crate::hooks::test_support::StubFs).blocked.is_none());
+        assert!(process(&input, &git, &crate::hooks::test_support::StubFs)
+            .blocked
+            .is_none());
     }
 
     #[test]
@@ -456,7 +514,9 @@ mod tests {
             ..Default::default()
         };
         assert!(
-            process(&input, &git, &crate::hooks::test_support::StubFs).blocked.is_none(),
+            process(&input, &git, &crate::hooks::test_support::StubFs)
+                .blocked
+                .is_none(),
             "should allow edits to files outside the cwd's repo"
         );
     }
@@ -489,7 +549,9 @@ mod tests {
             ..Default::default()
         };
         assert!(
-            process(&input, &git, &crate::hooks::test_support::StubFs).blocked.is_none(),
+            process(&input, &git, &crate::hooks::test_support::StubFs)
+                .blocked
+                .is_none(),
             "should pull file_path from tool_input when input.file_path is empty"
         );
     }
@@ -510,18 +572,42 @@ mod tests {
     }
 
     impl GitStatusPort for DiskRepoStub {
-        fn has_uncommitted_changes(&self, _: &str) -> anyhow::Result<bool> { Ok(false) }
-        fn changed_files(&self, _: &str) -> anyhow::Result<Vec<String>> { Ok(vec![]) }
-        fn current_branch(&self, _: &str) -> anyhow::Result<String> { Ok(self.branch.clone()) }
-        fn is_worktree(&self, _: &str) -> bool { self.worktree }
-        fn has_unpushed_commits(&self, _: &str) -> anyhow::Result<bool> { Ok(false) }
-        fn repo_root(&self, _: &str) -> Option<String> { Some(self.repo_root.clone()) }
-        fn list_worktree_names(&self, _: &str) -> Vec<String> { Vec::new() }
-        fn merge_base(&self, _: &str, _: &str) -> Option<String> { None }
-        fn rev_list_count(&self, _: &str, _: &str) -> Option<u32> { None }
-        fn diff_names(&self, _: &str, _: &str) -> Option<Vec<String>> { None }
-        fn merged_local_branches(&self, _: &str, _: &str) -> Vec<String> { Vec::new() }
-        fn merged_remote_branches(&self, _: &str, _: &str) -> Vec<String> { Vec::new() }
+        fn has_uncommitted_changes(&self, _: &str) -> anyhow::Result<bool> {
+            Ok(false)
+        }
+        fn changed_files(&self, _: &str) -> anyhow::Result<Vec<String>> {
+            Ok(vec![])
+        }
+        fn current_branch(&self, _: &str) -> anyhow::Result<String> {
+            Ok(self.branch.clone())
+        }
+        fn is_worktree(&self, _: &str) -> bool {
+            self.worktree
+        }
+        fn has_unpushed_commits(&self, _: &str) -> anyhow::Result<bool> {
+            Ok(false)
+        }
+        fn repo_root(&self, _: &str) -> Option<String> {
+            Some(self.repo_root.clone())
+        }
+        fn list_worktree_names(&self, _: &str) -> Vec<String> {
+            Vec::new()
+        }
+        fn merge_base(&self, _: &str, _: &str) -> Option<String> {
+            None
+        }
+        fn rev_list_count(&self, _: &str, _: &str) -> Option<u32> {
+            None
+        }
+        fn diff_names(&self, _: &str, _: &str) -> Option<Vec<String>> {
+            None
+        }
+        fn merged_local_branches(&self, _: &str, _: &str) -> Vec<String> {
+            Vec::new()
+        }
+        fn merged_remote_branches(&self, _: &str, _: &str) -> Vec<String> {
+            Vec::new()
+        }
     }
 
     fn make_repo_with(sentinel_files: &[&str]) -> tempfile::TempDir {
@@ -568,19 +654,33 @@ mod tests {
     /// because `is_merge_in_progress` reads MERGE_HEAD / etc. off disk.
     struct RealDiskFs;
     impl super::super::FileSystemPort for RealDiskFs {
-        fn home_dir(&self) -> Option<std::path::PathBuf> { dirs::home_dir() }
+        fn home_dir(&self) -> Option<std::path::PathBuf> {
+            dirs::home_dir()
+        }
         fn read_to_string(&self, p: &std::path::Path) -> anyhow::Result<String> {
             Ok(std::fs::read_to_string(p)?)
         }
-        fn write(&self, _: &std::path::Path, _: &[u8]) -> anyhow::Result<()> { Ok(()) }
-        fn create_dir_all(&self, _: &std::path::Path) -> anyhow::Result<()> { Ok(()) }
-        fn read_dir(&self, _: &std::path::Path) -> anyhow::Result<Vec<std::path::PathBuf>> { Ok(vec![]) }
-        fn exists(&self, p: &std::path::Path) -> bool { p.exists() }
-        fn is_dir(&self, p: &std::path::Path) -> bool { p.is_dir() }
+        fn write(&self, _: &std::path::Path, _: &[u8]) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn create_dir_all(&self, _: &std::path::Path) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn read_dir(&self, _: &std::path::Path) -> anyhow::Result<Vec<std::path::PathBuf>> {
+            Ok(vec![])
+        }
+        fn exists(&self, p: &std::path::Path) -> bool {
+            p.exists()
+        }
+        fn is_dir(&self, p: &std::path::Path) -> bool {
+            p.is_dir()
+        }
         fn metadata(&self, p: &std::path::Path) -> anyhow::Result<std::fs::Metadata> {
             Ok(std::fs::metadata(p)?)
         }
-        fn append(&self, _: &std::path::Path, _: &[u8]) -> anyhow::Result<()> { Ok(()) }
+        fn append(&self, _: &std::path::Path, _: &[u8]) -> anyhow::Result<()> {
+            Ok(())
+        }
     }
 
     /// Mid-merge edit on main is now allowed (the new exception). Repeated
@@ -640,19 +740,33 @@ mod tests {
         };
         struct RealFs;
         impl super::super::FileSystemPort for RealFs {
-            fn home_dir(&self) -> Option<std::path::PathBuf> { dirs::home_dir() }
+            fn home_dir(&self) -> Option<std::path::PathBuf> {
+                dirs::home_dir()
+            }
             fn read_to_string(&self, p: &std::path::Path) -> anyhow::Result<String> {
                 Ok(std::fs::read_to_string(p)?)
             }
-            fn write(&self, _: &std::path::Path, _: &[u8]) -> anyhow::Result<()> { Ok(()) }
-            fn create_dir_all(&self, _: &std::path::Path) -> anyhow::Result<()> { Ok(()) }
-            fn read_dir(&self, _: &std::path::Path) -> anyhow::Result<Vec<std::path::PathBuf>> { Ok(vec![]) }
-            fn exists(&self, p: &std::path::Path) -> bool { p.exists() }
-            fn is_dir(&self, p: &std::path::Path) -> bool { p.is_dir() }
+            fn write(&self, _: &std::path::Path, _: &[u8]) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn create_dir_all(&self, _: &std::path::Path) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn read_dir(&self, _: &std::path::Path) -> anyhow::Result<Vec<std::path::PathBuf>> {
+                Ok(vec![])
+            }
+            fn exists(&self, p: &std::path::Path) -> bool {
+                p.exists()
+            }
+            fn is_dir(&self, p: &std::path::Path) -> bool {
+                p.is_dir()
+            }
             fn metadata(&self, p: &std::path::Path) -> anyhow::Result<std::fs::Metadata> {
                 Ok(std::fs::metadata(p)?)
             }
-            fn append(&self, _: &std::path::Path, _: &[u8]) -> anyhow::Result<()> { Ok(()) }
+            fn append(&self, _: &std::path::Path, _: &[u8]) -> anyhow::Result<()> {
+                Ok(())
+            }
         }
         assert!(
             is_merge_in_progress(&RealFs, worktree.path().to_str().unwrap(), &git),

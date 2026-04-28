@@ -78,12 +78,7 @@ impl<'a> GitInterceptorService<'a> {
     }
 
     /// Run the interceptor logic for a git command.
-    pub fn run(
-        &self,
-        args: &[String],
-        self_path: &std::path::Path,
-        cwd: &str,
-    ) -> GitResult {
+    pub fn run(&self, args: &[String], self_path: &std::path::Path, cwd: &str) -> GitResult {
         // Find real git
         let real_git = match self.resolver.find_real_binary("git", self_path) {
             Some(p) => p,
@@ -104,18 +99,14 @@ impl<'a> GitInterceptorService<'a> {
         // Evaluate policy
         let args_joined = args.join(" ");
         match interceptor::evaluate_git_command(&args_joined) {
-            InterceptorPolicy::Allow => {
-                GitResult::Executed(self.executor.exec(&real_git, args))
-            }
+            InterceptorPolicy::Allow => GitResult::Executed(self.executor.exec(&real_git, args)),
             InterceptorPolicy::Block {
                 reason,
                 alternatives,
                 risk: _,
             } => {
                 // Print block message to stderr
-                eprintln!(
-                    "\x1b[0;31mBLOCKED: {reason}\x1b[0m"
-                );
+                eprintln!("\x1b[0;31mBLOCKED: {reason}\x1b[0m");
                 if !alternatives.is_empty() {
                     eprintln!("\x1b[0;32mSafe alternatives:\x1b[0m");
                     for alt in &alternatives {
@@ -123,9 +114,7 @@ impl<'a> GitInterceptorService<'a> {
                     }
                 }
                 eprintln!();
-                eprintln!(
-                    "\x1b[1;33mTo bypass with approval: git --bypass {args_joined}\x1b[0m"
-                );
+                eprintln!("\x1b[1;33mTo bypass with approval: git --bypass {args_joined}\x1b[0m");
                 GitResult::Blocked
             }
             InterceptorPolicy::Confirm { risk: _ } => {
@@ -134,9 +123,7 @@ impl<'a> GitInterceptorService<'a> {
                     eprint!("Proceed? (yes/no): ");
                     let _ = std::io::Write::flush(&mut std::io::stderr());
                     let mut input = String::new();
-                    if std::io::stdin().read_line(&mut input).is_ok()
-                        && input.trim() == "yes"
-                    {
+                    if std::io::stdin().read_line(&mut input).is_ok() && input.trim() == "yes" {
                         GitResult::Executed(self.executor.exec(&real_git, args))
                     } else {
                         GitResult::Declined
@@ -156,12 +143,7 @@ impl<'a> GitInterceptorService<'a> {
         }
     }
 
-    fn handle_bypass(
-        &self,
-        args: &[String],
-        real_git: &std::path::Path,
-        cwd: &str,
-    ) -> GitResult {
+    fn handle_bypass(&self, args: &[String], real_git: &std::path::Path, cwd: &str) -> GitResult {
         let args_joined = args.join(" ");
         let (risk, desc) = interceptor::classify_risk(&args_joined);
 
@@ -241,12 +223,8 @@ impl<'a> NpxInterceptorService<'a> {
             if let Some(target) = interceptor::resolve_npx_redirect(package, &redirects) {
                 eprintln!();
                 eprintln!("\x1b[1;33m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\x1b[0m");
-                eprintln!(
-                    "\x1b[0;31m  INTERCEPTED:\x1b[0m \x1b[1mnpx {package}\x1b[0m"
-                );
-                eprintln!(
-                    "\x1b[0;32m  Redirecting:\x1b[0m \x1b[0;36m\x1b[1m{target}\x1b[0m"
-                );
+                eprintln!("\x1b[0;31m  INTERCEPTED:\x1b[0m \x1b[1mnpx {package}\x1b[0m");
+                eprintln!("\x1b[0;32m  Redirecting:\x1b[0m \x1b[0;36m\x1b[1m{target}\x1b[0m");
                 eprintln!("\x1b[1;33m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\x1b[0m");
                 eprintln!();
 

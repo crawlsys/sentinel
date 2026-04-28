@@ -80,7 +80,12 @@ pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
         if !checklist.is_empty() {
             let incomplete: Vec<&str> = checklist
                 .iter()
-                .filter(|item| !item.get("completed").and_then(|v| v.as_bool()).unwrap_or(false))
+                .filter(|item| {
+                    !item
+                        .get("completed")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false)
+                })
                 .filter_map(|item| item.get("text").and_then(|v| v.as_str()))
                 .collect();
             if !incomplete.is_empty() {
@@ -128,9 +133,14 @@ pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
         serde_json::Value::String(teammate_name.to_string()),
     );
     crate::channel_events::emit(
-        ctx.fs, ctx.env,
-        "task_completed", &summary, meta,
-        input.session_id.as_deref(), input.cwd.as_deref(), Some("task_completed"),
+        ctx.fs,
+        ctx.env,
+        "task_completed",
+        &summary,
+        meta,
+        input.session_id.as_deref(),
+        input.cwd.as_deref(),
+        Some("task_completed"),
     );
 
     // Keep the Active Tasks section of ~/.claude/CLAUDE.md in sync with live
@@ -164,7 +174,8 @@ mod tests {
             .extra
             .insert("task_id".to_string(), serde_json::json!("42"));
 
-        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
+        let ctx = crate::hooks::test_support::stub_ctx();
+        let output = process(&input, &ctx);
         assert!(output.hook_specific_output.is_some());
         let ctx = output.hook_specific_output.unwrap().additional_context;
         let ctx = ctx.as_deref().unwrap();
@@ -177,7 +188,8 @@ mod tests {
     #[test]
     fn test_task_completed_handles_missing_fields() {
         let input = HookInput::default();
-        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
+        let ctx = crate::hooks::test_support::stub_ctx();
+        let output = process(&input, &ctx);
         assert!(output.hook_specific_output.is_some());
         let ctx = output.hook_specific_output.unwrap().additional_context;
         let ctx = ctx.as_deref().unwrap();
@@ -209,10 +221,9 @@ mod tests {
             "task_subject".to_string(),
             serde_json::json!("Build feature"),
         );
-        input.extra.insert(
-            "teammate_name".to_string(),
-            serde_json::json!("dev-1"),
-        );
+        input
+            .extra
+            .insert("teammate_name".to_string(), serde_json::json!("dev-1"));
         input
             .extra
             .insert("team_name".to_string(), serde_json::json!("team-a"));
@@ -256,7 +267,8 @@ mod tests {
             .extra
             .insert("task_id".to_string(), serde_json::json!("7"));
 
-        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
+        let ctx = crate::hooks::test_support::stub_ctx();
+        let output = process(&input, &ctx);
         let ctx = output.hook_specific_output.unwrap().additional_context;
         let ctx = ctx.as_deref().unwrap();
         assert!(ctx.contains("[Linear Sync]"));

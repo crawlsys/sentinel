@@ -139,9 +139,14 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
         serde_json::Value::String(target_path.display().to_string()),
     );
     crate::channel_events::emit(
-        ctx.fs, ctx.env,
-        "plan_organized", &summary, meta,
-        input.session_id.as_deref(), input.cwd.as_deref(), Some("plan_organizer"),
+        ctx.fs,
+        ctx.env,
+        "plan_organized",
+        &summary,
+        meta,
+        input.session_id.as_deref(),
+        input.cwd.as_deref(),
+        Some("plan_organizer"),
     );
 
     // Inject context telling the user and Claude where the archived copy lives
@@ -191,7 +196,10 @@ mod tests {
             detect_project("/home/gary/Documents/GitHub/sentinel"),
             "sentinel"
         );
-        assert_eq!(detect_project("/home/gary/Documents/GitHub/legatus"), "legatus");
+        assert_eq!(
+            detect_project("/home/gary/Documents/GitHub/legatus"),
+            "legatus"
+        );
         assert_eq!(detect_project("/"), "general");
     }
 
@@ -224,7 +232,9 @@ mod tests {
     /// from FileSystemPort cover the rest.
     struct RealFs;
     impl FileSystemPort for RealFs {
-        fn home_dir(&self) -> Option<PathBuf> { dirs::home_dir() }
+        fn home_dir(&self) -> Option<PathBuf> {
+            dirs::home_dir()
+        }
         fn read_to_string(&self, p: &Path) -> anyhow::Result<String> {
             Ok(std::fs::read_to_string(p)?)
         }
@@ -235,14 +245,22 @@ mod tests {
             Ok(std::fs::create_dir_all(p)?)
         }
         fn read_dir(&self, p: &Path) -> anyhow::Result<Vec<PathBuf>> {
-            Ok(std::fs::read_dir(p)?.filter_map(|e| e.ok().map(|e| e.path())).collect())
+            Ok(std::fs::read_dir(p)?
+                .filter_map(|e| e.ok().map(|e| e.path()))
+                .collect())
         }
-        fn exists(&self, p: &Path) -> bool { p.exists() }
-        fn is_dir(&self, p: &Path) -> bool { p.is_dir() }
+        fn exists(&self, p: &Path) -> bool {
+            p.exists()
+        }
+        fn is_dir(&self, p: &Path) -> bool {
+            p.is_dir()
+        }
         fn metadata(&self, p: &Path) -> anyhow::Result<std::fs::Metadata> {
             Ok(std::fs::metadata(p)?)
         }
-        fn append(&self, _: &Path, _: &[u8]) -> anyhow::Result<()> { Ok(()) }
+        fn append(&self, _: &Path, _: &[u8]) -> anyhow::Result<()> {
+            Ok(())
+        }
     }
 
     #[test]

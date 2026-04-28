@@ -12,10 +12,7 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     let cwd = input.cwd.as_deref().unwrap_or(".");
 
     // Check for uncommitted changes via git
-    let has_changes = ctx
-        .git
-        .has_uncommitted_changes(cwd)
-        .unwrap_or(false);
+    let has_changes = ctx.git.has_uncommitted_changes(cwd).unwrap_or(false);
 
     if !has_changes {
         return HookOutput::allow();

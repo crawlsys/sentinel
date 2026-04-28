@@ -276,8 +276,7 @@ impl SessionState {
         let skill_files = self.phases_read.get(&workflow.skill);
         for phase in &workflow.phases {
             if phase.required {
-                let read = skill_files
-                    .is_some_and(|files| files.contains(&phase.file));
+                let read = skill_files.is_some_and(|files| files.contains(&phase.file));
                 if !read {
                     return Some(phase.file.clone());
                 }
@@ -359,10 +358,7 @@ impl SessionState {
     /// Record a failed submission for `phase_key`. Bumps the attempt count
     /// and stamps `last_failure` to now. Creates the entry if missing.
     pub fn record_submission_failure(&mut self, phase_key: impl Into<String>) {
-        let entry = self
-            .failed_submissions
-            .entry(phase_key.into())
-            .or_default();
+        let entry = self.failed_submissions.entry(phase_key.into()).or_default();
         entry.count += 1;
         entry.last_failure = Some(Utc::now());
     }
@@ -677,9 +673,7 @@ mod tests {
         for expected in 1..=4_u32 {
             state.record_submission_failure("linear:claim");
             assert_eq!(
-                state
-                    .submission_attempts("linear:claim")
-                    .map(|a| a.count),
+                state.submission_attempts("linear:claim").map(|a| a.count),
                 Some(expected),
             );
         }

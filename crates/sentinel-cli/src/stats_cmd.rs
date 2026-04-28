@@ -86,8 +86,8 @@ pub fn run() -> Result<()> {
 /// read the same file via the daemon API; this CLI exists so users can
 /// sanity-check the data without spinning up the daemon.
 pub fn run_hooks(limit: usize, hours: u32) -> Result<()> {
-    let home = dirs::home_dir()
-        .ok_or_else(|| anyhow::anyhow!("could not resolve home directory"))?;
+    let home =
+        dirs::home_dir().ok_or_else(|| anyhow::anyhow!("could not resolve home directory"))?;
     let path = home
         .join(".claude")
         .join("sentinel")

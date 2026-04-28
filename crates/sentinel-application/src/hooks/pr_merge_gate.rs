@@ -43,7 +43,7 @@ pub fn process(input: &HookInput, env: &dyn EnvPort) -> HookOutput {
             );
         }
         return HookOutput::ask(
-            "[PR Merge Gate] Claude is attempting to merge/close a PR. Approve to proceed."
+            "[PR Merge Gate] Claude is attempting to merge/close a PR. Approve to proceed.",
         );
     }
 
@@ -83,7 +83,10 @@ mod tests {
         let out = process(&bash_input("gh pr merge 123"), &no_autopilot());
         assert!(out.blocked.is_none()); // not hard-blocked
         let hso = out.hook_specific_output.unwrap();
-        assert_eq!(hso.permission_decision, Some(sentinel_domain::events::PermissionDecision::Ask));
+        assert_eq!(
+            hso.permission_decision,
+            Some(sentinel_domain::events::PermissionDecision::Ask)
+        );
     }
 
     #[test]
@@ -91,28 +94,43 @@ mod tests {
         let out = process(&bash_input("gh pr close 42"), &no_autopilot());
         assert!(out.blocked.is_none());
         let hso = out.hook_specific_output.unwrap();
-        assert_eq!(hso.permission_decision, Some(sentinel_domain::events::PermissionDecision::Ask));
+        assert_eq!(
+            hso.permission_decision,
+            Some(sentinel_domain::events::PermissionDecision::Ask)
+        );
     }
 
     #[test]
     fn test_allows_gh_pr_view() {
-        assert!(process(&bash_input("gh pr view 123"), &no_autopilot()).blocked.is_none());
+        assert!(process(&bash_input("gh pr view 123"), &no_autopilot())
+            .blocked
+            .is_none());
     }
 
     #[test]
     fn test_allows_gh_pr_create() {
-        assert!(process(&bash_input("gh pr create --title test"), &no_autopilot()).blocked.is_none());
+        assert!(
+            process(&bash_input("gh pr create --title test"), &no_autopilot())
+                .blocked
+                .is_none()
+        );
     }
 
     #[test]
     fn test_allows_non_gh_commands() {
-        assert!(process(&bash_input("git push"), &no_autopilot()).blocked.is_none());
-        assert!(process(&bash_input("cargo test"), &no_autopilot()).blocked.is_none());
+        assert!(process(&bash_input("git push"), &no_autopilot())
+            .blocked
+            .is_none());
+        assert!(process(&bash_input("cargo test"), &no_autopilot())
+            .blocked
+            .is_none());
     }
 
     #[test]
     fn test_allows_no_tool_input() {
-        assert!(process(&HookInput::default(), &no_autopilot()).blocked.is_none());
+        assert!(process(&HookInput::default(), &no_autopilot())
+            .blocked
+            .is_none());
     }
 
     #[test]
@@ -129,7 +147,10 @@ mod tests {
         );
         // Should inject a context reminder instead.
         let ctx = hso.additional_context.unwrap_or_default();
-        assert!(ctx.contains("AUTOPILOT"), "expected AUTOPILOT reminder in context, got: {ctx}");
+        assert!(
+            ctx.contains("AUTOPILOT"),
+            "expected AUTOPILOT reminder in context, got: {ctx}"
+        );
     }
 
     #[test]

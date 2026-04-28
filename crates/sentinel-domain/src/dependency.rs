@@ -15,7 +15,10 @@ pub enum DependencyError {
     CyclicDependency(String),
     UnknownDependency(String, String),
     /// **Attack #180 fix**: Dependency chain too deep.
-    ExcessiveDepth { depth: usize, max: usize },
+    ExcessiveDepth {
+        depth: usize,
+        max: usize,
+    },
 }
 
 impl std::fmt::Display for DependencyError {

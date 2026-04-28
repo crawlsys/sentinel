@@ -537,10 +537,7 @@ pub async fn run() -> Result<()> {
         // Methods that don't read/write session state: dispatch directly.
         // Everything else: resolve session id, take the file lock, load
         // state into the shared Arc, run the handler, save and release.
-        let needs_session = matches!(
-            request.method.as_str(),
-            "tools/call"
-        );
+        let needs_session = matches!(request.method.as_str(), "tools/call");
 
         let response = if needs_session {
             match resolve_session_id(&request.params) {
@@ -771,10 +768,7 @@ async fn handle_submit_phase(
             };
             (phase.judge, desc)
         })
-        .unwrap_or((
-            JudgeModel::Sonnet,
-            format!("Complete the {phase_id} phase"),
-        ));
+        .unwrap_or((JudgeModel::Sonnet, format!("Complete the {phase_id} phase")));
 
     // Build evidence from the summary + state context
     let evidence = {
@@ -969,21 +963,25 @@ async fn handle_update_step(
     let steps_config = load_steps_config(&skill);
     let phase_total = steps_config
         .as_ref()
-        .and_then(|sc| sc.phase_steps(&phase_id)).map_or_else(|| {
-            s.workflows
-                .get(&skill)
-                .map_or(0, |w| w.phase_step_states(&phase_id).len())
-        }, |ps| ps.steps.len());
+        .and_then(|sc| sc.phase_steps(&phase_id))
+        .map_or_else(
+            || {
+                s.workflows
+                    .get(&skill)
+                    .map_or(0, |w| w.phase_step_states(&phase_id).len())
+            },
+            |ps| ps.steps.len(),
+        );
 
     let phase_progress = format!("{phase_completed}/{phase_total} steps");
 
     // Overall progress (only if steps config exists)
     let overall_progress = steps_config.as_ref().map(|sc| {
         let total = sc.total_steps();
-        let completed = s
-            .workflows
-            .get(&skill)
-            .map_or(0, sentinel_domain::workflow::WorkflowState::total_steps_completed);
+        let completed = s.workflows.get(&skill).map_or(
+            0,
+            sentinel_domain::workflow::WorkflowState::total_steps_completed,
+        );
         format!("{completed}/{total} steps")
     });
 
@@ -1136,37 +1134,33 @@ async fn handle_get_workflow_progress(
 
     if let Some(workflow) = workflow_configs.get(&skill) {
         for phase in &workflow.phases {
-            let phase_status = if wf_state
-                .is_some_and(|w| w.is_phase_complete(&phase.id))
-            {
+            let phase_status = if wf_state.is_some_and(|w| w.is_phase_complete(&phase.id)) {
                 "completed"
-            } else if wf_state
-                .is_some_and(|w| w.current_phase.is_some() && !w.completed_phases.contains(&phase.id))
-                && wf_state
-                    .is_some_and(|w| {
-                        w.completed_phases.len()
-                            == workflow
-                                .phases
-                                .iter()
-                                .position(|p| p.id == phase.id)
-                                .unwrap_or(0)
-                    })
-            {
+            } else if wf_state.is_some_and(|w| {
+                w.current_phase.is_some() && !w.completed_phases.contains(&phase.id)
+            }) && wf_state.is_some_and(|w| {
+                w.completed_phases.len()
+                    == workflow
+                        .phases
+                        .iter()
+                        .position(|p| p.id == phase.id)
+                        .unwrap_or(0)
+            }) {
                 "in_progress"
             } else {
                 "pending"
             };
 
             // Step-level counts for this phase
-            let steps_completed = wf_state
-                .map_or(0, |w| w.phase_steps_completed(&phase.id));
+            let steps_completed = wf_state.map_or(0, |w| w.phase_steps_completed(&phase.id));
 
             let steps_total = steps_config
                 .as_ref()
-                .and_then(|sc| sc.phase_steps(&phase.id)).map_or_else(|| {
-                    wf_state
-                        .map_or(0, |w| w.phase_step_states(&phase.id).len())
-                }, |ps| ps.steps.len());
+                .and_then(|sc| sc.phase_steps(&phase.id))
+                .map_or_else(
+                    || wf_state.map_or(0, |w| w.phase_step_states(&phase.id).len()),
+                    |ps| ps.steps.len(),
+                );
 
             overall_completed += steps_completed;
             overall_total += steps_total;
@@ -1499,7 +1493,10 @@ mod tests {
                 "_meta": {"claudecode/toolUseId": "toolu_never_recorded"}
             });
             let resolved = resolve_session_id(&params).unwrap();
-            assert_eq!(resolved, id, "must fall back to newest-mtime on missing toolUseId");
+            assert_eq!(
+                resolved, id,
+                "must fall back to newest-mtime on missing toolUseId"
+            );
         });
         drop(lock);
     }

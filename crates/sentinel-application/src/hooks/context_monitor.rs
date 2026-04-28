@@ -183,9 +183,14 @@ pub fn process_stop(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
             serde_json::Value::String(zone.label().to_string()),
         );
         crate::channel_events::emit(
-            ctx.fs, ctx.env,
-            "context_threshold", &summary, meta,
-            input.session_id.as_deref(), input.cwd.as_deref(), Some("context_monitor"),
+            ctx.fs,
+            ctx.env,
+            "context_threshold",
+            &summary,
+            meta,
+            input.session_id.as_deref(),
+            input.cwd.as_deref(),
+            Some("context_monitor"),
         );
     }
 
@@ -336,37 +341,52 @@ mod tests {
     /// This test therefore FAILS on the current codebase (red regression test).
     #[test]
     fn test_cross_session_cooldown_suppression_bug() {
-        use std::path::{Path, PathBuf};
         use super::super::FileSystemPort;
+        use std::path::{Path, PathBuf};
 
         // A minimal FileSystemPort that delegates to real std::fs so that
         // `cooldown_file()` -- which calls std::env::temp_dir() directly --
         // resolves to an actual on-disk path.
         struct RealTestFs;
         impl FileSystemPort for RealTestFs {
-            fn home_dir(&self) -> Option<PathBuf> { dirs::home_dir() }
+            fn home_dir(&self) -> Option<PathBuf> {
+                dirs::home_dir()
+            }
             fn read_to_string(&self, p: &Path) -> anyhow::Result<String> {
                 std::fs::read_to_string(p).map_err(Into::into)
             }
             fn write(&self, p: &Path, data: &[u8]) -> anyhow::Result<()> {
-                if let Some(parent) = p.parent() { std::fs::create_dir_all(parent)?; }
+                if let Some(parent) = p.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
                 std::fs::write(p, data).map_err(Into::into)
             }
             fn create_dir_all(&self, p: &Path) -> anyhow::Result<()> {
                 std::fs::create_dir_all(p).map_err(Into::into)
             }
             fn read_dir(&self, p: &Path) -> anyhow::Result<Vec<PathBuf>> {
-                Ok(std::fs::read_dir(p)?.filter_map(|e| e.ok().map(|e| e.path())).collect())
+                Ok(std::fs::read_dir(p)?
+                    .filter_map(|e| e.ok().map(|e| e.path()))
+                    .collect())
             }
-            fn exists(&self, p: &Path) -> bool { p.exists() }
-            fn is_dir(&self, p: &Path) -> bool { p.is_dir() }
+            fn exists(&self, p: &Path) -> bool {
+                p.exists()
+            }
+            fn is_dir(&self, p: &Path) -> bool {
+                p.is_dir()
+            }
             fn metadata(&self, p: &Path) -> anyhow::Result<std::fs::Metadata> {
                 std::fs::metadata(p).map_err(Into::into)
             }
             fn append(&self, p: &Path, data: &[u8]) -> anyhow::Result<()> {
                 use std::io::Write;
-                if let Some(parent) = p.parent() { std::fs::create_dir_all(parent)?; }
-                let mut f = std::fs::OpenOptions::new().create(true).append(true).open(p)?;
+                if let Some(parent) = p.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                let mut f = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(p)?;
                 f.write_all(data).map_err(Into::into)
             }
         }
@@ -406,5 +426,4 @@ mod tests {
         let _ = std::fs::remove_file(&session_a_path);
         let _ = std::fs::remove_file(&session_b_path);
     }
-
 }

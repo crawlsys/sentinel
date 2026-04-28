@@ -143,7 +143,7 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
         return HookOutput::deny(
             "🔴 [Doppler/Auth0 Gate] BLOCKED: Auth0 operations require explicit user permission \
              in Planned mode, or a non-prod tenant in Autopilot. Production Auth0 changes always \
-             require Gary's explicit approval — no exceptions, even in Autopilot."
+             require Gary's explicit approval — no exceptions, even in Autopilot.",
         );
     }
 
@@ -178,7 +178,9 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
         // TTL when the user's prompt arrives minutes before the final mutation.
         const OVERRIDE_TTL_SECS: u64 = 300; // 5 minutes — fits realistic batch writes
 
-        let overrides_dir = ctx.fs.home_dir()
+        let overrides_dir = ctx
+            .fs
+            .home_dir()
             .unwrap_or_else(|| std::path::PathBuf::from("."))
             .join(".claude")
             .join("sentinel")
@@ -190,10 +192,7 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
                 .map(|d| d.as_secs())
                 .unwrap_or(0);
             for path in paths {
-                let file_name = path
-                    .file_name()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("");
+                let file_name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
                 if !file_name.starts_with("doppler-") {
                     continue;
                 }
@@ -234,7 +233,9 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hooks::test_support::{stub_ctx, StubEnv, StubFs, StubGit, StubMemoryMcp, StubProcess};
+    use crate::hooks::test_support::{
+        stub_ctx, StubEnv, StubFs, StubGit, StubMemoryMcp, StubProcess,
+    };
 
     /// Build a `HookContext` with `SENTINEL_AUTOPILOT=1` injected via `StubEnv`
     /// so tests don't have to mutate process-global env state.
@@ -243,8 +244,17 @@ mod tests {
         let fs: &'static StubFs = Box::leak(Box::new(StubFs));
         let process: &'static StubProcess = Box::leak(Box::new(StubProcess));
         let memory_mcp: &'static StubMemoryMcp = Box::leak(Box::new(StubMemoryMcp));
-        let env: &'static StubEnv = Box::leak(Box::new(StubEnv::with(&[("SENTINEL_AUTOPILOT", "1")])));
-        HookContext { git, vector_store: None, fs, process, llm: None, memory_mcp, env }
+        let env: &'static StubEnv =
+            Box::leak(Box::new(StubEnv::with(&[("SENTINEL_AUTOPILOT", "1")])));
+        HookContext {
+            git,
+            vector_store: None,
+            fs,
+            process,
+            llm: None,
+            memory_mcp,
+            env,
+        }
     }
 
     fn input_with_tool(tool: &str) -> HookInput {
@@ -275,47 +285,118 @@ mod tests {
         let ctx = stub_ctx();
         assert!(process(&input_with_tool("Edit"), &ctx).blocked.is_none());
         assert!(process(&input_with_tool("Bash"), &ctx).blocked.is_none());
-        assert!(process(&input_with_tool("mcp__linear__create_issue"), &ctx).blocked.is_none());
+        assert!(process(&input_with_tool("mcp__linear__create_issue"), &ctx)
+            .blocked
+            .is_none());
     }
 
     #[test]
     fn test_blocks_auth0_mutation_tools() {
         let ctx = stub_ctx();
-        assert_eq!(process(&input_with_tool("mcp__auth0__authenticate"), &ctx).blocked, Some(true));
+        assert_eq!(
+            process(&input_with_tool("mcp__auth0__authenticate"), &ctx).blocked,
+            Some(true)
+        );
     }
 
     #[test]
     fn test_allows_mcp_router_tools_on_all_servers() {
         let ctx = stub_ctx();
-        assert!(process(&input_with_tool("mcp__auth0__mcp_health_check"), &ctx).blocked.is_none());
-        assert!(process(&input_with_tool("mcp__auth0__mcp_list_servers"), &ctx).blocked.is_none());
-        assert!(process(&input_with_tool("mcp__auth0__mcp_restart_server"), &ctx).blocked.is_none());
-        assert!(process(&input_with_tool("mcp__doppler__mcp_health_check"), &ctx).blocked.is_none());
-        assert!(process(&input_with_tool("mcp__doppler__mcp_list_servers"), &ctx).blocked.is_none());
-        assert!(process(&input_with_tool("mcp__doppler__mcp_restart_server"), &ctx).blocked.is_none());
+        assert!(
+            process(&input_with_tool("mcp__auth0__mcp_health_check"), &ctx)
+                .blocked
+                .is_none()
+        );
+        assert!(
+            process(&input_with_tool("mcp__auth0__mcp_list_servers"), &ctx)
+                .blocked
+                .is_none()
+        );
+        assert!(
+            process(&input_with_tool("mcp__auth0__mcp_restart_server"), &ctx)
+                .blocked
+                .is_none()
+        );
+        assert!(
+            process(&input_with_tool("mcp__doppler__mcp_health_check"), &ctx)
+                .blocked
+                .is_none()
+        );
+        assert!(
+            process(&input_with_tool("mcp__doppler__mcp_list_servers"), &ctx)
+                .blocked
+                .is_none()
+        );
+        assert!(
+            process(&input_with_tool("mcp__doppler__mcp_restart_server"), &ctx)
+                .blocked
+                .is_none()
+        );
     }
 
     #[test]
     fn test_allows_doppler_read_ops() {
         let ctx = stub_ctx();
-        assert!(process(&input_with_tool("mcp__doppler__get_secret"), &ctx).blocked.is_none());
-        assert!(process(&input_with_tool("mcp__doppler__list_projects"), &ctx).blocked.is_none());
-        assert!(process(&input_with_tool("mcp__doppler__list_secrets"), &ctx).blocked.is_none());
-        assert!(process(&input_with_tool("mcp__doppler__download_secrets"), &ctx).blocked.is_none());
-        assert!(process(&input_with_tool("mcp__doppler__current_account"), &ctx).blocked.is_none());
+        assert!(process(&input_with_tool("mcp__doppler__get_secret"), &ctx)
+            .blocked
+            .is_none());
+        assert!(
+            process(&input_with_tool("mcp__doppler__list_projects"), &ctx)
+                .blocked
+                .is_none()
+        );
+        assert!(
+            process(&input_with_tool("mcp__doppler__list_secrets"), &ctx)
+                .blocked
+                .is_none()
+        );
+        assert!(
+            process(&input_with_tool("mcp__doppler__download_secrets"), &ctx)
+                .blocked
+                .is_none()
+        );
+        assert!(
+            process(&input_with_tool("mcp__doppler__current_account"), &ctx)
+                .blocked
+                .is_none()
+        );
     }
 
     #[test]
     fn test_blocks_doppler_mutations() {
         let ctx = stub_ctx();
-        assert_eq!(process(&input_with_tool("mcp__doppler__set_secret"), &ctx).blocked, Some(true));
-        assert_eq!(process(&input_with_tool("mcp__doppler__set_secrets"), &ctx).blocked, Some(true));
-        assert_eq!(process(&input_with_tool("mcp__doppler__delete_secret"), &ctx).blocked, Some(true));
-        assert_eq!(process(&input_with_tool("mcp__doppler__create_project"), &ctx).blocked, Some(true));
-        assert_eq!(process(&input_with_tool("mcp__doppler__delete_config"), &ctx).blocked, Some(true));
-        assert_eq!(process(&input_with_tool("mcp__doppler__lock_config"), &ctx).blocked, Some(true));
-        assert_eq!(process(&input_with_tool("mcp__doppler__rollback_config"), &ctx).blocked, Some(true));
-        assert_eq!(process(&input_with_tool("mcp__doppler__create_service_token"), &ctx).blocked, Some(true));
+        assert_eq!(
+            process(&input_with_tool("mcp__doppler__set_secret"), &ctx).blocked,
+            Some(true)
+        );
+        assert_eq!(
+            process(&input_with_tool("mcp__doppler__set_secrets"), &ctx).blocked,
+            Some(true)
+        );
+        assert_eq!(
+            process(&input_with_tool("mcp__doppler__delete_secret"), &ctx).blocked,
+            Some(true)
+        );
+        assert_eq!(
+            process(&input_with_tool("mcp__doppler__create_project"), &ctx).blocked,
+            Some(true)
+        );
+        assert_eq!(
+            process(&input_with_tool("mcp__doppler__delete_config"), &ctx).blocked,
+            Some(true)
+        );
+        assert_eq!(
+            process(&input_with_tool("mcp__doppler__lock_config"), &ctx).blocked,
+            Some(true)
+        );
+        assert_eq!(
+            process(&input_with_tool("mcp__doppler__rollback_config"), &ctx).blocked,
+            Some(true)
+        );
+        assert_eq!(
+            process(&input_with_tool("mcp__doppler__create_service_token"), &ctx).blocked,
+            Some(true)
+        );
     }
 
     // ───────────────────────── Autopilot bypass ─────────────────────────
@@ -333,7 +414,7 @@ mod tests {
             }),
         );
         let out = process(&input, &ctx);
-assert!(
+        assert!(
             out.blocked.is_none(),
             "autopilot + non-prod config should allow doppler mutation"
         );
@@ -352,7 +433,7 @@ assert!(
             }),
         );
         let out = process(&input, &ctx);
-assert_eq!(
+        assert_eq!(
             out.blocked,
             Some(true),
             "autopilot must NOT bypass the gate when config is prod"
@@ -368,7 +449,7 @@ assert_eq!(
             serde_json::json!({"project": "x", "config": "production"}),
         );
         let out = process(&input, &ctx);
-assert_eq!(out.blocked, Some(true));
+        assert_eq!(out.blocked, Some(true));
     }
 
     #[test]
@@ -378,7 +459,7 @@ assert_eq!(out.blocked, Some(true));
         // "set_secret without a config" from a prod call.
         let ctx = ctx_autopilot_on();
         let out = process(&input_with_tool("mcp__doppler__set_secret"), &ctx);
-assert_eq!(out.blocked, Some(true));
+        assert_eq!(out.blocked, Some(true));
     }
 
     #[test]
@@ -389,7 +470,7 @@ assert_eq!(out.blocked, Some(true));
             serde_json::json!({"domain": "dev-fireflypro.us.auth0.com"}),
         );
         let out = process(&input, &ctx);
-assert!(
+        assert!(
             out.blocked.is_none(),
             "autopilot + non-prod Auth0 tenant should allow the mutation"
         );
@@ -403,7 +484,7 @@ assert!(
             serde_json::json!({"domain": "fireflypro-production.us.auth0.com"}),
         );
         let out = process(&input, &ctx);
-assert_eq!(
+        assert_eq!(
             out.blocked,
             Some(true),
             "autopilot must NOT bypass the gate when Auth0 tenant is production"
@@ -414,7 +495,7 @@ assert_eq!(
     fn test_autopilot_blocks_auth0_mutation_when_no_args() {
         let ctx = ctx_autopilot_on();
         let out = process(&input_with_tool("mcp__auth0__create_user"), &ctx);
-assert_eq!(
+        assert_eq!(
             out.blocked,
             Some(true),
             "conservative fallback: no args → assume prod → block"

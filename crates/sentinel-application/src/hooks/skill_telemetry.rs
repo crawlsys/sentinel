@@ -160,7 +160,9 @@ fn regenerate_summary(fs: &dyn FileSystemPort, telemetry_path: &Path, summary_pa
 
     let _ = fs.write(
         summary_path,
-        serde_json::to_string_pretty(&summary).unwrap_or_default().as_bytes(),
+        serde_json::to_string_pretty(&summary)
+            .unwrap_or_default()
+            .as_bytes(),
     );
 }
 
@@ -220,9 +222,10 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
         let _ = ctx.fs.append(&routing_file, completion_line.as_bytes());
 
         // Clean up one-time run ID file (write empty to clear)
-        let _ = ctx
-            .fs
-            .write(&telemetry_state_dir(ctx.fs).join("claude-skill-run-id"), b"");
+        let _ = ctx.fs.write(
+            &telemetry_state_dir(ctx.fs).join("claude-skill-run-id"),
+            b"",
+        );
     }
 
     // Regenerate summary every 10 executions
@@ -262,25 +265,49 @@ mod tests {
         fn with_files(files: Vec<(&str, &str)>) -> Self {
             Self {
                 existing: files.iter().map(|(k, _)| PathBuf::from(k)).collect(),
-                files: files.into_iter().map(|(k, v)| (PathBuf::from(k), v.to_string())).collect(),
+                files: files
+                    .into_iter()
+                    .map(|(k, v)| (PathBuf::from(k), v.to_string()))
+                    .collect(),
                 written: std::sync::Mutex::new(StdMap::new()),
             }
         }
     }
     impl FileSystemPort for TestFs {
-        fn home_dir(&self) -> Option<PathBuf> { Some(PathBuf::from("/mock/home")) }
+        fn home_dir(&self) -> Option<PathBuf> {
+            Some(PathBuf::from("/mock/home"))
+        }
         fn read_to_string(&self, p: &Path) -> anyhow::Result<String> {
-            self.files.get(p).cloned().ok_or_else(|| anyhow::anyhow!("not found"))
+            self.files
+                .get(p)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("not found"))
         }
         fn write(&self, p: &Path, c: &[u8]) -> anyhow::Result<()> {
-            self.written.lock().unwrap().insert(p.to_path_buf(), c.to_vec()); Ok(())
+            self.written
+                .lock()
+                .unwrap()
+                .insert(p.to_path_buf(), c.to_vec());
+            Ok(())
         }
-        fn create_dir_all(&self, _: &Path) -> anyhow::Result<()> { Ok(()) }
-        fn read_dir(&self, _: &Path) -> anyhow::Result<Vec<PathBuf>> { Ok(vec![]) }
-        fn exists(&self, p: &Path) -> bool { self.existing.contains(p) }
-        fn is_dir(&self, _: &Path) -> bool { false }
-        fn metadata(&self, _: &Path) -> anyhow::Result<std::fs::Metadata> { anyhow::bail!("no") }
-        fn append(&self, _: &Path, _: &[u8]) -> anyhow::Result<()> { Ok(()) }
+        fn create_dir_all(&self, _: &Path) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn read_dir(&self, _: &Path) -> anyhow::Result<Vec<PathBuf>> {
+            Ok(vec![])
+        }
+        fn exists(&self, p: &Path) -> bool {
+            self.existing.contains(p)
+        }
+        fn is_dir(&self, _: &Path) -> bool {
+            false
+        }
+        fn metadata(&self, _: &Path) -> anyhow::Result<std::fs::Metadata> {
+            anyhow::bail!("no")
+        }
+        fn append(&self, _: &Path, _: &[u8]) -> anyhow::Result<()> {
+            Ok(())
+        }
     }
 
     #[test]
@@ -326,7 +353,11 @@ mod tests {
         let fs = TestFs::with_files(vec![("/tel.jsonl", "")]);
         regenerate_summary(&fs, Path::new("/tel.jsonl"), Path::new("/summary.json"));
         // Empty file → no summary written
-        assert!(!fs.written.lock().unwrap().contains_key(Path::new("/summary.json")));
+        assert!(!fs
+            .written
+            .lock()
+            .unwrap()
+            .contains_key(Path::new("/summary.json")));
     }
 
     #[test]
@@ -345,7 +376,9 @@ mod tests {
         regenerate_summary(&fs, Path::new("/tel.jsonl"), Path::new("/summary.json"));
 
         let written = fs.written.lock().unwrap();
-        let bytes = written.get(Path::new("/summary.json")).expect("should be written");
+        let bytes = written
+            .get(Path::new("/summary.json"))
+            .expect("should be written");
         let result: serde_json::Value = serde_json::from_slice(bytes).unwrap();
         assert_eq!(result["total_executions"], 3);
     }

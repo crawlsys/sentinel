@@ -95,9 +95,30 @@ impl Exchange {
         // Skip exchanges where user input is trivial acknowledgement
         let user_trimmed = self.user_text.trim().to_lowercase();
         let trivial = [
-            "yes", "no", "ok", "okay", "done", "thanks", "thank you", "got it",
-            "sure", "y", "n", "yep", "nope", "continue", "go", "next", "fix it",
-            "all", "yee", "cool", "nice", "great", "perfect", "keep going",
+            "yes",
+            "no",
+            "ok",
+            "okay",
+            "done",
+            "thanks",
+            "thank you",
+            "got it",
+            "sure",
+            "y",
+            "n",
+            "yep",
+            "nope",
+            "continue",
+            "go",
+            "next",
+            "fix it",
+            "all",
+            "yee",
+            "cool",
+            "nice",
+            "great",
+            "perfect",
+            "keep going",
         ];
         if trivial.contains(&user_trimmed.as_str()) && self.assistant_text.len() < 200 {
             return false;

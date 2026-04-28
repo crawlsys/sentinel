@@ -159,5 +159,4 @@ impl VectorStorePort for QdrantAdapter {
         );
         Ok(())
     }
-
 }

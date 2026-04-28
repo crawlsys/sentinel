@@ -653,8 +653,12 @@ mod tests {
         fn diff_names(&self, _: &str, _: &str) -> Option<Vec<String>> {
             None
         }
-        fn merged_local_branches(&self, _: &str, _: &str) -> Vec<String> { Vec::new() }
-        fn merged_remote_branches(&self, _: &str, _: &str) -> Vec<String> { Vec::new() }
+        fn merged_local_branches(&self, _: &str, _: &str) -> Vec<String> {
+            Vec::new()
+        }
+        fn merged_remote_branches(&self, _: &str, _: &str) -> Vec<String> {
+            Vec::new()
+        }
     }
 
     /// Test fixture for [`TestProcess::run`]. The `Err` variant is used by
@@ -920,9 +924,10 @@ mod tests {
 
         let mut input = HookInput::default();
         input.session_id = Some("session-auth".to_string());
-        input
-            .extra
-            .insert("error".to_string(), serde_json::json!("authentication_failed"));
+        input.extra.insert(
+            "error".to_string(),
+            serde_json::json!("authentication_failed"),
+        );
         input
             .extra
             .insert("error_details".to_string(), serde_json::json!(""));
@@ -934,8 +939,14 @@ mod tests {
         let msg = output.system_message.expect("system_message present");
         assert!(msg.contains("[Auth Error]"), "msg: {msg}");
         assert!(msg.contains("swapped in-place"), "msg: {msg}");
-        assert!(msg.contains("claude2"), "msg should mention old account: {msg}");
-        assert!(msg.contains("claude3"), "msg should mention new account: {msg}");
+        assert!(
+            msg.contains("claude2"),
+            "msg should mention old account: {msg}"
+        );
+        assert!(
+            msg.contains("claude3"),
+            "msg should mention new account: {msg}"
+        );
     }
 
     /// `error: "invalid_request"` (e.g. prompt-too-long 400s) MUST NOT

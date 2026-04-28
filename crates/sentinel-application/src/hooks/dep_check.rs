@@ -117,8 +117,16 @@ fn check_outdated(
         ProjectType::Rust => {
             // `cargo outdated -R` requires cargo-outdated installed.
             // Fallback: `cargo update --dry-run` shows available updates.
-            if let Some(output) = run_cmd(process, "cargo", &["outdated", "-R", "--exit-code", "1"], cwd) {
-                Some(format!("**Rust (cargo outdated):**\n```\n{}\n```", output.trim()))
+            if let Some(output) = run_cmd(
+                process,
+                "cargo",
+                &["outdated", "-R", "--exit-code", "1"],
+                cwd,
+            ) {
+                Some(format!(
+                    "**Rust (cargo outdated):**\n```\n{}\n```",
+                    output.trim()
+                ))
             } else if let Some(output) = run_cmd(process, "cargo", &["update", "--dry-run"], cwd) {
                 let updates: Vec<&str> = output
                     .lines()
@@ -143,14 +151,22 @@ fn check_outdated(
             output.map(|o| format!("**Node (outdated):**\n```\n{}\n```", o.trim()))
         }
         ProjectType::Python => {
-            let output = run_cmd(process, "pip", &["list", "--outdated", "--format=columns"], cwd);
+            let output = run_cmd(
+                process,
+                "pip",
+                &["list", "--outdated", "--format=columns"],
+                cwd,
+            );
             output.map(|o| format!("**Python (pip outdated):**\n```\n{}\n```", o.trim()))
         }
         ProjectType::Go => {
             let output = run_cmd(process, "go", &["list", "-u", "-m", "all"], cwd);
             if let Some(ref o) = output {
                 // Filter to only lines with updates (contain [v...])
-                let updates: Vec<&str> = o.lines().filter(|l| l.contains('[') && l.contains(']')).collect();
+                let updates: Vec<&str> = o
+                    .lines()
+                    .filter(|l| l.contains('[') && l.contains(']'))
+                    .collect();
                 if updates.is_empty() {
                     return None;
                 }
@@ -212,7 +228,9 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
 
     // Cache the results (even if empty — prevents re-checking)
     if let Some(cache) = cache_path(ctx.fs, cwd_str) {
-        let _ = ctx.fs.create_dir_all(cache.parent().unwrap_or(Path::new(".")));
+        let _ = ctx
+            .fs
+            .create_dir_all(cache.parent().unwrap_or(Path::new(".")));
         let _ = ctx.fs.write(&cache, results.join("\n\n").as_bytes());
     }
 

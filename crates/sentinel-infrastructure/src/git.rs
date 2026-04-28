@@ -122,7 +122,11 @@ pub fn merge_base(repo_path: &str, base_ref: &str) -> Option<String> {
         return None;
     }
     let sha = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if sha.is_empty() { None } else { Some(sha) }
+    if sha.is_empty() {
+        None
+    } else {
+        Some(sha)
+    }
 }
 
 /// Count commits in `<from>..HEAD`. Returns `None` if git fails or the
@@ -152,7 +156,13 @@ pub fn diff_names(repo_path: &str, range: &str) -> Option<Vec<String>> {
         return None;
     }
     let stdout = String::from_utf8_lossy(&output.stdout);
-    Some(stdout.lines().filter(|l| !l.is_empty()).map(String::from).collect())
+    Some(
+        stdout
+            .lines()
+            .filter(|l| !l.is_empty())
+            .map(String::from)
+            .collect(),
+    )
 }
 
 /// List directory basenames of all registered worktrees for this repo.
@@ -203,11 +213,7 @@ pub fn merged_local_branches(repo_path: &str, base_ref: &str) -> Vec<String> {
     text.lines()
         .map(|l| l.trim_start_matches('*').trim().to_string())
         .filter(|b| {
-            !b.is_empty()
-                && b != base_ref
-                && b != "main"
-                && b != "master"
-                && !b.starts_with('(')
+            !b.is_empty() && b != base_ref && b != "main" && b != "master" && !b.starts_with('(')
         })
         .collect()
 }

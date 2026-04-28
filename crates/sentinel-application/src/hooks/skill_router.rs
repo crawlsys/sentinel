@@ -12,7 +12,8 @@ use super::FileSystemPort;
 /// Returns the content between `## Activation Banner` and the next `##` heading,
 /// including the code-fenced banner block.
 fn extract_banner(fs: &dyn FileSystemPort, skill: &str) -> Option<String> {
-    let skill_path = fs.home_dir()?
+    let skill_path = fs
+        .home_dir()?
         .join(".claude")
         .join("skills")
         .join(skill)
@@ -50,7 +51,8 @@ fn extract_banner(fs: &dyn FileSystemPort, skill: &str) -> Option<String> {
 /// instead of world-writable temp_dir(). Prevents other processes/users from
 /// injecting fake skill names or run IDs. (Attack #51)
 fn telemetry_dir(fs: &dyn FileSystemPort) -> Option<std::path::PathBuf> {
-    fs.home_dir().map(|h| h.join(".claude").join("sentinel").join("telemetry"))
+    fs.home_dir()
+        .map(|h| h.join(".claude").join("sentinel").join("telemetry"))
 }
 
 /// Path to the pending-skill state file for the given session. Lives under
@@ -129,11 +131,21 @@ fn write_telemetry_state(fs: &dyn FileSystemPort, skill: &str, run_id: &str) {
 
     // Start timestamp (epoch ms) for duration calculation
     let now_ms = chrono::Utc::now().timestamp_millis();
-    let _ = fs.write(&dir.join("claude-skill-start-time"), now_ms.to_string().as_bytes());
+    let _ = fs.write(
+        &dir.join("claude-skill-start-time"),
+        now_ms.to_string().as_bytes(),
+    );
 }
 
 /// Append a routing entry to metrics/routing.jsonl
-fn write_routing_entry(fs: &dyn FileSystemPort, skill: &str, run_id: &str, source: &str, input: &HookInput, prompt: &str) {
+fn write_routing_entry(
+    fs: &dyn FileSystemPort,
+    skill: &str,
+    run_id: &str,
+    source: &str,
+    input: &HookInput,
+    prompt: &str,
+) {
     let metrics_dir = match fs.home_dir() {
         Some(h) => super::metrics_dir(&h),
         None => return,
@@ -187,7 +199,11 @@ pub async fn process(
             Ok(Some(skill)) => {
                 // Validate: skill directory must exist on disk
                 if is_valid_skill(fs, &skill) {
-                    let source = if prompt.trim().starts_with('/') { "ai-slash" } else { "ai" };
+                    let source = if prompt.trim().starts_with('/') {
+                        "ai-slash"
+                    } else {
+                        "ai"
+                    };
                     return build_match_output(fs, &skill, input, prompt, source);
                 }
                 tracing::warn!(
@@ -219,7 +235,13 @@ fn is_valid_skill(fs: &dyn FileSystemPort, skill: &str) -> bool {
 }
 
 /// Build output for a matched skill
-fn build_match_output(fs: &dyn FileSystemPort, skill: &str, input: &HookInput, prompt: &str, source: &str) -> HookOutput {
+fn build_match_output(
+    fs: &dyn FileSystemPort,
+    skill: &str,
+    input: &HookInput,
+    prompt: &str,
+    source: &str,
+) -> HookOutput {
     let now_ms = chrono::Utc::now().timestamp_millis();
     let pid = std::process::id();
     let run_id = format!("{}-{}", now_ms, pid % 100000);
@@ -355,17 +377,31 @@ mod tests {
             }
             fn read_to_string(&self, _: &std::path::Path) -> anyhow::Result<String> {
                 let long_desc = "x".repeat(500);
-                Ok(format!("---\nname: foo\ndescription: {long_desc}\n---\n# Body\n"))
+                Ok(format!(
+                    "---\nname: foo\ndescription: {long_desc}\n---\n# Body\n"
+                ))
             }
-            fn write(&self, _: &std::path::Path, _: &[u8]) -> anyhow::Result<()> { Ok(()) }
-            fn create_dir_all(&self, _: &std::path::Path) -> anyhow::Result<()> { Ok(()) }
-            fn read_dir(&self, _: &std::path::Path) -> anyhow::Result<Vec<std::path::PathBuf>> { Ok(vec![]) }
-            fn exists(&self, _: &std::path::Path) -> bool { true }
-            fn is_dir(&self, _: &std::path::Path) -> bool { false }
+            fn write(&self, _: &std::path::Path, _: &[u8]) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn create_dir_all(&self, _: &std::path::Path) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn read_dir(&self, _: &std::path::Path) -> anyhow::Result<Vec<std::path::PathBuf>> {
+                Ok(vec![])
+            }
+            fn exists(&self, _: &std::path::Path) -> bool {
+                true
+            }
+            fn is_dir(&self, _: &std::path::Path) -> bool {
+                false
+            }
             fn metadata(&self, _: &std::path::Path) -> anyhow::Result<std::fs::Metadata> {
                 anyhow::bail!("nope")
             }
-            fn append(&self, _: &std::path::Path, _: &[u8]) -> anyhow::Result<()> { Ok(()) }
+            fn append(&self, _: &std::path::Path, _: &[u8]) -> anyhow::Result<()> {
+                Ok(())
+            }
         }
         let banner = synthesize_banner(&LongDescFs, "foo");
         // Description is hard-capped at 160 chars + "…", so the banner
@@ -384,15 +420,27 @@ mod tests {
             fn read_to_string(&self, _: &std::path::Path) -> anyhow::Result<String> {
                 Ok("---\nname: foo\ndescription: \"hello world\"\n---\n# Body\n".to_string())
             }
-            fn write(&self, _: &std::path::Path, _: &[u8]) -> anyhow::Result<()> { Ok(()) }
-            fn create_dir_all(&self, _: &std::path::Path) -> anyhow::Result<()> { Ok(()) }
-            fn read_dir(&self, _: &std::path::Path) -> anyhow::Result<Vec<std::path::PathBuf>> { Ok(vec![]) }
-            fn exists(&self, _: &std::path::Path) -> bool { true }
-            fn is_dir(&self, _: &std::path::Path) -> bool { false }
+            fn write(&self, _: &std::path::Path, _: &[u8]) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn create_dir_all(&self, _: &std::path::Path) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn read_dir(&self, _: &std::path::Path) -> anyhow::Result<Vec<std::path::PathBuf>> {
+                Ok(vec![])
+            }
+            fn exists(&self, _: &std::path::Path) -> bool {
+                true
+            }
+            fn is_dir(&self, _: &std::path::Path) -> bool {
+                false
+            }
             fn metadata(&self, _: &std::path::Path) -> anyhow::Result<std::fs::Metadata> {
                 anyhow::bail!("nope")
             }
-            fn append(&self, _: &std::path::Path, _: &[u8]) -> anyhow::Result<()> { Ok(()) }
+            fn append(&self, _: &std::path::Path, _: &[u8]) -> anyhow::Result<()> {
+                Ok(())
+            }
         }
         assert_eq!(
             read_skill_description(&QuotedFs, "foo").as_deref(),
@@ -410,15 +458,27 @@ mod tests {
             fn read_to_string(&self, _: &std::path::Path) -> anyhow::Result<String> {
                 Ok("# Just a heading\nNo frontmatter here.\n".to_string())
             }
-            fn write(&self, _: &std::path::Path, _: &[u8]) -> anyhow::Result<()> { Ok(()) }
-            fn create_dir_all(&self, _: &std::path::Path) -> anyhow::Result<()> { Ok(()) }
-            fn read_dir(&self, _: &std::path::Path) -> anyhow::Result<Vec<std::path::PathBuf>> { Ok(vec![]) }
-            fn exists(&self, _: &std::path::Path) -> bool { true }
-            fn is_dir(&self, _: &std::path::Path) -> bool { false }
+            fn write(&self, _: &std::path::Path, _: &[u8]) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn create_dir_all(&self, _: &std::path::Path) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn read_dir(&self, _: &std::path::Path) -> anyhow::Result<Vec<std::path::PathBuf>> {
+                Ok(vec![])
+            }
+            fn exists(&self, _: &std::path::Path) -> bool {
+                true
+            }
+            fn is_dir(&self, _: &std::path::Path) -> bool {
+                false
+            }
             fn metadata(&self, _: &std::path::Path) -> anyhow::Result<std::fs::Metadata> {
                 anyhow::bail!("nope")
             }
-            fn append(&self, _: &std::path::Path, _: &[u8]) -> anyhow::Result<()> { Ok(()) }
+            fn append(&self, _: &std::path::Path, _: &[u8]) -> anyhow::Result<()> {
+                Ok(())
+            }
         }
         assert_eq!(read_skill_description(&NoFrontmatterFs, "foo"), None);
     }

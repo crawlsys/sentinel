@@ -150,7 +150,10 @@ fn plans_dir_has_recent_md(fs: &dyn FileSystemPort, dir: &Path, now: SystemTime)
         if entry.extension().and_then(|e| e.to_str()) != Some("md") {
             return false;
         }
-        match fs.metadata(entry).and_then(|m| m.modified().map_err(Into::into)) {
+        match fs
+            .metadata(entry)
+            .and_then(|m| m.modified().map_err(Into::into))
+        {
             Ok(modified) => now
                 .duration_since(modified)
                 .map(|age| age <= PLAN_FILE_FRESH_WINDOW)
@@ -292,49 +295,154 @@ fn strip_cd_prefix(cmd: &str) -> &str {
 /// Read-only Bash prefixes — these never need a task. Conservative list:
 /// only commands that genuinely don't change repo / system state.
 const READ_ONLY_BASH_PREFIXES: &[&str] = &[
-    "ls", "ll", "cat", "head", "tail", "wc", "find", "tree", "du", "stat",
-    "pwd", "which", "whoami", "id", "uname", "date", "echo", "printf",
-    "git status", "git log", "git diff", "git show", "git branch -a",
-    "git branch -r", "git branch -v", "git ls-files", "git rev-parse",
-    "git config --get", "git config --list", "git remote -v",
-    "git worktree list", "git stash list", "git tag", "git describe",
-    "git blame", "git shortlog", "git reflog",
-    "gh pr view", "gh pr list", "gh pr checks", "gh pr diff",
-    "gh issue view", "gh issue list",
-    "gh run view", "gh run list", "gh repo view", "gh release list",
-    "gh auth status", "gh api",
-    "cargo check", "cargo clippy", "cargo metadata", "cargo tree",
-    "cargo doc --no-deps", "cargo fmt --check", "cargo --version",
+    "ls",
+    "ll",
+    "cat",
+    "head",
+    "tail",
+    "wc",
+    "find",
+    "tree",
+    "du",
+    "stat",
+    "pwd",
+    "which",
+    "whoami",
+    "id",
+    "uname",
+    "date",
+    "echo",
+    "printf",
+    "git status",
+    "git log",
+    "git diff",
+    "git show",
+    "git branch -a",
+    "git branch -r",
+    "git branch -v",
+    "git ls-files",
+    "git rev-parse",
+    "git config --get",
+    "git config --list",
+    "git remote -v",
+    "git worktree list",
+    "git stash list",
+    "git tag",
+    "git describe",
+    "git blame",
+    "git shortlog",
+    "git reflog",
+    "gh pr view",
+    "gh pr list",
+    "gh pr checks",
+    "gh pr diff",
+    "gh issue view",
+    "gh issue list",
+    "gh run view",
+    "gh run list",
+    "gh repo view",
+    "gh release list",
+    "gh auth status",
+    "gh api",
+    "cargo check",
+    "cargo clippy",
+    "cargo metadata",
+    "cargo tree",
+    "cargo doc --no-deps",
+    "cargo fmt --check",
+    "cargo --version",
     "cargo search",
-    "npm ls", "npm view", "npm outdated", "npm config get",
-    "pnpm ls", "yarn list",
-    "rustc --version", "rustup show", "node --version", "python --version",
-    "docker ps", "docker images", "docker version",
-    "kubectl get", "kubectl describe",
+    "npm ls",
+    "npm view",
+    "npm outdated",
+    "npm config get",
+    "pnpm ls",
+    "yarn list",
+    "rustc --version",
+    "rustup show",
+    "node --version",
+    "python --version",
+    "docker ps",
+    "docker images",
+    "docker version",
+    "kubectl get",
+    "kubectl describe",
 ];
 
 /// Mutating Bash prefixes / patterns — these must be gated.
 /// Order: longest/most-specific first so prefix matches don't shadow.
 const MUTATING_BASH_PATTERNS: &[&str] = &[
-    "git commit", "git push", "git merge", "git rebase",
-    "git reset --hard", "git clean -f", "git branch -d", "git branch -D",
-    "git restore", "git checkout --", "git checkout -b", "git tag -d",
-    "git stash drop", "git stash clear", "git stash pop", "git stash apply",
-    "git worktree remove", "git worktree add",
-    "gh pr create", "gh pr merge", "gh pr close", "gh pr edit", "gh pr review",
-    "gh issue create", "gh issue close", "gh issue edit",
-    "gh release create", "gh release edit", "gh release delete",
-    "cargo build", "cargo run", "cargo install", "cargo update",
-    "cargo publish", "cargo test", "cargo bench",
-    "npm install", "npm i ", "npm run", "npm publish", "npm uninstall",
-    "yarn install", "yarn add", "yarn remove", "yarn run",
-    "pnpm install", "pnpm add", "pnpm remove", "pnpm run",
-    "pip install", "pip uninstall",
-    "rm ", "rm -", "mv ", "cp ", "mkdir ", "touch ", "chmod ", "chown ",
+    "git commit",
+    "git push",
+    "git merge",
+    "git rebase",
+    "git reset --hard",
+    "git clean -f",
+    "git branch -d",
+    "git branch -D",
+    "git restore",
+    "git checkout --",
+    "git checkout -b",
+    "git tag -d",
+    "git stash drop",
+    "git stash clear",
+    "git stash pop",
+    "git stash apply",
+    "git worktree remove",
+    "git worktree add",
+    "gh pr create",
+    "gh pr merge",
+    "gh pr close",
+    "gh pr edit",
+    "gh pr review",
+    "gh issue create",
+    "gh issue close",
+    "gh issue edit",
+    "gh release create",
+    "gh release edit",
+    "gh release delete",
+    "cargo build",
+    "cargo run",
+    "cargo install",
+    "cargo update",
+    "cargo publish",
+    "cargo test",
+    "cargo bench",
+    "npm install",
+    "npm i ",
+    "npm run",
+    "npm publish",
+    "npm uninstall",
+    "yarn install",
+    "yarn add",
+    "yarn remove",
+    "yarn run",
+    "pnpm install",
+    "pnpm add",
+    "pnpm remove",
+    "pnpm run",
+    "pip install",
+    "pip uninstall",
+    "rm ",
+    "rm -",
+    "mv ",
+    "cp ",
+    "mkdir ",
+    "touch ",
+    "chmod ",
+    "chown ",
     "ln -",
-    "make ", "make\n",
-    "docker run", "docker build", "docker push", "docker rm", "docker rmi",
-    "kubectl apply", "kubectl delete", "kubectl create", "kubectl edit",
+    "make ",
+    "make\n",
+    "docker run",
+    "docker build",
+    "docker push",
+    "docker rm",
+    "docker rmi",
+    "kubectl apply",
+    "kubectl delete",
+    "kubectl create",
+    "kubectl edit",
 ];
 
 /// Decide whether a Bash tool call is mutating (and therefore should be
@@ -407,10 +515,29 @@ fn is_mutating_mcp_tool(tool: &str) -> bool {
     // Read-only verb fragments — if the tool name contains any of these,
     // treat as read-only and let it through without a task.
     const READ_ONLY_FRAGMENTS: &[&str] = &[
-        "_get", "get_", "_list", "list_", "_view", "view_", "_search",
-        "_check", "_status", "_show", "_describe", "_inspect", "_health",
-        "_count", "_query", "_resolve", "_fetch", "_read", "whoami",
-        "_info", "_export", "current_account", "list_accounts",
+        "_get",
+        "get_",
+        "_list",
+        "list_",
+        "_view",
+        "view_",
+        "_search",
+        "_check",
+        "_status",
+        "_show",
+        "_describe",
+        "_inspect",
+        "_health",
+        "_count",
+        "_query",
+        "_resolve",
+        "_fetch",
+        "_read",
+        "whoami",
+        "_info",
+        "_export",
+        "current_account",
+        "list_accounts",
     ];
     for f in READ_ONLY_FRAGMENTS {
         if verb_part.contains(f) {
@@ -472,7 +599,7 @@ pub fn process(input: &HookInput, fs: &dyn FileSystemPort, env: &dyn EnvPort) ->
     if !has_marker(fs, SEQUENTIAL_MARKER_PREFIX, session_id) {
         return HookOutput::deny(
             "🔴 [Tool Usage Gate] BLOCKED: Use `mcp__sequential-thinking__sequentialthinking` \
-             to think through your approach before making code changes."
+             to think through your approach before making code changes.",
         );
     }
 
@@ -481,7 +608,7 @@ pub fn process(input: &HookInput, fs: &dyn FileSystemPort, env: &dyn EnvPort) ->
         return HookOutput::deny(
             "🔴 [Tool Usage Gate] BLOCKED: Create a task with `TaskCreate` (agent-team \
              harness) or `TodoWrite` (core Claude Code) before making code changes. \
-             All work must be tracked as a task."
+             All work must be tracked as a task.",
         );
     }
 
@@ -536,7 +663,7 @@ pub fn process(input: &HookInput, fs: &dyn FileSystemPort, env: &dyn EnvPort) ->
              cwd (resumed-session fallback) — if you're inside a git worktree, \
              the walk-up stops at the worktree's `.git` file, so the plan MUST \
              live inside the worktree itself (e.g. `{worktree}/plans/foo.md`), \
-             not at the main repo root."
+             not at the main repo root.",
         );
     }
 
@@ -553,7 +680,8 @@ pub fn process(input: &HookInput, fs: &dyn FileSystemPort, env: &dyn EnvPort) ->
         let msg = if hint.is_empty() {
             "🔴 [Tool Usage Gate] BLOCKED: Create a task with `TaskCreate` (agent-team \
              harness) or `TodoWrite` (core Claude Code) before making code changes. \
-             All work must be tracked as an active task.".to_string()
+             All work must be tracked as an active task."
+                .to_string()
         } else {
             format!(
                 "🔴 [Tool Usage Gate] BLOCKED: Mark a task as `in_progress` before making \
@@ -581,7 +709,9 @@ mod tests {
 
     impl MockFs {
         fn new() -> Self {
-            Self { existing_files: Mutex::new(HashSet::new()) }
+            Self {
+                existing_files: Mutex::new(HashSet::new()),
+            }
         }
 
         fn with_marker(prefix: &str, session_id: &str) -> Self {
@@ -620,7 +750,9 @@ mod tests {
     }
 
     impl FileSystemPort for MockFs {
-        fn home_dir(&self) -> Option<PathBuf> { Some(PathBuf::from("/mock/home")) }
+        fn home_dir(&self) -> Option<PathBuf> {
+            Some(PathBuf::from("/mock/home"))
+        }
         fn read_to_string(&self, p: &Path) -> anyhow::Result<String> {
             // Pass-through to real disk for transcript files (used by
             // `detect_plan_mode_from_transcript`); other reads are not used
@@ -632,17 +764,30 @@ mod tests {
             }
         }
         fn write(&self, path: &Path, _: &[u8]) -> anyhow::Result<()> {
-            self.existing_files.lock().unwrap().insert(path.to_path_buf());
+            self.existing_files
+                .lock()
+                .unwrap()
+                .insert(path.to_path_buf());
             Ok(())
         }
-        fn create_dir_all(&self, _: &Path) -> anyhow::Result<()> { Ok(()) }
-        fn read_dir(&self, _: &Path) -> anyhow::Result<Vec<PathBuf>> { Ok(vec![]) }
+        fn create_dir_all(&self, _: &Path) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn read_dir(&self, _: &Path) -> anyhow::Result<Vec<PathBuf>> {
+            Ok(vec![])
+        }
         fn exists(&self, path: &Path) -> bool {
             self.existing_files.lock().unwrap().contains(path)
         }
-        fn is_dir(&self, _: &Path) -> bool { false }
-        fn metadata(&self, _: &Path) -> anyhow::Result<std::fs::Metadata> { anyhow::bail!("no") }
-        fn append(&self, _: &Path, _: &[u8]) -> anyhow::Result<()> { Ok(()) }
+        fn is_dir(&self, _: &Path) -> bool {
+            false
+        }
+        fn metadata(&self, _: &Path) -> anyhow::Result<std::fs::Metadata> {
+            anyhow::bail!("no")
+        }
+        fn append(&self, _: &Path, _: &[u8]) -> anyhow::Result<()> {
+            Ok(())
+        }
     }
 
     /// FileSystemPort that delegates to the real disk — needed by tests that
@@ -651,19 +796,33 @@ mod tests {
     /// (the function under test only reads).
     struct RealTestFs;
     impl FileSystemPort for RealTestFs {
-        fn home_dir(&self) -> Option<PathBuf> { dirs::home_dir() }
+        fn home_dir(&self) -> Option<PathBuf> {
+            dirs::home_dir()
+        }
         fn read_to_string(&self, path: &Path) -> anyhow::Result<String> {
             Ok(std::fs::read_to_string(path)?)
         }
-        fn write(&self, _: &Path, _: &[u8]) -> anyhow::Result<()> { Ok(()) }
-        fn create_dir_all(&self, _: &Path) -> anyhow::Result<()> { Ok(()) }
-        fn read_dir(&self, _: &Path) -> anyhow::Result<Vec<PathBuf>> { Ok(vec![]) }
-        fn exists(&self, path: &Path) -> bool { path.exists() }
-        fn is_dir(&self, path: &Path) -> bool { path.is_dir() }
+        fn write(&self, _: &Path, _: &[u8]) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn create_dir_all(&self, _: &Path) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn read_dir(&self, _: &Path) -> anyhow::Result<Vec<PathBuf>> {
+            Ok(vec![])
+        }
+        fn exists(&self, path: &Path) -> bool {
+            path.exists()
+        }
+        fn is_dir(&self, path: &Path) -> bool {
+            path.is_dir()
+        }
         fn metadata(&self, path: &Path) -> anyhow::Result<std::fs::Metadata> {
             Ok(std::fs::metadata(path)?)
         }
-        fn append(&self, _: &Path, _: &[u8]) -> anyhow::Result<()> { Ok(()) }
+        fn append(&self, _: &Path, _: &[u8]) -> anyhow::Result<()> {
+            Ok(())
+        }
     }
 
     fn edit_input(session_id: &str) -> HookInput {
@@ -692,7 +851,11 @@ mod tests {
             session_id: Some("test-session".to_string()),
             ..Default::default()
         };
-        assert!(process(&input, &fs, &crate::hooks::test_support::StubEnv::new()).blocked.is_none());
+        assert!(
+            process(&input, &fs, &crate::hooks::test_support::StubEnv::new())
+                .blocked
+                .is_none()
+        );
     }
 
     #[test]
@@ -706,7 +869,11 @@ mod tests {
             session_id: Some("test-session".to_string()),
             ..Default::default()
         };
-        assert!(process(&input, &fs, &crate::hooks::test_support::StubEnv::new()).blocked.is_none());
+        assert!(
+            process(&input, &fs, &crate::hooks::test_support::StubEnv::new())
+                .blocked
+                .is_none()
+        );
     }
 
     #[test]
@@ -722,7 +889,8 @@ mod tests {
         };
         let output = process(&input, &fs, &crate::hooks::test_support::StubEnv::new());
         assert_eq!(
-            output.blocked, Some(true),
+            output.blocked,
+            Some(true),
             "mutating bash should be gated; got: {output:?}",
         );
     }
@@ -736,7 +904,11 @@ mod tests {
             session_id: Some("test-session".to_string()),
             ..Default::default()
         };
-        assert!(process(&input, &fs, &crate::hooks::test_support::StubEnv::new()).blocked.is_none());
+        assert!(
+            process(&input, &fs, &crate::hooks::test_support::StubEnv::new())
+                .blocked
+                .is_none()
+        );
     }
 
     #[test]
@@ -750,7 +922,8 @@ mod tests {
         };
         let output = process(&input, &fs, &crate::hooks::test_support::StubEnv::new());
         assert_eq!(
-            output.blocked, Some(true),
+            output.blocked,
+            Some(true),
             "mutating MCP tool should be gated; got: {output:?}",
         );
     }
@@ -808,64 +981,103 @@ mod tests {
             tool_name: Some("Edit".to_string()),
             ..Default::default()
         };
-        assert!(process(&input, &fs, &crate::hooks::test_support::StubEnv::new()).blocked.is_none());
+        assert!(
+            process(&input, &fs, &crate::hooks::test_support::StubEnv::new())
+                .blocked
+                .is_none()
+        );
     }
 
     #[test]
     fn test_blocks_edit_without_sequential_thinking() {
         let fs = MockFs::new();
-        let output = process(&edit_input("test-session"), &fs, &crate::hooks::test_support::StubEnv::new());
+        let output = process(
+            &edit_input("test-session"),
+            &fs,
+            &crate::hooks::test_support::StubEnv::new(),
+        );
         assert_eq!(output.blocked, Some(true));
     }
 
     #[test]
     fn test_blocks_write_without_sequential_thinking() {
         let fs = MockFs::new();
-        let output = process(&write_input("test-session"), &fs, &crate::hooks::test_support::StubEnv::new());
+        let output = process(
+            &write_input("test-session"),
+            &fs,
+            &crate::hooks::test_support::StubEnv::new(),
+        );
         assert_eq!(output.blocked, Some(true));
     }
 
     #[test]
     fn test_blocks_edit_without_task_but_with_sequential() {
         let fs = MockFs::with_marker(SEQUENTIAL_MARKER_PREFIX, "test-session");
-        let output = process(&edit_input("test-session"), &fs, &crate::hooks::test_support::StubEnv::new());
+        let output = process(
+            &edit_input("test-session"),
+            &fs,
+            &crate::hooks::test_support::StubEnv::new(),
+        );
         assert_eq!(output.blocked, Some(true));
     }
 
     #[test]
     fn test_blocks_edit_without_plan_approval() {
-        let fs = MockFs::with_markers("test-session", &[
-            SEQUENTIAL_MARKER_PREFIX,
-            TASK_MARKER_PREFIX,
-        ]);
-        let output = process(&edit_input("test-session"), &fs, &crate::hooks::test_support::StubEnv::new());
+        let fs = MockFs::with_markers(
+            "test-session",
+            &[SEQUENTIAL_MARKER_PREFIX, TASK_MARKER_PREFIX],
+        );
+        let output = process(
+            &edit_input("test-session"),
+            &fs,
+            &crate::hooks::test_support::StubEnv::new(),
+        );
         assert_eq!(output.blocked, Some(true));
-        let reason = output.hook_specific_output.as_ref()
-            .and_then(|h| h.permission_decision_reason.as_deref()).unwrap_or("");
+        let reason = output
+            .hook_specific_output
+            .as_ref()
+            .and_then(|h| h.permission_decision_reason.as_deref())
+            .unwrap_or("");
         // Message references the real entry paths: EnterPlanMode (real tool
         // per 2.1.114 binary handler `r7H`, though hidden from sdk-tools.d.ts),
         // Shift+Tab, env var, Agent mode, or CLI flag; and ExitPlanMode as the
         // approval step.
         assert!(reason.contains("Plan Mode") && reason.contains("ExitPlanMode"));
-        assert!(reason.contains("EnterPlanMode"),
-            "deny message must reference EnterPlanMode — real tool per 2.1.114 audit");
-        assert!(reason.contains("worktree"),
-            "deny message must warn that walk-up stops at worktree .git boundary");
-        assert!(reason.contains("current shell cwd") || reason.contains("CURRENT shell cwd"),
-            "deny message must clarify cwd means the current shell directory, not repo root");
+        assert!(
+            reason.contains("EnterPlanMode"),
+            "deny message must reference EnterPlanMode — real tool per 2.1.114 audit"
+        );
+        assert!(
+            reason.contains("worktree"),
+            "deny message must warn that walk-up stops at worktree .git boundary"
+        );
+        assert!(
+            reason.contains("current shell cwd") || reason.contains("CURRENT shell cwd"),
+            "deny message must clarify cwd means the current shell directory, not repo root"
+        );
     }
 
     #[test]
     fn test_blocks_edit_without_active_task() {
-        let fs = MockFs::with_markers("test-session", &[
-            SEQUENTIAL_MARKER_PREFIX,
-            TASK_MARKER_PREFIX,
-            PLAN_MARKER_PREFIX,
-        ]);
-        let output = process(&edit_input("test-session"), &fs, &crate::hooks::test_support::StubEnv::new());
+        let fs = MockFs::with_markers(
+            "test-session",
+            &[
+                SEQUENTIAL_MARKER_PREFIX,
+                TASK_MARKER_PREFIX,
+                PLAN_MARKER_PREFIX,
+            ],
+        );
+        let output = process(
+            &edit_input("test-session"),
+            &fs,
+            &crate::hooks::test_support::StubEnv::new(),
+        );
         assert_eq!(output.blocked, Some(true));
-        let reason = output.hook_specific_output.as_ref()
-            .and_then(|h| h.permission_decision_reason.as_deref()).unwrap_or("");
+        let reason = output
+            .hook_specific_output
+            .as_ref()
+            .and_then(|h| h.permission_decision_reason.as_deref())
+            .unwrap_or("");
         assert!(
             reason.contains("in_progress") || reason.contains("TaskCreate"),
             "block message should mention in_progress or TaskCreate — got: {reason}",
@@ -875,14 +1087,22 @@ mod tests {
     #[test]
     fn test_allows_edit_with_all_markers() {
         let fs = MockFs::with_all_markers("test-session");
-        let output = process(&edit_input("test-session"), &fs, &crate::hooks::test_support::StubEnv::new());
+        let output = process(
+            &edit_input("test-session"),
+            &fs,
+            &crate::hooks::test_support::StubEnv::new(),
+        );
         assert!(output.blocked.is_none());
     }
 
     #[test]
     fn test_allows_write_with_all_markers() {
         let fs = MockFs::with_all_markers("test-session");
-        let output = process(&write_input("test-session"), &fs, &crate::hooks::test_support::StubEnv::new());
+        let output = process(
+            &write_input("test-session"),
+            &fs,
+            &crate::hooks::test_support::StubEnv::new(),
+        );
         assert!(output.blocked.is_none());
     }
 
@@ -921,7 +1141,11 @@ mod tests {
     #[test]
     fn test_markers_are_session_scoped() {
         let fs = MockFs::with_all_markers("session-a");
-        let output = process(&edit_input("session-b"), &fs, &crate::hooks::test_support::StubEnv::new());
+        let output = process(
+            &edit_input("session-b"),
+            &fs,
+            &crate::hooks::test_support::StubEnv::new(),
+        );
         assert_eq!(output.blocked, Some(true));
     }
 
@@ -936,7 +1160,8 @@ mod tests {
 
         let tmp = TempDir::new().unwrap();
         let session = "override-sess";
-        let override_dir = tmp.path()
+        let override_dir = tmp
+            .path()
             .join(".claude")
             .join("sentinel")
             .join("overrides");
@@ -946,7 +1171,9 @@ mod tests {
             home: PathBuf,
         }
         impl FileSystemPort for HomeFs {
-            fn home_dir(&self) -> Option<PathBuf> { Some(self.home.clone()) }
+            fn home_dir(&self) -> Option<PathBuf> {
+                Some(self.home.clone())
+            }
             fn read_to_string(&self, p: &Path) -> anyhow::Result<String> {
                 Ok(fs::read_to_string(p)?)
             }
@@ -959,11 +1186,19 @@ mod tests {
                 Ok(())
             }
             fn read_dir(&self, p: &Path) -> anyhow::Result<Vec<PathBuf>> {
-                Ok(fs::read_dir(p)?.filter_map(|e| e.ok().map(|e| e.path())).collect())
+                Ok(fs::read_dir(p)?
+                    .filter_map(|e| e.ok().map(|e| e.path()))
+                    .collect())
             }
-            fn exists(&self, p: &Path) -> bool { p.exists() }
-            fn is_dir(&self, p: &Path) -> bool { p.is_dir() }
-            fn metadata(&self, p: &Path) -> anyhow::Result<fs::Metadata> { Ok(fs::metadata(p)?) }
+            fn exists(&self, p: &Path) -> bool {
+                p.exists()
+            }
+            fn is_dir(&self, p: &Path) -> bool {
+                p.is_dir()
+            }
+            fn metadata(&self, p: &Path) -> anyhow::Result<fs::Metadata> {
+                Ok(fs::metadata(p)?)
+            }
             fn append(&self, p: &Path, b: &[u8]) -> anyhow::Result<()> {
                 use std::io::Write;
                 let mut f = fs::OpenOptions::new().append(true).create(true).open(p)?;
@@ -972,7 +1207,9 @@ mod tests {
             }
         }
 
-        let fs_port = HomeFs { home: tmp.path().to_path_buf() };
+        let fs_port = HomeFs {
+            home: tmp.path().to_path_buf(),
+        };
         let override_path =
             super::super::hygiene_override::verification_override_path(&fs_port, session);
         write_signed_override_for_test(&fs_port, &override_path, "verification", session);
@@ -984,7 +1221,11 @@ mod tests {
             session_id: Some(session.into()),
             ..Default::default()
         };
-        let output = process(&input, &fs_port, &crate::hooks::test_support::StubEnv::new());
+        let output = process(
+            &input,
+            &fs_port,
+            &crate::hooks::test_support::StubEnv::new(),
+        );
         assert!(
             output.blocked.is_none(),
             "active signed verification override must bypass the tool_usage_gate"
@@ -1000,16 +1241,21 @@ mod tests {
         // SENTINEL_AUTOPILOT is only consulted when no transcript_path is
         // available in the hook input — it's a last-resort escape hatch,
         // not a user-facing bypass.
-        let fs = MockFs::with_markers("test-session", &[
-            SEQUENTIAL_MARKER_PREFIX,
-            TASK_MARKER_PREFIX,
-            TASK_ACTIVE_PREFIX,
-        ]);
+        let fs = MockFs::with_markers(
+            "test-session",
+            &[
+                SEQUENTIAL_MARKER_PREFIX,
+                TASK_MARKER_PREFIX,
+                TASK_ACTIVE_PREFIX,
+            ],
+        );
         // `edit_input` omits transcript_path, so the None-branch fallback
         // kicks in and honours SENTINEL_AUTOPILOT.
         let output = process(&edit_input("test-session"), &fs, &autopilot_env());
-        assert!(output.blocked.is_none(),
-            "autopilot env var must still work when no transcript is available");
+        assert!(
+            output.blocked.is_none(),
+            "autopilot env var must still work when no transcript is available"
+        );
     }
 
     #[test]
@@ -1018,11 +1264,14 @@ mod tests {
         // env var does NOT bypass the check — the model must actually
         // enter plan mode.
         let t = write_transcript(&[assistant_tool_use("Read")]);
-        let fs = MockFs::with_markers("test-session", &[
-            SEQUENTIAL_MARKER_PREFIX,
-            TASK_MARKER_PREFIX,
-            TASK_ACTIVE_PREFIX,
-        ]);
+        let fs = MockFs::with_markers(
+            "test-session",
+            &[
+                SEQUENTIAL_MARKER_PREFIX,
+                TASK_MARKER_PREFIX,
+                TASK_ACTIVE_PREFIX,
+            ],
+        );
         let input = HookInput {
             tool_name: Some("Edit".into()),
             session_id: Some("test-session".into()),
@@ -1040,15 +1289,18 @@ mod tests {
     #[test]
     fn test_autopilot_does_not_bypass_task_active_check() {
         // Plan marker missing AND task-active marker missing.
-        let fs = MockFs::with_markers("test-session", &[
-            SEQUENTIAL_MARKER_PREFIX,
-            TASK_MARKER_PREFIX,
-        ]);
+        let fs = MockFs::with_markers(
+            "test-session",
+            &[SEQUENTIAL_MARKER_PREFIX, TASK_MARKER_PREFIX],
+        );
         let output = process(&edit_input("test-session"), &fs, &autopilot_env());
         // Plan check skipped, but task-active still blocks.
         assert_eq!(output.blocked, Some(true));
-        let reason = output.hook_specific_output.as_ref()
-            .and_then(|h| h.permission_decision_reason.as_deref()).unwrap_or("");
+        let reason = output
+            .hook_specific_output
+            .as_ref()
+            .and_then(|h| h.permission_decision_reason.as_deref())
+            .unwrap_or("");
         assert!(
             reason.contains("in_progress") || reason.contains("TaskCreate"),
             "autopilot must still enforce the active-task check — got: {reason}",
@@ -1069,7 +1321,9 @@ mod tests {
         // Real FS-backed shim so metadata() returns actual timestamps.
     }
     impl FileSystemPort for RealishFs {
-        fn home_dir(&self) -> Option<PathBuf> { None }
+        fn home_dir(&self) -> Option<PathBuf> {
+            None
+        }
         fn read_to_string(&self, p: &Path) -> anyhow::Result<String> {
             Ok(fs::read_to_string(p)?)
         }
@@ -1082,11 +1336,19 @@ mod tests {
             Ok(())
         }
         fn read_dir(&self, p: &Path) -> anyhow::Result<Vec<PathBuf>> {
-            Ok(fs::read_dir(p)?.filter_map(|e| e.ok().map(|e| e.path())).collect())
+            Ok(fs::read_dir(p)?
+                .filter_map(|e| e.ok().map(|e| e.path()))
+                .collect())
         }
-        fn exists(&self, p: &Path) -> bool { p.exists() }
-        fn is_dir(&self, p: &Path) -> bool { p.is_dir() }
-        fn metadata(&self, p: &Path) -> anyhow::Result<fs::Metadata> { Ok(fs::metadata(p)?) }
+        fn exists(&self, p: &Path) -> bool {
+            p.exists()
+        }
+        fn is_dir(&self, p: &Path) -> bool {
+            p.is_dir()
+        }
+        fn metadata(&self, p: &Path) -> anyhow::Result<fs::Metadata> {
+            Ok(fs::metadata(p)?)
+        }
         fn append(&self, p: &Path, b: &[u8]) -> anyhow::Result<()> {
             use std::io::Write;
             let mut f = fs::OpenOptions::new().append(true).create(true).open(p)?;
@@ -1103,7 +1365,11 @@ mod tests {
         fs::write(plans.join("my-plan.md"), b"# Plan").unwrap();
 
         let fs_port = RealishFs {};
-        assert!(has_recent_plan_file(&fs_port, tmp.path().to_str(), SystemTime::now()));
+        assert!(has_recent_plan_file(
+            &fs_port,
+            tmp.path().to_str(),
+            SystemTime::now()
+        ));
     }
 
     #[test]
@@ -1116,7 +1382,11 @@ mod tests {
         fs::create_dir_all(tmp.path().join("plans")).unwrap();
 
         let fs_port = RealishFs {};
-        assert!(!has_recent_plan_file(&fs_port, tmp.path().to_str(), SystemTime::now()));
+        assert!(!has_recent_plan_file(
+            &fs_port,
+            tmp.path().to_str(),
+            SystemTime::now()
+        ));
     }
 
     #[test]
@@ -1124,7 +1394,11 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         fs::write(tmp.path().join(".git"), b"gitdir: /fake").unwrap();
         let fs_port = RealishFs {};
-        assert!(!has_recent_plan_file(&fs_port, tmp.path().to_str(), SystemTime::now()));
+        assert!(!has_recent_plan_file(
+            &fs_port,
+            tmp.path().to_str(),
+            SystemTime::now()
+        ));
     }
 
     #[test]
@@ -1138,7 +1412,11 @@ mod tests {
         let fs_port = RealishFs {};
         // 8 days ago — past the 7-day window
         let future_now = SystemTime::now() + Duration::from_secs(8 * 24 * 60 * 60);
-        assert!(!has_recent_plan_file(&fs_port, tmp.path().to_str(), future_now));
+        assert!(!has_recent_plan_file(
+            &fs_port,
+            tmp.path().to_str(),
+            future_now
+        ));
     }
 
     #[test]
@@ -1263,7 +1541,10 @@ mod tests {
 
     #[test]
     fn test_detect_plan_mode_returns_false_when_file_missing() {
-        assert!(!detect_plan_mode_from_transcript(&RealTestFs, Path::new("/does/not/exist")));
+        assert!(!detect_plan_mode_from_transcript(
+            &RealTestFs,
+            Path::new("/does/not/exist")
+        ));
     }
 
     #[test]
@@ -1295,11 +1576,14 @@ mod tests {
         // real 2.1.114 signal without any markers or env vars.
         let t = write_transcript(&[assistant_tool_use("EnterPlanMode")]);
 
-        let fs = MockFs::with_markers("sess-plan", &[
-            SEQUENTIAL_MARKER_PREFIX,
-            TASK_MARKER_PREFIX,
-            TASK_ACTIVE_PREFIX,
-        ]);
+        let fs = MockFs::with_markers(
+            "sess-plan",
+            &[
+                SEQUENTIAL_MARKER_PREFIX,
+                TASK_MARKER_PREFIX,
+                TASK_ACTIVE_PREFIX,
+            ],
+        );
         let input = HookInput {
             tool_name: Some("Edit".into()),
             session_id: Some("sess-plan".into()),
@@ -1317,11 +1601,14 @@ mod tests {
     fn test_transcript_without_plan_signal_blocks_edit() {
         let t = write_transcript(&[assistant_tool_use("Read")]);
 
-        let fs = MockFs::with_markers("sess-noplan", &[
-            SEQUENTIAL_MARKER_PREFIX,
-            TASK_MARKER_PREFIX,
-            TASK_ACTIVE_PREFIX,
-        ]);
+        let fs = MockFs::with_markers(
+            "sess-noplan",
+            &[
+                SEQUENTIAL_MARKER_PREFIX,
+                TASK_MARKER_PREFIX,
+                TASK_ACTIVE_PREFIX,
+            ],
+        );
         let input = HookInput {
             tool_name: Some("Edit".into()),
             session_id: Some("sess-noplan".into()),
@@ -1347,11 +1634,14 @@ mod tests {
         // the resumed-session case. Should be allowed via the plan-file
         // fallback.
         let session = "resumed-sess";
-        let marker_fs = MockFs::with_markers(session, &[
-            SEQUENTIAL_MARKER_PREFIX,
-            TASK_MARKER_PREFIX,
-            TASK_ACTIVE_PREFIX,
-        ]);
+        let marker_fs = MockFs::with_markers(
+            session,
+            &[
+                SEQUENTIAL_MARKER_PREFIX,
+                TASK_MARKER_PREFIX,
+                TASK_ACTIVE_PREFIX,
+            ],
+        );
 
         // Compose a FileSystemPort that delegates marker checks to
         // `marker_fs` (temp dir) and plan-dir checks to the real FS
@@ -1361,11 +1651,21 @@ mod tests {
             real: RealishFs,
         }
         impl FileSystemPort for Composite<'_> {
-            fn home_dir(&self) -> Option<PathBuf> { None }
-            fn read_to_string(&self, p: &Path) -> anyhow::Result<String> { self.real.read_to_string(p) }
-            fn write(&self, p: &Path, b: &[u8]) -> anyhow::Result<()> { self.markers.write(p, b) }
-            fn create_dir_all(&self, p: &Path) -> anyhow::Result<()> { self.real.create_dir_all(p) }
-            fn read_dir(&self, p: &Path) -> anyhow::Result<Vec<PathBuf>> { self.real.read_dir(p) }
+            fn home_dir(&self) -> Option<PathBuf> {
+                None
+            }
+            fn read_to_string(&self, p: &Path) -> anyhow::Result<String> {
+                self.real.read_to_string(p)
+            }
+            fn write(&self, p: &Path, b: &[u8]) -> anyhow::Result<()> {
+                self.markers.write(p, b)
+            }
+            fn create_dir_all(&self, p: &Path) -> anyhow::Result<()> {
+                self.real.create_dir_all(p)
+            }
+            fn read_dir(&self, p: &Path) -> anyhow::Result<Vec<PathBuf>> {
+                self.real.read_dir(p)
+            }
             fn exists(&self, p: &Path) -> bool {
                 // Marker checks go to temp dir; plan-file checks go to real FS.
                 if p.to_string_lossy().contains("claude-") {
@@ -1374,20 +1674,36 @@ mod tests {
                     self.real.exists(p)
                 }
             }
-            fn is_dir(&self, p: &Path) -> bool { self.real.is_dir(p) }
-            fn metadata(&self, p: &Path) -> anyhow::Result<fs::Metadata> { self.real.metadata(p) }
-            fn append(&self, p: &Path, b: &[u8]) -> anyhow::Result<()> { self.real.append(p, b) }
+            fn is_dir(&self, p: &Path) -> bool {
+                self.real.is_dir(p)
+            }
+            fn metadata(&self, p: &Path) -> anyhow::Result<fs::Metadata> {
+                self.real.metadata(p)
+            }
+            fn append(&self, p: &Path, b: &[u8]) -> anyhow::Result<()> {
+                self.real.append(p, b)
+            }
         }
 
-        let fs_port = Composite { markers: &marker_fs, real: RealishFs {} };
+        let fs_port = Composite {
+            markers: &marker_fs,
+            real: RealishFs {},
+        };
         let input = HookInput {
             tool_name: Some("Edit".into()),
             session_id: Some(session.into()),
             cwd: Some(tmp.path().to_string_lossy().into()),
             ..Default::default()
         };
-        let output = process(&input, &fs_port, &crate::hooks::test_support::StubEnv::new());
-        assert!(output.blocked.is_none(), "plan-file fallback should allow write");
+        let output = process(
+            &input,
+            &fs_port,
+            &crate::hooks::test_support::StubEnv::new(),
+        );
+        assert!(
+            output.blocked.is_none(),
+            "plan-file fallback should allow write"
+        );
     }
 
     // ── Edge-case tests for detect_plan_mode_from_transcript ────────
@@ -1399,11 +1715,21 @@ mod tests {
         use std::io::Write;
         let mut f = tempfile::NamedTempFile::new().unwrap();
         // Line 1: valid — ExitPlanMode
-        writeln!(f, "{}", serde_json::to_string(&assistant_tool_use("ExitPlanMode")).unwrap()).unwrap();
+        writeln!(
+            f,
+            "{}",
+            serde_json::to_string(&assistant_tool_use("ExitPlanMode")).unwrap()
+        )
+        .unwrap();
         // Line 2: garbage
         writeln!(f, "not valid json {{{{").unwrap();
         // Line 3: valid — EnterPlanMode (most recent valid signal)
-        writeln!(f, "{}", serde_json::to_string(&assistant_tool_use("EnterPlanMode")).unwrap()).unwrap();
+        writeln!(
+            f,
+            "{}",
+            serde_json::to_string(&assistant_tool_use("EnterPlanMode")).unwrap()
+        )
+        .unwrap();
         // Line 4: more garbage after the last valid signal
         writeln!(f, "{{broken").unwrap();
         // Walking backwards: line 4 is skipped (malformed), line 3 is

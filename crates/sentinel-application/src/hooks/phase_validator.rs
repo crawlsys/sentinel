@@ -339,14 +339,30 @@ mod tests {
         fn home_dir(&self) -> Option<std::path::PathBuf> {
             Some(std::path::PathBuf::from("/mock/home"))
         }
-        fn read_to_string(&self, _: &std::path::Path) -> anyhow::Result<String> { anyhow::bail!("no") }
-        fn write(&self, _: &std::path::Path, _: &[u8]) -> anyhow::Result<()> { Ok(()) }
-        fn create_dir_all(&self, _: &std::path::Path) -> anyhow::Result<()> { Ok(()) }
-        fn read_dir(&self, _: &std::path::Path) -> anyhow::Result<Vec<std::path::PathBuf>> { Ok(vec![]) }
-        fn exists(&self, _: &std::path::Path) -> bool { true }
-        fn is_dir(&self, _: &std::path::Path) -> bool { true }
-        fn metadata(&self, _: &std::path::Path) -> anyhow::Result<std::fs::Metadata> { anyhow::bail!("no") }
-        fn append(&self, _: &std::path::Path, _: &[u8]) -> anyhow::Result<()> { Ok(()) }
+        fn read_to_string(&self, _: &std::path::Path) -> anyhow::Result<String> {
+            anyhow::bail!("no")
+        }
+        fn write(&self, _: &std::path::Path, _: &[u8]) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn create_dir_all(&self, _: &std::path::Path) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn read_dir(&self, _: &std::path::Path) -> anyhow::Result<Vec<std::path::PathBuf>> {
+            Ok(vec![])
+        }
+        fn exists(&self, _: &std::path::Path) -> bool {
+            true
+        }
+        fn is_dir(&self, _: &std::path::Path) -> bool {
+            true
+        }
+        fn metadata(&self, _: &std::path::Path) -> anyhow::Result<std::fs::Metadata> {
+            anyhow::bail!("no")
+        }
+        fn append(&self, _: &std::path::Path, _: &[u8]) -> anyhow::Result<()> {
+            Ok(())
+        }
     }
 
     #[test]
@@ -425,15 +441,18 @@ mod tests {
         state.record_tool_call();
 
         let mut workflows = HashMap::new();
-        workflows.insert(
-            "nonexistent-phantom-skill-xyz".to_string(),
-            test_workflow(),
-        );
+        workflows.insert("nonexistent-phantom-skill-xyz".to_string(), test_workflow());
         let step_configs = HashMap::new();
         let input = HookInput::default();
 
         // StubFs.is_dir returns false — simulates "no phases/ directory on disk".
-        let output = process(&input, &state, &workflows, &step_configs, &crate::hooks::test_support::StubFs);
+        let output = process(
+            &input,
+            &state,
+            &workflows,
+            &step_configs,
+            &crate::hooks::test_support::StubFs,
+        );
         // allow() means no context injection
         assert!(output.hook_specific_output.is_none());
     }

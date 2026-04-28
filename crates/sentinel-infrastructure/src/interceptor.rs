@@ -178,9 +178,7 @@ impl BypassDialogPort for NativeBypassDialog {
                 r#"display dialog "{}" buttons {{"No", "Yes"}} default button "No" with icon caution"#,
                 message.replace('"', "\\\"")
             );
-            let out = Command::new("osascript")
-                .args(["-e", &script])
-                .output();
+            let out = Command::new("osascript").args(["-e", &script]).output();
             matches!(out, Ok(o) if String::from_utf8_lossy(&o.stdout).contains("Yes"))
         }
 

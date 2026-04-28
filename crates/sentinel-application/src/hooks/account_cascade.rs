@@ -19,10 +19,7 @@ use super::{FileSystemPort, HookContext};
 /// Tool name suffixes that trigger cascade behavior.
 /// Note: `account_rotate` is intentionally excluded — rate limit rotation
 /// swaps Claude credentials only; it should NOT cascade to other services.
-const TRIGGER_SUFFIXES: &[&str] = &[
-    "account_switch",
-    "project_switch",
-];
+const TRIGGER_SUFFIXES: &[&str] = &["account_switch", "project_switch"];
 
 /// Process a `PostToolUse` event. Returns context injection if a cascade is needed.
 pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
@@ -31,7 +28,9 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     };
 
     // Only fire for account/project switch tools
-    let is_trigger = TRIGGER_SUFFIXES.iter().any(|suffix| tool_name.ends_with(suffix));
+    let is_trigger = TRIGGER_SUFFIXES
+        .iter()
+        .any(|suffix| tool_name.ends_with(suffix));
     if !is_trigger {
         return HookOutput::allow();
     }
@@ -165,30 +164,106 @@ fn inject_auto_execute(result_text: &str) -> HookOutput {
 /// The `config_key` is looked up in project frontmatter.
 /// The template has `{}` where the config value is interpolated.
 const CASCADE_TARGETS: &[(&str, &str, &str)] = &[
-    ("linear_account",      "mcp__linear__switch_account(account_name: \"{}\")",          "Linear"),
-    ("doppler_account",     "mcp__doppler__switch_account(account_id: \"{}\")",            "Doppler"),
-    ("blacksmith_account",  "mcp__blacksmith__switch_account(account_name: \"{}\")",       "Blacksmith"),
-    ("cerebras_account",    "mcp__cerebras__switch_account(account_name: \"{}\")",         "Cerebras"),
-    ("neon_account",        "mcp__neon__switch_account(account_name: \"{}\")",             "Neon"),
-    ("railway_account",     "mcp__railway__switch_account(name: \"{}\")",                  "Railway"),
-    ("vercel_account",      "mcp__vercel__switch_account(name: \"{}\")",                   "Vercel"),
-    ("sentry_account",      "mcp__sentry__switch_account(account_id: \"{}\")",             "Sentry"),
-    ("onepassword_account", "mcp__1password__switch_account(account_name: \"{}\")",        "1Password"),
-    ("dragonfly_account",   "mcp__dragonfly__switch_account(account_name: \"{}\")",        "Dragonfly"),
-    ("gooddata_account",    "mcp__gooddata__switch_account(account_name: \"{}\")",         "GoodData"),
-    ("hyperswitch_account", "mcp__hyperswitch__switch_account(account_name: \"{}\")",      "Hyperswitch"),
-    ("nylas_account",       "mcp__nylas__switch_account(account_name: \"{}\")",            "Nylas"),
-    ("notion_account",      "mcp__notion__switch_account(profile_name: \"{}\")",           "Notion"),
-    ("cloudflare_account",  "mcp__cloudflare-wrangler__switch_account(account_id: \"{}\")", "Cloudflare"),
-    ("github_account",      "mcp__github__auth_switch(username: \"{}\")",                  "GitHub"),
-    ("firebase_account",    "mcp__google-firebase__login_use(email: \"{}\")",              "Firebase"),
-    ("loom_workspace",      "mcp__loom__switch_workspace(workspace_id: \"{}\")",           "Loom"),
+    (
+        "linear_account",
+        "mcp__linear__switch_account(account_name: \"{}\")",
+        "Linear",
+    ),
+    (
+        "doppler_account",
+        "mcp__doppler__switch_account(account_id: \"{}\")",
+        "Doppler",
+    ),
+    (
+        "blacksmith_account",
+        "mcp__blacksmith__switch_account(account_name: \"{}\")",
+        "Blacksmith",
+    ),
+    (
+        "cerebras_account",
+        "mcp__cerebras__switch_account(account_name: \"{}\")",
+        "Cerebras",
+    ),
+    (
+        "neon_account",
+        "mcp__neon__switch_account(account_name: \"{}\")",
+        "Neon",
+    ),
+    (
+        "railway_account",
+        "mcp__railway__switch_account(name: \"{}\")",
+        "Railway",
+    ),
+    (
+        "vercel_account",
+        "mcp__vercel__switch_account(name: \"{}\")",
+        "Vercel",
+    ),
+    (
+        "sentry_account",
+        "mcp__sentry__switch_account(account_id: \"{}\")",
+        "Sentry",
+    ),
+    (
+        "onepassword_account",
+        "mcp__1password__switch_account(account_name: \"{}\")",
+        "1Password",
+    ),
+    (
+        "dragonfly_account",
+        "mcp__dragonfly__switch_account(account_name: \"{}\")",
+        "Dragonfly",
+    ),
+    (
+        "gooddata_account",
+        "mcp__gooddata__switch_account(account_name: \"{}\")",
+        "GoodData",
+    ),
+    (
+        "hyperswitch_account",
+        "mcp__hyperswitch__switch_account(account_name: \"{}\")",
+        "Hyperswitch",
+    ),
+    (
+        "nylas_account",
+        "mcp__nylas__switch_account(account_name: \"{}\")",
+        "Nylas",
+    ),
+    (
+        "notion_account",
+        "mcp__notion__switch_account(profile_name: \"{}\")",
+        "Notion",
+    ),
+    (
+        "cloudflare_account",
+        "mcp__cloudflare-wrangler__switch_account(account_id: \"{}\")",
+        "Cloudflare",
+    ),
+    (
+        "github_account",
+        "mcp__github__auth_switch(username: \"{}\")",
+        "GitHub",
+    ),
+    (
+        "firebase_account",
+        "mcp__google-firebase__login_use(email: \"{}\")",
+        "Firebase",
+    ),
+    (
+        "loom_workspace",
+        "mcp__loom__switch_workspace(workspace_id: \"{}\")",
+        "Loom",
+    ),
 ];
 
 /// Scan project configs for one whose `claude_account` matches the switched account name.
 /// Falls back to matching by project name or aliases if `claude_account` is not set.
 /// Returns a list of MCP tool call instructions for all mapped services.
-fn build_cascade_instructions(fs: &dyn FileSystemPort, projects_dir: &Path, account_name: &str) -> Vec<String> {
+fn build_cascade_instructions(
+    fs: &dyn FileSystemPort,
+    projects_dir: &Path,
+    account_name: &str,
+) -> Vec<String> {
     if !fs.is_dir(projects_dir) {
         return vec![];
     }
@@ -196,10 +271,9 @@ fn build_cascade_instructions(fs: &dyn FileSystemPort, projects_dir: &Path, acco
     let configs = load_project_configs(fs, projects_dir);
 
     // Strategy 1: exact match on claude_account field
-    let project = configs.iter().find(|p| {
-        p.get("claude_account")
-            .is_some_and(|v| v == account_name)
-    });
+    let project = configs
+        .iter()
+        .find(|p| p.get("claude_account").is_some_and(|v| v == account_name));
 
     // Strategy 2: match account name against project name or aliases
     let project = project.or_else(|| {
@@ -285,7 +359,11 @@ fn parse_frontmatter(fs: &dyn FileSystemPort, path: &Path) -> Option<HashMap<Str
         }
         if let Some((key, value)) = trimmed.split_once(':') {
             let key = key.trim().to_string();
-            let value = value.trim().trim_matches('"').trim_matches('\'').to_string();
+            let value = value
+                .trim()
+                .trim_matches('"')
+                .trim_matches('\'')
+                .to_string();
             if !value.is_empty() {
                 fields.insert(key, value);
             }
@@ -307,20 +385,38 @@ mod tests {
     /// Real-FS wrapper for tests that need tempdir I/O.
     struct TestFs;
     impl FileSystemPort for TestFs {
-        fn home_dir(&self) -> Option<std::path::PathBuf> { dirs::home_dir() }
-        fn read_to_string(&self, p: &Path) -> anyhow::Result<String> { Ok(std::fs::read_to_string(p)?) }
+        fn home_dir(&self) -> Option<std::path::PathBuf> {
+            dirs::home_dir()
+        }
+        fn read_to_string(&self, p: &Path) -> anyhow::Result<String> {
+            Ok(std::fs::read_to_string(p)?)
+        }
         fn write(&self, p: &Path, c: &[u8]) -> anyhow::Result<()> {
-            if let Some(par) = p.parent() { std::fs::create_dir_all(par)?; }
+            if let Some(par) = p.parent() {
+                std::fs::create_dir_all(par)?;
+            }
             Ok(std::fs::write(p, c)?)
         }
-        fn create_dir_all(&self, p: &Path) -> anyhow::Result<()> { Ok(std::fs::create_dir_all(p)?) }
-        fn read_dir(&self, p: &Path) -> anyhow::Result<Vec<std::path::PathBuf>> {
-            Ok(std::fs::read_dir(p)?.filter_map(|e| e.ok().map(|e| e.path())).collect())
+        fn create_dir_all(&self, p: &Path) -> anyhow::Result<()> {
+            Ok(std::fs::create_dir_all(p)?)
         }
-        fn exists(&self, p: &Path) -> bool { p.exists() }
-        fn is_dir(&self, p: &Path) -> bool { p.is_dir() }
-        fn metadata(&self, p: &Path) -> anyhow::Result<std::fs::Metadata> { Ok(std::fs::metadata(p)?) }
-        fn append(&self, _: &Path, _: &[u8]) -> anyhow::Result<()> { Ok(()) }
+        fn read_dir(&self, p: &Path) -> anyhow::Result<Vec<std::path::PathBuf>> {
+            Ok(std::fs::read_dir(p)?
+                .filter_map(|e| e.ok().map(|e| e.path()))
+                .collect())
+        }
+        fn exists(&self, p: &Path) -> bool {
+            p.exists()
+        }
+        fn is_dir(&self, p: &Path) -> bool {
+            p.is_dir()
+        }
+        fn metadata(&self, p: &Path) -> anyhow::Result<std::fs::Metadata> {
+            Ok(std::fs::metadata(p)?)
+        }
+        fn append(&self, _: &Path, _: &[u8]) -> anyhow::Result<()> {
+            Ok(())
+        }
     }
 
     #[test]
@@ -329,39 +425,37 @@ mod tests {
             extract_bold_text("Switched to **gary-max** (gary@example.com, Max 20x)"),
             Some("gary-max".to_string())
         );
-        assert_eq!(
-            extract_bold_text("no bold here"),
-            None
-        );
-        assert_eq!(
-            extract_bold_text("****"),
-            None
-        );
+        assert_eq!(extract_bold_text("no bold here"), None);
+        assert_eq!(extract_bold_text("****"), None);
     }
 
     #[test]
     fn test_parse_switched_account_switch() {
-        let result = parse_switched_account(
-            "Switched to **gary-max** (gary@example.com, Max 20x)",
-        );
+        let result = parse_switched_account("Switched to **gary-max** (gary@example.com, Max 20x)");
         assert_eq!(result, "gary-max");
     }
 
     #[test]
     fn test_parse_switched_account_no_bold() {
-        let result = parse_switched_account(
-            "Error: profile not found",
-        );
+        let result = parse_switched_account("Error: profile not found");
         assert_eq!(result, "");
     }
 
     #[test]
     fn test_trigger_detection() {
-        assert!(TRIGGER_SUFFIXES.iter().any(|s| "mcp__accounts__account_switch".ends_with(s)));
-        assert!(TRIGGER_SUFFIXES.iter().any(|s| "mcp__accounts__project_switch".ends_with(s)));
+        assert!(TRIGGER_SUFFIXES
+            .iter()
+            .any(|s| "mcp__accounts__account_switch".ends_with(s)));
+        assert!(TRIGGER_SUFFIXES
+            .iter()
+            .any(|s| "mcp__accounts__project_switch".ends_with(s)));
         // account_rotate is intentionally NOT a trigger — rate limit rotation shouldn't cascade
-        assert!(!TRIGGER_SUFFIXES.iter().any(|s| "mcp__accounts__account_rotate".ends_with(s)));
-        assert!(!TRIGGER_SUFFIXES.iter().any(|s| "mcp__accounts__account_list".ends_with(s)));
+        assert!(!TRIGGER_SUFFIXES
+            .iter()
+            .any(|s| "mcp__accounts__account_rotate".ends_with(s)));
+        assert!(!TRIGGER_SUFFIXES
+            .iter()
+            .any(|s| "mcp__accounts__account_list".ends_with(s)));
     }
 
     #[test]
@@ -396,7 +490,8 @@ mod tests {
     #[test]
     fn test_is_error_result_checks_is_error_field() {
         let mut input = HookInput::default();
-        input.tool_result = Some(serde_json::json!({"isError": true, "content": [{"text": "something failed"}]}));
+        input.tool_result =
+            Some(serde_json::json!({"isError": true, "content": [{"text": "something failed"}]}));
         assert!(is_error_result(&input, "something failed"));
     }
 
@@ -404,7 +499,10 @@ mod tests {
     fn test_is_error_result_allows_normal_text_containing_error_word() {
         let input = HookInput::default();
         // "error" as a substring should NOT trigger false positive
-        assert!(!is_error_result(&input, "Switched to **gary-max** — 0 errors in config"));
+        assert!(!is_error_result(
+            &input,
+            "Switched to **gary-max** — 0 errors in config"
+        ));
     }
 
     #[test]
@@ -424,7 +522,10 @@ mod tests {
         let fields = parse_frontmatter(&TestFs, &file).unwrap();
         assert_eq!(fields.get("name").unwrap(), "myproject");
         assert_eq!(fields.get("claude_account").unwrap(), "gary-max");
-        assert_eq!(fields.get("linear_account").unwrap(), "gary@test.com (workspace)");
+        assert_eq!(
+            fields.get("linear_account").unwrap(),
+            "gary@test.com (workspace)"
+        );
     }
 
     #[test]
@@ -444,7 +545,9 @@ mod tests {
     fn test_build_cascade_all_18_services() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("full.md");
-        fs::write(&file, "\
+        fs::write(
+            &file,
+            "\
 ---
 name: fullproject
 claude_account: gary-max
@@ -467,7 +570,9 @@ github_account: garysomerhalder
 firebase_account: gary@gmail.com
 loom_workspace: ws-abc123
 ---
-").unwrap();
+",
+        )
+        .unwrap();
 
         let instructions = build_cascade_instructions(&TestFs, dir.path(), "gary-max");
         assert_eq!(instructions.len(), 18);
@@ -524,7 +629,11 @@ loom_workspace: ws-abc123
     fn test_build_cascade_no_match() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("test.md");
-        fs::write(&file, "---\nname: testproject\nclaude_account: other-account\n---\n").unwrap();
+        fs::write(
+            &file,
+            "---\nname: testproject\nclaude_account: other-account\n---\n",
+        )
+        .unwrap();
 
         let instructions = build_cascade_instructions(&TestFs, dir.path(), "gary-max");
         assert!(instructions.is_empty());
@@ -535,7 +644,11 @@ loom_workspace: ws-abc123
         // No claude_account field, but project name matches account name
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("corvus.md");
-        fs::write(&file, "---\nname: corvus\nlinear_account: gary@test.com (corvus)\n---\n").unwrap();
+        fs::write(
+            &file,
+            "---\nname: corvus\nlinear_account: gary@test.com (corvus)\n---\n",
+        )
+        .unwrap();
 
         let instructions = build_cascade_instructions(&TestFs, dir.path(), "corvus");
         assert_eq!(instructions.len(), 1);

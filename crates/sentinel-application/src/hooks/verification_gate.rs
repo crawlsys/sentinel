@@ -140,7 +140,11 @@ struct TranscriptData {
     has_bash_calls: bool,
 }
 
-fn parse_transcript(fs: &dyn FileSystemPort, transcript_path: &str, session_id: &str) -> TranscriptData {
+fn parse_transcript(
+    fs: &dyn FileSystemPort,
+    transcript_path: &str,
+    session_id: &str,
+) -> TranscriptData {
     let mut data = TranscriptData {
         assistant_text: String::new(),
         has_bash_calls: false,
@@ -368,7 +372,8 @@ mod tests {
     #[test]
     fn test_no_transcript() {
         let input = HookInput::default();
-        let ctx = crate::hooks::test_support::stub_ctx(); let output = process_stop(&input, &ctx);
+        let ctx = crate::hooks::test_support::stub_ctx();
+        let output = process_stop(&input, &ctx);
         assert!(output.blocked.is_none());
     }
 
@@ -389,7 +394,8 @@ mod tests {
             session_id: Some("test-vg-noclaims".to_string()),
             ..Default::default()
         };
-        let ctx = crate::hooks::test_support::stub_ctx(); let output = process_stop(&input, &ctx);
+        let ctx = crate::hooks::test_support::stub_ctx();
+        let output = process_stop(&input, &ctx);
         assert!(output.blocked.is_none());
     }
 
@@ -417,7 +423,8 @@ mod tests {
             session_id: Some("test-vg-evidence".to_string()),
             ..Default::default()
         };
-        let ctx = crate::hooks::test_support::stub_ctx(); let output = process_stop(&input, &ctx);
+        let ctx = crate::hooks::test_support::stub_ctx();
+        let output = process_stop(&input, &ctx);
         assert!(output.blocked.is_none());
     }
 

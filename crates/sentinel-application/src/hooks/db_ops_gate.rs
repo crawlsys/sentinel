@@ -53,7 +53,7 @@ pub fn process(input: &HookInput) -> HookOutput {
         return HookOutput::deny(
             "🔴 [Database Gate] BLOCKED: Database operation targeting PRODUCTION detected. \
              NEVER run database migrations or destructive operations in production. \
-             NO EXCEPTIONS — even if Gary says it's okay."
+             NO EXCEPTIONS — even if Gary says it's okay.",
         );
     }
 
@@ -88,7 +88,10 @@ mod tests {
     #[test]
     fn test_blocks_diesel_migration_prod() {
         assert_eq!(
-            process(&bash_input("DATABASE_URL=postgres://prod.db/app diesel migration run")).blocked,
+            process(&bash_input(
+                "DATABASE_URL=postgres://prod.db/app diesel migration run"
+            ))
+            .blocked,
             Some(true)
         );
     }
@@ -116,7 +119,9 @@ mod tests {
 
     #[test]
     fn test_allows_local_diesel_migration() {
-        assert!(process(&bash_input("diesel migration run")).blocked.is_none());
+        assert!(process(&bash_input("diesel migration run"))
+            .blocked
+            .is_none());
     }
 
     #[test]

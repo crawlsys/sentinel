@@ -32,7 +32,8 @@ mod tests {
             .extra
             .insert("trigger".to_string(), serde_json::json!("init"));
 
-        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
+        let ctx = crate::hooks::test_support::stub_ctx();
+        let output = process(&input, &ctx);
         assert!(output.blocked.is_none());
     }
 }

@@ -68,7 +68,8 @@ impl MemoryMcpConfig {
     pub fn from_env() -> Self {
         let argv = std::env::var("MEMORY_MCP_CMD")
             .ok()
-            .filter(|s| !s.trim().is_empty()).map_or_else(|| shell_split(DEFAULT_CMD), |s| shell_split(&s));
+            .filter(|s| !s.trim().is_empty())
+            .map_or_else(|| shell_split(DEFAULT_CMD), |s| shell_split(&s));
         let timeout = std::env::var("MEMORY_MCP_TIMEOUT_SECS")
             .ok()
             .and_then(|s| s.parse::<u64>().ok())
@@ -117,17 +118,14 @@ impl MemoryMcpClient {
         let mut args = serde_json::Map::new();
         args.insert("query".into(), serde_json::Value::String(query.into()));
         args.insert("project".into(), serde_json::Value::String(project.into()));
-        args.insert(
-            "top_k".into(),
-            serde_json::Value::Number(top_k.into()),
-        );
+        args.insert("top_k".into(), serde_json::Value::Number(top_k.into()));
         if let Some(s) = session {
             args.insert("session".into(), serde_json::Value::String(s.into()));
         }
 
         let payload = self.call_tool("memory_search", args).await?;
-        let parsed: SearchResponse = serde_json::from_value(payload)
-            .context("parse memory_search response payload")?;
+        let parsed: SearchResponse =
+            serde_json::from_value(payload).context("parse memory_search response payload")?;
         if parsed.status != "ok" {
             return Err(anyhow!("memory_search returned status={}", parsed.status));
         }
@@ -317,7 +315,9 @@ fn extract_tool_payload(resp: &serde_json::Value) -> Result<serde_json::Value> {
     let text = resp
         .pointer("/result/content/0/text")
         .and_then(|t| t.as_str())
-        .ok_or_else(|| anyhow!("memory-mcp response missing structuredContent and content[0].text: {resp}"))?;
+        .ok_or_else(|| {
+            anyhow!("memory-mcp response missing structuredContent and content[0].text: {resp}")
+        })?;
     serde_json::from_str(text)
         .with_context(|| format!("parse memory-mcp tool text payload: {text}"))
 }

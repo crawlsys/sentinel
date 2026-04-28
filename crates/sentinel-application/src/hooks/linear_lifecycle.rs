@@ -123,7 +123,9 @@ mod tests {
 
     #[test]
     fn test_ignores_no_tool_name() {
-        assert!(process(&HookInput::default()).hook_specific_output.is_none());
+        assert!(process(&HookInput::default())
+            .hook_specific_output
+            .is_none());
     }
 
     #[test]

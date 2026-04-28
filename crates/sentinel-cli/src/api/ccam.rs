@@ -60,8 +60,14 @@ fn load_accounts() -> serde_json::Value {
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or(serde_json::json!({}));
 
-    let cooldowns = rotation.get("cooldowns").cloned().unwrap_or(serde_json::json!({}));
-    let last_assigned = rotation.get("lastAssigned").and_then(|v| v.as_str()).unwrap_or("");
+    let cooldowns = rotation
+        .get("cooldowns")
+        .cloned()
+        .unwrap_or(serde_json::json!({}));
+    let last_assigned = rotation
+        .get("lastAssigned")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
 
     let entries = match fs::read_dir(&accounts_root) {
         Ok(e) => e,
@@ -76,7 +82,11 @@ fn load_accounts() -> serde_json::Value {
         if !path.is_dir() {
             continue;
         }
-        let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+        let name = path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
         // Skip non-profile dirs (rotation-state.json is a file, not a dir)
         let creds_path = path.join("credentials.json");
         if !creds_path.exists() {
@@ -88,10 +98,19 @@ fn load_accounts() -> serde_json::Value {
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or(serde_json::json!({}));
 
-        let oauth = creds.get("claudeAiOauth").cloned().unwrap_or(serde_json::json!({}));
+        let oauth = creds
+            .get("claudeAiOauth")
+            .cloned()
+            .unwrap_or(serde_json::json!({}));
         let expires_at = oauth.get("expiresAt").and_then(|v| v.as_u64()).unwrap_or(0);
-        let subscription_type = oauth.get("subscriptionType").and_then(|v| v.as_str()).unwrap_or("unknown");
-        let rate_limit_tier = oauth.get("rateLimitTier").and_then(|v| v.as_str()).unwrap_or("unknown");
+        let subscription_type = oauth
+            .get("subscriptionType")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+        let rate_limit_tier = oauth
+            .get("rateLimitTier")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
 
         let token_status = if expires_at == 0 {
             "unknown"
@@ -136,7 +155,10 @@ fn load_accounts() -> serde_json::Value {
         let a_active = a["is_active"].as_bool().unwrap_or(false);
         let b_active = b["is_active"].as_bool().unwrap_or(false);
         b_active.cmp(&a_active).then(
-            a["name"].as_str().unwrap_or("").cmp(b["name"].as_str().unwrap_or(""))
+            a["name"]
+                .as_str()
+                .unwrap_or("")
+                .cmp(b["name"].as_str().unwrap_or("")),
         )
     });
 
@@ -202,7 +224,11 @@ fn load_sessions() -> serde_json::Value {
         if !path.is_dir() {
             continue;
         }
-        let dir_name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+        let dir_name = path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
 
         // Parse session-env dir name: <profile>-<pid>-<epoch>
         let parts: Vec<&str> = dir_name.rsplitn(3, '-').collect();
@@ -256,7 +282,10 @@ fn load_sessions() -> serde_json::Value {
         let a_alive = a["pid_alive"].as_bool().unwrap_or(false);
         let b_alive = b["pid_alive"].as_bool().unwrap_or(false);
         b_alive.cmp(&a_alive).then(
-            b["started_at_ms"].as_u64().unwrap_or(0).cmp(&a["started_at_ms"].as_u64().unwrap_or(0))
+            b["started_at_ms"]
+                .as_u64()
+                .unwrap_or(0)
+                .cmp(&a["started_at_ms"].as_u64().unwrap_or(0)),
         )
     });
 
@@ -297,7 +326,10 @@ async fn get_rotation() -> Json<serde_json::Value> {
                 0
             };
             let mut enriched = entry.as_object().cloned().unwrap_or_default();
-            enriched.insert("hours_remaining".to_string(), serde_json::json!(hours_remaining));
+            enriched.insert(
+                "hours_remaining".to_string(),
+                serde_json::json!(hours_remaining),
+            );
             cooldowns.insert(profile.clone(), serde_json::Value::Object(enriched));
         }
     }

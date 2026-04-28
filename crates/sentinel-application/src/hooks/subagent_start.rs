@@ -21,18 +21,16 @@ pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
         .home_dir()
         .map(|h| h.join(".claude").join("sentinel").join("state"));
 
-    let active_skill = state_dir
-        .as_ref()
-        .and_then(|dir| {
-            let session_id = input.session_id.as_deref()?;
-            let state_path = dir.join(format!("{session_id}.json"));
-            let content = ctx.fs.read_to_string(&state_path).ok()?;
-            let state: serde_json::Value = serde_json::from_str(&content).ok()?;
-            state
-                .get("active_skill")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
-        });
+    let active_skill = state_dir.as_ref().and_then(|dir| {
+        let session_id = input.session_id.as_deref()?;
+        let state_path = dir.join(format!("{session_id}.json"));
+        let content = ctx.fs.read_to_string(&state_path).ok()?;
+        let state: serde_json::Value = serde_json::from_str(&content).ok()?;
+        state
+            .get("active_skill")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+    });
 
     let context = if let Some(skill) = &active_skill {
         format!(
@@ -41,10 +39,7 @@ pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
             agent_type, skill, skill
         )
     } else {
-        format!(
-            "[Subagent Context] Agent type '{}' spawned.",
-            agent_type
-        )
+        format!("[Subagent Context] Agent type '{}' spawned.", agent_type)
     };
 
     HookOutput::inject_context(HookEvent::SubagentStart, &context)
@@ -61,7 +56,8 @@ mod tests {
             .extra
             .insert("agent_type".to_string(), serde_json::json!("code-reviewer"));
 
-        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
+        let ctx = crate::hooks::test_support::stub_ctx();
+        let output = process(&input, &ctx);
         assert!(output.hook_specific_output.is_some());
         let ctx = output.hook_specific_output.unwrap().additional_context;
         let ctx = ctx.as_deref().unwrap();

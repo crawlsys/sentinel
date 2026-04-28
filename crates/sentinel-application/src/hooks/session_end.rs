@@ -33,7 +33,9 @@ pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
 
         let _ = ctx.fs.create_dir_all(&metrics_dir);
         let line = format!("{end_entry}\n");
-        let _ = ctx.fs.append(&metrics_dir.join("sessions.jsonl"), line.as_bytes());
+        let _ = ctx
+            .fs
+            .append(&metrics_dir.join("sessions.jsonl"), line.as_bytes());
     }
 
     HookOutput::allow()
@@ -50,7 +52,8 @@ mod tests {
             .extra
             .insert("reason".to_string(), serde_json::json!("prompt_input_exit"));
 
-        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
+        let ctx = crate::hooks::test_support::stub_ctx();
+        let output = process(&input, &ctx);
         assert!(output.blocked.is_none());
     }
 }

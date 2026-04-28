@@ -41,18 +41,11 @@ struct InjectedState {
 }
 
 fn state_dir(fs: &dyn FileSystemPort) -> Option<PathBuf> {
-    fs.home_dir().map(|h| {
-        h.join(".claude")
-            .join("sentinel")
-            .join("state")
-    })
+    fs.home_dir()
+        .map(|h| h.join(".claude").join("sentinel").join("state"))
 }
 
-fn write_injected_state(
-    fs: &dyn FileSystemPort,
-    hits: &[UnifiedHit],
-    user_prompt: Option<&str>,
-) {
+fn write_injected_state(fs: &dyn FileSystemPort, hits: &[UnifiedHit], user_prompt: Option<&str>) {
     let Some(dir) = state_dir(fs) else {
         return;
     };
@@ -148,10 +141,7 @@ fn project_from_cwd(cwd: &str) -> String {
 // ---------------------------------------------------------------------------
 
 fn compact_summary(content: &str, max_chars: usize) -> String {
-    let collapsed: String = content
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
+    let collapsed: String = content.split_whitespace().collect::<Vec<_>>().join(" ");
 
     if collapsed.chars().count() <= max_chars {
         return collapsed;
@@ -199,7 +189,10 @@ fn search_memory_engine(
 ) -> Option<(Vec<UnifiedHit>, String)> {
     let project = project_from_cwd(cwd);
     let mut args = serde_json::Map::new();
-    args.insert("query".into(), serde_json::Value::String(prompt.to_string()));
+    args.insert(
+        "query".into(),
+        serde_json::Value::String(prompt.to_string()),
+    );
     args.insert("project".into(), serde_json::Value::String(project.clone()));
     args.insert("top_k".into(), serde_json::Value::Number(8u32.into()));
 
@@ -312,7 +305,10 @@ mod tests {
 
     #[test]
     fn test_project_from_cwd_posix_and_windows() {
-        assert_eq!(project_from_cwd("/Users/gary/code/firefly-pro"), "firefly-pro");
+        assert_eq!(
+            project_from_cwd("/Users/gary/code/firefly-pro"),
+            "firefly-pro"
+        );
         assert_eq!(
             project_from_cwd(r"C:\Users\gary\code\firefly-pro"),
             "firefly-pro"

@@ -99,11 +99,8 @@ pub trait GitStatusPort {
 pub trait VectorStorePort: Send + Sync {
     /// Upsert points with server-side embedding. Each point has an id,
     /// text (for embedding), and a JSON payload.
-    async fn upsert_points(
-        &self,
-        collection: &str,
-        points: Vec<VectorPoint>,
-    ) -> anyhow::Result<()>;
+    async fn upsert_points(&self, collection: &str, points: Vec<VectorPoint>)
+        -> anyhow::Result<()>;
 
     /// Scroll (list) points with optional filter. Returns payloads.
     async fn scroll(
@@ -120,7 +117,6 @@ pub trait VectorStorePort: Send + Sync {
         point_ids: &[String],
         payload: serde_json::Value,
     ) -> anyhow::Result<()>;
-
 }
 
 /// A point to upsert (with server-side embedding).
@@ -241,19 +237,11 @@ pub trait FileSystemPort: Send + Sync {
 /// `pre_push_steel_test` (git).
 pub trait ProcessPort: Send + Sync {
     /// Run a command and capture output. Returns (`exit_success`, stdout, stderr).
-    fn run(
-        &self,
-        command: &str,
-        args: &[&str],
-        cwd: Option<&str>,
-    ) -> anyhow::Result<ProcessOutput>;
+    fn run(&self, command: &str, args: &[&str], cwd: Option<&str>)
+        -> anyhow::Result<ProcessOutput>;
 
     /// Spawn a detached process (fire-and-forget). Returns immediately.
-    fn spawn_detached(
-        &self,
-        command: &str,
-        args: &[&str],
-    ) -> anyhow::Result<()>;
+    fn spawn_detached(&self, command: &str, args: &[&str]) -> anyhow::Result<()>;
 }
 
 /// Output from a process execution.

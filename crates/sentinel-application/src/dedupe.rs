@@ -375,9 +375,12 @@ mod tests {
         let out = &ready[0];
         assert_eq!(out.coalesce_count, 10);
         assert_eq!(out.event.summary, "update #9"); // last wins
-        // Meta should be annotated with coalesce_count.
+                                                    // Meta should be annotated with coalesce_count.
         assert_eq!(
-            out.event.meta.get("coalesce_count").and_then(|v| v.as_u64()),
+            out.event
+                .meta
+                .get("coalesce_count")
+                .and_then(|v| v.as_u64()),
             Some(10)
         );
     }
@@ -388,11 +391,21 @@ mod tests {
         let mut c = Coalescer::with_clock(Duration::from_secs(3), clock.clone());
 
         c.ingest(
-            make_event("linear.issue.update", "linear", Some("FPCRM-1"), "Issue.update"),
+            make_event(
+                "linear.issue.update",
+                "linear",
+                Some("FPCRM-1"),
+                "Issue.update",
+            ),
             None,
         );
         c.ingest(
-            make_event("linear.issue.update", "linear", Some("FPCRM-2"), "Issue.update"),
+            make_event(
+                "linear.issue.update",
+                "linear",
+                Some("FPCRM-2"),
+                "Issue.update",
+            ),
             None,
         );
         c.ingest(

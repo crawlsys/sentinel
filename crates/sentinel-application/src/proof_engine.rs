@@ -59,9 +59,7 @@ impl ProofEngine {
                 Self::MAX_RAPID_FAILURES,
                 Self::RESUBMIT_COOLDOWN_SECS,
             ) {
-                let count = state
-                    .submission_attempts(&phase_key)
-                    .map_or(0, |a| a.count);
+                let count = state.submission_attempts(&phase_key).map_or(0, |a| a.count);
                 bail!(
                     "Phase '{}' resubmission blocked — wait {}s (failed {} time(s))",
                     phase_id,

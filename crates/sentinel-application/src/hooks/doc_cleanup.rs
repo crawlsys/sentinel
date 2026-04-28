@@ -282,7 +282,9 @@ mod tests {
     /// Real-FS port impl for tests that exercise actual tempfile directories.
     struct RealTestFs;
     impl FileSystemPort for RealTestFs {
-        fn home_dir(&self) -> Option<PathBuf> { dirs::home_dir() }
+        fn home_dir(&self) -> Option<PathBuf> {
+            dirs::home_dir()
+        }
         fn read_to_string(&self, p: &Path) -> anyhow::Result<String> {
             Ok(std::fs::read_to_string(p)?)
         }
@@ -293,14 +295,22 @@ mod tests {
             Ok(std::fs::create_dir_all(p)?)
         }
         fn read_dir(&self, p: &Path) -> anyhow::Result<Vec<PathBuf>> {
-            Ok(std::fs::read_dir(p)?.filter_map(|e| e.ok().map(|e| e.path())).collect())
+            Ok(std::fs::read_dir(p)?
+                .filter_map(|e| e.ok().map(|e| e.path()))
+                .collect())
         }
-        fn exists(&self, p: &Path) -> bool { p.exists() }
-        fn is_dir(&self, p: &Path) -> bool { p.is_dir() }
+        fn exists(&self, p: &Path) -> bool {
+            p.exists()
+        }
+        fn is_dir(&self, p: &Path) -> bool {
+            p.is_dir()
+        }
         fn metadata(&self, p: &Path) -> anyhow::Result<std::fs::Metadata> {
             Ok(std::fs::metadata(p)?)
         }
-        fn append(&self, _: &Path, _: &[u8]) -> anyhow::Result<()> { Ok(()) }
+        fn append(&self, _: &Path, _: &[u8]) -> anyhow::Result<()> {
+            Ok(())
+        }
     }
 
     #[test]
@@ -310,7 +320,8 @@ mod tests {
             cwd: Some(dir.path().to_string_lossy().to_string()),
             ..Default::default()
         };
-        let ctx = crate::hooks::test_support::stub_ctx(); let output = process_stop(&input, &ctx);
+        let ctx = crate::hooks::test_support::stub_ctx();
+        let output = process_stop(&input, &ctx);
         assert!(output.blocked.is_none());
     }
 
@@ -326,7 +337,8 @@ mod tests {
             cwd: Some(dir.path().to_string_lossy().to_string()),
             ..Default::default()
         };
-        let ctx = crate::hooks::test_support::stub_ctx(); let output = process_stop(&input, &ctx);
+        let ctx = crate::hooks::test_support::stub_ctx();
+        let output = process_stop(&input, &ctx);
         assert!(output.blocked.is_none());
     }
 
@@ -382,7 +394,8 @@ mod tests {
             cwd: Some("/nonexistent/test/path".into()),
             ..Default::default()
         };
-        let ctx = crate::hooks::test_support::stub_ctx(); let output = process_prompt(&input, &ctx);
+        let ctx = crate::hooks::test_support::stub_ctx();
+        let output = process_prompt(&input, &ctx);
         assert!(output.hook_specific_output.is_none());
     }
 

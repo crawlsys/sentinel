@@ -90,9 +90,9 @@ fn extract_bash_command(input: &HookInput) -> Option<&str> {
 /// Try to extract a PR number or URL from the tool result.
 fn extract_pr_from_result(input: &HookInput) -> Option<String> {
     let result = input.tool_result.as_ref()?;
-    let text = result.as_str().or_else(|| {
-        result.get("content").and_then(|c| c.as_str())
-    })?;
+    let text = result
+        .as_str()
+        .or_else(|| result.get("content").and_then(|c| c.as_str()))?;
 
     // Look for PR URL pattern
     if let Some(pos) = text.find("/pull/") {
@@ -162,22 +162,32 @@ mod tests {
     fn test_ignores_git_push_main() {
         let output = process(&bash_input("git push origin main"));
         // Push to main is fine — no monitor needed
-        assert!(output.hook_specific_output.is_none() ||
-            output.hook_specific_output.as_ref()
-                .and_then(|h| h.additional_context.as_deref())
-                .map(|c| !c.contains("PR Auto-Monitor"))
-                .unwrap_or(true));
+        assert!(
+            output.hook_specific_output.is_none()
+                || output
+                    .hook_specific_output
+                    .as_ref()
+                    .and_then(|h| h.additional_context.as_deref())
+                    .map(|c| !c.contains("PR Auto-Monitor"))
+                    .unwrap_or(true)
+        );
     }
 
     #[test]
     fn test_ignores_non_git_commands() {
-        assert!(process(&bash_input("cargo test")).hook_specific_output.is_none());
-        assert!(process(&bash_input("ls -la")).hook_specific_output.is_none());
+        assert!(process(&bash_input("cargo test"))
+            .hook_specific_output
+            .is_none());
+        assert!(process(&bash_input("ls -la"))
+            .hook_specific_output
+            .is_none());
     }
 
     #[test]
     fn test_ignores_no_tool_input() {
-        assert!(process(&HookInput::default()).hook_specific_output.is_none());
+        assert!(process(&HookInput::default())
+            .hook_specific_output
+            .is_none());
     }
 
     #[test]

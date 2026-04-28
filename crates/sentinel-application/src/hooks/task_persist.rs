@@ -73,7 +73,11 @@ fn project_hash(cwd: &str) -> String {
 
 /// Get the persistent tasks directory for a project
 fn persistent_tasks_dir(fs: &dyn FileSystemPort, project_hash: &str) -> Option<PathBuf> {
-    fs.home_dir().map(|h| h.join(".claude").join("persistent-tasks").join(project_hash))
+    fs.home_dir().map(|h| {
+        h.join(".claude")
+            .join("persistent-tasks")
+            .join(project_hash)
+    })
 }
 
 /// Find the active task list directory for this session.
@@ -311,20 +315,38 @@ mod tests {
     /// Minimal real-FS for tests that need to read temp directories.
     struct TestFs;
     impl FileSystemPort for TestFs {
-        fn home_dir(&self) -> Option<PathBuf> { dirs::home_dir() }
-        fn read_to_string(&self, p: &Path) -> anyhow::Result<String> { Ok(std::fs::read_to_string(p)?) }
+        fn home_dir(&self) -> Option<PathBuf> {
+            dirs::home_dir()
+        }
+        fn read_to_string(&self, p: &Path) -> anyhow::Result<String> {
+            Ok(std::fs::read_to_string(p)?)
+        }
         fn write(&self, p: &Path, c: &[u8]) -> anyhow::Result<()> {
-            if let Some(par) = p.parent() { std::fs::create_dir_all(par)?; }
+            if let Some(par) = p.parent() {
+                std::fs::create_dir_all(par)?;
+            }
             Ok(std::fs::write(p, c)?)
         }
-        fn create_dir_all(&self, p: &Path) -> anyhow::Result<()> { Ok(std::fs::create_dir_all(p)?) }
-        fn read_dir(&self, p: &Path) -> anyhow::Result<Vec<PathBuf>> {
-            Ok(std::fs::read_dir(p)?.filter_map(|e| e.ok().map(|e| e.path())).collect())
+        fn create_dir_all(&self, p: &Path) -> anyhow::Result<()> {
+            Ok(std::fs::create_dir_all(p)?)
         }
-        fn exists(&self, p: &Path) -> bool { p.exists() }
-        fn is_dir(&self, p: &Path) -> bool { p.is_dir() }
-        fn metadata(&self, p: &Path) -> anyhow::Result<std::fs::Metadata> { Ok(std::fs::metadata(p)?) }
-        fn append(&self, _: &Path, _: &[u8]) -> anyhow::Result<()> { Ok(()) }
+        fn read_dir(&self, p: &Path) -> anyhow::Result<Vec<PathBuf>> {
+            Ok(std::fs::read_dir(p)?
+                .filter_map(|e| e.ok().map(|e| e.path()))
+                .collect())
+        }
+        fn exists(&self, p: &Path) -> bool {
+            p.exists()
+        }
+        fn is_dir(&self, p: &Path) -> bool {
+            p.is_dir()
+        }
+        fn metadata(&self, p: &Path) -> anyhow::Result<std::fs::Metadata> {
+            Ok(std::fs::metadata(p)?)
+        }
+        fn append(&self, _: &Path, _: &[u8]) -> anyhow::Result<()> {
+            Ok(())
+        }
     }
 
     #[test]
@@ -483,20 +505,38 @@ mod tests {
         home: PathBuf,
     }
     impl FileSystemPort for ScopedHomeFs {
-        fn home_dir(&self) -> Option<PathBuf> { Some(self.home.clone()) }
-        fn read_to_string(&self, p: &Path) -> anyhow::Result<String> { Ok(std::fs::read_to_string(p)?) }
+        fn home_dir(&self) -> Option<PathBuf> {
+            Some(self.home.clone())
+        }
+        fn read_to_string(&self, p: &Path) -> anyhow::Result<String> {
+            Ok(std::fs::read_to_string(p)?)
+        }
         fn write(&self, p: &Path, c: &[u8]) -> anyhow::Result<()> {
-            if let Some(par) = p.parent() { std::fs::create_dir_all(par)?; }
+            if let Some(par) = p.parent() {
+                std::fs::create_dir_all(par)?;
+            }
             Ok(std::fs::write(p, c)?)
         }
-        fn create_dir_all(&self, p: &Path) -> anyhow::Result<()> { Ok(std::fs::create_dir_all(p)?) }
-        fn read_dir(&self, p: &Path) -> anyhow::Result<Vec<PathBuf>> {
-            Ok(std::fs::read_dir(p)?.filter_map(|e| e.ok().map(|e| e.path())).collect())
+        fn create_dir_all(&self, p: &Path) -> anyhow::Result<()> {
+            Ok(std::fs::create_dir_all(p)?)
         }
-        fn exists(&self, p: &Path) -> bool { p.exists() }
-        fn is_dir(&self, p: &Path) -> bool { p.is_dir() }
-        fn metadata(&self, p: &Path) -> anyhow::Result<std::fs::Metadata> { Ok(std::fs::metadata(p)?) }
-        fn append(&self, _: &Path, _: &[u8]) -> anyhow::Result<()> { Ok(()) }
+        fn read_dir(&self, p: &Path) -> anyhow::Result<Vec<PathBuf>> {
+            Ok(std::fs::read_dir(p)?
+                .filter_map(|e| e.ok().map(|e| e.path()))
+                .collect())
+        }
+        fn exists(&self, p: &Path) -> bool {
+            p.exists()
+        }
+        fn is_dir(&self, p: &Path) -> bool {
+            p.is_dir()
+        }
+        fn metadata(&self, p: &Path) -> anyhow::Result<std::fs::Metadata> {
+            Ok(std::fs::metadata(p)?)
+        }
+        fn append(&self, _: &Path, _: &[u8]) -> anyhow::Result<()> {
+            Ok(())
+        }
     }
 
     /// Regression: `find_active_task_dir` must NOT fall back to the most
@@ -531,13 +571,18 @@ mod tests {
 
         // Lookup for a session with no dir returns None — not the newest sibling.
         let missing = find_active_task_dir(&fs, "no-such-session");
-        assert!(missing.is_none(), "must not fall back to other sessions' dirs");
+        assert!(
+            missing.is_none(),
+            "must not fall back to other sessions' dirs"
+        );
     }
 
     #[test]
     fn test_find_active_task_dir_missing_tasks_root() {
         let tmp = tempfile::tempdir().unwrap();
-        let fs = ScopedHomeFs { home: tmp.path().to_path_buf() };
+        let fs = ScopedHomeFs {
+            home: tmp.path().to_path_buf(),
+        };
         // ~/.claude/tasks/ doesn't exist at all.
         assert!(find_active_task_dir(&fs, "any-session").is_none());
     }

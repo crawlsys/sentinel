@@ -263,7 +263,9 @@ pub fn process_stop(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     if let Some(path) = summary_file(ctx.fs, session_id) {
         let _ = ctx.fs.write(
             &path,
-            serde_json::to_string(&summary).unwrap_or_default().as_bytes(),
+            serde_json::to_string(&summary)
+                .unwrap_or_default()
+                .as_bytes(),
         );
     }
 

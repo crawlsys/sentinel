@@ -95,8 +95,7 @@ impl FileSystemPort for RealFileSystem {
             // Treat "not found" as success — callers use this for best-effort
             // cleanup of state markers that may not exist yet.
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(anyhow::Error::new(e)
-                .context(format!("remove_file {}", path.display()))),
+            Err(e) => Err(anyhow::Error::new(e).context(format!("remove_file {}", path.display()))),
         }
     }
 
@@ -104,8 +103,7 @@ impl FileSystemPort for RealFileSystem {
         match std::fs::remove_dir(path) {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(anyhow::Error::new(e)
-                .context(format!("remove_dir {}", path.display()))),
+            Err(e) => Err(anyhow::Error::new(e).context(format!("remove_dir {}", path.display()))),
         }
     }
 }
@@ -125,8 +123,7 @@ const METRICS_LOG_MAX_BYTES: u64 = 10 * 1024 * 1024;
 fn is_metrics_jsonl(path: &Path) -> bool {
     let s = path.to_string_lossy();
     // Match both `/sentinel/metrics/` (Unix) and `\sentinel\metrics\` (Windows)
-    let in_metrics = s.contains("sentinel/metrics/")
-        || s.contains("sentinel\\metrics\\");
+    let in_metrics = s.contains("sentinel/metrics/") || s.contains("sentinel\\metrics\\");
     let is_jsonl = path
         .extension()
         .and_then(|e| e.to_str())
@@ -147,7 +144,9 @@ pub fn rotate_metrics_log_if_oversized(path: &Path) {
     if !is_metrics_jsonl(path) {
         return;
     }
-    let Ok(meta) = std::fs::metadata(path) else { return };
+    let Ok(meta) = std::fs::metadata(path) else {
+        return;
+    };
     if meta.len() <= METRICS_LOG_MAX_BYTES {
         return;
     }
@@ -216,9 +215,7 @@ mod tests {
             "C:\\Users\\garys\\.claude\\sentinel\\metrics\\errors.jsonl"
         )));
         // Wrong extension
-        assert!(!is_metrics_jsonl(Path::new(
-            "/sentinel/metrics/state.json"
-        )));
+        assert!(!is_metrics_jsonl(Path::new("/sentinel/metrics/state.json")));
         // Wrong directory
         assert!(!is_metrics_jsonl(Path::new(
             "/.claude/sentinel/state/markers.jsonl"

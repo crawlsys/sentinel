@@ -268,10 +268,16 @@ impl std::fmt::Display for ProofChainError {
                 "broken chain at phase '{phase}': expected previous_hash '{expected}', got '{got}'"
             ),
             Self::InvalidProof { phase } => {
-                write!(f, "invalid proof for phase '{phase}': hash verification failed")
+                write!(
+                    f,
+                    "invalid proof for phase '{phase}': hash verification failed"
+                )
             }
             Self::ChainFull { skill, max } => {
-                write!(f, "proof chain for skill '{skill}' is full ({max} proofs max)")
+                write!(
+                    f,
+                    "proof chain for skill '{skill}' is full ({max} proofs max)"
+                )
             }
         }
     }

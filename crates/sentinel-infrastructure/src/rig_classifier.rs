@@ -43,7 +43,10 @@ impl RigClassifier {
 
     fn openrouter() -> Result<Self> {
         let key = std::env::var("OPENROUTER_API_KEY").context("OPENROUTER_API_KEY not set")?;
-        let client = Arc::new(openrouter::Client::new(&key).map_err(|e| anyhow::anyhow!("Failed to build OpenRouter client: {e}"))?);
+        let client = Arc::new(
+            openrouter::Client::new(&key)
+                .map_err(|e| anyhow::anyhow!("Failed to build OpenRouter client: {e}"))?,
+        );
         Ok(Self {
             prompt_fn: Arc::new(move |system, user_msg| {
                 let client = client.clone();
@@ -245,11 +248,19 @@ fn extract_description(content: &str) -> Option<String> {
             })
             .collect();
         let desc = lines.join(" ").trim().to_string();
-        if desc.is_empty() { None } else { Some(desc) }
+        if desc.is_empty() {
+            None
+        } else {
+            Some(desc)
+        }
     } else {
         let line = trimmed.lines().next()?;
         let desc = line.trim().trim_matches('"').to_string();
-        if desc.is_empty() { None } else { Some(desc) }
+        if desc.is_empty() {
+            None
+        } else {
+            Some(desc)
+        }
     }
 }
 
@@ -265,7 +276,11 @@ fn extract_keywords(content: &str) -> Option<String> {
     let kw_start = frontmatter.find("keywords:")?;
     let after_kw = &frontmatter[kw_start + "keywords:".len()..];
     let line = after_kw.lines().next()?.trim();
-    if line.is_empty() { None } else { Some(line.to_string()) }
+    if line.is_empty() {
+        None
+    } else {
+        Some(line.to_string())
+    }
 }
 
 #[cfg(test)]

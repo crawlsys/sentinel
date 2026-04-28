@@ -496,7 +496,10 @@ fn cancel_break(session: Option<String>) -> Result<()> {
 
             sentinel_infrastructure::state_store::save(&mut state)?;
             eprintln!("  [sentinel] Glass break CANCELLED for session '{sid}'.");
-            eprintln!("    {} tool calls were made during the break.", gb.tools_used.len());
+            eprintln!(
+                "    {} tool calls were made during the break.",
+                gb.tools_used.len()
+            );
         }
         None => {
             eprintln!("  [sentinel] No active glass break to cancel for session '{sid}'.");
@@ -510,7 +513,9 @@ fn cancel_break(session: Option<String>) -> Result<()> {
 /// record per session. Sessions with no active or historical break still
 /// appear with `active: false`.
 fn list_breaks(json: bool) -> Result<()> {
-    let state_dir = if let Some(h) = dirs::home_dir() { h.join(".claude").join("sentinel").join("state") } else {
+    let state_dir = if let Some(h) = dirs::home_dir() {
+        h.join(".claude").join("sentinel").join("state")
+    } else {
         if json {
             println!("[]");
         } else {
@@ -589,10 +594,7 @@ fn list_breaks(json: bool) -> Result<()> {
     }
     eprintln!("  {:-<74}", "");
     let active_count = results.iter().filter(|s| s.active).count();
-    eprintln!(
-        "  {active_count} active / {} total",
-        results.len()
-    );
+    eprintln!("  {active_count} active / {} total", results.len());
     Ok(())
 }
 

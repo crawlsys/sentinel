@@ -13,9 +13,29 @@ use crate::constants::MIN_EXCHANGE_LENGTH;
 /// The list is intentionally short; expanding it risks dropping real
 /// exchanges that happen to start with one of these tokens.
 pub const TRIVIAL_USER_PHRASES: &[&str] = &[
-    "yes", "no", "ok", "okay", "done", "thanks", "thank you", "got it", "sure",
-    "y", "n", "yep", "nope", "continue", "go", "next", "fix it", "all", "yee",
-    "cool", "nice", "great", "perfect",
+    "yes",
+    "no",
+    "ok",
+    "okay",
+    "done",
+    "thanks",
+    "thank you",
+    "got it",
+    "sure",
+    "y",
+    "n",
+    "yep",
+    "nope",
+    "continue",
+    "go",
+    "next",
+    "fix it",
+    "all",
+    "yee",
+    "cool",
+    "nice",
+    "great",
+    "perfect",
 ];
 
 /// Maximum assistant-reply length (chars) for which a trivial user phrase

@@ -180,11 +180,18 @@ fn capture_memory_via_mcp(
     //   - project   = "auto-extract"  (same as legacy default)
     // If either side's schema evolves, revisit here first.
     let subject = if name.is_empty() {
-        path.file_stem().and_then(|s| s.to_str()).unwrap_or("unnamed").to_string()
+        path.file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("unnamed")
+            .to_string()
     } else {
         name
     };
-    let predicate = if mem_type.is_empty() { "describes".to_string() } else { mem_type };
+    let predicate = if mem_type.is_empty() {
+        "describes".to_string()
+    } else {
+        mem_type
+    };
     let value = if body.is_empty() {
         description
     } else {
@@ -198,7 +205,10 @@ fn capture_memory_via_mcp(
     args.insert("subject".into(), serde_json::Value::String(subject));
     args.insert("predicate".into(), serde_json::Value::String(predicate));
     args.insert("value".into(), serde_json::Value::String(value));
-    args.insert("project".into(), serde_json::Value::String("auto-extract".into()));
+    args.insert(
+        "project".into(),
+        serde_json::Value::String("auto-extract".into()),
+    );
     // Tag the qualifier with the source file path so memory_audit can
     // correlate atoms back to the .md they came from.
     let source_path = path.to_string_lossy().to_string();
@@ -444,7 +454,11 @@ fn periodic_session_index(
     let count = points.len();
     super::run_async(async {
         match vector_store.upsert_points(SESSION_COLLECTION, points).await {
-            Ok(()) => info!(count, session = session_id, "Periodic session index upserted"),
+            Ok(()) => info!(
+                count,
+                session = session_id,
+                "Periodic session index upserted"
+            ),
             Err(e) => warn!(error = %e, "Periodic session index upsert failed"),
         }
     });
@@ -502,9 +516,10 @@ pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
             "Tool call threshold reached — triggering periodic session index"
         );
 
-        if let (Some(session_id), Some(transcript_path)) =
-            (input.session_id.as_deref(), input.transcript_path.as_deref())
-        {
+        if let (Some(session_id), Some(transcript_path)) = (
+            input.session_id.as_deref(),
+            input.transcript_path.as_deref(),
+        ) {
             if !session_id.is_empty()
                 && !transcript_path.is_empty()
                 && fs.exists(std::path::Path::new(transcript_path))
@@ -550,7 +565,11 @@ pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
 
     if synced > 0 {
         save_sync_state(fs, &state);
-        info!(synced, total = unsynced.len(), "Memory files synced to Qdrant");
+        info!(
+            synced,
+            total = unsynced.len(),
+            "Memory files synced to Qdrant"
+        );
     }
 
     HookOutput::allow()
@@ -581,7 +600,8 @@ mod tests {
             cwd: Some("/nonexistent".to_string()),
             ..Default::default()
         };
-        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
+        let ctx = crate::hooks::test_support::stub_ctx();
+        let output = process(&input, &ctx);
         assert!(output.blocked.is_none());
     }
 
@@ -594,10 +614,7 @@ mod tests {
             "I found the issue in the token validation. The JWT expiry check was comparing timestamps in different formats."
         ));
         // Short user + long assistant = ok
-        assert!(is_substantive_exchange(
-            "fix it",
-            &"x".repeat(250)
-        ));
+        assert!(is_substantive_exchange("fix it", &"x".repeat(250)));
         // Trivial user + short assistant = skip
         assert!(!is_substantive_exchange("ok", "Done."));
     }

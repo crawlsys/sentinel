@@ -132,11 +132,15 @@ mod tests {
 
     #[test]
     fn test_ignores_non_build_commands() {
-        assert!(process(&bg_bash_input("git status")).hook_specific_output.is_none());
+        assert!(process(&bg_bash_input("git status"))
+            .hook_specific_output
+            .is_none());
     }
 
     #[test]
     fn test_ignores_no_input() {
-        assert!(process(&HookInput::default()).hook_specific_output.is_none());
+        assert!(process(&HookInput::default())
+            .hook_specific_output
+            .is_none());
     }
 }

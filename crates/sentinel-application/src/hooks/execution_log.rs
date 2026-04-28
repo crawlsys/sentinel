@@ -87,7 +87,10 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     };
 
     // Read transcript, extract assistant text from new lines only
-    let transcript = match ctx.fs.read_to_string(std::path::Path::new(&transcript_path)) {
+    let transcript = match ctx
+        .fs
+        .read_to_string(std::path::Path::new(&transcript_path))
+    {
         Ok(t) => t,
         Err(_) => return HookOutput::allow(),
     };
@@ -198,7 +201,8 @@ mod tests {
     #[test]
     fn test_no_transcript_path() {
         let input = HookInput::default();
-        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
+        let ctx = crate::hooks::test_support::stub_ctx();
+        let output = process(&input, &ctx);
         assert!(output.blocked.is_none());
     }
 
@@ -210,7 +214,8 @@ mod tests {
             session_id: Some("test-exec-empty".to_string()),
             ..Default::default()
         };
-        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
+        let ctx = crate::hooks::test_support::stub_ctx();
+        let output = process(&input, &ctx);
         assert!(output.blocked.is_none());
     }
 
@@ -232,7 +237,8 @@ mod tests {
             cwd: Some(".".to_string()),
             ..Default::default()
         };
-        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
+        let ctx = crate::hooks::test_support::stub_ctx();
+        let output = process(&input, &ctx);
         assert!(output.blocked.is_none());
     }
 
@@ -254,7 +260,8 @@ mod tests {
             cwd: Some(".".to_string()),
             ..Default::default()
         };
-        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
+        let ctx = crate::hooks::test_support::stub_ctx();
+        let output = process(&input, &ctx);
         assert!(output.blocked.is_none());
     }
 

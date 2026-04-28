@@ -269,7 +269,11 @@ impl WorkflowState {
         &self,
         workflow: &'a SkillWorkflow,
     ) -> Option<&'a WorkflowPhase> {
-        workflow.phases.iter().find(|&phase| phase.required && !self.is_phase_complete(&phase.id)).map(|v| v as _)
+        workflow
+            .phases
+            .iter()
+            .find(|&phase| phase.required && !self.is_phase_complete(&phase.id))
+            .map(|v| v as _)
     }
 
     /// Check if a tool call should be blocked based on workflow state

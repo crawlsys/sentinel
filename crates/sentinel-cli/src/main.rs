@@ -298,9 +298,7 @@ async fn main() -> anyhow::Result<()> {
         } => scan_cmd::run(counts_only, validate, sync_counts, manifest, dry_run, dir),
         Commands::Stats { action } => match action {
             None => stats_cmd::run(),
-            Some(StatsAction::Hooks { limit, hours }) => {
-                stats_cmd::run_hooks(limit, hours)
-            }
+            Some(StatsAction::Hooks { limit, hours }) => stats_cmd::run_hooks(limit, hours),
         },
         Commands::SteelTest { action } => match action {
             SteelTestAction::Record { session } => steel_test_cmd::record(session),

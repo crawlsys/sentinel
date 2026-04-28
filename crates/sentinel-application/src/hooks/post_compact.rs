@@ -21,23 +21,20 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     tracing::info!(trigger, "Post-compaction state restoration");
 
     // Read active skill from session state
-    let active_skill = ctx
-        .fs
-        .home_dir()
-        .and_then(|home| {
-            let session_id = input.session_id.as_deref()?;
-            let state_path = home
-                .join(".claude")
-                .join("sentinel")
-                .join("state")
-                .join(format!("{session_id}.json"));
-            let content = ctx.fs.read_to_string(&state_path).ok()?;
-            let state: serde_json::Value = serde_json::from_str(&content).ok()?;
-            state
-                .get("active_skill")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
-        });
+    let active_skill = ctx.fs.home_dir().and_then(|home| {
+        let session_id = input.session_id.as_deref()?;
+        let state_path = home
+            .join(".claude")
+            .join("sentinel")
+            .join("state")
+            .join(format!("{session_id}.json"));
+        let content = ctx.fs.read_to_string(&state_path).ok()?;
+        let state: serde_json::Value = serde_json::from_str(&content).ok()?;
+        state
+            .get("active_skill")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+    });
 
     if let Some(skill) = &active_skill {
         let context = format!(

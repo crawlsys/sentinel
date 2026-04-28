@@ -146,10 +146,9 @@ impl ReplayResult {
             return "[HOOKDECK REPLAY] first session — no catchup window".to_string();
         }
         match (self.since, self.until) {
-            (Some(since), _) if self.event_count == 0 => format!(
-                "[HOOKDECK REPLAY] since {} — no events",
-                since.to_rfc3339()
-            ),
+            (Some(since), _) if self.event_count == 0 => {
+                format!("[HOOKDECK REPLAY] since {} — no events", since.to_rfc3339())
+            }
             (Some(since), _) => {
                 let bucket_summary = self
                     .buckets

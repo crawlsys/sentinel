@@ -43,13 +43,13 @@ struct InjectedState {
 // ---------------------------------------------------------------------------
 
 fn state_dir(fs: &dyn FileSystemPort) -> Option<PathBuf> {
-    fs.home_dir().map(|h| h.join(".claude").join("sentinel").join("state"))
+    fs.home_dir()
+        .map(|h| h.join(".claude").join("sentinel").join("state"))
 }
 
 fn injected_state_path(fs: &dyn FileSystemPort) -> Option<PathBuf> {
     state_dir(fs).map(|d| d.join("last-injected-memories.json"))
 }
-
 
 // ---------------------------------------------------------------------------
 // Correction detection
@@ -141,8 +141,7 @@ fn record_outcomes_unified(
     used: &[&InjectedMemory],
     correction_detected: bool,
 ) {
-    let used_ids: std::collections::HashSet<&str> =
-        used.iter().map(|m| m.id.as_str()).collect();
+    let used_ids: std::collections::HashSet<&str> = used.iter().map(|m| m.id.as_str()).collect();
 
     let mut outcomes: Vec<(String, &'static str)> = Vec::with_capacity(injected.len());
     for memory in injected {
@@ -167,8 +166,14 @@ fn record_outcomes_unified(
     crate::hooks::run_async(async move {
         for (event_id, outcome) in outcomes {
             let mut args = serde_json::Map::new();
-            args.insert("event_id".into(), serde_json::Value::String(event_id.clone()));
-            args.insert("outcome".into(), serde_json::Value::String(outcome.to_string()));
+            args.insert(
+                "event_id".into(),
+                serde_json::Value::String(event_id.clone()),
+            );
+            args.insert(
+                "outcome".into(),
+                serde_json::Value::String(outcome.to_string()),
+            );
             if let Err(e) = memory_mcp.call_tool("memory_record_outcome", args).await {
                 warn!(
                     event_id = %event_id,
@@ -319,7 +324,8 @@ mod tests {
             last_assistant_message: Some("response text".to_string()),
             ..Default::default()
         };
-        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
+        let ctx = crate::hooks::test_support::stub_ctx();
+        let output = process(&input, &ctx);
         assert!(output.blocked.is_none());
     }
 
@@ -328,7 +334,8 @@ mod tests {
         let input = HookInput {
             ..Default::default()
         };
-        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
+        let ctx = crate::hooks::test_support::stub_ctx();
+        let output = process(&input, &ctx);
         assert!(output.blocked.is_none());
     }
 

@@ -136,9 +136,7 @@ mod tests {
         assert!(is_inside_worktree(
             "C:\\Users\\garys\\.claude\\worktrees\\my-branch"
         ));
-        assert!(is_inside_worktree(
-            "/home/user/.claude/worktrees/feat-xyz"
-        ));
+        assert!(is_inside_worktree("/home/user/.claude/worktrees/feat-xyz"));
         assert!(!is_inside_worktree(
             "C:\\Users\\garys\\Documents\\GitHub\\sentinel"
         ));
@@ -147,7 +145,8 @@ mod tests {
     #[test]
     fn test_process_no_cwd() {
         let input = HookInput::default();
-        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
+        let ctx = crate::hooks::test_support::stub_ctx();
+        let output = process(&input, &ctx);
         assert!(output.hook_specific_output.is_none());
     }
 
@@ -158,7 +157,8 @@ mod tests {
             prompt: Some("fix the code".to_string()),
             ..Default::default()
         };
-        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
+        let ctx = crate::hooks::test_support::stub_ctx();
+        let output = process(&input, &ctx);
         assert!(output.hook_specific_output.is_none());
     }
 }

@@ -155,7 +155,10 @@ pub fn pending_events(fs: &dyn FileSystemPort, env: &dyn EnvPort) -> Vec<std::pa
     pending_events_in_dir(fs, &dir)
 }
 
-fn pending_events_in_dir(fs: &dyn FileSystemPort, dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+fn pending_events_in_dir(
+    fs: &dyn FileSystemPort,
+    dir: &std::path::Path,
+) -> Vec<std::path::PathBuf> {
     let mut entries: Vec<std::path::PathBuf> = fs
         .read_dir(dir)
         .ok()
@@ -193,7 +196,10 @@ pub fn cleanup_stale_sessions(fs: &dyn FileSystemPort, max_age: std::time::Durat
             continue;
         }
 
-        let modified = match fs.metadata(&path).and_then(|m| m.modified().map_err(Into::into)) {
+        let modified = match fs
+            .metadata(&path)
+            .and_then(|m| m.modified().map_err(Into::into))
+        {
             Ok(t) => t,
             Err(_) => continue,
         };
@@ -280,19 +286,33 @@ mod tests {
         // Inline FileSystemPort impl that delegates to real disk for read.
         struct TestFs;
         impl FileSystemPort for TestFs {
-            fn home_dir(&self) -> Option<std::path::PathBuf> { dirs::home_dir() }
+            fn home_dir(&self) -> Option<std::path::PathBuf> {
+                dirs::home_dir()
+            }
             fn read_to_string(&self, p: &std::path::Path) -> anyhow::Result<String> {
                 Ok(std::fs::read_to_string(p)?)
             }
-            fn write(&self, _: &std::path::Path, _: &[u8]) -> anyhow::Result<()> { Ok(()) }
-            fn create_dir_all(&self, _: &std::path::Path) -> anyhow::Result<()> { Ok(()) }
-            fn read_dir(&self, _: &std::path::Path) -> anyhow::Result<Vec<std::path::PathBuf>> { Ok(vec![]) }
-            fn exists(&self, p: &std::path::Path) -> bool { p.exists() }
-            fn is_dir(&self, p: &std::path::Path) -> bool { p.is_dir() }
+            fn write(&self, _: &std::path::Path, _: &[u8]) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn create_dir_all(&self, _: &std::path::Path) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn read_dir(&self, _: &std::path::Path) -> anyhow::Result<Vec<std::path::PathBuf>> {
+                Ok(vec![])
+            }
+            fn exists(&self, p: &std::path::Path) -> bool {
+                p.exists()
+            }
+            fn is_dir(&self, p: &std::path::Path) -> bool {
+                p.is_dir()
+            }
             fn metadata(&self, p: &std::path::Path) -> anyhow::Result<std::fs::Metadata> {
                 Ok(std::fs::metadata(p)?)
             }
-            fn append(&self, _: &std::path::Path, _: &[u8]) -> anyhow::Result<()> { Ok(()) }
+            fn append(&self, _: &std::path::Path, _: &[u8]) -> anyhow::Result<()> {
+                Ok(())
+            }
         }
 
         let read = read_event(&TestFs, &path).unwrap();

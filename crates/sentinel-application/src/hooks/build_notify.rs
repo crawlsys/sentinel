@@ -62,7 +62,10 @@ pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
             && !result_text.contains("could not compile");
 
         let summary = if succeeded {
-            format!("Build/test completed successfully: `{}`", truncate(command, 80))
+            format!(
+                "Build/test completed successfully: `{}`",
+                truncate(command, 80)
+            )
         } else {
             format!("Build/test FAILED: `{}`", truncate(command, 80))
         };
@@ -76,22 +79,24 @@ pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
             "pattern".to_string(),
             serde_json::Value::String((*pattern).to_string()),
         );
-        meta.insert(
-            "success".to_string(),
-            serde_json::Value::Bool(succeeded),
-        );
+        meta.insert("success".to_string(), serde_json::Value::Bool(succeeded));
         crate::channel_events::emit(
-            ctx.fs, ctx.env,
-            "build_completed", &summary, meta,
-            input.session_id.as_deref(), input.cwd.as_deref(), Some("build_notify"),
+            ctx.fs,
+            ctx.env,
+            "build_completed",
+            &summary,
+            meta,
+            input.session_id.as_deref(),
+            input.cwd.as_deref(),
+            Some("build_notify"),
         );
 
         // Phone push for FAILURES only — build successes stay quiet.
         if !succeeded {
             let project = project_name(input.cwd.as_deref());
             let title = format!("Build FAILED: {project}");
-            let snippet = first_error_line(result_text)
-                .unwrap_or_else(|| truncate(command, 120).to_string());
+            let snippet =
+                first_error_line(result_text).unwrap_or_else(|| truncate(command, 120).to_string());
             ntfy_push::push_attention(ctx.fs, ctx.env, &title, &snippet, 4, &["x"]);
         }
 
@@ -120,10 +125,7 @@ pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
             "pattern".to_string(),
             serde_json::Value::String((*pattern).to_string()),
         );
-        meta.insert(
-            "success".to_string(),
-            serde_json::Value::Bool(succeeded),
-        );
+        meta.insert("success".to_string(), serde_json::Value::Bool(succeeded));
         if !target.is_empty() {
             meta.insert(
                 "target".to_string(),
@@ -131,9 +133,14 @@ pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
             );
         }
         crate::channel_events::emit(
-            ctx.fs, ctx.env,
-            "deploy_completed", &summary, meta,
-            input.session_id.as_deref(), input.cwd.as_deref(), Some("build_notify"),
+            ctx.fs,
+            ctx.env,
+            "deploy_completed",
+            &summary,
+            meta,
+            input.session_id.as_deref(),
+            input.cwd.as_deref(),
+            Some("build_notify"),
         );
 
         // Phone push for both success and failure — deploys are infrequent
@@ -145,7 +152,15 @@ pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
             (format!("Deploy FAILED: {project}{target}"), 4_u8, "x")
         };
         let body = truncate(command, 120).to_string();
-        ntfy_push::push_to_topic(ctx.fs, ctx.env, TOPIC_DEPLOYS, &title, &body, priority, &[tag]);
+        ntfy_push::push_to_topic(
+            ctx.fs,
+            ctx.env,
+            TOPIC_DEPLOYS,
+            &title,
+            &body,
+            priority,
+            &[tag],
+        );
     }
 
     HookOutput::allow()
@@ -207,7 +222,10 @@ mod tests {
 
     #[test]
     fn test_extract_push_target() {
-        assert_eq!(extract_push_target("git push origin main"), " → origin/main");
+        assert_eq!(
+            extract_push_target("git push origin main"),
+            " → origin/main"
+        );
         assert_eq!(extract_push_target("git push origin"), " → origin");
         assert_eq!(extract_push_target("git push --force origin main"), "");
         assert_eq!(extract_push_target("git push"), "");
@@ -233,7 +251,10 @@ mod tests {
     #[test]
     fn test_project_name_basename() {
         #[cfg(windows)]
-        assert_eq!(project_name(Some(r"C:\Users\garys\Documents\GitHub\sentinel")), "sentinel");
+        assert_eq!(
+            project_name(Some(r"C:\Users\garys\Documents\GitHub\sentinel")),
+            "sentinel"
+        );
         assert_eq!(project_name(Some("/home/g/repo")), "repo");
         assert_eq!(project_name(None), "unknown");
     }
@@ -247,7 +268,8 @@ mod tests {
 
     #[test]
     fn test_first_error_line_returns_none_on_clean_output() {
-        let out = "   Compiling foo v0.1.0\n    Finished `dev` profile [unoptimized] target(s) in 1.23s";
+        let out =
+            "   Compiling foo v0.1.0\n    Finished `dev` profile [unoptimized] target(s) in 1.23s";
         assert!(first_error_line(out).is_none());
     }
 

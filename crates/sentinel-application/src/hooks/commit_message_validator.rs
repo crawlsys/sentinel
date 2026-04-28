@@ -56,9 +56,19 @@ fn frontmatter_tokens(frontmatter: &str, file_stem: &str) -> Vec<String> {
     for line in frontmatter.lines() {
         let line = line.trim();
         if let Some(rest) = line.strip_prefix("name:") {
-            tokens.push(rest.trim().trim_matches('"').trim_matches('\'').to_lowercase());
+            tokens.push(
+                rest.trim()
+                    .trim_matches('"')
+                    .trim_matches('\'')
+                    .to_lowercase(),
+            );
         } else if let Some(rest) = line.strip_prefix("doppler_project:") {
-            tokens.push(rest.trim().trim_matches('"').trim_matches('\'').to_lowercase());
+            tokens.push(
+                rest.trim()
+                    .trim_matches('"')
+                    .trim_matches('\'')
+                    .to_lowercase(),
+            );
         } else if let Some(rest) = line.strip_prefix("aliases:") {
             let rest = rest.trim();
             if rest.starts_with('[') && rest.ends_with(']') {
@@ -73,7 +83,10 @@ fn frontmatter_tokens(frontmatter: &str, file_stem: &str) -> Vec<String> {
         }
     }
 
-    tokens.into_iter().filter(|t| t.len() >= 3).collect::<Vec<_>>()
+    tokens
+        .into_iter()
+        .filter(|t| t.len() >= 3)
+        .collect::<Vec<_>>()
 }
 
 fn frontmatter_prefixes(frontmatter: &str) -> Vec<String> {
@@ -117,7 +130,10 @@ fn cwd_matches_tokens(cwd: &str, tokens: &[String]) -> bool {
     tokens.iter().any(|t| segments.iter().any(|s| s == t))
 }
 
-fn detect_prefixes_for_cwd(fs: &dyn super::FileSystemPort, cwd: &str) -> Option<(String, Vec<String>)> {
+fn detect_prefixes_for_cwd(
+    fs: &dyn super::FileSystemPort,
+    cwd: &str,
+) -> Option<(String, Vec<String>)> {
     let dir = projects_dir(fs)?;
     let entries = fs.read_dir(&dir).ok()?;
 
@@ -239,9 +255,7 @@ pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
     // Prefer the cwd the command actually commits in: `cd <path> && git commit`
     // → use <path>, not the session's input.cwd. Falls back to session cwd.
     let effective_cwd = effective_cwd_from_command(command);
-    let cwd_for_lookup: Option<&str> = effective_cwd
-        .as_deref()
-        .or(input.cwd.as_deref());
+    let cwd_for_lookup: Option<&str> = effective_cwd.as_deref().or(input.cwd.as_deref());
 
     if let Some(cwd) = cwd_for_lookup {
         if let Some((project, prefixes)) = detect_prefixes_for_cwd(ctx.fs, cwd) {
@@ -519,10 +533,7 @@ mod tests {
             &tokens
         ));
         // But an exact "personal" segment still matches.
-        assert!(cwd_matches_tokens(
-            "/home/garys/repos/personal",
-            &tokens
-        ));
+        assert!(cwd_matches_tokens("/home/garys/repos/personal", &tokens));
     }
 
     #[test]
@@ -571,7 +582,9 @@ mod tests {
     #[test]
     fn test_effective_cwd_strips_double_quotes() {
         assert_eq!(
-            effective_cwd_from_command("cd \"C:/Users/garys/Documents/GitHub/sentinel\" && git commit"),
+            effective_cwd_from_command(
+                "cd \"C:/Users/garys/Documents/GitHub/sentinel\" && git commit"
+            ),
             Some("C:/Users/garys/Documents/GitHub/sentinel".into())
         );
     }
@@ -587,9 +600,6 @@ mod tests {
     #[test]
     fn test_effective_cwd_not_cd_prefixed_command() {
         // `cdk deploy && git commit` must NOT match — command doesn't start with `cd ` or `cd\t`.
-        assert_eq!(
-            effective_cwd_from_command("cdk deploy && git commit"),
-            None
-        );
+        assert_eq!(effective_cwd_from_command("cdk deploy && git commit"), None);
     }
 }

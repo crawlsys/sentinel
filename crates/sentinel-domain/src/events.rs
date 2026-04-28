@@ -370,7 +370,6 @@ pub struct HookSpecificOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<serde_json::Value>,
 
-
     /// `WorktreeCreate` output path
     #[serde(skip_serializing_if = "Option::is_none", rename = "worktreePath")]
     pub worktree_path: Option<String>,

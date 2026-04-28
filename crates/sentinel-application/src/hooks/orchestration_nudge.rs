@@ -28,13 +28,13 @@ fn parallel_signal(prompt: &str) -> bool {
         r"\bconcurrently\b",
         r"\bat the same time\b",
         r"\b(\d+)\s+(tasks|things|items|steps|todos)\b", // "5 tasks"
-        r"\b(all|each) of (the|these) \w+", // "all of these bugs"
-        r"\bacross (all|every|\d+)", // "across all repos"
+        r"\b(all|each) of (the|these) \w+",              // "all of these bugs"
+        r"\bacross (all|every|\d+)",                     // "across all repos"
     ];
     let lower = prompt.to_lowercase();
-    patterns.iter().any(|p| {
-        Regex::new(p).map(|re| re.is_match(&lower)).unwrap_or(false)
-    })
+    patterns
+        .iter()
+        .any(|p| Regex::new(p).map(|re| re.is_match(&lower)).unwrap_or(false))
 }
 
 fn broad_exploration_signal(prompt: &str) -> bool {
@@ -48,9 +48,9 @@ fn broad_exploration_signal(prompt: &str) -> bool {
         r"\bdepend(s|encies) on\b",
     ];
     let lower = prompt.to_lowercase();
-    patterns.iter().any(|p| {
-        Regex::new(p).map(|re| re.is_match(&lower)).unwrap_or(false)
-    })
+    patterns
+        .iter()
+        .any(|p| Regex::new(p).map(|re| re.is_match(&lower)).unwrap_or(false))
 }
 
 fn multi_step_implementation_signal(prompt: &str) -> bool {
@@ -62,9 +62,9 @@ fn multi_step_implementation_signal(prompt: &str) -> bool {
         r"\bfull (stack|flow|pipeline|workflow)\b",
     ];
     let lower = prompt.to_lowercase();
-    patterns.iter().any(|p| {
-        Regex::new(p).map(|re| re.is_match(&lower)).unwrap_or(false)
-    })
+    patterns
+        .iter()
+        .any(|p| Regex::new(p).map(|re| re.is_match(&lower)).unwrap_or(false))
 }
 
 /// True if we're executing inside a subagent — we don't want to nudge
@@ -150,7 +150,9 @@ mod tests {
 
     #[test]
     fn test_parallel_signal_triggers_team_nudge() {
-        assert!(parallel_signal("fix 5 bugs in parallel across the frontend"));
+        assert!(parallel_signal(
+            "fix 5 bugs in parallel across the frontend"
+        ));
         assert!(parallel_signal("handle all of these issues concurrently"));
         assert!(parallel_signal("audit 7 repos at the same time"));
         assert!(!parallel_signal("fix a single bug"));
@@ -161,9 +163,7 @@ mod tests {
         assert!(broad_exploration_signal(
             "find all usages of the old API across every file"
         ));
-        assert!(broad_exploration_signal(
-            "audit the codebase for dead code"
-        ));
+        assert!(broad_exploration_signal("audit the codebase for dead code"));
         assert!(!broad_exploration_signal("edit src/main.rs line 42"));
     }
 
@@ -182,7 +182,7 @@ mod tests {
     fn test_injects_all_three_when_all_match() {
         let input = prompt_input(
             "implement the new billing system end to end: find all pricing \
-             references across the codebase, then refactor 6 handlers in parallel"
+             references across the codebase, then refactor 6 handlers in parallel",
         );
         let ctx = super::super::test_support::stub_ctx();
         let out = process(&input, &ctx);
@@ -190,9 +190,18 @@ mod tests {
             .hook_specific_output
             .and_then(|h| h.additional_context)
             .unwrap_or_default();
-        assert!(injected.contains("Agent Teams"), "missing team nudge: {injected}");
-        assert!(injected.contains("Explore subagent"), "missing subagent nudge: {injected}");
-        assert!(injected.contains("Skills"), "missing skill nudge: {injected}");
+        assert!(
+            injected.contains("Agent Teams"),
+            "missing team nudge: {injected}"
+        );
+        assert!(
+            injected.contains("Explore subagent"),
+            "missing subagent nudge: {injected}"
+        );
+        assert!(
+            injected.contains("Skills"),
+            "missing skill nudge: {injected}"
+        );
     }
 
     #[test]
@@ -204,17 +213,18 @@ mod tests {
 
     #[test]
     fn test_no_nudge_inside_subagent() {
-        let mut input = prompt_input(
-            "implement the auth flow end to end, find all references in parallel"
-        );
+        let mut input =
+            prompt_input("implement the auth flow end to end, find all references in parallel");
         input.extra.insert(
             "agent_type".to_string(),
             serde_json::Value::String("Explore".to_string()),
         );
         let ctx = super::super::test_support::stub_ctx();
         let out = process(&input, &ctx);
-        assert!(out.hook_specific_output.is_none(),
-            "subagents should not recurse into more subagent nudges");
+        assert!(
+            out.hook_specific_output.is_none(),
+            "subagents should not recurse into more subagent nudges"
+        );
     }
 
     #[test]

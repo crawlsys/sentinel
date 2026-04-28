@@ -121,7 +121,11 @@ fn repo_name_from_cwd(cwd: &str) -> Option<String> {
 /// AND that project has steel_test_email configured.
 ///
 /// Accepts an optional override path for testing; uses ~/.claude/skills/linear/projects/ by default.
-fn repo_has_steel_config_in(fs: &dyn super::FileSystemPort, cwd: Option<&str>, projects_dir: Option<&std::path::Path>) -> bool {
+fn repo_has_steel_config_in(
+    fs: &dyn super::FileSystemPort,
+    cwd: Option<&str>,
+    projects_dir: Option<&std::path::Path>,
+) -> bool {
     let repo = match cwd.and_then(repo_name_from_cwd) {
         Some(r) => r,
         None => return false, // No cwd → can't determine repo → allow
@@ -291,7 +295,10 @@ pub fn record_steel_test_passed(fs: &dyn super::FileSystemPort, session_id: &str
         "sessionId": session_id,
         "timestamp": Utc::now().to_rfc3339()
     });
-    if let Err(e) = fs.write(&path, serde_json::to_string(&state).unwrap_or_default().as_bytes()) {
+    if let Err(e) = fs.write(
+        &path,
+        serde_json::to_string(&state).unwrap_or_default().as_bytes(),
+    ) {
         tracing::warn!("Failed to write Steel test state file: {e}");
     } else {
         tracing::debug!("Steel test state recorded at {}", path.display());
@@ -414,29 +421,44 @@ mod tests {
     /// the rest fall through to default behaviour.
     struct RealFsTest;
     impl super::super::FileSystemPort for RealFsTest {
-        fn home_dir(&self) -> Option<std::path::PathBuf> { dirs::home_dir() }
+        fn home_dir(&self) -> Option<std::path::PathBuf> {
+            dirs::home_dir()
+        }
         fn read_to_string(&self, p: &std::path::Path) -> anyhow::Result<String> {
             Ok(std::fs::read_to_string(p)?)
         }
         fn write(&self, p: &std::path::Path, c: &[u8]) -> anyhow::Result<()> {
-            if let Some(parent) = p.parent() { let _ = std::fs::create_dir_all(parent); }
+            if let Some(parent) = p.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
             Ok(std::fs::write(p, c)?)
         }
         fn create_dir_all(&self, p: &std::path::Path) -> anyhow::Result<()> {
             Ok(std::fs::create_dir_all(p)?)
         }
         fn read_dir(&self, p: &std::path::Path) -> anyhow::Result<Vec<std::path::PathBuf>> {
-            Ok(std::fs::read_dir(p)?.filter_map(|e| e.ok().map(|e| e.path())).collect())
+            Ok(std::fs::read_dir(p)?
+                .filter_map(|e| e.ok().map(|e| e.path()))
+                .collect())
         }
-        fn exists(&self, p: &std::path::Path) -> bool { p.exists() }
-        fn is_dir(&self, p: &std::path::Path) -> bool { p.is_dir() }
+        fn exists(&self, p: &std::path::Path) -> bool {
+            p.exists()
+        }
+        fn is_dir(&self, p: &std::path::Path) -> bool {
+            p.is_dir()
+        }
         fn metadata(&self, p: &std::path::Path) -> anyhow::Result<std::fs::Metadata> {
             Ok(std::fs::metadata(p)?)
         }
         fn append(&self, p: &std::path::Path, c: &[u8]) -> anyhow::Result<()> {
             use std::io::Write;
-            if let Some(parent) = p.parent() { let _ = std::fs::create_dir_all(parent); }
-            let mut f = std::fs::OpenOptions::new().create(true).append(true).open(p)?;
+            if let Some(parent) = p.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let mut f = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(p)?;
             f.write_all(c)?;
             Ok(())
         }
@@ -451,7 +473,15 @@ mod tests {
         let process: &'static StubProcess = Box::leak(Box::new(StubProcess));
         let memory_mcp: &'static StubMemoryMcp = Box::leak(Box::new(StubMemoryMcp));
         let env: &'static StubEnv = Box::leak(Box::new(StubEnv::new()));
-        super::super::HookContext { git, vector_store: None, fs, process, llm: None, memory_mcp, env }
+        super::super::HookContext {
+            git,
+            vector_store: None,
+            fs,
+            process,
+            llm: None,
+            memory_mcp,
+            env,
+        }
     }
 
     #[test]
@@ -460,7 +490,8 @@ mod tests {
             tool_name: Some("Read".to_string()),
             ..Default::default()
         };
-        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
+        let ctx = crate::hooks::test_support::stub_ctx();
+        let output = process(&input, &ctx);
         assert!(output.blocked.is_none());
     }
 
@@ -471,7 +502,8 @@ mod tests {
             tool_input: Some(serde_json::json!({"command": "git commit -m 'test'"})),
             ..Default::default()
         };
-        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
+        let ctx = crate::hooks::test_support::stub_ctx();
+        let output = process(&input, &ctx);
         assert!(output.blocked.is_none());
     }
 
@@ -479,7 +511,11 @@ mod tests {
     fn test_allows_push_when_no_steel_config() {
         // Use an empty temp dir — no project config files with steel settings
         let tmpdir = tempfile::tempdir().unwrap();
-        let result = repo_has_steel_config_in(&RealFsTest, Some("/fake/path/some-repo"), Some(tmpdir.path()));
+        let result = repo_has_steel_config_in(
+            &RealFsTest,
+            Some("/fake/path/some-repo"),
+            Some(tmpdir.path()),
+        );
         assert!(!result, "Empty directory should have no steel config");
     }
 
@@ -493,8 +529,11 @@ mod tests {
         )
         .unwrap();
         // Repo name "firefly-pro-crm" contains alias "crm" → match
-        let result =
-            repo_has_steel_config_in(&RealFsTest, Some("/fake/path/firefly-pro-crm"), Some(tmpdir.path()));
+        let result = repo_has_steel_config_in(
+            &RealFsTest,
+            Some("/fake/path/firefly-pro-crm"),
+            Some(tmpdir.path()),
+        );
         assert!(
             result,
             "Should match repo 'firefly-pro-crm' against alias 'crm'"
@@ -511,7 +550,11 @@ mod tests {
         )
         .unwrap();
         // Repo name "sentinel" doesn't match any alias → no block
-        let result = repo_has_steel_config_in(&RealFsTest, Some("/fake/path/sentinel"), Some(tmpdir.path()));
+        let result = repo_has_steel_config_in(
+            &RealFsTest,
+            Some("/fake/path/sentinel"),
+            Some(tmpdir.path()),
+        );
         assert!(
             !result,
             "Should NOT match repo 'sentinel' against firefly aliases"
@@ -528,7 +571,11 @@ mod tests {
             "name: myproject\naliases: [\"myapp\"]\nstaging_url: https://staging.example.com",
         )
         .unwrap();
-        let result = repo_has_steel_config_in(&RealFsTest, Some("/fake/path/myproject"), Some(tmpdir.path()));
+        let result = repo_has_steel_config_in(
+            &RealFsTest,
+            Some("/fake/path/myproject"),
+            Some(tmpdir.path()),
+        );
         assert!(!result, "Should NOT match project without steel_test_email");
     }
 
@@ -567,7 +614,8 @@ mod tests {
             session_id: Some(session_id.to_string()),
             ..Default::default()
         };
-        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
+        let ctx = crate::hooks::test_support::stub_ctx();
+        let output = process(&input, &ctx);
         assert!(output.blocked.is_none());
 
         // Cleanup
@@ -605,7 +653,8 @@ mod tests {
     #[test]
     fn test_allows_no_tool_name() {
         let input = HookInput::default();
-        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
+        let ctx = crate::hooks::test_support::stub_ctx();
+        let output = process(&input, &ctx);
         assert!(output.blocked.is_none());
     }
 
@@ -633,41 +682,78 @@ mod tests {
     /// methods return safe defaults — the tests exercise only the diff path.
     struct RealTestGit;
     impl super::super::GitStatusPort for RealTestGit {
-        fn has_uncommitted_changes(&self, _: &str) -> anyhow::Result<bool> { Ok(false) }
-        fn changed_files(&self, _: &str) -> anyhow::Result<Vec<String>> { Ok(vec![]) }
-        fn current_branch(&self, _: &str) -> anyhow::Result<String> { Ok("main".into()) }
-        fn is_worktree(&self, _: &str) -> bool { false }
-        fn has_unpushed_commits(&self, _: &str) -> anyhow::Result<bool> { Ok(false) }
-        fn repo_root(&self, _: &str) -> Option<String> { None }
-        fn list_worktree_names(&self, _: &str) -> Vec<String> { Vec::new() }
+        fn has_uncommitted_changes(&self, _: &str) -> anyhow::Result<bool> {
+            Ok(false)
+        }
+        fn changed_files(&self, _: &str) -> anyhow::Result<Vec<String>> {
+            Ok(vec![])
+        }
+        fn current_branch(&self, _: &str) -> anyhow::Result<String> {
+            Ok("main".into())
+        }
+        fn is_worktree(&self, _: &str) -> bool {
+            false
+        }
+        fn has_unpushed_commits(&self, _: &str) -> anyhow::Result<bool> {
+            Ok(false)
+        }
+        fn repo_root(&self, _: &str) -> Option<String> {
+            None
+        }
+        fn list_worktree_names(&self, _: &str) -> Vec<String> {
+            Vec::new()
+        }
         fn merge_base(&self, repo_path: &str, base_ref: &str) -> Option<String> {
             let out = std::process::Command::new("git")
                 .args(["merge-base", "HEAD", base_ref])
                 .current_dir(repo_path)
-                .output().ok()?;
-            if !out.status.success() { return None; }
+                .output()
+                .ok()?;
+            if !out.status.success() {
+                return None;
+            }
             let sha = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            if sha.is_empty() { None } else { Some(sha) }
+            if sha.is_empty() {
+                None
+            } else {
+                Some(sha)
+            }
         }
         fn rev_list_count(&self, repo_path: &str, from: &str) -> Option<u32> {
             let out = std::process::Command::new("git")
                 .args(["rev-list", "--count", &format!("{from}..HEAD")])
                 .current_dir(repo_path)
-                .output().ok()?;
-            if !out.status.success() { return None; }
+                .output()
+                .ok()?;
+            if !out.status.success() {
+                return None;
+            }
             String::from_utf8_lossy(&out.stdout).trim().parse().ok()
         }
         fn diff_names(&self, repo_path: &str, range: &str) -> Option<Vec<String>> {
             let out = std::process::Command::new("git")
                 .args(["diff", "--name-only", range])
                 .current_dir(repo_path)
-                .output().ok()?;
-            if !out.status.success() { return None; }
+                .output()
+                .ok()?;
+            if !out.status.success() {
+                return None;
+            }
             let stdout = String::from_utf8_lossy(&out.stdout);
-            Some(stdout.lines().filter(|l| !l.is_empty()).map(String::from).collect())
+            Some(
+                stdout
+                    .lines()
+                    .filter(|l| !l.is_empty())
+                    .map(String::from)
+                    .collect(),
+            )
         }
-        fn merged_local_branches(&self, _: &str, _: &str) -> Vec<String> { Vec::new() }
-        fn merged_remote_branches(&self, _: &str, _: &str) -> Vec<String> { Vec::new() }
+        fn merged_local_branches(&self, _: &str, _: &str) -> Vec<String> {
+            Vec::new()
+        }
+        fn merged_remote_branches(&self, _: &str, _: &str) -> Vec<String> {
+            Vec::new()
+        }
     }
 
     /// Helper: run `git` in a directory and assert success.
@@ -776,10 +862,7 @@ mod tests {
                 &pre_rebase_head,
             ],
         );
-        git(
-            repo,
-            &["config", "branch.feature/backend.remote", "origin"],
-        );
+        git(repo, &["config", "branch.feature/backend.remote", "origin"]);
         git(
             repo,
             &[
@@ -794,7 +877,10 @@ mod tests {
         git(repo, &["checkout", "-q", "main"]);
         std::fs::write(repo.join("App.tsx"), "x").unwrap();
         git(repo, &["add", "App.tsx"]);
-        git(repo, &["commit", "-q", "-m", "ui: frontend PR lands on main"]);
+        git(
+            repo,
+            &["commit", "-q", "-m", "ui: frontend PR lands on main"],
+        );
         // Mirror it into origin/main so the hook's candidate resolves.
         let new_main = {
             let out = std::process::Command::new("git")
@@ -804,10 +890,7 @@ mod tests {
                 .unwrap();
             String::from_utf8_lossy(&out.stdout).trim().to_string()
         };
-        git(
-            repo,
-            &["update-ref", "refs/remotes/origin/main", &new_main],
-        );
+        git(repo, &["update-ref", "refs/remotes/origin/main", &new_main]);
 
         // Rebase feature branch onto the new main — our commit replays on top.
         git(repo, &["checkout", "-q", "feature/backend"]);

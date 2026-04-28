@@ -219,10 +219,7 @@ pub fn count_repos_with_suffix(home_dir: &Path, suffix: &str) -> usize {
 /// Derives the user's home directory from `claude_dir` (its parent) to locate
 /// `~/.claude.json` and `~/Documents/GitHub/` without calling `dirs::home_dir()`.
 pub fn count_components(claude_dir: &Path) -> ComponentCounts {
-    let home_dir = claude_dir
-        .parent()
-        .unwrap_or(claude_dir)
-        .to_path_buf();
+    let home_dir = claude_dir.parent().unwrap_or(claude_dir).to_path_buf();
 
     let skills = count_subdirs(&claude_dir.join("skills"));
     let hooks = super::hooks::HOOK_NAMES.len();
@@ -595,10 +592,7 @@ pub fn scan_marketplace(root_dir: &Path) -> MarketplaceSnapshot {
     );
 
     // --- Counts ---
-    let home_dir = root_dir
-        .parent()
-        .unwrap_or(root_dir)
-        .to_path_buf();
+    let home_dir = root_dir.parent().unwrap_or(root_dir).to_path_buf();
 
     let counts = ComponentCounts {
         skills: skills.len(),
@@ -732,10 +726,7 @@ fn scan_skills(root_dir: &Path, mp_data: &serde_json::Value) -> Vec<Skill> {
 ///
 /// `root_dir` is `~/.claude/` — hooks.toml lives at `root_dir/sentinel/config/hooks.toml`.
 fn scan_hooks(root_dir: &Path) -> Vec<Hook> {
-    let hooks_toml_path = root_dir
-        .join("sentinel")
-        .join("config")
-        .join("hooks.toml");
+    let hooks_toml_path = root_dir.join("sentinel").join("config").join("hooks.toml");
 
     fs::read_to_string(&hooks_toml_path)
         .ok()
@@ -993,10 +984,7 @@ fn run_validation(
     }
 
     // Sentinel hooks.toml
-    let hooks_toml_path = root_dir
-        .join("sentinel")
-        .join("config")
-        .join("hooks.toml");
+    let hooks_toml_path = root_dir.join("sentinel").join("config").join("hooks.toml");
 
     if hooks_toml_path.exists() {
         results.push(ValidationResult {

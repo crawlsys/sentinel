@@ -54,7 +54,10 @@ struct PhaseFileInfo {
 /// - Skill name and file name contain only safe ASCII characters
 /// - Symlinks resolve to a path still under `~/.claude/skills/` (PathBuf API)
 /// - `trusted` flag indicates whether canonical validation passed
-fn extract_phase_file(fs: &dyn super::FileSystemPort, tool_input: &serde_json::Value) -> Option<PhaseFileInfo> {
+fn extract_phase_file(
+    fs: &dyn super::FileSystemPort,
+    tool_input: &serde_json::Value,
+) -> Option<PhaseFileInfo> {
     use std::path::{Component, Path};
 
     // tool_input for Read is { "file_path": "..." }
@@ -911,7 +914,11 @@ fn normalize_shell_quoting(cmd: &str) -> String {
 ///
 /// Catches: `> path`, `>> path`, `tee path`, `tee -a path`, `cp src path`.
 /// Uses the same textual check as Write/Edit protection.
-fn check_bash_redirect_to_protected(fs: &dyn super::FileSystemPort, cmd: &str, input: &HookInput) -> Option<HookOutput> {
+fn check_bash_redirect_to_protected(
+    fs: &dyn super::FileSystemPort,
+    cmd: &str,
+    input: &HookInput,
+) -> Option<HookOutput> {
     // Extract all potential file targets from redirects and tee commands.
     // Pattern: anything followed by > or >> followed by a path
     // **Attack #70 fix**: Extended to catch mv, ln, install, dd of=, curl -o, wget -O
@@ -930,8 +937,9 @@ fn check_bash_redirect_to_protected(fs: &dyn super::FileSystemPort, cmd: &str, i
             let expanded = if normalized.starts_with("~/") || normalized.starts_with("~\\") {
                 // **Attack #90 fix**: Panic instead of empty fallback — empty PathBuf
                 // makes all ~/‐prefixed protected path checks silently pass.
-                let home =
-                    fs.home_dir().expect("[sentinel] FATAL: Cannot determine home directory");
+                let home = fs
+                    .home_dir()
+                    .expect("[sentinel] FATAL: Cannot determine home directory");
                 format!(
                     "{}/{}",
                     home.to_string_lossy().replace('\\', "/"),
@@ -973,8 +981,9 @@ fn check_bash_redirect_to_protected(fs: &dyn super::FileSystemPort, cmd: &str, i
             let expanded = if normalized.starts_with("~/") || normalized.starts_with("~\\") {
                 // **Attack #90 fix**: Panic instead of empty fallback — empty PathBuf
                 // makes all ~/‐prefixed protected path checks silently pass.
-                let home =
-                    fs.home_dir().expect("[sentinel] FATAL: Cannot determine home directory");
+                let home = fs
+                    .home_dir()
+                    .expect("[sentinel] FATAL: Cannot determine home directory");
                 format!(
                     "{}/{}",
                     home.to_string_lossy().replace('\\', "/"),
@@ -1263,7 +1272,9 @@ fn check_protected_canonical(
     // .claude.json at HOME root (parent of ~/.claude/)
     // canonical_parent is HOME dir, filename is .claude.json
     // **Attack #92 fix**: Panic instead of empty fallback
-    let home_dir = fs.home_dir().expect("[sentinel] FATAL: Cannot determine home directory");
+    let home_dir = fs
+        .home_dir()
+        .expect("[sentinel] FATAL: Cannot determine home directory");
     let home_canonical = home_dir.canonicalize().unwrap_or(home_dir);
     if canonical_parent == home_canonical {
         let filename = target.file_name()?.to_str()?;
@@ -1414,29 +1425,52 @@ mod tests {
     /// by delegating to actual `dirs::home_dir()` and `Path::exists()`.
     struct RealTestFs;
     impl super::super::FileSystemPort for RealTestFs {
-        fn home_dir(&self) -> Option<PathBuf> { dirs::home_dir() }
-        fn read_to_string(&self, p: &Path) -> anyhow::Result<String> { Ok(std::fs::read_to_string(p)?) }
+        fn home_dir(&self) -> Option<PathBuf> {
+            dirs::home_dir()
+        }
+        fn read_to_string(&self, p: &Path) -> anyhow::Result<String> {
+            Ok(std::fs::read_to_string(p)?)
+        }
         fn write(&self, p: &Path, content: &[u8]) -> anyhow::Result<()> {
-            if let Some(parent) = p.parent() { std::fs::create_dir_all(parent)?; }
+            if let Some(parent) = p.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
             Ok(std::fs::write(p, content)?)
         }
-        fn create_dir_all(&self, p: &Path) -> anyhow::Result<()> { Ok(std::fs::create_dir_all(p)?) }
-        fn read_dir(&self, p: &Path) -> anyhow::Result<Vec<PathBuf>> {
-            Ok(std::fs::read_dir(p)?.filter_map(|e| e.ok().map(|e| e.path())).collect())
+        fn create_dir_all(&self, p: &Path) -> anyhow::Result<()> {
+            Ok(std::fs::create_dir_all(p)?)
         }
-        fn exists(&self, p: &Path) -> bool { p.exists() }
-        fn is_dir(&self, p: &Path) -> bool { p.is_dir() }
-        fn metadata(&self, p: &Path) -> anyhow::Result<std::fs::Metadata> { Ok(std::fs::metadata(p)?) }
+        fn read_dir(&self, p: &Path) -> anyhow::Result<Vec<PathBuf>> {
+            Ok(std::fs::read_dir(p)?
+                .filter_map(|e| e.ok().map(|e| e.path()))
+                .collect())
+        }
+        fn exists(&self, p: &Path) -> bool {
+            p.exists()
+        }
+        fn is_dir(&self, p: &Path) -> bool {
+            p.is_dir()
+        }
+        fn metadata(&self, p: &Path) -> anyhow::Result<std::fs::Metadata> {
+            Ok(std::fs::metadata(p)?)
+        }
         fn append(&self, p: &Path, content: &[u8]) -> anyhow::Result<()> {
             use std::io::Write;
-            if let Some(parent) = p.parent() { std::fs::create_dir_all(parent)?; }
-            let mut f = std::fs::OpenOptions::new().create(true).append(true).open(p)?;
+            if let Some(parent) = p.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let mut f = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(p)?;
             f.write_all(content)?;
             Ok(())
         }
     }
 
-    fn test_fs() -> RealTestFs { RealTestFs }
+    fn test_fs() -> RealTestFs {
+        RealTestFs
+    }
 
     fn test_workflow() -> SkillWorkflow {
         SkillWorkflow {
@@ -1496,8 +1530,17 @@ mod tests {
         let mut workflows = HashMap::new();
         workflows.insert("linear".to_string(), test_workflow());
 
-        for exempt in ["Glob", "Read", "Grep", "WebSearch", "AskUserQuestion",
-                       "ExitPlanMode", "TodoWrite", "TaskCreate", "ToolSearch"] {
+        for exempt in [
+            "Glob",
+            "Read",
+            "Grep",
+            "WebSearch",
+            "AskUserQuestion",
+            "ExitPlanMode",
+            "TodoWrite",
+            "TaskCreate",
+            "ToolSearch",
+        ] {
             let input = HookInput {
                 tool_name: Some((*exempt).to_string()),
                 ..Default::default()

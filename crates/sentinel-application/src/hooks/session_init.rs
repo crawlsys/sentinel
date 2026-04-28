@@ -172,7 +172,11 @@ pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
             if let Err(e) = std::fs::write(&env_file, lines.join("\n") + "\n") {
                 tracing::warn!(error = %e, "Failed to write CLAUDE_ENV_FILE");
             } else {
-                tracing::debug!(env_file, "Wrote {} env vars to CLAUDE_ENV_FILE", lines.len());
+                tracing::debug!(
+                    env_file,
+                    "Wrote {} env vars to CLAUDE_ENV_FILE",
+                    lines.len()
+                );
             }
         }
     }
@@ -201,7 +205,9 @@ pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
     // claude.exe v2.1.114; see ~/.claude/projects/.../memory/mcp_reconnect_research.md.
     let autoheal_prefix = "/reload-plugins";
     let initial_message = if source == "resume" {
-        Some(format!("{autoheal_prefix}\nWhat was I working on? Give me a brief summary."))
+        Some(format!(
+            "{autoheal_prefix}\nWhat was I working on? Give me a brief summary."
+        ))
     } else {
         Some(autoheal_prefix.to_string())
     };
@@ -311,12 +317,18 @@ fn migrate_metrics_dir(claude_dir: &Path) {
     }
 
     // Remove old directory if empty
-    if fs::read_dir(&old_dir).map(|mut d| d.next().is_none()).unwrap_or(false) {
+    if fs::read_dir(&old_dir)
+        .map(|mut d| d.next().is_none())
+        .unwrap_or(false)
+    {
         let _ = fs::remove_dir(&old_dir);
     }
 
     if moved > 0 {
-        tracing::info!(moved, "Migrated metrics files to ~/.claude/sentinel/metrics/");
+        tracing::info!(
+            moved,
+            "Migrated metrics files to ~/.claude/sentinel/metrics/"
+        );
     }
 }
 
@@ -329,7 +341,10 @@ fn migrate_last_sync_commit(claude_dir: &Path) {
         return;
     }
 
-    let new_file = claude_dir.join("sentinel").join("state").join("last-sync-commit");
+    let new_file = claude_dir
+        .join("sentinel")
+        .join("state")
+        .join("last-sync-commit");
     if new_file.exists() {
         // Already migrated — remove the stale old copy
         let _ = fs::remove_file(&old_file);
@@ -426,7 +441,10 @@ fn sync_marketplace(process: &dyn super::ProcessPort, claude_dir: &Path) -> Sync
     };
 
     // Check if we need to sync (compare last sync commit)
-    let marker_file = claude_dir.join("sentinel").join("state").join("last-sync-commit");
+    let marker_file = claude_dir
+        .join("sentinel")
+        .join("state")
+        .join("last-sync-commit");
     let current_head = get_git_head(process, &repo_dir);
 
     if let (Some(ref head), Ok(last)) = (&current_head, fs::read_to_string(&marker_file)) {
@@ -689,7 +707,12 @@ fn list_linear_accounts(claude_dir: &Path) -> Vec<String> {
     // This is the authoritative source — names like "gary.somerhalder@gmail.com (claude-code)"
     let token_store = dirs::data_dir()
         .or_else(|| dirs::home_dir().map(|h| h.join("AppData").join("Roaming")))
-        .map(|d| d.join("linear").join("linear-cli").join("data").join("tokens.json"));
+        .map(|d| {
+            d.join("linear")
+                .join("linear-cli")
+                .join("data")
+                .join("tokens.json")
+        });
 
     if let Some(path) = token_store {
         if let Ok(content) = fs::read_to_string(&path) {
@@ -748,7 +771,10 @@ pub fn render_tasks_section(cwd: &Path) -> String {
     let live: Vec<&serde_json::Value> = tasks
         .iter()
         .filter(|t| {
-            let status = t.get("status").and_then(|s| s.as_str()).unwrap_or("pending");
+            let status = t
+                .get("status")
+                .and_then(|s| s.as_str())
+                .unwrap_or("pending");
             status != "completed" && status != "deleted"
         })
         .collect();
@@ -767,7 +793,10 @@ pub fn render_tasks_section(cwd: &Path) -> String {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .replace('|', "\\|");
-        let status = t.get("status").and_then(|v| v.as_str()).unwrap_or("pending");
+        let status = t
+            .get("status")
+            .and_then(|v| v.as_str())
+            .unwrap_or("pending");
         let priority = t
             .get("metadata")
             .and_then(|m| m.get("priority"))
@@ -1827,9 +1856,13 @@ fn detect_project_from_cwd(cwd: &str) -> Option<String> {
     let dir_name = Path::new(cwd).file_name()?.to_str()?;
     let project = match dir_name {
         "claude-code-marketplace" => "marketplace",
-        "firefly-pro-crm" | "firefly-pro-web-app" | "firefly-pro-auth"
-        | "firefly-pro-routing" | "firefly-pro-technician-mobile-app"
-        | "firefly-pro-marketing" | "firefly-pro-hyperswitch" => "firefly-pro",
+        "firefly-pro-crm"
+        | "firefly-pro-web-app"
+        | "firefly-pro-auth"
+        | "firefly-pro-routing"
+        | "firefly-pro-technician-mobile-app"
+        | "firefly-pro-marketing"
+        | "firefly-pro-hyperswitch" => "firefly-pro",
         "sentinel" | "sentinel-launcher" => "sentinel",
         _ => dir_name,
     };
@@ -1887,7 +1920,8 @@ mod tests {
             cwd: Some("/tmp/test".to_string()),
             ..Default::default()
         };
-        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
+        let ctx = crate::hooks::test_support::stub_ctx();
+        let output = process(&input, &ctx);
         assert!(output.hook_specific_output.is_some());
         let ctx = output.hook_specific_output.unwrap();
         let additional = ctx.additional_context.as_deref().unwrap();
@@ -2181,7 +2215,11 @@ mod tests {
 
         let cwd = "/fake/test/cwd";
         let hash = project_hash_for_cwd(cwd);
-        let task_dir = tmp.path().join(".claude").join("persistent-tasks").join(&hash);
+        let task_dir = tmp
+            .path()
+            .join(".claude")
+            .join("persistent-tasks")
+            .join(&hash);
         fs::create_dir_all(&task_dir).unwrap();
         let fixture = serde_json::json!([
             {"id": "1", "subject": "Open work", "status": "pending", "blockedBy": [], "blocks": [], "metadata": {"priority": "P1"}},

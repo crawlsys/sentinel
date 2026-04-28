@@ -9,8 +9,7 @@
 ///
 /// Intentionally narrow: the goal is to flag obvious source-file edits
 /// without nagging on every JSON/YAML/TOML config tweak.
-pub const CODE_EXTENSIONS: &[&str] =
-    &["rs", "ts", "tsx", "js", "jsx", "py", "go"];
+pub const CODE_EXTENSIONS: &[&str] = &["rs", "ts", "tsx", "js", "jsx", "py", "go"];
 
 /// Return `true` if `path` ends with any of [`CODE_EXTENSIONS`]. Match is
 /// case-insensitive on the extension, so `Cargo.toml.RS` matches `rs`.

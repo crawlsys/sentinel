@@ -45,10 +45,7 @@ const ALLOWED_TOOLS: &[&str] = &[
 /// permanently deadlocking the session.
 const PENDING_TTL_SECS: i64 = 300;
 
-fn load_pending_state(
-    fs: &dyn FileSystemPort,
-    session_id: &str,
-) -> Option<PendingSkillState> {
+fn load_pending_state(fs: &dyn FileSystemPort, session_id: &str) -> Option<PendingSkillState> {
     let path = super::skill_router::pending_skill_state_path(fs, session_id)?;
     let content = fs.read_to_string(&path).ok()?;
     serde_json::from_str(&content).ok()
@@ -104,9 +101,7 @@ pub fn process_pretool(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
             "Skill `{}` was detected but not invoked. Call `Skill(skill: \"{0}\")` \
              or `Read(\"{}\")` before using `{}`. \
              (Read-only tools and TaskCreate/TaskUpdate are allowed.)",
-            state.skill,
-            state.skill_path,
-            tool_name,
+            state.skill, state.skill_path, tool_name,
         ),
     );
     HookOutput::block(envelope.render())

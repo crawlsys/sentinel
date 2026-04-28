@@ -136,7 +136,14 @@ fn accounts_path(fs: &dyn FileSystemPort) -> Option<PathBuf> {
     Some(fs.home_dir()?.join(ACCOUNTS_FILE))
 }
 
-async fn send(creds: &Creds, topic: &str, title: &str, message: &str, priority: u8, tags: &[String]) {
+async fn send(
+    creds: &Creds,
+    topic: &str,
+    title: &str,
+    message: &str,
+    priority: u8,
+    tags: &[String],
+) {
     let body = json!({
         "topic": topic,
         "title": title,
@@ -195,15 +202,33 @@ mod tests {
     fn accounts_path_under_home() {
         struct RealHomeFs;
         impl FileSystemPort for RealHomeFs {
-            fn home_dir(&self) -> Option<std::path::PathBuf> { dirs::home_dir() }
-            fn read_to_string(&self, _: &std::path::Path) -> anyhow::Result<String> { anyhow::bail!("no") }
-            fn write(&self, _: &std::path::Path, _: &[u8]) -> anyhow::Result<()> { Ok(()) }
-            fn create_dir_all(&self, _: &std::path::Path) -> anyhow::Result<()> { Ok(()) }
-            fn read_dir(&self, _: &std::path::Path) -> anyhow::Result<Vec<std::path::PathBuf>> { Ok(vec![]) }
-            fn exists(&self, _: &std::path::Path) -> bool { false }
-            fn is_dir(&self, _: &std::path::Path) -> bool { false }
-            fn metadata(&self, _: &std::path::Path) -> anyhow::Result<std::fs::Metadata> { anyhow::bail!("no") }
-            fn append(&self, _: &std::path::Path, _: &[u8]) -> anyhow::Result<()> { Ok(()) }
+            fn home_dir(&self) -> Option<std::path::PathBuf> {
+                dirs::home_dir()
+            }
+            fn read_to_string(&self, _: &std::path::Path) -> anyhow::Result<String> {
+                anyhow::bail!("no")
+            }
+            fn write(&self, _: &std::path::Path, _: &[u8]) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn create_dir_all(&self, _: &std::path::Path) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn read_dir(&self, _: &std::path::Path) -> anyhow::Result<Vec<std::path::PathBuf>> {
+                Ok(vec![])
+            }
+            fn exists(&self, _: &std::path::Path) -> bool {
+                false
+            }
+            fn is_dir(&self, _: &std::path::Path) -> bool {
+                false
+            }
+            fn metadata(&self, _: &std::path::Path) -> anyhow::Result<std::fs::Metadata> {
+                anyhow::bail!("no")
+            }
+            fn append(&self, _: &std::path::Path, _: &[u8]) -> anyhow::Result<()> {
+                Ok(())
+            }
         }
         if let Some(p) = accounts_path(&RealHomeFs) {
             let s = p.to_string_lossy();

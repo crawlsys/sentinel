@@ -225,9 +225,7 @@ fn is_content_only_repo(cwd: Option<&str>) -> bool {
         },
     };
 
-    !BUILD_CONFIG_MARKERS
-        .iter()
-        .any(|f| dir.join(f).exists())
+    !BUILD_CONFIG_MARKERS.iter().any(|f| dir.join(f).exists())
 }
 
 /// Trait for running `git diff` — injectable so tests can stub it.
@@ -243,7 +241,11 @@ fn is_docs_only_commit_with(command: &str, git: &dyn super::GitStatusPort, cwd: 
 
     // Staged diff for commits, branch diff for pushes — same ranges as the
     // legacy `RealGitDiff` impl this replaced.
-    let range = if is_commit { "--cached" } else { "origin/HEAD..HEAD" };
+    let range = if is_commit {
+        "--cached"
+    } else {
+        "origin/HEAD..HEAD"
+    };
     let files = match git.diff_names(cwd, range) {
         Some(f) => f,
         None => return false, // Can't determine — don't skip
@@ -323,8 +325,12 @@ fn process_with_override(
     }
 
     // Check signed override file (Attack #47: replaces mtime-only check)
-    if super::hygiene_override::is_signed_override_active(fs, override_path, "verification", session_id)
-    {
+    if super::hygiene_override::is_signed_override_active(
+        fs,
+        override_path,
+        "verification",
+        session_id,
+    ) {
         return HookOutput::allow();
     }
 
@@ -353,14 +359,19 @@ fn process_with_override(
             eprintln!("[sentinel] pre-commit-verify: EVIDENCE FOUND in input.transcript_path");
             return HookOutput::allow();
         }
-        eprintln!("[sentinel] pre-commit-verify: no evidence in input.transcript_path, trying fallback");
+        eprintln!(
+            "[sentinel] pre-commit-verify: no evidence in input.transcript_path, trying fallback"
+        );
     } else {
         eprintln!("[sentinel] pre-commit-verify: no input.transcript_path, trying fallback");
     }
 
     // Fallback: search all project dirs for the largest transcript with this session ID
     if let Some(ref fallback_path) = find_transcript_by_session(fs, session_id) {
-        let size = fs.metadata(std::path::Path::new(fallback_path)).map(|m| m.len()).unwrap_or(0);
+        let size = fs
+            .metadata(std::path::Path::new(fallback_path))
+            .map(|m| m.len())
+            .unwrap_or(0);
         eprintln!(
             "[sentinel] pre-commit-verify: fallback transcript: {} ({} bytes)",
             fallback_path, size
@@ -414,7 +425,8 @@ mod tests {
             tool_input: Some(serde_json::json!({"file_path": "foo.rs"})),
             ..Default::default()
         };
-        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
+        let ctx = crate::hooks::test_support::stub_ctx();
+        let output = process(&input, &ctx);
         assert!(output.blocked.is_none());
     }
 
@@ -425,7 +437,8 @@ mod tests {
             tool_input: Some(serde_json::json!({"command": "ls -la"})),
             ..Default::default()
         };
-        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
+        let ctx = crate::hooks::test_support::stub_ctx();
+        let output = process(&input, &ctx);
         assert!(output.blocked.is_none());
     }
 
@@ -466,20 +479,42 @@ mod tests {
         // is_docs_only_commit_with reaches; everything else returns defaults.
         struct StubCodeDiff;
         impl super::super::GitStatusPort for StubCodeDiff {
-            fn has_uncommitted_changes(&self, _: &str) -> anyhow::Result<bool> { Ok(false) }
-            fn changed_files(&self, _: &str) -> anyhow::Result<Vec<String>> { Ok(vec![]) }
-            fn current_branch(&self, _: &str) -> anyhow::Result<String> { Ok("main".into()) }
-            fn is_worktree(&self, _: &str) -> bool { false }
-            fn has_unpushed_commits(&self, _: &str) -> anyhow::Result<bool> { Ok(false) }
-            fn repo_root(&self, _: &str) -> Option<String> { None }
-            fn list_worktree_names(&self, _: &str) -> Vec<String> { Vec::new() }
-            fn merge_base(&self, _: &str, _: &str) -> Option<String> { None }
-            fn rev_list_count(&self, _: &str, _: &str) -> Option<u32> { None }
+            fn has_uncommitted_changes(&self, _: &str) -> anyhow::Result<bool> {
+                Ok(false)
+            }
+            fn changed_files(&self, _: &str) -> anyhow::Result<Vec<String>> {
+                Ok(vec![])
+            }
+            fn current_branch(&self, _: &str) -> anyhow::Result<String> {
+                Ok("main".into())
+            }
+            fn is_worktree(&self, _: &str) -> bool {
+                false
+            }
+            fn has_unpushed_commits(&self, _: &str) -> anyhow::Result<bool> {
+                Ok(false)
+            }
+            fn repo_root(&self, _: &str) -> Option<String> {
+                None
+            }
+            fn list_worktree_names(&self, _: &str) -> Vec<String> {
+                Vec::new()
+            }
+            fn merge_base(&self, _: &str, _: &str) -> Option<String> {
+                None
+            }
+            fn rev_list_count(&self, _: &str, _: &str) -> Option<u32> {
+                None
+            }
             fn diff_names(&self, _: &str, _: &str) -> Option<Vec<String>> {
                 Some(vec!["src/main.rs".to_string()])
             }
-            fn merged_local_branches(&self, _: &str, _: &str) -> Vec<String> { Vec::new() }
-            fn merged_remote_branches(&self, _: &str, _: &str) -> Vec<String> { Vec::new() }
+            fn merged_local_branches(&self, _: &str, _: &str) -> Vec<String> {
+                Vec::new()
+            }
+            fn merged_remote_branches(&self, _: &str, _: &str) -> Vec<String> {
+                Vec::new()
+            }
         }
         let output = process_with_override(
             &input,
@@ -513,15 +548,33 @@ mod tests {
         // evidence detection. Use a real-FS stub that delegates to std::fs.
         struct RealFsStub;
         impl super::super::FileSystemPort for RealFsStub {
-            fn home_dir(&self) -> Option<PathBuf> { dirs::home_dir() }
-            fn read_to_string(&self, p: &std::path::Path) -> anyhow::Result<String> { Ok(std::fs::read_to_string(p)?) }
-            fn write(&self, _: &std::path::Path, _: &[u8]) -> anyhow::Result<()> { Ok(()) }
-            fn create_dir_all(&self, _: &std::path::Path) -> anyhow::Result<()> { Ok(()) }
-            fn read_dir(&self, _: &std::path::Path) -> anyhow::Result<Vec<PathBuf>> { Ok(vec![]) }
-            fn exists(&self, p: &std::path::Path) -> bool { p.exists() }
-            fn is_dir(&self, p: &std::path::Path) -> bool { p.is_dir() }
-            fn metadata(&self, p: &std::path::Path) -> anyhow::Result<std::fs::Metadata> { Ok(std::fs::metadata(p)?) }
-            fn append(&self, _: &std::path::Path, _: &[u8]) -> anyhow::Result<()> { Ok(()) }
+            fn home_dir(&self) -> Option<PathBuf> {
+                dirs::home_dir()
+            }
+            fn read_to_string(&self, p: &std::path::Path) -> anyhow::Result<String> {
+                Ok(std::fs::read_to_string(p)?)
+            }
+            fn write(&self, _: &std::path::Path, _: &[u8]) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn create_dir_all(&self, _: &std::path::Path) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn read_dir(&self, _: &std::path::Path) -> anyhow::Result<Vec<PathBuf>> {
+                Ok(vec![])
+            }
+            fn exists(&self, p: &std::path::Path) -> bool {
+                p.exists()
+            }
+            fn is_dir(&self, p: &std::path::Path) -> bool {
+                p.is_dir()
+            }
+            fn metadata(&self, p: &std::path::Path) -> anyhow::Result<std::fs::Metadata> {
+                Ok(std::fs::metadata(p)?)
+            }
+            fn append(&self, _: &std::path::Path, _: &[u8]) -> anyhow::Result<()> {
+                Ok(())
+            }
         }
         let real_fs = RealFsStub;
         let stub_git = crate::hooks::test_support::StubGit;
@@ -560,18 +613,36 @@ mod tests {
         // For write/read roundtrip, use a real-FS wrapper
         struct RealTestFs;
         impl super::super::FileSystemPort for RealTestFs {
-            fn home_dir(&self) -> Option<PathBuf> { dirs::home_dir() }
-            fn read_to_string(&self, p: &std::path::Path) -> anyhow::Result<String> { Ok(std::fs::read_to_string(p)?) }
+            fn home_dir(&self) -> Option<PathBuf> {
+                dirs::home_dir()
+            }
+            fn read_to_string(&self, p: &std::path::Path) -> anyhow::Result<String> {
+                Ok(std::fs::read_to_string(p)?)
+            }
             fn write(&self, p: &std::path::Path, c: &[u8]) -> anyhow::Result<()> {
-                if let Some(par) = p.parent() { std::fs::create_dir_all(par)?; }
+                if let Some(par) = p.parent() {
+                    std::fs::create_dir_all(par)?;
+                }
                 Ok(std::fs::write(p, c)?)
             }
-            fn create_dir_all(&self, p: &std::path::Path) -> anyhow::Result<()> { Ok(std::fs::create_dir_all(p)?) }
-            fn read_dir(&self, _: &std::path::Path) -> anyhow::Result<Vec<PathBuf>> { Ok(vec![]) }
-            fn exists(&self, p: &std::path::Path) -> bool { p.exists() }
-            fn is_dir(&self, p: &std::path::Path) -> bool { p.is_dir() }
-            fn metadata(&self, p: &std::path::Path) -> anyhow::Result<std::fs::Metadata> { Ok(std::fs::metadata(p)?) }
-            fn append(&self, _: &std::path::Path, _: &[u8]) -> anyhow::Result<()> { Ok(()) }
+            fn create_dir_all(&self, p: &std::path::Path) -> anyhow::Result<()> {
+                Ok(std::fs::create_dir_all(p)?)
+            }
+            fn read_dir(&self, _: &std::path::Path) -> anyhow::Result<Vec<PathBuf>> {
+                Ok(vec![])
+            }
+            fn exists(&self, p: &std::path::Path) -> bool {
+                p.exists()
+            }
+            fn is_dir(&self, p: &std::path::Path) -> bool {
+                p.is_dir()
+            }
+            fn metadata(&self, p: &std::path::Path) -> anyhow::Result<std::fs::Metadata> {
+                Ok(std::fs::metadata(p)?)
+            }
+            fn append(&self, _: &std::path::Path, _: &[u8]) -> anyhow::Result<()> {
+                Ok(())
+            }
         }
         let real_fs = RealTestFs;
 
@@ -618,7 +689,8 @@ mod tests {
     #[test]
     fn test_allows_no_tool_name() {
         let input = HookInput::default();
-        let ctx = crate::hooks::test_support::stub_ctx(); let output = process(&input, &ctx);
+        let ctx = crate::hooks::test_support::stub_ctx();
+        let output = process(&input, &ctx);
         assert!(output.blocked.is_none());
     }
 
@@ -641,15 +713,33 @@ mod tests {
         // tempfile we just wrote (default StubFs.read_to_string returns bail!).
         struct RealFsStub;
         impl super::super::FileSystemPort for RealFsStub {
-            fn home_dir(&self) -> Option<PathBuf> { dirs::home_dir() }
-            fn read_to_string(&self, p: &std::path::Path) -> anyhow::Result<String> { Ok(std::fs::read_to_string(p)?) }
-            fn write(&self, _: &std::path::Path, _: &[u8]) -> anyhow::Result<()> { Ok(()) }
-            fn create_dir_all(&self, _: &std::path::Path) -> anyhow::Result<()> { Ok(()) }
-            fn read_dir(&self, _: &std::path::Path) -> anyhow::Result<Vec<PathBuf>> { Ok(vec![]) }
-            fn exists(&self, p: &std::path::Path) -> bool { p.exists() }
-            fn is_dir(&self, p: &std::path::Path) -> bool { p.is_dir() }
-            fn metadata(&self, p: &std::path::Path) -> anyhow::Result<std::fs::Metadata> { Ok(std::fs::metadata(p)?) }
-            fn append(&self, _: &std::path::Path, _: &[u8]) -> anyhow::Result<()> { Ok(()) }
+            fn home_dir(&self) -> Option<PathBuf> {
+                dirs::home_dir()
+            }
+            fn read_to_string(&self, p: &std::path::Path) -> anyhow::Result<String> {
+                Ok(std::fs::read_to_string(p)?)
+            }
+            fn write(&self, _: &std::path::Path, _: &[u8]) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn create_dir_all(&self, _: &std::path::Path) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn read_dir(&self, _: &std::path::Path) -> anyhow::Result<Vec<PathBuf>> {
+                Ok(vec![])
+            }
+            fn exists(&self, p: &std::path::Path) -> bool {
+                p.exists()
+            }
+            fn is_dir(&self, p: &std::path::Path) -> bool {
+                p.is_dir()
+            }
+            fn metadata(&self, p: &std::path::Path) -> anyhow::Result<std::fs::Metadata> {
+                Ok(std::fs::metadata(p)?)
+            }
+            fn append(&self, _: &std::path::Path, _: &[u8]) -> anyhow::Result<()> {
+                Ok(())
+            }
         }
         let real_fs = RealFsStub;
         let stub_git = crate::hooks::test_support::StubGit;
@@ -719,15 +809,33 @@ mod tests {
         // takes a `FileSystemPort`, and we need actual file IO here.
         struct RealTestFs;
         impl super::super::FileSystemPort for RealTestFs {
-            fn home_dir(&self) -> Option<PathBuf> { dirs::home_dir() }
-            fn read_to_string(&self, p: &std::path::Path) -> anyhow::Result<String> { Ok(std::fs::read_to_string(p)?) }
-            fn write(&self, _: &std::path::Path, _: &[u8]) -> anyhow::Result<()> { Ok(()) }
-            fn create_dir_all(&self, _: &std::path::Path) -> anyhow::Result<()> { Ok(()) }
-            fn read_dir(&self, _: &std::path::Path) -> anyhow::Result<Vec<PathBuf>> { Ok(vec![]) }
-            fn exists(&self, p: &std::path::Path) -> bool { p.exists() }
-            fn is_dir(&self, p: &std::path::Path) -> bool { p.is_dir() }
-            fn metadata(&self, p: &std::path::Path) -> anyhow::Result<std::fs::Metadata> { Ok(std::fs::metadata(p)?) }
-            fn append(&self, _: &std::path::Path, _: &[u8]) -> anyhow::Result<()> { Ok(()) }
+            fn home_dir(&self) -> Option<PathBuf> {
+                dirs::home_dir()
+            }
+            fn read_to_string(&self, p: &std::path::Path) -> anyhow::Result<String> {
+                Ok(std::fs::read_to_string(p)?)
+            }
+            fn write(&self, _: &std::path::Path, _: &[u8]) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn create_dir_all(&self, _: &std::path::Path) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn read_dir(&self, _: &std::path::Path) -> anyhow::Result<Vec<PathBuf>> {
+                Ok(vec![])
+            }
+            fn exists(&self, p: &std::path::Path) -> bool {
+                p.exists()
+            }
+            fn is_dir(&self, p: &std::path::Path) -> bool {
+                p.is_dir()
+            }
+            fn metadata(&self, p: &std::path::Path) -> anyhow::Result<std::fs::Metadata> {
+                Ok(std::fs::metadata(p)?)
+            }
+            fn append(&self, _: &std::path::Path, _: &[u8]) -> anyhow::Result<()> {
+                Ok(())
+            }
         }
         let real_fs = RealTestFs;
 
@@ -747,9 +855,15 @@ mod tests {
     fn test_docs_only_extensions() {
         // These should all be recognized as docs-only
         let docs_files = vec![
-            "README.md", "CHANGELOG.md", "skills/linear/SKILL.md",
-            "config.json", "config.yaml", "settings.toml",
-            ".gitignore", ".editorconfig", "LICENSE",
+            "README.md",
+            "CHANGELOG.md",
+            "skills/linear/SKILL.md",
+            "config.json",
+            "config.yaml",
+            "settings.toml",
+            ".gitignore",
+            ".editorconfig",
+            "LICENSE",
         ];
         for f in &docs_files {
             assert!(
@@ -761,8 +875,13 @@ mod tests {
         // These should NOT be docs-only (`.toml` IS in the list, so it's
         // an exception we explicitly check).
         let code_files = vec![
-            "main.rs", "index.ts", "app.tsx", "server.py", "handler.go",
-            "style.css", "Cargo.toml",
+            "main.rs",
+            "index.ts",
+            "app.tsx",
+            "server.py",
+            "handler.go",
+            "style.css",
+            "Cargo.toml",
         ];
         for f in &code_files {
             let is_docs = is_docs_only_path(f);
@@ -780,22 +899,50 @@ mod tests {
         // Reports zero diffed files via GitStatusPort.diff_names.
         struct NoFiles;
         impl super::super::GitStatusPort for NoFiles {
-            fn has_uncommitted_changes(&self, _: &str) -> anyhow::Result<bool> { Ok(false) }
-            fn changed_files(&self, _: &str) -> anyhow::Result<Vec<String>> { Ok(vec![]) }
-            fn current_branch(&self, _: &str) -> anyhow::Result<String> { Ok("main".into()) }
-            fn is_worktree(&self, _: &str) -> bool { false }
-            fn has_unpushed_commits(&self, _: &str) -> anyhow::Result<bool> { Ok(false) }
-            fn repo_root(&self, _: &str) -> Option<String> { None }
-            fn list_worktree_names(&self, _: &str) -> Vec<String> { Vec::new() }
-            fn merge_base(&self, _: &str, _: &str) -> Option<String> { None }
-            fn rev_list_count(&self, _: &str, _: &str) -> Option<u32> { None }
-            fn diff_names(&self, _: &str, _: &str) -> Option<Vec<String>> { Some(vec![]) }
-            fn merged_local_branches(&self, _: &str, _: &str) -> Vec<String> { Vec::new() }
-            fn merged_remote_branches(&self, _: &str, _: &str) -> Vec<String> { Vec::new() }
+            fn has_uncommitted_changes(&self, _: &str) -> anyhow::Result<bool> {
+                Ok(false)
+            }
+            fn changed_files(&self, _: &str) -> anyhow::Result<Vec<String>> {
+                Ok(vec![])
+            }
+            fn current_branch(&self, _: &str) -> anyhow::Result<String> {
+                Ok("main".into())
+            }
+            fn is_worktree(&self, _: &str) -> bool {
+                false
+            }
+            fn has_unpushed_commits(&self, _: &str) -> anyhow::Result<bool> {
+                Ok(false)
+            }
+            fn repo_root(&self, _: &str) -> Option<String> {
+                None
+            }
+            fn list_worktree_names(&self, _: &str) -> Vec<String> {
+                Vec::new()
+            }
+            fn merge_base(&self, _: &str, _: &str) -> Option<String> {
+                None
+            }
+            fn rev_list_count(&self, _: &str, _: &str) -> Option<u32> {
+                None
+            }
+            fn diff_names(&self, _: &str, _: &str) -> Option<Vec<String>> {
+                Some(vec![])
+            }
+            fn merged_local_branches(&self, _: &str, _: &str) -> Vec<String> {
+                Vec::new()
+            }
+            fn merged_remote_branches(&self, _: &str, _: &str) -> Vec<String> {
+                Vec::new()
+            }
         }
         // Non-commit/push commands short-circuit before touching git.
         assert!(!is_docs_only_commit_with("ls -la", &NoFiles, "."));
         // A push with no diff'd files returns false (can't determine → don't skip).
-        assert!(!is_docs_only_commit_with("git push origin main", &NoFiles, "."));
+        assert!(!is_docs_only_commit_with(
+            "git push origin main",
+            &NoFiles,
+            "."
+        ));
     }
 }

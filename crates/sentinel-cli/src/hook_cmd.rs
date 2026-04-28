@@ -11,10 +11,10 @@ use sentinel_domain::events::{HookEvent, HookOutput, HookSpecificOutput};
 use sentinel_domain::state::SessionState;
 use sentinel_domain::workflow::{SkillSteps, SkillWorkflow};
 
-use std::sync::Arc;
 use sentinel_domain::ports::{LlmPort, VectorStorePort};
 use sentinel_infrastructure::git::RealGit;
 use sentinel_infrastructure::memory_mcp_client::MemoryMcpClient;
+use std::sync::Arc;
 
 pub async fn run(event: &str, matcher: Option<&str>, standalone: bool) -> Result<()> {
     // ── Glass break emergency override ───────────────────────────────────
@@ -125,9 +125,10 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
     let real_env = sentinel_infrastructure::env::RealEnv;
 
     // Construct LLM adapter (None if no Anthropic key)
-    let llm: Option<Arc<dyn LlmPort>> = sentinel_infrastructure::anthropic::AnthropicClient::from_env()
-        .ok()
-        .map(|c| Arc::new(c) as Arc<dyn LlmPort>);
+    let llm: Option<Arc<dyn LlmPort>> =
+        sentinel_infrastructure::anthropic::AnthropicClient::from_env()
+            .ok()
+            .map(|c| Arc::new(c) as Arc<dyn LlmPort>);
 
     // Construct memory-mcp client (always present; reads MEMORY_MCP_CMD /
     // MEMORY_MCP_TIMEOUT_SECS from env, defaults handled by from_env).
@@ -173,9 +174,8 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
             // We offload the blocking init to a spawn_blocking task so it doesn't starve
             // the async executor; the surrounding timeout cancels the future if the whole
             // operation (init + classify) exceeds 8 s.
-            let router_output = match tokio::time::timeout(
-                std::time::Duration::from_secs(8),
-                async {
+            let router_output =
+                match tokio::time::timeout(std::time::Duration::from_secs(8), async {
                     let classifier = if has_prompt {
                         tokio::task::spawn_blocking(
                             sentinel_infrastructure::rig_classifier::RigClassifier::from_env,
@@ -194,16 +194,15 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
                         &real_fs,
                     )
                     .await
-                },
-            )
-            .await
-            {
-                Ok(output) => output,
-                Err(_) => {
-                    tracing::warn!("Skill router timed out (8s) — no routing for this message");
-                    hooks::skill_router::build_no_match_output(&real_fs)
-                }
-            };
+                })
+                .await
+                {
+                    Ok(output) => output,
+                    Err(_) => {
+                        tracing::warn!("Skill router timed out (8s) — no routing for this message");
+                        hooks::skill_router::build_no_match_output(&real_fs)
+                    }
+                };
             output.merge(&router_output);
 
             // Extract detected skill from router output and update state.
@@ -433,10 +432,9 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
                 output.merge(&msg_output);
 
                 // Pre-push Steel test — block git push without Steel test (Bash only)
-                let steel_output =
-                    time_and_record(ctx.fs, &mk_ctx("pre_push_steel_test"), || {
-                        hooks::pre_push_steel_test::process(&input, &ctx)
-                    });
+                let steel_output = time_and_record(ctx.fs, &mk_ctx("pre_push_steel_test"), || {
+                    hooks::pre_push_steel_test::process(&input, &ctx)
+                });
                 output.merge(&steel_output);
 
                 // PR merge gate — block gh pr merge without confirmation (Bash only)
@@ -701,7 +699,6 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
         }
 
         // ── New events added from Claude Code v2.1.88 source analysis ──
-
         HookEvent::SessionEnd => {
             // Session cleanup — flush state, log session end (1.5s timeout!)
             let end_output = hooks::session_end::process(&input, &ctx);
@@ -768,8 +765,16 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
         HookEvent::PostToolUseFailure => {
             // Tool execution failed — log for diagnostics
             let tool_name = input.tool_name.as_deref().unwrap_or("unknown");
-            let is_timeout = input.extra.get("is_timeout").and_then(serde_json::Value::as_bool).unwrap_or(false);
-            let error = input.extra.get("error").and_then(|v| v.as_str()).unwrap_or("");
+            let is_timeout = input
+                .extra
+                .get("is_timeout")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+            let error = input
+                .extra
+                .get("error")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             tracing::debug!(tool_name, is_timeout, error, "Tool execution failed");
 
             if let Some(home) = dirs::home_dir() {
@@ -799,17 +804,36 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
             // will come when we add specific auto-approve rules for trusted tools
             // in certain contexts (e.g., auto-allow Edit in a known project dir).
             let tool = input.tool_name.as_deref().unwrap_or("unknown");
-            let has_suggestions = input.permission_suggestions.as_ref().map_or(0, std::vec::Vec::len);
-            tracing::debug!(tool, has_suggestions, "PermissionRequest — pass through (no auto-decisions yet)");
+            let has_suggestions = input
+                .permission_suggestions
+                .as_ref()
+                .map_or(0, std::vec::Vec::len);
+            tracing::debug!(
+                tool,
+                has_suggestions,
+                "PermissionRequest — pass through (no auto-decisions yet)"
+            );
         }
 
         HookEvent::Elicitation => {
             // MCP server requesting user input — log details, pass through.
             // Auto-responding to elicitation without understanding the context is risky.
             // Future: auto-accept known servers (e.g., sentinel, codex) for trusted prompts.
-            let server = input.extra.get("mcp_server_name").and_then(|v| v.as_str()).unwrap_or("unknown");
-            let message = input.extra.get("message").and_then(|v| v.as_str()).unwrap_or("");
-            tracing::debug!(server, message, "Elicitation request from MCP server — pass through");
+            let server = input
+                .extra
+                .get("mcp_server_name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            let message = input
+                .extra
+                .get("message")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            tracing::debug!(
+                server,
+                message,
+                "Elicitation request from MCP server — pass through"
+            );
         }
 
         HookEvent::ElicitationResult => {
@@ -819,21 +843,34 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
 
         HookEvent::ConfigChange => {
             // Settings or skill file changed — validate and warn on dangerous changes.
-            let source = input.extra.get("source").and_then(|v| v.as_str()).unwrap_or("unknown");
-            let file_path = input.extra.get("file_path").and_then(|v| v.as_str()).unwrap_or("");
+            let source = input
+                .extra
+                .get("source")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            let file_path = input
+                .extra
+                .get("file_path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             tracing::debug!(source, file_path, "ConfigChange detected");
 
             // Warn if disableAllHooks is set (kill-switch that disables all enforcement)
-            if (source == "user_settings" || source == "project_settings" || source == "local_settings")
-                && !file_path.is_empty() {
-                    if let Ok(settings_content) = std::fs::read_to_string(file_path) {
-                        if settings_content.contains("\"disableAllHooks\"") && settings_content.contains("true") {
-                            output.system_message = Some(
+            if (source == "user_settings"
+                || source == "project_settings"
+                || source == "local_settings")
+                && !file_path.is_empty()
+            {
+                if let Ok(settings_content) = std::fs::read_to_string(file_path) {
+                    if settings_content.contains("\"disableAllHooks\"")
+                        && settings_content.contains("true")
+                    {
+                        output.system_message = Some(
                                 "[sentinel] WARNING: disableAllHooks detected in settings — all hook enforcement will be disabled!".to_string()
                             );
-                        }
                     }
                 }
+            }
 
             // Log skill file changes for telemetry
             if source == "skills" {
@@ -852,16 +889,25 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
             //   { source: "user_settings" | ..., field: "permissionMode",
             //     old_value: "<mode>", new_value: "<mode>", ... }
             // We read `new_value` (or fall back to `value`) and compare to "plan".
-            let changed_field = input.extra.get("field").and_then(|v| v.as_str()).unwrap_or("");
+            let changed_field = input
+                .extra
+                .get("field")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             if changed_field == "permissionMode" || changed_field == "permission_mode" {
-                let new_mode = input.extra.get("new_value")
+                let new_mode = input
+                    .extra
+                    .get("new_value")
                     .or_else(|| input.extra.get("value"))
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
                 if new_mode == "plan" {
                     if let Some(sid) = input.session_id.as_deref() {
                         hooks::tool_usage_gate::mark_plan_approved(ctx.fs, sid);
-                        tracing::info!(source, "Plan mode entered via ConfigChange — plan-approved marker written");
+                        tracing::info!(
+                            source,
+                            "Plan mode entered via ConfigChange — plan-approved marker written"
+                        );
                     }
                 }
             }
@@ -869,32 +915,53 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
 
         HookEvent::InstructionsLoaded => {
             // CLAUDE.md or other instruction file loaded — log details.
-            let file_path = input.extra.get("file_path").and_then(|v| v.as_str()).unwrap_or("");
-            let memory_type = input.extra.get("memory_type").and_then(|v| v.as_str()).unwrap_or("");
-            let load_reason = input.extra.get("load_reason").and_then(|v| v.as_str()).unwrap_or("");
+            let file_path = input
+                .extra
+                .get("file_path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let memory_type = input
+                .extra
+                .get("memory_type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let load_reason = input
+                .extra
+                .get("load_reason")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             tracing::debug!(file_path, memory_type, load_reason, "Instructions loaded");
 
             // Log managed/enterprise overrides — these can silently change behavior
             if memory_type == "Managed" {
-                tracing::info!(file_path, "Managed (enterprise) instructions loaded — may override user settings");
+                tracing::info!(
+                    file_path,
+                    "Managed (enterprise) instructions loaded — may override user settings"
+                );
             }
         }
 
         HookEvent::FileChanged => {
             // Watched file changed — log and inject context for important files.
-            let file_path = input.file_path.as_deref()
+            let file_path = input
+                .file_path
+                .as_deref()
                 .or_else(|| input.extra.get("file_path").and_then(|v| v.as_str()))
                 .unwrap_or("");
-            let event_type = input.extra.get("event").and_then(|v| v.as_str()).unwrap_or("change");
+            let event_type = input
+                .extra
+                .get("event")
+                .and_then(|v| v.as_str())
+                .unwrap_or("change");
             tracing::info!(file_path, event_type, "Watched file changed");
 
             if file_path.ends_with("CLAUDE.md") {
-                output.system_message = Some(
-                    "[sentinel] CLAUDE.md changed — context may need refresh".to_string()
-                );
+                output.system_message =
+                    Some("[sentinel] CLAUDE.md changed — context may need refresh".to_string());
             } else if file_path.ends_with("settings.json") {
                 output.system_message = Some(
-                    "[sentinel] settings.json changed — hook configuration may have been updated".to_string()
+                    "[sentinel] settings.json changed — hook configuration may have been updated"
+                        .to_string(),
                 );
             }
         }
@@ -924,9 +991,16 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
     if output.blocked == Some(true) {
         let tool_name = input.tool_name.as_deref().unwrap_or("(no tool)");
         let title = format!("Claude blocked: {hook_event} / {tool_name}");
-        let reason = output
-            .reason
-            .as_deref().map_or_else(|| "(no reason given)".to_string(), |r| if r.len() > 240 { format!("{}…", &r[..240]) } else { r.to_string() });
+        let reason = output.reason.as_deref().map_or_else(
+            || "(no reason given)".to_string(),
+            |r| {
+                if r.len() > 240 {
+                    format!("{}…", &r[..240])
+                } else {
+                    r.to_string()
+                }
+            },
+        );
         sentinel_application::ntfy_push::push_attention(
             &real_fs,
             &real_env,
@@ -1015,7 +1089,9 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
 }
 
 fn parse_hook_event(event: &str) -> Result<HookEvent> {
-    if let Some(e) = HookEvent::from_arg(event) { Ok(e) } else {
+    if let Some(e) = HookEvent::from_arg(event) {
+        Ok(e)
+    } else {
         eprintln!(
             "[sentinel] ERROR: Unknown hook event type '{event}'. \
              Valid events: SessionStart, SessionEnd, UserPromptSubmit, PreToolUse, \
@@ -1036,7 +1112,6 @@ const fn should_attach_project_context(hook_event: HookEvent) -> bool {
             | HookEvent::Setup
     )
 }
-
 
 fn write_safe_allow_response() -> Result<()> {
     sentinel_infrastructure::stdout::write_hook_output(&HookOutput::allow())
@@ -1131,9 +1206,7 @@ fn validate_caller() -> Result<()> {
                 let _ = sentinel_infrastructure::security_log::log_security_event(
                     "caller_rejected",
                     "unknown",
-                    &format!(
-                        "Parent process '{parent}' is not a known Claude Code runtime"
-                    ),
+                    &format!("Parent process '{parent}' is not a known Claude Code runtime"),
                 );
             }
         }
@@ -1401,7 +1474,9 @@ mod tests {
         assert!(should_attach_project_context(HookEvent::Setup));
         assert!(!should_attach_project_context(HookEvent::PreToolUse));
         assert!(!should_attach_project_context(HookEvent::PostToolUse));
-        assert!(!should_attach_project_context(HookEvent::PostToolUseFailure));
+        assert!(!should_attach_project_context(
+            HookEvent::PostToolUseFailure
+        ));
         assert!(!should_attach_project_context(HookEvent::PostCompact));
     }
 
@@ -1410,9 +1485,17 @@ mod tests {
     async fn test_hook_internal_exits_within_timeout() {
         let manifest_dir = env!("CARGO_MANIFEST_DIR");
         let engine = std::path::Path::new(manifest_dir)
-            .parent().unwrap()
-            .parent().unwrap()
-            .join("target").join("release").join(if cfg!(windows) { "sentinel-engine.exe" } else { "sentinel-engine" });
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("target")
+            .join("release")
+            .join(if cfg!(windows) {
+                "sentinel-engine.exe"
+            } else {
+                "sentinel-engine"
+            });
 
         if !engine.exists() {
             eprintln!("Skipping: sentinel-engine not found at {engine:?}");
@@ -1440,7 +1523,8 @@ mod tests {
 
         // Windows git subprocesses are ~0.8s each; allow more headroom on Windows.
         let timeout_secs = if cfg!(windows) { 15 } else { 3 };
-        let result = tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), child.wait()).await;
+        let result =
+            tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), child.wait()).await;
 
         assert!(
             result.is_ok(),
@@ -1453,9 +1537,17 @@ mod tests {
     async fn test_hook_stdout_is_valid_json() {
         let manifest_dir = env!("CARGO_MANIFEST_DIR");
         let engine = std::path::Path::new(manifest_dir)
-            .parent().unwrap()
-            .parent().unwrap()
-            .join("target").join("release").join(if cfg!(windows) { "sentinel-engine.exe" } else { "sentinel-engine" });
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("target")
+            .join("release")
+            .join(if cfg!(windows) {
+                "sentinel-engine.exe"
+            } else {
+                "sentinel-engine"
+            });
 
         if !engine.exists() {
             eprintln!("Skipping: sentinel-engine not found at {engine:?}");
@@ -1483,11 +1575,13 @@ mod tests {
 
         // Windows git subprocesses are ~0.8s each; allow more headroom on Windows.
         let timeout_secs = if cfg!(windows) { 15 } else { 3 };
-        let output =
-            tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), child.wait_with_output())
-                .await
-                .expect("timed out")
-                .expect("wait failed");
+        let output = tokio::time::timeout(
+            std::time::Duration::from_secs(timeout_secs),
+            child.wait_with_output(),
+        )
+        .await
+        .expect("timed out")
+        .expect("wait failed");
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(!stdout.is_empty(), "stdout should not be empty");
@@ -1523,14 +1617,13 @@ mod tests {
         let result: Result<Option<()>, tokio::time::error::Elapsed> =
             tokio::time::timeout(short_timeout, async {
                 // Mimic RigClassifier::from_env taking 30 s (e.g. Windows TLS cert load).
-                let _classifier: Option<()> =
-                    tokio::task::spawn_blocking(|| {
-                        std::thread::sleep(std::time::Duration::from_secs(30));
-                        None::<()>
-                    })
-                    .await
-                    .ok()
-                    .flatten();
+                let _classifier: Option<()> = tokio::task::spawn_blocking(|| {
+                    std::thread::sleep(std::time::Duration::from_secs(30));
+                    None::<()>
+                })
+                .await
+                .ok()
+                .flatten();
                 _classifier
             })
             .await;
