@@ -113,7 +113,10 @@ enum Commands {
     },
 
     /// Show hook execution statistics
-    Stats,
+    Stats {
+        #[command(subcommand)]
+        action: Option<StatsAction>,
+    },
 
     /// Manage Steel browser test state
     SteelTest {
@@ -229,6 +232,20 @@ enum ConfigAction {
 }
 
 #[derive(Subcommand)]
+enum StatsAction {
+    /// Show hook invocation summary from hook-invocations.jsonl
+    /// (top-N by call count, latency, and block frequency).
+    Hooks {
+        /// Limit the number of rows shown per breakdown (default 10).
+        #[arg(long, default_value_t = 10)]
+        limit: usize,
+        /// Only consider invocations from the last N hours (default 24).
+        #[arg(long, default_value_t = 24)]
+        hours: u32,
+    },
+}
+
+#[derive(Subcommand)]
 enum SteelTestAction {
     /// Record a passing browser test for the current session
     Record {
@@ -279,7 +296,12 @@ async fn main() -> anyhow::Result<()> {
             dry_run,
             dir,
         } => scan_cmd::run(counts_only, validate, sync_counts, manifest, dry_run, dir),
-        Commands::Stats => stats_cmd::run(),
+        Commands::Stats { action } => match action {
+            None => stats_cmd::run(),
+            Some(StatsAction::Hooks { limit, hours }) => {
+                stats_cmd::run_hooks(limit, hours)
+            }
+        },
         Commands::SteelTest { action } => match action {
             SteelTestAction::Record { session } => steel_test_cmd::record(session),
             SteelTestAction::Check { session } => steel_test_cmd::check(session),

@@ -9,6 +9,7 @@ pub mod classifier;
 pub mod dedupe;
 pub mod engine;
 pub mod gate;
+pub mod hook_metrics;
 pub mod hooks;
 pub mod interceptor;
 pub mod judge_service;
