@@ -328,10 +328,17 @@ async fn get_linear() -> Json<serde_json::Value> {
     Json(data)
 }
 
+// ── Dashboard HTML ───────────────────────────────────────────────────────────
+
+async fn get_dashboard() -> axum::response::Html<&'static str> {
+    axum::response::Html(include_str!("ccam_dashboard.html"))
+}
+
 // ── Router ───────────────────────────────────────────────────────────────────
 
 pub fn router() -> Router<AppState> {
     Router::new()
+        .route("/ccam", get(get_dashboard))
         .route("/accounts", get(get_accounts))
         .route("/sessions", get(get_sessions))
         .route("/rotation", get(get_rotation))
