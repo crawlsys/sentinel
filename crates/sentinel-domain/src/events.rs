@@ -202,6 +202,80 @@ pub struct HookInput {
     pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
+/// Severity tier for `HookEnvelope` — drives the leading emoji in the
+/// rendered prefix so users can scan hook output by urgency.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HookTier {
+    /// Informational / observational — green dot.
+    Info,
+    /// Warning — user should notice but isn't blocked. Yellow dot.
+    Warn,
+    /// Blocking — the hook is rejecting the action. Red dot.
+    Block,
+}
+
+impl HookTier {
+    /// Single-glyph emoji prefix for this tier.
+    #[must_use]
+    pub const fn emoji(self) -> &'static str {
+        match self {
+            Self::Info => "🟢",
+            Self::Warn => "🟡",
+            Self::Block => "🔴",
+        }
+    }
+}
+
+/// Canonical envelope every hook should build its user-facing message with.
+/// Renders to `[<name>] <emoji> <message>` so the surface stays consistent
+/// across the 54 hooks that inject context.
+///
+/// `name` is the short hook identifier shown in brackets (e.g. `Skill Router`,
+/// `Worktree Reminder`). Use Title Case with spaces, not the snake_case file
+/// name — it's user-facing.
+#[derive(Debug, Clone)]
+pub struct HookEnvelope {
+    pub name: String,
+    pub tier: HookTier,
+    pub message: String,
+}
+
+impl HookEnvelope {
+    #[must_use]
+    pub fn new(name: impl Into<String>, tier: HookTier, message: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            tier,
+            message: message.into(),
+        }
+    }
+
+    /// Convenience: build an Info-tier envelope.
+    #[must_use]
+    pub fn info(name: impl Into<String>, message: impl Into<String>) -> Self {
+        Self::new(name, HookTier::Info, message)
+    }
+
+    /// Convenience: build a Warn-tier envelope.
+    #[must_use]
+    pub fn warn(name: impl Into<String>, message: impl Into<String>) -> Self {
+        Self::new(name, HookTier::Warn, message)
+    }
+
+    /// Convenience: build a Block-tier envelope.
+    #[must_use]
+    pub fn block(name: impl Into<String>, message: impl Into<String>) -> Self {
+        Self::new(name, HookTier::Block, message)
+    }
+
+    /// Render to the canonical `[name] emoji message` string.
+    #[must_use]
+    pub fn render(&self) -> String {
+        format!("[{}] {} {}", self.name, self.tier.emoji(), self.message)
+    }
+}
+
 /// JSON output a hook returns to Claude Code
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct HookOutput {
@@ -375,6 +449,15 @@ impl HookOutput {
             }),
             ..Self::default()
         }
+    }
+
+    /// Inject context formatted through the canonical hook envelope.
+    /// Renders as `[HookName] <tier-emoji> <message>` so the user sees a
+    /// consistent prefix across all 54 hooks instead of the ad-hoc mix of
+    /// brackets / emoji / box-drawing currently in use.
+    #[must_use]
+    pub fn inject_envelope(event: HookEvent, envelope: HookEnvelope) -> Self {
+        Self::inject_context(event, envelope.render())
     }
 
     /// Allow the model to retry a denied tool call (`PermissionDenied` only).
@@ -697,5 +780,32 @@ mod tests {
         let transformed = output.into_pretool_output();
         assert!(transformed.blocked.is_none());
         assert!(transformed.hook_specific_output.is_none());
+    }
+
+    #[test]
+    fn test_hook_envelope_renders_canonical_prefix() {
+        let env = HookEnvelope::warn("Worktree Reminder", "use EnterWorktree first");
+        assert_eq!(
+            env.render(),
+            "[Worktree Reminder] 🟡 use EnterWorktree first"
+        );
+    }
+
+    #[test]
+    fn test_hook_envelope_tiers_use_distinct_emoji() {
+        assert_eq!(HookTier::Info.emoji(), "🟢");
+        assert_eq!(HookTier::Warn.emoji(), "🟡");
+        assert_eq!(HookTier::Block.emoji(), "🔴");
+    }
+
+    #[test]
+    fn test_inject_envelope_round_trips_through_inject_context() {
+        let env = HookEnvelope::block("Phase Gate", "load phase file before tools");
+        let out = HookOutput::inject_envelope(HookEvent::PreToolUse, env);
+        let ctx = out
+            .hook_specific_output
+            .and_then(|h| h.additional_context)
+            .unwrap();
+        assert_eq!(ctx, "[Phase Gate] 🔴 load phase file before tools");
     }
 }

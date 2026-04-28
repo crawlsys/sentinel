@@ -27,7 +27,7 @@ pub mod state;
 pub mod workflow;
 
 // Re-export commonly used types
-pub use events::HookEvent;
+pub use events::{HookEnvelope, HookEvent, HookTier};
 pub use evidence::{Evidence, EvidenceEntry};
 pub use hooks::{HookId, HookResult, HookSpec};
 pub use judge::JudgeVerdict;

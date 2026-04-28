@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added
+
+- **Canonical hook output envelope (`HookEnvelope` + `HookTier`)**: new types in `sentinel-domain::events` plus `HookOutput::inject_envelope(event, envelope)` constructor. Renders as `[<HookName>] <emoji> <message>` with 🟢 Info / 🟡 Warn / 🔴 Block tier emojis so the user sees a consistent prefix across all 54 hooks instead of the ad-hoc mix of brackets, emoji, and box-drawing currently in use. Phase A only — existing `inject_context` call sites are unchanged. Migration of the 50+ legacy callers will land in follow-up tasks (one batch per hook group).
+
 ### Changed
 
 - **Worktree/branch cleanup discipline (hygiene_reminders + worktree_reminder + pr_auto_monitor)**: surface merged `worktree-*` branches as actionable cleanup commands, both local (`git branch -d`) and remote (`git push origin --delete`). Detection runs on `Stop` (via hygiene_reminders) and on the worktree-reminder injection path. The merge-to-main detector in pr_auto_monitor now names the merged branch and lists the exact `ExitWorktree` + branch-delete commands so orphaned refs don't pile up. Required new `GitStatusPort::merged_local_branches` and `GitStatusPort::merged_remote_branches` ports.
