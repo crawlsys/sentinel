@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use anyhow::Result;
 use tracing::debug;
 
+use sentinel_application::hook_metrics::{time_and_record, InvocationContext};
 use sentinel_application::hooks;
 use sentinel_domain::events::{HookEvent, HookOutput, HookSpecificOutput};
 use sentinel_domain::state::SessionState;
@@ -146,6 +147,11 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
     // Process through matching hooks based on event type
     let mut output = HookOutput::allow();
 
+    // Resolved once per hook event so the per-call `time_and_record`
+    // wrapper can stamp the JSONL row without each hook re-running git.
+    let cwd_for_metrics = input.cwd.as_deref().unwrap_or(".");
+    let repo_root_for_metrics = ctx.git.repo_root(cwd_for_metrics);
+
     match hook_event {
         HookEvent::UserPromptSubmit => {
             // Skill router — Opus AI classification on EVERY message.
@@ -244,81 +250,147 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
                 }
             }
 
+            // Build the metrics envelope for this branch.
+            let mk_ctx = |hook: &'static str| InvocationContext {
+                event: "UserPromptSubmit",
+                hook,
+                tool: None,
+                session_id: input.session_id.as_deref(),
+                repo_root: repo_root_for_metrics.as_deref(),
+            };
+
             // Phase validator — inject phase + step progress context
-            let validator_output =
-                hooks::phase_validator::process(&input, &state, &workflows, &step_configs, ctx.fs);
+            let validator_output = time_and_record(ctx.fs, &mk_ctx("phase_validator"), || {
+                hooks::phase_validator::process(&input, &state, &workflows, &step_configs, ctx.fs)
+            });
             output.merge(&validator_output);
 
             // Error reporter — inject Linear filing instructions for unresolved errors
-            let error_output = hooks::error_reporter::process(&input, &ctx);
+            let error_output = time_and_record(ctx.fs, &mk_ctx("error_reporter"), || {
+                hooks::error_reporter::process(&input, &ctx)
+            });
             output.merge(&error_output);
 
             // Hygiene override — detect override commands in prompt
-            let override_output = hooks::hygiene_override::process(&input, &ctx);
+            let override_output = time_and_record(ctx.fs, &mk_ctx("hygiene_override"), || {
+                hooks::hygiene_override::process(&input, &ctx)
+            });
             output.merge(&override_output);
 
             // Worktree reminder — remind to use EnterWorktree in git repos
-            let worktree_output = hooks::worktree_reminder::process(&input, &ctx);
+            let worktree_output = time_and_record(ctx.fs, &mk_ctx("worktree_reminder"), || {
+                hooks::worktree_reminder::process(&input, &ctx)
+            });
             output.merge(&worktree_output);
 
             // Orchestration nudge — suggest agent teams / Explore subagents /
             // skill invocation based on prompt heuristics.
-            let orchestration_output = hooks::orchestration_nudge::process(&input, &ctx);
+            let orchestration_output =
+                time_and_record(ctx.fs, &mk_ctx("orchestration_nudge"), || {
+                    hooks::orchestration_nudge::process(&input, &ctx)
+                });
             output.merge(&orchestration_output);
 
             // Todo loader — inject active todos into context
-            let todo_output = hooks::todo_loader::process(&input, &ctx);
+            let todo_output = time_and_record(ctx.fs, &mk_ctx("todo_loader"), || {
+                hooks::todo_loader::process(&input, &ctx)
+            });
             output.merge(&todo_output);
 
             // --- Two-phase hooks (read state written by Stop, inject instructions) ---
 
             // Doc drift — inject update instructions for stale docs
-            let drift_output = hooks::doc_drift::process_prompt(&input, &ctx);
+            let drift_output = time_and_record(ctx.fs, &mk_ctx("doc_drift"), || {
+                hooks::doc_drift::process_prompt(&input, &ctx)
+            });
             output.merge(&drift_output);
 
             // Doc cleanup — inject cleanup instructions for junk docs
-            let cleanup_output = hooks::doc_cleanup::process_prompt(&input, &ctx);
+            let cleanup_output = time_and_record(ctx.fs, &mk_ctx("doc_cleanup"), || {
+                hooks::doc_cleanup::process_prompt(&input, &ctx)
+            });
             output.merge(&cleanup_output);
 
             // Commit hygiene — remind about uncommitted changes
-            let commit_output = hooks::commit_hygiene::process_prompt(&input, &ctx);
+            let commit_output = time_and_record(ctx.fs, &mk_ctx("commit_hygiene"), || {
+                hooks::commit_hygiene::process_prompt(&input, &ctx)
+            });
             output.merge(&commit_output);
 
             // Context monitor — inject zone-specific strategy guidance
-            let ctx_prompt_output = hooks::context_monitor::process_prompt(&input, &ctx);
+            let ctx_prompt_output = time_and_record(ctx.fs, &mk_ctx("context_monitor"), || {
+                hooks::context_monitor::process_prompt(&input, &ctx)
+            });
             output.merge(&ctx_prompt_output);
 
             // Verification gate — remind to verify before claiming completion
-            let verify_prompt_output = hooks::verification_gate::process_prompt(&input, &ctx);
+            let verify_prompt_output =
+                time_and_record(ctx.fs, &mk_ctx("verification_gate"), || {
+                    hooks::verification_gate::process_prompt(&input, &ctx)
+                });
             output.merge(&verify_prompt_output);
 
             // Activity tracker — inject session activity summary when context is elevated
-            let activity_prompt_output = hooks::activity_tracker::process_prompt(&input, &ctx);
+            let activity_prompt_output =
+                time_and_record(ctx.fs, &mk_ctx("activity_tracker"), || {
+                    hooks::activity_tracker::process_prompt(&input, &ctx)
+                });
             output.merge(&activity_prompt_output);
 
             // Hygiene reminders — inject push/worktree/changelog reminders
-            let reminders_prompt_output = hooks::hygiene_reminders::process_prompt(&input, &ctx);
+            let reminders_prompt_output =
+                time_and_record(ctx.fs, &mk_ctx("hygiene_reminders"), || {
+                    hooks::hygiene_reminders::process_prompt(&input, &ctx)
+                });
             output.merge(&reminders_prompt_output);
 
             // Memory inject — search Qdrant for semantically relevant memories
-            let memory_output = hooks::memory_inject::process(&input, &ctx);
+            let memory_output = time_and_record(ctx.fs, &mk_ctx("memory_inject"), || {
+                hooks::memory_inject::process(&input, &ctx)
+            });
             output.merge(&memory_output);
         }
 
         HookEvent::PreToolUse => {
+            // Build the fixed metrics envelope once — every wrapped hook
+            // call stamps a JSONL row through `time_and_record` with this
+            // context. Hooks themselves are unchanged; the wrapper just
+            // measures wall-clock duration and records the outcome.
+            let metrics_ctx = InvocationContext {
+                event: "PreToolUse",
+                hook: "", // overwritten per-call below via .with_hook(...)
+                tool: input.tool_name.as_deref(),
+                session_id: input.session_id.as_deref(),
+                repo_root: repo_root_for_metrics.as_deref(),
+            };
+            let mk_ctx = |hook: &'static str| InvocationContext {
+                event: metrics_ctx.event,
+                hook,
+                tool: metrics_ctx.tool,
+                session_id: metrics_ctx.session_id,
+                repo_root: metrics_ctx.repo_root,
+            };
+
             // Bug task gate — block mutating tools when a bug signal was
             // observed in tool output but no TaskCreate has filed it yet.
-            let bug_gate_output = hooks::bug_task_gate::process_pretool(&input, &ctx);
+            let bug_gate_output = time_and_record(ctx.fs, &mk_ctx("bug_task_gate"), || {
+                hooks::bug_task_gate::process_pretool(&input, &ctx)
+            });
             output.merge(&bug_gate_output);
 
             // Skill invocation gate — block tools when a skill was detected
             // by skill_router but not yet invoked. Allowlists Read/Glob/Grep/
             // Skill/Task* so the gate doesn't refuse to let Claude clear it.
-            let skill_gate_output = hooks::skill_invocation_gate::process_pretool(&input, &ctx);
+            let skill_gate_output =
+                time_and_record(ctx.fs, &mk_ctx("skill_invocation_gate"), || {
+                    hooks::skill_invocation_gate::process_pretool(&input, &ctx)
+                });
             output.merge(&skill_gate_output);
 
             // Phase gate — check workflow state + track Read() calls on phase files
-            let gate_output = hooks::phase_gate::process(&input, &mut state, &workflows, ctx.fs);
+            let gate_output = time_and_record(ctx.fs, &mk_ctx("phase_gate"), || {
+                hooks::phase_gate::process(&input, &mut state, &workflows, ctx.fs)
+            });
             output.merge(&gate_output);
 
             if gate_output.blocked == Some(true) {
@@ -327,37 +399,56 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
 
             // Git hygiene — block on protected branch without worktree + uncommitted file limit
             if matches!(input.tool_name.as_deref(), Some("Edit" | "Write")) {
-                let hygiene_output = hooks::git_hygiene::process(&input, &git, ctx.fs);
+                let hygiene_output = time_and_record(ctx.fs, &mk_ctx("git_hygiene"), || {
+                    hooks::git_hygiene::process(&input, &git, ctx.fs)
+                });
                 output.merge(&hygiene_output);
 
                 // Tool usage gate — require sequential thinking + task creation
-                let usage_output = hooks::tool_usage_gate::process(&input, ctx.fs, ctx.env);
+                let usage_output = time_and_record(ctx.fs, &mk_ctx("tool_usage_gate"), || {
+                    hooks::tool_usage_gate::process(&input, ctx.fs, ctx.env)
+                });
                 output.merge(&usage_output);
             }
 
             // Doppler/Auth0 gate — block mutation tools (any tool type)
-            let doppler_output = hooks::doppler_auth0_gate::process(&input, &ctx);
+            let doppler_output = time_and_record(ctx.fs, &mk_ctx("doppler_auth0_gate"), || {
+                hooks::doppler_auth0_gate::process(&input, &ctx)
+            });
             output.merge(&doppler_output);
 
             // Pre-commit verification — block git commit/push without test evidence (Bash only)
             if matches!(input.tool_name.as_deref(), Some("Bash")) {
-                let commit_output = hooks::pre_commit_verification::process(&input, &ctx);
+                let commit_output =
+                    time_and_record(ctx.fs, &mk_ctx("pre_commit_verification"), || {
+                        hooks::pre_commit_verification::process(&input, &ctx)
+                    });
                 output.merge(&commit_output);
 
                 // Commit message validator — enforce conventional commits (Bash only)
-                let msg_output = hooks::commit_message_validator::process(&input, &ctx);
+                let msg_output =
+                    time_and_record(ctx.fs, &mk_ctx("commit_message_validator"), || {
+                        hooks::commit_message_validator::process(&input, &ctx)
+                    });
                 output.merge(&msg_output);
 
                 // Pre-push Steel test — block git push without Steel test (Bash only)
-                let steel_output = hooks::pre_push_steel_test::process(&input, &ctx);
+                let steel_output =
+                    time_and_record(ctx.fs, &mk_ctx("pre_push_steel_test"), || {
+                        hooks::pre_push_steel_test::process(&input, &ctx)
+                    });
                 output.merge(&steel_output);
 
                 // PR merge gate — block gh pr merge without confirmation (Bash only)
-                let pr_output = hooks::pr_merge_gate::process(&input, ctx.env);
+                let pr_output = time_and_record(ctx.fs, &mk_ctx("pr_merge_gate"), || {
+                    hooks::pr_merge_gate::process(&input, ctx.env)
+                });
                 output.merge(&pr_output);
 
                 // DB ops gate — block production database operations (Bash only)
-                let db_output = hooks::db_ops_gate::process(&input);
+                let db_output = time_and_record(ctx.fs, &mk_ctx("db_ops_gate"), || {
+                    hooks::db_ops_gate::process(&input)
+                });
                 output.merge(&db_output);
             }
         }
