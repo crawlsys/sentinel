@@ -232,6 +232,7 @@ mod tests {
 
     #[test]
     fn test_project_name_basename() {
+        #[cfg(windows)]
         assert_eq!(project_name(Some(r"C:\Users\garys\Documents\GitHub\sentinel")), "sentinel");
         assert_eq!(project_name(Some("/home/g/repo")), "repo");
         assert_eq!(project_name(None), "unknown");

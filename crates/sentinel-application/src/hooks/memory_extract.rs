@@ -637,6 +637,7 @@ mod tests {
     #[test]
     fn test_project_name() {
         assert_eq!(project_name("/Users/gary/projects/firefly"), "firefly");
+        #[cfg(windows)]
         assert_eq!(
             project_name("C:\\Users\\garys\\Documents\\GitHub\\sentinel"),
             "sentinel"

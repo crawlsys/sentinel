@@ -177,8 +177,13 @@ fn pid_alive(pid: u64) -> bool {
     }
     #[cfg(not(windows))]
     {
-        // On Unix, send signal 0 to check existence
-        unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+        // On Unix, send signal 0 to check existence (safe — no libc/unsafe needed)
+        use std::process::Command;
+        Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
     }
 }
 

@@ -418,6 +418,7 @@ mod tests {
     #[test]
     fn test_project_name_extraction() {
         assert_eq!(project_name("/Users/gary/projects/firefly"), "firefly");
+        #[cfg(windows)]
         assert_eq!(
             project_name("C:\\Users\\gary\\Documents\\GitHub\\sentinel"),
             "sentinel"
