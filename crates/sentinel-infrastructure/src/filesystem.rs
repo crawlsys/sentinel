@@ -69,13 +69,26 @@ impl FileSystemPort for RealFileSystem {
         // next append. Only sentinel/metrics/*.jsonl paths are rotated;
         // other appends (state markers, manifests, etc.) are untouched.
         rotate_metrics_log_if_oversized(path);
+        // Best-effort trace_id stamping: if this is a metrics JSONL line
+        // and the payload is a parseable JSON object that doesn't already
+        // carry `trace_id`, inject it from the env var (or mint one) so
+        // every event in `~/.claude/sentinel/metrics/*.jsonl` shares the
+        // same correlation id as the handler-side launch event for the
+        // current operation. Malformed/multi-doc lines write unchanged.
+        let stamped: Vec<u8>;
+        let payload: &[u8] = if is_metrics_jsonl(path) {
+            stamped = stamp_trace_id_if_missing(content);
+            &stamped
+        } else {
+            content
+        };
         use std::io::Write;
         let mut file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(path)
             .with_context(|| format!("append open {}", path.display()))?;
-        file.write_all(content)
+        file.write_all(payload)
             .with_context(|| format!("append write {}", path.display()))
     }
 
@@ -130,6 +143,96 @@ fn is_metrics_jsonl(path: &Path) -> bool {
         .map(|e| e == "jsonl")
         .unwrap_or(false);
     in_metrics && is_jsonl
+}
+
+/// Env var that carries the current trace id between processes. Read
+/// from the inherited env when the handler spawned us; minted fresh
+/// when sentinel is the start of the chain (e.g. an interactive
+/// `accounts` CLI invocation that didn't go through `c`).
+const TRACE_ID_ENV_VAR: &str = "CLAUDE_TRACE_ID";
+
+/// Read `CLAUDE_TRACE_ID` from the env, or mint a fresh UUIDv4 if absent.
+/// Wrapped in a one-line helper so the append path can call it without
+/// every caller knowing about the env-var contract.
+fn current_trace_id() -> String {
+    current_trace_id_from(|| std::env::var(TRACE_ID_ENV_VAR).ok())
+}
+
+/// Pure-function variant for testing. The caller supplies an env-var
+/// reader closure so tests can inject Some/None without mutating
+/// process-global env (which violates `unsafe_code = forbid` in this
+/// workspace).
+fn current_trace_id_from<F: FnOnce() -> Option<String>>(read_env: F) -> String {
+    match read_env() {
+        Some(s) if !s.trim().is_empty() => s,
+        _ => uuid::Uuid::new_v4().to_string(),
+    }
+}
+
+/// Stamp `trace_id` onto a JSONL line if it parses as a single JSON
+/// object that doesn't already carry one. Returns the (possibly
+/// modified) line as bytes, with the trailing newline preserved.
+///
+/// Defensive on every edge case — observability plumbing must not break
+/// the caller's critical path:
+/// - Empty buffer or just a newline → unchanged.
+/// - Multi-line payload (rare; one writer batched several events) →
+///   each line stamped independently.
+/// - Non-JSON line, JSON array, JSON scalar → unchanged.
+/// - Already has `trace_id` → unchanged (caller wins).
+/// - Reserialization fails → original returned.
+fn stamp_trace_id_if_missing(content: &[u8]) -> Vec<u8> {
+    stamp_trace_id_if_missing_with(content, current_trace_id)
+}
+
+/// Pure-function variant for testing. The caller supplies the trace_id
+/// generator so tests can pass deterministic ids without mutating
+/// process-global env (`unsafe_code = forbid` in this workspace).
+fn stamp_trace_id_if_missing_with<F: Fn() -> String>(content: &[u8], gen_id: F) -> Vec<u8> {
+    let Ok(text) = std::str::from_utf8(content) else {
+        return content.to_vec();
+    };
+    let mut out = String::with_capacity(text.len() + 64);
+    let mut needs_stamp = false;
+    for raw in text.split_inclusive('\n') {
+        // split_inclusive keeps the trailing '\n'; strip it before parse,
+        // then put it back exactly as it was.
+        let (body, nl) = match raw.strip_suffix('\n') {
+            Some(b) => (b, "\n"),
+            None => (raw, ""),
+        };
+        if body.is_empty() {
+            out.push_str(raw);
+            continue;
+        }
+        match serde_json::from_str::<serde_json::Value>(body) {
+            Ok(serde_json::Value::Object(mut map)) => {
+                if !map.contains_key("trace_id") {
+                    map.insert(
+                        "trace_id".to_string(),
+                        serde_json::Value::String(gen_id()),
+                    );
+                    needs_stamp = true;
+                }
+                match serde_json::to_string(&serde_json::Value::Object(map)) {
+                    Ok(s) => {
+                        out.push_str(&s);
+                        out.push_str(nl);
+                    }
+                    // Reserialization should be infallible for a parsed
+                    // Value, but if it ever isn't, keep the original line.
+                    Err(_) => out.push_str(raw),
+                }
+            }
+            // Unparseable, array, or scalar — pass through unchanged.
+            _ => out.push_str(raw),
+        }
+    }
+    if needs_stamp {
+        out.into_bytes()
+    } else {
+        content.to_vec()
+    }
 }
 
 /// Best-effort: if `path` is a metrics JSONL larger than
@@ -300,5 +403,98 @@ mod tests {
         // Should not panic and should not error; just returns silently.
         rotate_metrics_log_if_oversized(&path);
         assert!(!path.exists());
+    }
+
+    // ── trace_id stamping ───────────────────────────────────────────
+
+    /// All these tests use the pure-function variants
+    /// (`stamp_trace_id_if_missing_with` / `current_trace_id_from`) that
+    /// take an injected id-generator instead of touching real env vars.
+    /// This keeps the workspace `unsafe_code = forbid` lint clean.
+
+    fn fixed_id(s: &'static str) -> impl Fn() -> String {
+        move || s.to_string()
+    }
+
+    #[test]
+    fn stamp_injects_trace_id_when_missing() {
+        let stamped = stamp_trace_id_if_missing_with(
+            b"{\"event\":\"foo\"}\n",
+            fixed_id("test-stamp-fixed-id"),
+        );
+        let s = String::from_utf8(stamped).unwrap();
+        assert!(s.contains("\"trace_id\":\"test-stamp-fixed-id\""), "got {s}");
+        assert!(s.contains("\"event\":\"foo\""));
+        assert!(s.ends_with('\n'));
+    }
+
+    #[test]
+    fn stamp_preserves_existing_trace_id() {
+        let stamped = stamp_trace_id_if_missing_with(
+            b"{\"event\":\"foo\",\"trace_id\":\"caller-id\"}\n",
+            fixed_id("env-id-should-not-win"),
+        );
+        let s = String::from_utf8(stamped).unwrap();
+        assert!(s.contains("\"trace_id\":\"caller-id\""));
+        assert!(!s.contains("env-id-should-not-win"));
+    }
+
+    #[test]
+    fn stamp_passes_through_unparseable_lines() {
+        let raw = b"not even json\n";
+        let stamped = stamp_trace_id_if_missing_with(raw, fixed_id("trace-fixed"));
+        assert_eq!(stamped, raw.to_vec());
+    }
+
+    #[test]
+    fn stamp_passes_through_json_array() {
+        let raw = b"[1,2,3]\n";
+        let stamped = stamp_trace_id_if_missing_with(raw, fixed_id("trace-fixed"));
+        assert_eq!(stamped, raw.to_vec());
+    }
+
+    #[test]
+    fn stamp_handles_multiple_lines_independently() {
+        let raw = b"{\"a\":1}\n{\"b\":2,\"trace_id\":\"already-set\"}\nbroken line\n";
+        let stamped = stamp_trace_id_if_missing_with(raw, fixed_id("multi-line-id"));
+        let s = String::from_utf8(stamped).unwrap();
+        // First line gets stamped
+        assert!(s.contains("\"a\":1") && s.contains("\"trace_id\":\"multi-line-id\""));
+        // Second line keeps its own trace_id
+        assert!(s.contains("\"b\":2") && s.contains("\"trace_id\":\"already-set\""));
+        // Third line passes through verbatim
+        assert!(s.contains("broken line"));
+    }
+
+    #[test]
+    fn stamp_no_op_if_no_objects_need_stamping() {
+        let raw = b"{\"trace_id\":\"x\"}\n";
+        let stamped = stamp_trace_id_if_missing_with(raw, fixed_id("trace-fixed"));
+        // Returns the original buffer when no edit happened — preserves
+        // byte-for-byte equality (no reserialization-induced reformatting).
+        assert_eq!(stamped, raw.to_vec());
+    }
+
+    #[test]
+    fn current_trace_id_from_uses_supplied_value() {
+        assert_eq!(
+            current_trace_id_from(|| Some("env-supplied-id".into())),
+            "env-supplied-id"
+        );
+    }
+
+    #[test]
+    fn current_trace_id_from_mints_uuid_when_env_unset() {
+        let id = current_trace_id_from(|| None);
+        // UUIDv4 shape: 8-4-4-4-12 hex
+        assert_eq!(id.len(), 36);
+        assert_eq!(id.matches('-').count(), 4);
+    }
+
+    #[test]
+    fn current_trace_id_from_treats_blank_as_missing() {
+        let id = current_trace_id_from(|| Some("   ".into()));
+        // Blank/whitespace value is treated as unset → fresh UUID
+        assert_eq!(id.len(), 36);
     }
 }
