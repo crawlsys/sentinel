@@ -149,6 +149,21 @@ fn is_metrics_jsonl(path: &Path) -> bool {
 /// from the inherited env when the handler spawned us; minted fresh
 /// when sentinel is the start of the chain (e.g. an interactive
 /// `accounts` CLI invocation that didn't go through `c`).
+///
+/// CONTRACT (cross-crate, must stay in sync — single source of truth
+/// is the env-var name, not the helper impl):
+/// - Var name: literal `"CLAUDE_TRACE_ID"`. Same string is duplicated in
+///   `accounts-application/src/trace.rs::TRACE_ID_ENV_VAR` (public). If
+///   one ever changes, both must.
+/// - Empty/whitespace value is treated as unset.
+/// - Fallback is a fresh UUIDv4 string in 8-4-4-4-12 hex with version
+///   bits 4 and RFC 4122 variant bits set. accounts-application uses
+///   `mint_token_lineage` (inline format); sentinel uses the `uuid`
+///   crate's `Uuid::new_v4().to_string()`. Same wire shape.
+/// - Result is a String, no validation on read (callers don't care
+///   whether the inherited value is a valid UUID — they care only
+///   that two events with the same `trace_id` came from the same
+///   user-initiated operation).
 const TRACE_ID_ENV_VAR: &str = "CLAUDE_TRACE_ID";
 
 /// Read `CLAUDE_TRACE_ID` from the env, or mint a fresh UUIDv4 if absent.
@@ -496,5 +511,18 @@ mod tests {
         let id = current_trace_id_from(|| Some("   ".into()));
         // Blank/whitespace value is treated as unset → fresh UUID
         assert_eq!(id.len(), 36);
+    }
+
+    /// Cross-crate contract regression test (task #18). The literal
+    /// env-var name MUST match what `accounts-application` reads.
+    /// If this string ever changes here, the matching constant in
+    /// `accounts-application/src/trace.rs::TRACE_ID_ENV_VAR` must
+    /// change in lock-step or events emitted by handler-side launches
+    /// will stop being correlated with sentinel hook events.
+    #[test]
+    fn env_var_name_is_stable() {
+        assert_eq!(TRACE_ID_ENV_VAR, "CLAUDE_TRACE_ID",
+            "TRACE_ID_ENV_VAR is part of the cross-crate contract — \
+             change requires matching update in accounts-application");
     }
 }
