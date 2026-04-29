@@ -9,16 +9,20 @@ use sentinel_domain::events::{HookEvent, HookInput, HookOutput};
 ///
 /// Injects context reminding the teammate to check for remaining work.
 pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
-    let teammate_name = input
-        .extra
-        .get("teammate_name")
-        .and_then(|v| v.as_str())
-        .unwrap_or("unknown");
+    // SEN-1: drop malformed TeammateIdle events. If the dispatcher didn't
+    // populate teammate_name with a real value, the event is malformed —
+    // emitting "Teammate 'unknown' (team: unknown) is going idle" just
+    // spams the lead session.
+    let teammate_name = match input.extra.get("teammate_name").and_then(|v| v.as_str()) {
+        Some(s) if !s.is_empty() && s != "unknown" => s,
+        _ => return HookOutput::allow(),
+    };
 
     let team_name = input
         .extra
         .get("team_name")
         .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
         .unwrap_or("unknown");
 
     // Inject a reminder to check task list before going idle
@@ -84,13 +88,25 @@ mod tests {
     }
 
     #[test]
-    fn test_teammate_idle_handles_missing_fields() {
+    fn test_teammate_idle_drops_event_when_teammate_name_missing() {
+        // SEN-1: a TeammateIdle event without a real teammate_name is
+        // malformed and must be dropped.
         let input = HookInput::default();
         let ctx = crate::hooks::test_support::stub_ctx();
         let output = process(&input, &ctx);
-        assert!(output.hook_specific_output.is_some());
-        let ctx = output.hook_specific_output.unwrap().additional_context;
-        let ctx = ctx.as_deref().unwrap();
-        assert!(ctx.contains("unknown"));
+        assert!(output.hook_specific_output.is_none());
+    }
+
+    #[test]
+    fn test_teammate_idle_drops_event_when_teammate_name_is_unknown_literal() {
+        // SEN-1: also drop events where the upstream populated the literal
+        // string "unknown".
+        let mut input = HookInput::default();
+        input
+            .extra
+            .insert("teammate_name".to_string(), serde_json::json!("unknown"));
+        let ctx = crate::hooks::test_support::stub_ctx();
+        let output = process(&input, &ctx);
+        assert!(output.hook_specific_output.is_none());
     }
 }

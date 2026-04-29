@@ -38,29 +38,31 @@ fn extract_linear_id(subject: &str) -> Option<&str> {
 /// Injects context reminding the teammate to verify before marking complete.
 /// If the task subject contains `@linear:{ID}`, also injects Linear sync instructions.
 pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
-    let task_subject = input
-        .extra
-        .get("task_subject")
-        .and_then(|v| v.as_str())
-        .unwrap_or("unknown task");
+    // SEN-1: drop malformed TaskCompleted events. If the upstream hook
+    // dispatcher didn't populate task_id / task_subject / teammate_name with
+    // real values, the event is malformed — emitting it just spams the
+    // session with "Task #? completed: 'unknown task' (by unknown)" lines.
+    let task_subject = match input.extra.get("task_subject").and_then(|v| v.as_str()) {
+        Some(s) if !s.is_empty() && s != "unknown task" => s,
+        _ => return HookOutput::allow(),
+    };
 
-    let teammate_name = input
-        .extra
-        .get("teammate_name")
-        .and_then(|v| v.as_str())
-        .unwrap_or("unknown");
+    let teammate_name = match input.extra.get("teammate_name").and_then(|v| v.as_str()) {
+        Some(s) if !s.is_empty() && s != "unknown" => s,
+        _ => return HookOutput::allow(),
+    };
 
     let team_name = input
         .extra
         .get("team_name")
         .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
         .unwrap_or("unknown");
 
-    let task_id = input
-        .extra
-        .get("task_id")
-        .and_then(|v| v.as_str())
-        .unwrap_or("?");
+    let task_id = match input.extra.get("task_id").and_then(|v| v.as_str()) {
+        Some(s) if !s.is_empty() && s != "?" => s,
+        _ => return HookOutput::allow(),
+    };
 
     // Base verification reminder
     let mut context = format!(
@@ -186,14 +188,36 @@ mod tests {
     }
 
     #[test]
-    fn test_task_completed_handles_missing_fields() {
+    fn test_task_completed_drops_event_when_required_fields_missing() {
+        // SEN-1: events without real task_id / task_subject / teammate_name
+        // are malformed and must be dropped, not surfaced as
+        // "Task #? completed: 'unknown task' (by unknown)" notifications.
         let input = HookInput::default();
         let ctx = crate::hooks::test_support::stub_ctx();
         let output = process(&input, &ctx);
-        assert!(output.hook_specific_output.is_some());
-        let ctx = output.hook_specific_output.unwrap().additional_context;
-        let ctx = ctx.as_deref().unwrap();
-        assert!(ctx.contains("unknown task"));
+        assert!(
+            output.hook_specific_output.is_none(),
+            "malformed TaskCompleted must produce no output"
+        );
+    }
+
+    #[test]
+    fn test_task_completed_drops_event_when_fields_are_unknown_literals() {
+        // SEN-1: also drop events where the dispatcher populated the literal
+        // placeholders ("?", "unknown task", "unknown").
+        let mut input = HookInput::default();
+        input
+            .extra
+            .insert("task_id".to_string(), serde_json::json!("?"));
+        input
+            .extra
+            .insert("task_subject".to_string(), serde_json::json!("unknown task"));
+        input
+            .extra
+            .insert("teammate_name".to_string(), serde_json::json!("unknown"));
+        let ctx = crate::hooks::test_support::stub_ctx();
+        let output = process(&input, &ctx);
+        assert!(output.hook_specific_output.is_none());
     }
 
     #[test]
