@@ -8,7 +8,53 @@
 //! - `git push` to a branch (not main) → check CI results
 //! - `git merge` to main → verify push + changelog
 
+use std::path::{Path, PathBuf};
+
 use sentinel_domain::events::{HookEvent, HookInput, HookOutput};
+
+/// Detect whether the repo at `cwd` has at least one git remote configured.
+///
+/// SEN-3 fix: avoid recommending `git push` when the user has no remote yet.
+/// We read `<cwd>/.git/config` directly (no subprocess, no latency) and look
+/// for any `[remote "..."]` section. Worktrees have a `.git` *file* that
+/// points at the main repo's `.git/config`, so we follow that pointer.
+fn has_git_remote(cwd: Option<&str>) -> bool {
+    let Some(cwd) = cwd else {
+        // Without a cwd we can't check — be conservative and assume yes,
+        // matching the legacy behavior (recommend push by default).
+        return true;
+    };
+    let cwd = Path::new(cwd);
+    let Some(config_path) = git_config_path(cwd) else {
+        return true; // not in a git repo we can probe — fall back to legacy
+    };
+    let Ok(content) = std::fs::read_to_string(&config_path) else {
+        return true;
+    };
+    content
+        .lines()
+        .any(|line| line.trim_start().starts_with("[remote "))
+}
+
+/// Resolve the git config path for `cwd`, following worktree pointers.
+fn git_config_path(cwd: &Path) -> Option<PathBuf> {
+    let mut cur = Some(cwd);
+    while let Some(dir) = cur {
+        let dot_git = dir.join(".git");
+        if dot_git.is_dir() {
+            return Some(dot_git.join("config"));
+        }
+        if dot_git.is_file() {
+            // Worktree: contents look like `gitdir: /path/to/main/.git/worktrees/<name>`
+            let content = std::fs::read_to_string(&dot_git).ok()?;
+            let gitdir = content.trim().strip_prefix("gitdir: ")?;
+            let gitdir = Path::new(gitdir.trim());
+            return gitdir.parent().and_then(|p| p.parent()).map(|p| p.join("config"));
+        }
+        cur = dir.parent();
+    }
+    None
+}
 
 /// Process a PostToolUse Bash event for PR-related commands.
 pub fn process(input: &HookInput) -> HookOutput {
@@ -53,13 +99,19 @@ pub fn process(input: &HookInput) -> HookOutput {
     if (cmd.contains("git merge") && (cmd.contains("main") || cmd.contains("--no-edit")))
         || cmd.contains("git merge --no-edit")
     {
-        let mut msg = String::from(
+        // SEN-3: only suggest `git push` when a remote is actually configured.
+        let push_step = if has_git_remote(input.cwd.as_deref()) {
+            "1. Push to remote: `git push`"
+        } else {
+            "1. Configure a remote (`git remote add origin <url>`) before the first push"
+        };
+        let mut msg = format!(
             "[PR Auto-Monitor] Merge to main detected. Verify:\n\
-             1. Push to remote: `git push`\n\
+             {push_step}\n\
              2. Check CHANGELOG.md was updated\n\
              3. Clean up: `ExitWorktree(action: \"remove\")` for the active worktree, \
              `git branch -d <branch>` for the merged local branch, and \
-             `git push origin --delete <branch>` if the branch was pushed to origin",
+             `git push origin --delete <branch>` if the branch was pushed to origin"
         );
         if let Some(branch) = extract_worktree_branch_name(cmd) {
             msg.push_str(&format!(
@@ -188,6 +240,76 @@ mod tests {
         assert!(process(&HookInput::default())
             .hook_specific_output
             .is_none());
+    }
+
+    #[test]
+    fn test_merge_with_no_remote_suggests_remote_add() {
+        // SEN-3: no [remote "..."] in .git/config → swap "git push" for
+        // "Configure a remote..."
+        let tmp = tempfile::TempDir::new().unwrap();
+        let git_dir = tmp.path().join(".git");
+        std::fs::create_dir_all(&git_dir).unwrap();
+        std::fs::write(
+            git_dir.join("config"),
+            "[core]\n\trepositoryformatversion = 0\n",
+        )
+        .unwrap();
+
+        let input = HookInput {
+            tool_name: Some("Bash".to_string()),
+            tool_input: Some(
+                serde_json::json!({"command": "git merge feat/foo --no-edit"}),
+            ),
+            cwd: Some(tmp.path().to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+        let output = process(&input);
+        let ctx = output
+            .hook_specific_output
+            .as_ref()
+            .and_then(|h| h.additional_context.as_deref())
+            .expect("merge to main should inject context");
+        assert!(
+            !ctx.contains("Push to remote: `git push`"),
+            "no-remote merge must NOT recommend git push, got: {ctx}"
+        );
+        assert!(
+            ctx.contains("Configure a remote"),
+            "no-remote merge should recommend `remote add`, got: {ctx}"
+        );
+    }
+
+    #[test]
+    fn test_merge_with_remote_suggests_git_push() {
+        // SEN-3 regression: remote configured → legacy "git push" still appears.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let git_dir = tmp.path().join(".git");
+        std::fs::create_dir_all(&git_dir).unwrap();
+        std::fs::write(
+            git_dir.join("config"),
+            "[core]\n\trepositoryformatversion = 0\n\
+             [remote \"origin\"]\n\turl = git@github.com:foo/bar.git\n",
+        )
+        .unwrap();
+
+        let input = HookInput {
+            tool_name: Some("Bash".to_string()),
+            tool_input: Some(
+                serde_json::json!({"command": "git merge feat/foo --no-edit"}),
+            ),
+            cwd: Some(tmp.path().to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+        let output = process(&input);
+        let ctx = output
+            .hook_specific_output
+            .as_ref()
+            .and_then(|h| h.additional_context.as_deref())
+            .expect("merge to main should inject context");
+        assert!(
+            ctx.contains("Push to remote: `git push`"),
+            "remote-configured merge must recommend git push, got: {ctx}"
+        );
     }
 
     #[test]
