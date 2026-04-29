@@ -177,6 +177,65 @@ fn write_routing_entry(
 
 /// Process a skill-router hook event via Opus AI classification.
 ///
+/// Strip injected hook context (`<system-reminder>` blocks, `<channel>`
+/// blocks, and standalone `[Bracketed Tag]` reminder lines) from a prompt
+/// before classification.
+///
+/// SEN-2 fix: previously the AI classifier would route on words appearing in
+/// hook-injected reminders (e.g., the literal `[Worktree Cleanup]` reminder
+/// line caused the `cleanup` skill to fire). Strip those out so only the
+/// actual user message body drives routing.
+fn strip_hook_context(prompt: &str) -> String {
+    // Remove all <system-reminder>...</system-reminder> blocks (multi-line).
+    let mut buf = String::with_capacity(prompt.len());
+    let mut rest = prompt;
+    loop {
+        let Some(start) = rest.find("<system-reminder>") else {
+            break;
+        };
+        buf.push_str(&rest[..start]);
+        let after = &rest[start + "<system-reminder>".len()..];
+        if let Some(end) = after.find("</system-reminder>") {
+            rest = &after[end + "</system-reminder>".len()..];
+        } else {
+            rest = "";
+            break;
+        }
+    }
+    buf.push_str(rest);
+
+    // Remove all <channel ...>...</channel> blocks.
+    let with_reminders_stripped = buf.clone();
+    let mut buf2 = String::with_capacity(with_reminders_stripped.len());
+    let mut rest = with_reminders_stripped.as_str();
+    loop {
+        let Some(start) = rest.find("<channel ").or_else(|| rest.find("<channel>")) else {
+            break;
+        };
+        buf2.push_str(&rest[..start]);
+        let after = &rest[start..];
+        if let Some(end) = after.find("</channel>") {
+            rest = &after[end + "</channel>".len()..];
+        } else {
+            rest = "";
+            break;
+        }
+    }
+    buf2.push_str(rest);
+
+    // Drop standalone "[Bracketed Tag] ..." reminder lines.
+    buf2.lines()
+        .filter(|line| {
+            let t = line.trim_start();
+            let stripped = t.trim_start_matches(|c: char| !c.is_ascii_alphabetic() && c != '[');
+            !stripped.starts_with('[')
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_string()
+}
+
 /// ALL routing goes through Claude Opus 4.6 — slash commands, natural
 /// language, typos, everything. No regex fallback. Opus understands
 /// "/commti" is a typo for "commit" and "migrate hooks to ports" means
@@ -188,9 +247,18 @@ pub async fn process(
     classifier: Option<&dyn crate::classifier::AiClassifier>,
     fs: &dyn FileSystemPort,
 ) -> HookOutput {
-    let prompt = match &input.prompt {
-        Some(p) if !p.trim().is_empty() => p,
+    let raw_prompt = match &input.prompt {
+        Some(p) if !p.trim().is_empty() => p.as_str(),
         _ => return HookOutput::allow(),
+    };
+
+    // SEN-2: classify on the cleaned user-message body, not on injected
+    // hook reminders / channel events / system-reminder blocks.
+    let cleaned = strip_hook_context(raw_prompt);
+    let prompt: &str = if cleaned.is_empty() {
+        return HookOutput::allow();
+    } else {
+        &cleaned
     };
 
     // AI classification — Opus classifies everything
@@ -354,6 +422,44 @@ mod tests {
             .as_ref()
             .and_then(|h| h.additional_context.as_deref());
         assert!(ctx.unwrap().contains("No skill matched"));
+    }
+
+    #[test]
+    fn test_strip_hook_context_removes_system_reminders() {
+        // SEN-2: <system-reminder>...</system-reminder> blocks are removed.
+        let input = "tell me a joke\n<system-reminder>\n[Worktree Cleanup] 4 stale worktree(s) found\n</system-reminder>";
+        let cleaned = strip_hook_context(input);
+        assert_eq!(cleaned, "tell me a joke");
+        assert!(!cleaned.contains("Cleanup"));
+    }
+
+    #[test]
+    fn test_strip_hook_context_removes_channel_blocks() {
+        let input = "do the thing\n<channel source=\"sentinel\" event=\"task_completed\">noise</channel>";
+        let cleaned = strip_hook_context(input);
+        assert_eq!(cleaned, "do the thing");
+    }
+
+    #[test]
+    fn test_strip_hook_context_removes_bracketed_reminder_lines() {
+        // SEN-2: bare bracketed reminder lines are removed too.
+        let input = "build the next feature\n[Worktree Cleanup] 4 stale worktree(s) found";
+        let cleaned = strip_hook_context(input);
+        assert_eq!(cleaned, "build the next feature");
+    }
+
+    #[test]
+    fn test_strip_hook_context_keeps_pure_user_text() {
+        let input = "implement the auth flow";
+        let cleaned = strip_hook_context(input);
+        assert_eq!(cleaned, "implement the auth flow");
+    }
+
+    #[test]
+    fn test_strip_hook_context_returns_empty_when_only_hook_context() {
+        let input = "<system-reminder>[Worktree Reminder] xyz</system-reminder>";
+        let cleaned = strip_hook_context(input);
+        assert_eq!(cleaned, "");
     }
 
     #[test]
