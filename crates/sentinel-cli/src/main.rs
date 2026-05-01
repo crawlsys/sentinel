@@ -25,6 +25,7 @@ mod scan_cmd;
 mod stage_cmd;
 mod stats_cmd;
 mod steel_test_cmd;
+mod tokens_cmd;
 mod verify_cmd;
 
 /// Sentinel — Proof-of-Work for AI Skill Execution
@@ -116,6 +117,12 @@ enum Commands {
     Stats {
         #[command(subcommand)]
         action: Option<StatsAction>,
+    },
+
+    /// Aggregate session JSONL token usage by Linear ticket (SEN-7)
+    Tokens {
+        #[command(subcommand)]
+        action: TokensAction,
     },
 
     /// Manage Steel browser test state
@@ -246,6 +253,17 @@ enum StatsAction {
 }
 
 #[derive(Subcommand)]
+enum TokensAction {
+    /// Walk ~/.claude/projects/, aggregate per-ticket token cost,
+    /// write ~/.claude/sentinel/metrics/tokens-per-ticket.jsonl.
+    Scan {
+        /// Number of top-cost tickets to print (default 10)
+        #[arg(long, default_value_t = 10)]
+        top: usize,
+    },
+}
+
+#[derive(Subcommand)]
 enum SteelTestAction {
     /// Record a passing browser test for the current session
     Record {
@@ -299,6 +317,9 @@ async fn main() -> anyhow::Result<()> {
         Commands::Stats { action } => match action {
             None => stats_cmd::run(),
             Some(StatsAction::Hooks { limit, hours }) => stats_cmd::run_hooks(limit, hours),
+        },
+        Commands::Tokens { action } => match action {
+            TokensAction::Scan { top } => tokens_cmd::run(top),
         },
         Commands::SteelTest { action } => match action {
             SteelTestAction::Record { session } => steel_test_cmd::record(session),

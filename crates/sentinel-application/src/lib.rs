@@ -18,5 +18,6 @@ pub mod ntfy_push;
 pub mod project_init;
 pub mod proof_engine;
 pub mod scanner;
+pub mod tokens;
 pub mod verifier;
 pub mod webhook_replay;

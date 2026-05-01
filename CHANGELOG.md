@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added
+
+- **Tokens-per-ticket aggregator (SEN-7)**: new `sentinel tokens scan` CLI subcommand walks `~/.claude/projects/*/` for session JSONL files, extracts the Linear ticket id from the worktree path slug first (high-confidence) and grep of the first 50 user prompts second (medium-confidence), aggregates `usage` blocks across every `assistant` message in the session, applies per-model Anthropic pricing via the new `sentinel_domain::pricing` module, and writes one `{ticket, sessions, total_input, cache_read, cache_creation, output, cost_usd, models, confidence}` row per ticket to `~/.claude/sentinel/metrics/tokens-per-ticket.jsonl`. Output is full-overwrite each scan — input session JSONLs are the source of truth so re-scanning is idempotent. Pricing tiers (Opus / Sonnet / Haiku) are hardcoded constants for now; TODO move to a TOML lookup in a follow-up. Stdout report prints total sessions, mapping coverage %, and top-N most expensive tickets. Known prefix allow-list (FPCRM, FPFIELD, FPROUTE, FPMD, FPTRIBU, LEG, COR, EXA, SYN, TES, TRI, SEN) keeps `HTTP-200`-style false positives out. 15 unit tests cover path-slug extraction, prompt grep with cap, cost computation against published rates, and an end-to-end fixture scan.
+
 ### Fixed
 
 - **Drop malformed `task_completed` / `teammate_idle` channel events (SEN-1)**: both hooks previously fell back to placeholder strings (`"?"`, `"unknown task"`, `"unknown"`) when `input.extra` was missing required fields, then emitted those placeholders as channel notifications. The result: lead sessions saw a constant trickle of `"Task #? completed: 'unknown task' (by unknown)"` and `"Teammate 'unknown' (team: unknown) is going idle"` notifications for every malformed dispatch. Both hooks now `return HookOutput::allow()` without emitting when any of `task_id` / `task_subject` / `teammate_name` is missing or contains the literal placeholder. 4 new unit tests pin both the missing-fields and unknown-literals branches.
