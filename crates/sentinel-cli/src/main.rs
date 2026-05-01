@@ -23,6 +23,7 @@ mod init_cmd;
 mod mcp_cmd;
 mod pr_review_cmd;
 mod resign_cmd;
+mod roi_cmd;
 mod rotate_key_cmd;
 mod scan_cmd;
 mod stage_cmd;
@@ -145,6 +146,13 @@ enum Commands {
     Cache {
         #[command(subcommand)]
         action: CacheAction,
+    },
+
+    /// ROI vs human-team baseline — joins SEN-7 + SEN-13 to compute
+    /// $ Claude spent vs $ a human team would spend (SEN-15).
+    Roi {
+        #[command(subcommand)]
+        action: RoiAction,
     },
 
     /// Manage Steel browser test state
@@ -315,6 +323,14 @@ enum CacheAction {
 }
 
 #[derive(Subcommand)]
+enum RoiAction {
+    /// Join SEN-7 tokens-per-ticket data with SEN-13 cost-per-point
+    /// summary, project ROI vs $327/point human baseline, write
+    /// ~/.claude/sentinel/metrics/roi.{jsonl,-summary.json}.
+    Scan,
+}
+
+#[derive(Subcommand)]
 enum SteelTestAction {
     /// Record a passing browser test for the current session
     Record {
@@ -380,6 +396,9 @@ async fn main() -> anyhow::Result<()> {
         },
         Commands::Cache { action } => match action {
             CacheAction::Scan { top } => cache_cmd::run(top),
+        },
+        Commands::Roi { action } => match action {
+            RoiAction::Scan => roi_cmd::run(),
         },
         Commands::SteelTest { action } => match action {
             SteelTestAction::Record { session } => steel_test_cmd::record(session),
