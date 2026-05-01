@@ -4,6 +4,7 @@
 //! infrastructure ports for hook execution, proof management,
 //! AI judging, and MCP tool handling.
 
+pub mod cache_efficiency;
 pub mod channel_events;
 pub mod classifier;
 pub mod cost_per_point;

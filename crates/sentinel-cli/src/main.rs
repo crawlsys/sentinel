@@ -13,6 +13,7 @@ use tracing_subscriber::EnvFilter;
 
 mod api;
 mod break_cmd;
+mod cache_cmd;
 mod claude_md_cmd;
 mod config_cmd;
 mod cost_per_point_cmd;
@@ -138,6 +139,12 @@ enum Commands {
     CostPerPoint {
         #[command(subcommand)]
         action: CostPerPointAction,
+    },
+
+    /// Scan prompt-cache hit rate across all sessions (SEN-14)
+    Cache {
+        #[command(subcommand)]
+        action: CacheAction,
     },
 
     /// Manage Steel browser test state
@@ -297,6 +304,17 @@ enum CostPerPointAction {
 }
 
 #[derive(Subcommand)]
+enum CacheAction {
+    /// Walk ~/.claude/projects/, compute per-session cache hit rate,
+    /// write ~/.claude/sentinel/metrics/cache-efficiency.{jsonl,-summary.json}.
+    Scan {
+        /// Number of worst sessions to print (default 10)
+        #[arg(long, default_value_t = 10)]
+        top: usize,
+    },
+}
+
+#[derive(Subcommand)]
 enum SteelTestAction {
     /// Record a passing browser test for the current session
     Record {
@@ -359,6 +377,9 @@ async fn main() -> anyhow::Result<()> {
         },
         Commands::CostPerPoint { action } => match action {
             CostPerPointAction::Scan => cost_per_point_cmd::run(),
+        },
+        Commands::Cache { action } => match action {
+            CacheAction::Scan { top } => cache_cmd::run(top),
         },
         Commands::SteelTest { action } => match action {
             SteelTestAction::Record { session } => steel_test_cmd::record(session),
