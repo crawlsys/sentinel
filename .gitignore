@@ -3,3 +3,10 @@
 *.swo
 .env
 .claude/worktrees/
+
+# apps/dashboard (Next.js)
+apps/dashboard/node_modules/
+apps/dashboard/.next/
+apps/dashboard/dist/
+apps/dashboard/.env.local
+apps/dashboard/coverage/
