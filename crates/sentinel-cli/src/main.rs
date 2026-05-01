@@ -13,6 +13,7 @@ use tracing_subscriber::EnvFilter;
 
 mod api;
 mod break_cmd;
+mod cache_cmd;
 mod claude_md_cmd;
 mod config_cmd;
 mod daemon_cmd;
@@ -123,6 +124,12 @@ enum Commands {
     Tokens {
         #[command(subcommand)]
         action: TokensAction,
+    },
+
+    /// Scan prompt-cache hit rate across all sessions (SEN-14)
+    Cache {
+        #[command(subcommand)]
+        action: CacheAction,
     },
 
     /// Manage Steel browser test state
@@ -264,6 +271,17 @@ enum TokensAction {
 }
 
 #[derive(Subcommand)]
+enum CacheAction {
+    /// Walk ~/.claude/projects/, compute per-session cache hit rate,
+    /// write ~/.claude/sentinel/metrics/cache-efficiency.{jsonl,-summary.json}.
+    Scan {
+        /// Number of worst sessions to print (default 10)
+        #[arg(long, default_value_t = 10)]
+        top: usize,
+    },
+}
+
+#[derive(Subcommand)]
 enum SteelTestAction {
     /// Record a passing browser test for the current session
     Record {
@@ -320,6 +338,9 @@ async fn main() -> anyhow::Result<()> {
         },
         Commands::Tokens { action } => match action {
             TokensAction::Scan { top } => tokens_cmd::run(top),
+        },
+        Commands::Cache { action } => match action {
+            CacheAction::Scan { top } => cache_cmd::run(top),
         },
         Commands::SteelTest { action } => match action {
             SteelTestAction::Record { session } => steel_test_cmd::record(session),
