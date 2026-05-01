@@ -137,3 +137,33 @@ pub const PLAN_FILE_FRESH_WINDOW: Duration = Duration::from_secs(7 * 24 * 60 * 6
 /// One day matches `DEP_CHECK_CACHE_TTL` numerically but the meanings are
 /// independent — kept distinct so they can drift apart later.
 pub const STALE_SESSION_EVENTS_AGE: Duration = Duration::from_secs(24 * 60 * 60);
+
+// ---------------------------------------------------------------------------
+// Human-team baseline (SEN-15 ROI)
+// ---------------------------------------------------------------------------
+
+/// Fully-loaded mid-level engineer cost per year (USD). Includes salary,
+/// benefits, taxes, equipment, office overhead. $170k is the conservative
+/// US-based mid-level rate at writing.
+pub const HUMAN_FULLY_LOADED_USD_PER_YEAR: f64 = 170_000.0;
+
+/// Fully-loaded engineer cost per working day (USD). Derived as
+/// `HUMAN_FULLY_LOADED_USD_PER_YEAR / 260` (52 weeks * 5 working days).
+/// Stored as a constant rather than computed so the ROI rollup is
+/// deterministic and reviewers don't have to retrace the arithmetic.
+pub const HUMAN_FULLY_LOADED_USD_PER_DAY: f64 = 654.0;
+
+/// Average mid-level developer velocity expressed as days per story
+/// point. Derived from "10 points per week = 0.5 days per point" — a
+/// commonly cited team-velocity benchmark. Override per project if your
+/// team's actual velocity differs materially.
+pub const HUMAN_DAYS_PER_POINT: f64 = 0.5;
+
+/// Fully-loaded human cost per story point (USD). Equal to
+/// `HUMAN_FULLY_LOADED_USD_PER_DAY * HUMAN_DAYS_PER_POINT` ($654 * 0.5 = $327).
+/// This is the headline divisor in the ROI ratio.
+pub const HUMAN_USD_PER_POINT: f64 = 327.0;
+
+/// Working days per year used to project annual savings from a per-day
+/// or per-point delta. 260 = 52 * 5.
+pub const HUMAN_WORKING_DAYS_PER_YEAR: f64 = 260.0;
