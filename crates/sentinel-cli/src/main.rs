@@ -19,6 +19,7 @@ mod daemon_cmd;
 mod hook_cmd;
 mod init_cmd;
 mod mcp_cmd;
+mod pr_review_cmd;
 mod resign_cmd;
 mod rotate_key_cmd;
 mod scan_cmd;
@@ -123,6 +124,12 @@ enum Commands {
     Tokens {
         #[command(subcommand)]
         action: TokensAction,
+    },
+
+    /// PR review thoroughness + Codex/CodeRabbit metrics (SEN-18)
+    PrReview {
+        #[command(subcommand)]
+        action: PrReviewAction,
     },
 
     /// Manage Steel browser test state
@@ -264,6 +271,17 @@ enum TokensAction {
 }
 
 #[derive(Subcommand)]
+enum PrReviewAction {
+    /// Walk merged PRs across firefly-pro + sentinel via `gh`,
+    /// write pr-review.jsonl + pr-review-summary.json.
+    Scan {
+        /// Window in days to scan (default 30)
+        #[arg(long, default_value_t = 30)]
+        days: u32,
+    },
+}
+
+#[derive(Subcommand)]
 enum SteelTestAction {
     /// Record a passing browser test for the current session
     Record {
@@ -320,6 +338,9 @@ async fn main() -> anyhow::Result<()> {
         },
         Commands::Tokens { action } => match action {
             TokensAction::Scan { top } => tokens_cmd::run(top),
+        },
+        Commands::PrReview { action } => match action {
+            PrReviewAction::Scan { days } => pr_review_cmd::run(days),
         },
         Commands::SteelTest { action } => match action {
             SteelTestAction::Record { session } => steel_test_cmd::record(session),
