@@ -15,6 +15,7 @@ mod api;
 mod break_cmd;
 mod claude_md_cmd;
 mod config_cmd;
+mod cost_per_point_cmd;
 mod daemon_cmd;
 mod hook_cmd;
 mod init_cmd;
@@ -130,6 +131,13 @@ enum Commands {
     PrReview {
         #[command(subcommand)]
         action: PrReviewAction,
+    },
+
+    /// Join SEN-7 token data with Linear estimates → tokens & $ per
+    /// story point, per estimate bucket, with drift detection (SEN-13).
+    CostPerPoint {
+        #[command(subcommand)]
+        action: CostPerPointAction,
     },
 
     /// Manage Steel browser test state
@@ -282,6 +290,13 @@ enum PrReviewAction {
 }
 
 #[derive(Subcommand)]
+enum CostPerPointAction {
+    /// Join tokens-per-ticket.jsonl with Linear estimates, write
+    /// ~/.claude/sentinel/metrics/cost-per-point.{jsonl,-summary.json}.
+    Scan,
+}
+
+#[derive(Subcommand)]
 enum SteelTestAction {
     /// Record a passing browser test for the current session
     Record {
@@ -341,6 +356,9 @@ async fn main() -> anyhow::Result<()> {
         },
         Commands::PrReview { action } => match action {
             PrReviewAction::Scan { days } => pr_review_cmd::run(days),
+        },
+        Commands::CostPerPoint { action } => match action {
+            CostPerPointAction::Scan => cost_per_point_cmd::run(),
         },
         Commands::SteelTest { action } => match action {
             SteelTestAction::Record { session } => steel_test_cmd::record(session),
