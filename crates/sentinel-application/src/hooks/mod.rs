@@ -58,6 +58,7 @@ pub mod task_coverage_check;
 pub mod task_created;
 pub mod task_persist;
 pub mod task_rehydrate;
+pub mod tasks_md_guard;
 pub mod teammate_idle;
 pub mod todo_interceptor;
 pub mod todo_loader;
@@ -135,6 +136,7 @@ pub const HOOK_NAMES: &[&str] = &[
     "task_created",
     "task_persist",
     "task_rehydrate",
+    "tasks_md_guard",
     "teammate_idle",
     "todo_interceptor",
     "todo_loader",

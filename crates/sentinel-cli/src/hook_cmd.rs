@@ -403,6 +403,14 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
                 });
                 output.merge(&hygiene_output);
 
+                // tasks.md auto-block guard — block edits/writes that would
+                // mutate the SENTINEL:TASKS auto block (owned by task_persist).
+                let tasks_guard_output =
+                    time_and_record(ctx.fs, &mk_ctx("tasks_md_guard"), || {
+                        hooks::tasks_md_guard::process(&input, &ctx)
+                    });
+                output.merge(&tasks_guard_output);
+
                 // Tool usage gate — require sequential thinking + task creation
                 let usage_output = time_and_record(ctx.fs, &mk_ctx("tool_usage_gate"), || {
                     hooks::tool_usage_gate::process(&input, ctx.fs, ctx.env)
