@@ -22,6 +22,32 @@ const FRAMEWORK_PATTERNS = [
   "@emotion/*",
 ];
 
+// Atomic-design boundary (SEN-26). Atoms must remain leaf components — they
+// can only depend on React, MUI, the design tokens at src/theme, and on each
+// other (relative imports are siblings within the atoms folder).
+const ATOM_FORBIDDEN_PATTERNS = [
+  "**/molecules/*",
+  "**/molecules",
+  "**/organisms/*",
+  "**/organisms",
+  "**/templates/*",
+  "**/templates",
+  "**/application/*",
+  "**/application",
+  "**/adapters/*",
+  "**/adapters",
+  "@/components/molecules",
+  "@/components/molecules/*",
+  "@/components/organisms",
+  "@/components/organisms/*",
+  "@/components/templates",
+  "@/components/templates/*",
+  "@/application",
+  "@/application/*",
+  "@/adapters",
+  "@/adapters/*",
+];
+
 const eslintConfig = [
   ...compat.extends("next/core-web-vitals", "next/typescript"),
   {
@@ -37,6 +63,21 @@ const eslintConfig = [
             group: [p],
             message:
               "src/domain/** must stay framework-free (no React/Next/MUI/emotion). Move framework code to src/components/, src/adapters/, or src/application/.",
+          })),
+        },
+      ],
+    },
+  },
+  {
+    files: ["src/components/atoms/**/*.{ts,tsx}"],
+    rules: {
+      "no-restricted-imports": [
+        "error",
+        {
+          patterns: ATOM_FORBIDDEN_PATTERNS.map((p) => ({
+            group: [p],
+            message:
+              "Atoms must not depend on molecules/organisms/templates/application/adapters. Atomic design boundary — see src/components/atoms/index.ts.",
           })),
         },
       ],
