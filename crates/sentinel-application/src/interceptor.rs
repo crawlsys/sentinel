@@ -98,9 +98,11 @@ impl<'a> GitInterceptorService<'a> {
             return GitResult::Executed(code);
         }
 
-        // Evaluate policy
+        // Evaluate policy. Use the args-aware entrypoint so commit message
+        // bodies containing flag-like text ("--force", "reset --hard") don't
+        // false-positive — only the actual flags on the command line matter.
         let args_joined = args.join(" ");
-        match interceptor::evaluate_git_command(&args_joined) {
+        match interceptor::evaluate_git_args(args) {
             InterceptorPolicy::Allow => {
                 let code = self.executor.exec(&real_git, args);
                 post_exec_cleanup(args, cwd, &code);

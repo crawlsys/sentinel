@@ -309,10 +309,55 @@ const GIT_BLOCKED_RULES: &[GitRule] = &[
     },
 ];
 
+/// Strip the *values* of message/content flags so policy substring-matching
+/// doesn't fire on "--force" or "reset --hard" appearing inside a commit body
+/// passed via `-m`, `--message`, `-F`, or `--file=<path>`.
+///
+/// Handles both space-separated forms (`-m "msg"`, `-F path`) and `=` forms
+/// (`--message=msg`, `--file=path`). Returns the remaining arg vec joined by
+/// space — same shape as the existing `args_joined` API so the substring
+/// rules above still work.
+///
+/// We strip the **value**, not the flag itself, so e.g. `commit -m foo`
+/// stays as `commit -m` for matching purposes (no-op for safety rules).
+fn strip_message_args(args: &[String]) -> String {
+    const VALUE_FLAGS: &[&str] = &["-m", "--message", "-F", "--file"];
+    let mut out: Vec<&str> = Vec::with_capacity(args.len());
+    let mut iter = args.iter().peekable();
+    while let Some(arg) = iter.next() {
+        // `--flag=value` form: strip the whole token.
+        if let Some(eq_pos) = arg.find('=') {
+            let key = &arg[..eq_pos];
+            if VALUE_FLAGS.contains(&key) {
+                continue;
+            }
+        }
+        // `-m value` / `-F value` form: keep the flag, drop the next token.
+        if VALUE_FLAGS.contains(&arg.as_str()) {
+            iter.next();
+            continue;
+        }
+        out.push(arg);
+    }
+    out.join(" ")
+}
+
+/// Evaluate a git invocation given its raw arg vector. Strips commit-message
+/// content before applying substring-match policy rules so a commit body
+/// containing "--force" or "reset --hard" doesn't false-positive.
+pub fn evaluate_git_args(args: &[String]) -> InterceptorPolicy {
+    let stripped = strip_message_args(args);
+    evaluate_git_command(&stripped)
+}
+
 /// Evaluate a git command against safety rules.
 ///
 /// Returns `Allow` if safe, `Block` if dangerous, or `Confirm` if --force
 /// is present but no specific rule matched (interactive confirmation needed).
+///
+/// Substring-matches the joined arg string. Callers with access to the raw
+/// arg vector should prefer [`evaluate_git_args`] which strips commit-message
+/// content first to avoid false positives like `commit -m "fix --force bug"`.
 pub fn evaluate_git_command(args_joined: &str) -> InterceptorPolicy {
     // Exception: prune is ok when used with `worktree prune`
     let is_prune = args_joined.contains("prune") && !args_joined.contains("worktree prune");
@@ -584,6 +629,127 @@ mod tests {
             r.len() >= 20,
             "expected at least 20 redirects, got {}",
             r.len()
+        );
+    }
+
+    // ── evaluate_git_args: commit-message false-positive guards ──────────
+
+    fn s(v: &[&str]) -> Vec<String> {
+        v.iter().map(ToString::to_string).collect()
+    }
+
+    #[test]
+    fn args_aware_allows_commit_with_force_in_message() {
+        // Real-world failure mode: the agent writes a commit body explaining
+        // a `--force` decision, and the interceptor blocks the commit.
+        let args = s(&["commit", "-m", "fix: add --force handling for X"]);
+        assert_eq!(evaluate_git_args(&args), InterceptorPolicy::Allow);
+    }
+
+    #[test]
+    fn args_aware_allows_commit_with_reset_hard_in_message() {
+        let args = s(&[
+            "commit",
+            "-m",
+            "docs: warn against `git reset --hard` in destructive guide",
+        ]);
+        assert_eq!(evaluate_git_args(&args), InterceptorPolicy::Allow);
+    }
+
+    #[test]
+    fn args_aware_allows_commit_with_filter_branch_in_message() {
+        let args = s(&[
+            "commit",
+            "-m",
+            "feat: detect filter-branch usage and warn",
+        ]);
+        assert_eq!(evaluate_git_args(&args), InterceptorPolicy::Allow);
+    }
+
+    #[test]
+    fn args_aware_allows_long_form_message_flag() {
+        let args = s(&[
+            "commit",
+            "--message",
+            "fix: handle --force-with-lease in reviewer notes",
+        ]);
+        assert_eq!(evaluate_git_args(&args), InterceptorPolicy::Allow);
+    }
+
+    #[test]
+    fn args_aware_allows_equals_form_message_flag() {
+        let args = s(&[
+            "commit",
+            "--message=feat: rebase -i workflow doc update",
+        ]);
+        assert_eq!(evaluate_git_args(&args), InterceptorPolicy::Allow);
+    }
+
+    #[test]
+    fn args_aware_allows_file_form_message() {
+        // -F <path> reads commit msg from file. Path could literally be
+        // "force.txt" — strip it before policy check.
+        let args = s(&["commit", "-F", "/tmp/force.txt"]);
+        assert_eq!(evaluate_git_args(&args), InterceptorPolicy::Allow);
+    }
+
+    #[test]
+    fn args_aware_still_confirms_real_force_flag() {
+        // The actual --force flag (not embedded in a message) must still
+        // route to Confirm.
+        let args = s(&["worktree", "remove", "path", "--force"]);
+        match evaluate_git_args(&args) {
+            InterceptorPolicy::Confirm { .. } => {}
+            other => panic!("expected Confirm, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn args_aware_still_blocks_real_push_force() {
+        // Real `push --force` must still be blocked even if a -m flag is
+        // present alongside.
+        let args = s(&[
+            "push",
+            "--force",
+            "origin",
+            "main",
+            "-m",
+            "harmless message",
+        ]);
+        match evaluate_git_args(&args) {
+            InterceptorPolicy::Block { .. } => {}
+            other => panic!("expected Block, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn args_aware_still_blocks_real_reset_hard() {
+        let args = s(&["reset", "--hard", "HEAD~1"]);
+        match evaluate_git_args(&args) {
+            InterceptorPolicy::Block { .. } => {}
+            other => panic!("expected Block, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn strip_message_args_handles_no_message() {
+        // No -m / -F / --message: identity-on-join (modulo whitespace).
+        let args = s(&["status", "--short"]);
+        assert_eq!(strip_message_args(&args), "status --short");
+    }
+
+    #[test]
+    fn strip_message_args_handles_dangling_m_at_end() {
+        // -m at the end with no value: malformed input from the user. Our
+        // strip routine drops the flag (consumes the would-be next token
+        // which doesn't exist), which is fine — git itself rejects the
+        // malformed command, so the substring policy result doesn't matter.
+        // This test just pins that we don't panic and produce something sane.
+        let args = s(&["commit", "-m"]);
+        let stripped = strip_message_args(&args);
+        assert!(
+            stripped == "commit" || stripped == "commit -m",
+            "got: {stripped}"
         );
     }
 }
