@@ -1,0 +1,21 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`Label > matches snapshot in dark mode (primary tone) 1`] = `
+<div>
+  <span
+    class="MuiBox-root css-11yv44i"
+  >
+    DEPLOY
+  </span>
+</div>
+`;
+
+exports[`Label > matches snapshot in light mode (primary tone) 1`] = `
+<div>
+  <span
+    class="MuiBox-root css-l0pqj0"
+  >
+    DEPLOY
+  </span>
+</div>
+`;
