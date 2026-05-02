@@ -72,6 +72,25 @@ fn is_merge_in_progress(
         || fs.is_dir(&gitdir.join("rebase-apply"))
 }
 
+/// Returns true when `file_path` is under the Claude Code session-env
+/// scratch directory (`~/.claude/session-env/`). Those paths are harness
+/// state — plan files, transcripts, memory snapshots — not project source
+/// code, so the protected-branch hygiene check should not apply there.
+///
+/// Without this exemption, plan-mode and other harness machinery
+/// dead-locks against `git_hygiene` whenever the session-env happens to
+/// be its own git repo on `main`: `tool_usage_gate` Check #3 demands a
+/// plan file at `session-env/.../plans/{slug}.md`, but writing that file
+/// triggers Check #1's protected-branch block.
+///
+/// The match is purely string-based on the post-canonicalisation path so
+/// a separate fs round-trip isn't needed; both forward- and back-slash
+/// separators are accepted to keep this Windows-friendly.
+fn is_session_env_path(file_path: &str) -> bool {
+    let normalized = file_path.replace('\\', "/");
+    normalized.contains("/.claude/session-env/")
+}
+
 /// Check whether `file_path` lives inside the git repo rooted at `cwd`.
 ///
 /// Returns `true` if we can't determine a repo root (be conservative —
@@ -124,6 +143,14 @@ pub fn process(
     let file_path = file_path_from_input(input);
     if let Some(fp) = file_path.as_deref() {
         if !is_path_inside_repo(fs, fp, cwd, git) {
+            return HookOutput::allow();
+        }
+        // Exempt Claude Code's session-env scratch tree even when it
+        // happens to live inside a git repo. These writes are harness
+        // state (plan files, transcripts, snapshots) and must not be
+        // gated by the protected-branch check, otherwise plan-mode
+        // dead-locks against itself.
+        if is_session_env_path(fp) {
             return HookOutput::allow();
         }
     }
@@ -561,6 +588,44 @@ mod tests {
         assert!(PROTECTED_BRANCHES.contains(&"main"));
         assert!(PROTECTED_BRANCHES.contains(&"master"));
         assert!(!PROTECTED_BRANCHES.contains(&"feat/my-feature"));
+    }
+
+    /// Plan-mode regression: writing the plan file at
+    /// `~/.claude/session-env/.../plans/{slug}.md` must not be blocked by
+    /// the protected-branch check, even when the session-env happens to
+    /// be its own git repo on `main`. Otherwise `tool_usage_gate` Check #3
+    /// dead-locks against `git_hygiene` Check #1.
+    #[test]
+    fn test_allows_session_env_plan_file_on_main() {
+        let git = StubGit::on_main();
+        let input = HookInput {
+            tool_name: Some("Write".to_string()),
+            cwd: Some("/home/user/.claude/session-env/abc123".to_string()),
+            file_path: Some(
+                "/home/user/.claude/session-env/abc123/plans/snug-painting-quokka.md".to_string(),
+            ),
+            ..Default::default()
+        };
+        assert!(
+            process(&input, &git, &crate::hooks::test_support::StubFs)
+                .blocked
+                .is_none(),
+            "session-env writes must be exempt from the protected-branch check"
+        );
+    }
+
+    #[test]
+    fn test_session_env_path_detector_handles_separators() {
+        assert!(is_session_env_path(
+            "/home/user/.claude/session-env/abc/plans/foo.md"
+        ));
+        assert!(is_session_env_path(
+            "C:\\Users\\garys\\.claude\\session-env\\abc\\plans\\foo.md"
+        ));
+        assert!(!is_session_env_path("/repo/src/foo.rs"));
+        assert!(!is_session_env_path(
+            "/home/user/.claude/projects/foo.md"
+        ));
     }
 
     /// Stub that points `repo_root` at a real on-disk tempdir so
