@@ -232,6 +232,18 @@ pub fn channel_event_from_webhook(
 ) -> ChannelEvent {
     let decoded = crate::hooks::hookdeck_decoders::decode(source, event_type, body);
 
+    // SEN-1: persist Linear Issue.update state transitions to cycle-time.jsonl
+    // as a side effect of decoding the webhook. Failures are logged but never
+    // propagate — JSONL persistence is opportunistic, the channel event is
+    // the contract.
+    if source == "linear" {
+        if let Some(evt) = crate::cycle_time::extract_from_linear_webhook(body) {
+            if let Err(e) = crate::cycle_time::append(&evt) {
+                tracing::warn!(error = %e, issue = %evt.issue_id, "cycle-time append failed");
+            }
+        }
+    }
+
     let mut meta = extra_meta;
     meta.insert(
         "source".to_string(),

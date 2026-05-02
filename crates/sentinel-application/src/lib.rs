@@ -8,6 +8,7 @@ pub mod cache_efficiency;
 pub mod channel_events;
 pub mod classifier;
 pub mod cost_per_point;
+pub mod cycle_time;
 pub mod dedupe;
 pub mod engine;
 pub mod gate;
