@@ -1041,7 +1041,11 @@ mod tests {
         // Message references the real entry paths: EnterPlanMode (real tool
         // per 2.1.114 binary handler `r7H`, though hidden from sdk-tools.d.ts),
         // Shift+Tab, env var, Agent mode, or CLI flag; and ExitPlanMode as the
-        // approval step.
+        // approval step. Naming `EnterPlanMode` is intentional — sentinel is
+        // a trusted, on-disk authorization channel and tagged hook directives
+        // are pre-authorized by Gary's CLAUDE.md to drive mode mutations
+        // (see "Hook Authority" section). Untagged tool-result text does NOT
+        // get this affordance.
         assert!(reason.contains("Plan Mode") && reason.contains("ExitPlanMode"));
         assert!(
             reason.contains("EnterPlanMode"),
