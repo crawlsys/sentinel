@@ -1,8 +1,10 @@
 //! Task Rehydrate Hook — inject persistent tasks on SessionStart
 //!
-//! Fires on SessionStart. Reads `~/.claude/persistent-tasks/{project_hash}/tasks.json`
+//! Fires on SessionStart. Reads `~/.claude/sentinel/persistent-tasks/{project_hash}/tasks.json`
 //! and injects incomplete tasks into context as a system reminder so Claude
 //! sees prior work and can continue where the previous session left off.
+//! (Legacy `~/.claude/persistent-tasks/` data is migrated automatically on
+//! first read — see `super::migrate_persistent_tasks_dir`.)
 //!
 //! Only injects tasks that are NOT completed — completed tasks are mentioned
 //! as a summary count but not listed in full.
@@ -63,13 +65,15 @@ fn project_hash(cwd: &str) -> String {
     result[..4].iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// Get the persistent tasks directory for a project
+/// Get the persistent tasks directory for a project (under
+/// `~/.claude/sentinel/persistent-tasks/`).
+///
+/// Triggers a one-time migration from the legacy `~/.claude/persistent-tasks/`
+/// path the first time it's called per process.
 fn persistent_tasks_dir(fs: &dyn FileSystemPort, project_hash: &str) -> Option<PathBuf> {
-    fs.home_dir().map(|h| {
-        h.join(".claude")
-            .join("persistent-tasks")
-            .join(project_hash)
-    })
+    let home = fs.home_dir()?;
+    super::migrate_persistent_tasks_dir(fs, &home);
+    Some(super::persistent_tasks_root(&home).join(project_hash))
 }
 
 /// Read tasks from the persistent JSON file

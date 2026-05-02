@@ -10,9 +10,12 @@
 //!    If the file doesn't exist it is created. If the file exists without markers
 //!    a fresh marker block is prepended (and the existing content stays below it).
 //!
-//! 2. **`~/.claude/persistent-tasks/{project_hash}/tasks.json`** (rehydration)
+//! 2. **`~/.claude/sentinel/persistent-tasks/{project_hash}/tasks.json`** (rehydration)
 //!    Machine-readable snapshot consumed by `task_rehydrate` on SessionStart.
 //!    `meta.json` next to it tracks last update + content hash for skip-if-unchanged.
+//!    Previously lived at `~/.claude/persistent-tasks/` — moved under `sentinel/`
+//!    to colocate with the rest of sentinel-owned state. Old data is migrated
+//!    automatically on first read (see [`super::migrate_persistent_tasks_dir`]).
 //!
 //! Project scoping:
 //!   - Repo root resolution via `GitStatusPort::repo_root(cwd)`. If the cwd is
@@ -112,13 +115,16 @@ fn sha256_hex(s: &str) -> String {
     result.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// Get the persistent tasks directory for a project (under `~/.claude/`).
+/// Get the persistent tasks directory for a project (under
+/// `~/.claude/sentinel/persistent-tasks/`).
+///
+/// Triggers a one-time migration from the legacy `~/.claude/persistent-tasks/`
+/// location on the first call after upgrade. Migration is idempotent — once
+/// the new dir exists, the legacy path is never touched again.
 fn persistent_tasks_dir(fs: &dyn FileSystemPort, project_hash: &str) -> Option<PathBuf> {
-    fs.home_dir().map(|h| {
-        h.join(".claude")
-            .join("persistent-tasks")
-            .join(project_hash)
-    })
+    let home = fs.home_dir()?;
+    super::migrate_persistent_tasks_dir(fs, &home);
+    Some(super::persistent_tasks_root(&home).join(project_hash))
 }
 
 /// Find the active task list directory for this session.

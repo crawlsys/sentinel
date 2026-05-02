@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Changed
+
+- **Persistent-tasks dir relocated under `sentinel/`**: snapshots written by `task_persist` and read by `task_rehydrate` (and the CLAUDE.md "Active Tasks" section in `session_init`) now live at `~/.claude/sentinel/persistent-tasks/{project_hash}/` instead of `~/.claude/persistent-tasks/`. Centralizes sentinel-owned state alongside `metrics/`, `state/`, `proofs/`, etc. so `~/.claude/` stays clean. New `persistent_tasks_root(home)` and `legacy_persistent_tasks_root(home)` helpers in `hooks::mod.rs`; both `task_persist` and `task_rehydrate` resolve their dir through them. One-time migration via `migrate_persistent_tasks_dir(fs, home)` triggers on first read after upgrade — atomic rename when possible, per-entry copy fallback for cross-mount or Windows-locked cases. Idempotent: no-op when the new dir already exists or the legacy dir doesn't. `session_init::render_tasks_section` reads new location first, falls back to legacy during the migration window so CLAUDE.md generation stays correct mid-upgrade. 5 new unit tests in `migrate_tests` (move, no-op when new exists, no-op when legacy missing, path shape under sentinel, legacy path unchanged).
+
 ### Added
 
 - **Project-scoped `tasks.md` sync (single source of truth)**: `task_persist` hook now writes `<repo_root>/tasks.md` on every `TaskCreated` / `TaskCompleted` / `Stop` event in addition to the existing `~/.claude/persistent-tasks/{hash}/tasks.json` rehydration snapshot. The on-repo file is wrapped in `<!-- SENTINEL:TASKS:START -->` / `<!-- SENTINEL:TASKS:END -->` markers so any hand-written content (e.g. a curated roadmap that already lives at `tasks.md`) is preserved — first run prepends the auto block above existing content; subsequent runs splice in place. Skip-if-unchanged compares a SHA-256 of the rendered block against `meta.json` so unchanged turns are no-ops. Repo-root resolution goes through `GitStatusPort::repo_root(cwd)` so non-repo directories silently skip the markdown write while still updating the global JSON.

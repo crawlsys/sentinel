@@ -736,12 +736,13 @@ fn list_linear_accounts(claude_dir: &Path) -> Vec<String> {
 /// Render the **Active Tasks** section from the persistent-tasks snapshot for
 /// the current project.
 ///
-/// Reads `~/.claude/persistent-tasks/{project_hash}/tasks.json` where
+/// Reads `~/.claude/sentinel/persistent-tasks/{project_hash}/tasks.json` where
 /// `project_hash` is the first 8 hex chars of `SHA-256(cwd)` — the same
-/// scheme used by `task_persist.rs`. If the file doesn't exist, the project
-/// has no persisted tasks yet and this returns an empty string (no section
-/// is rendered). Completed tasks are filtered out; the section only shows
-/// live work.
+/// scheme used by `task_persist.rs`. Falls back to the legacy
+/// `~/.claude/persistent-tasks/` path for backward compatibility during the
+/// migration window. If neither file exists, the project has no persisted
+/// tasks yet and this returns an empty string. Completed tasks are filtered
+/// out; the section only shows live work.
 ///
 /// Called from `generate_claude_md` so the CLAUDE.md snapshot tracks the
 /// live `TaskList` state. Pair with auto-regenerate hooks on `TaskCreated`
@@ -753,14 +754,26 @@ pub fn render_tasks_section(cwd: &Path) -> String {
     let Some(home) = dirs::home_dir() else {
         return String::new();
     };
-    let tasks_path = home
+
+    // New canonical location (under sentinel/), falling back to legacy.
+    let new_path = home
+        .join(".claude")
+        .join("sentinel")
+        .join("persistent-tasks")
+        .join(&hash)
+        .join("tasks.json");
+    let legacy_path = home
         .join(".claude")
         .join("persistent-tasks")
         .join(&hash)
         .join("tasks.json");
 
-    let Ok(content) = fs::read_to_string(&tasks_path) else {
-        return String::new();
+    let content = match fs::read_to_string(&new_path) {
+        Ok(c) => c,
+        Err(_) => match fs::read_to_string(&legacy_path) {
+            Ok(c) => c,
+            Err(_) => return String::new(),
+        },
     };
 
     let Ok(tasks) = serde_json::from_str::<Vec<serde_json::Value>>(&content) else {
@@ -2215,9 +2228,11 @@ mod tests {
 
         let cwd = "/fake/test/cwd";
         let hash = project_hash_for_cwd(cwd);
+        // Write to the canonical (post-migration) location.
         let task_dir = tmp
             .path()
             .join(".claude")
+            .join("sentinel")
             .join("persistent-tasks")
             .join(&hash);
         fs::create_dir_all(&task_dir).unwrap();

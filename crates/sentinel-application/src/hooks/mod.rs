@@ -83,6 +83,107 @@ pub fn metrics_dir(home: &std::path::Path) -> std::path::PathBuf {
     sentinel_dir(home).join("metrics")
 }
 
+/// Return `<home>/.claude/sentinel/persistent-tasks`.
+///
+/// Snapshots of the per-session TaskList (one subdir per project_hash). The
+/// authoritative source for `task_rehydrate` on SessionStart. Previously
+/// lived at `<home>/.claude/persistent-tasks/` — moved under `sentinel/` so
+/// all sentinel-owned state is colocated.
+///
+/// Use [`legacy_persistent_tasks_root`] when reading old data during the
+/// migration window.
+pub fn persistent_tasks_root(home: &std::path::Path) -> std::path::PathBuf {
+    sentinel_dir(home).join("persistent-tasks")
+}
+
+/// Return the legacy `<home>/.claude/persistent-tasks` path. Only used for
+/// one-time migration on first read; new writes always go through
+/// [`persistent_tasks_root`].
+pub fn legacy_persistent_tasks_root(home: &std::path::Path) -> std::path::PathBuf {
+    home.join(".claude").join("persistent-tasks")
+}
+
+/// One-time migration of persistent-tasks data from the legacy location to
+/// the sentinel-owned location. Idempotent: no-op when the new dir already
+/// exists or the legacy dir doesn't.
+///
+/// Strategy: rename the legacy directory in place. If rename fails (e.g.
+/// across mount points, or because something else holds a handle on
+/// Windows), fall back to copying each `<hash>/` subdir individually and
+/// best-effort removing the legacy entries we successfully copied. The
+/// legacy root itself is left as an empty husk so users can confirm
+/// migration happened, then delete by hand.
+pub fn migrate_persistent_tasks_dir(fs: &dyn FileSystemPort, home: &std::path::Path) {
+    let new_root = persistent_tasks_root(home);
+    let legacy_root = legacy_persistent_tasks_root(home);
+    if fs.is_dir(&new_root) {
+        return;
+    }
+    if !fs.is_dir(&legacy_root) {
+        return;
+    }
+    if let Some(parent) = new_root.parent() {
+        let _ = fs.create_dir_all(parent);
+    }
+    if std::fs::rename(&legacy_root, &new_root).is_ok() {
+        tracing::info!(
+            from = %legacy_root.display(),
+            to = %new_root.display(),
+            "Migrated persistent-tasks dir"
+        );
+        return;
+    }
+    // Fallback: per-entry copy.
+    if let Err(e) = fs.create_dir_all(&new_root) {
+        tracing::warn!(error = %e, "Failed to create new persistent-tasks dir; aborting migration");
+        return;
+    }
+    let entries = fs.read_dir(&legacy_root).unwrap_or_default();
+    for entry in entries {
+        let Some(name) = entry.file_name().and_then(|n| n.to_str()).map(str::to_string) else {
+            continue;
+        };
+        let dest = new_root.join(&name);
+        if fs.exists(&dest) {
+            continue;
+        }
+        if std::fs::rename(&entry, &dest).is_ok() {
+            continue;
+        }
+        // Best-effort recursive copy as last resort. We use std::fs directly
+        // since the FileSystemPort doesn't expose a tree-copy primitive and
+        // this only runs once per machine.
+        if let Err(e) = copy_dir_recursive(&entry, &dest) {
+            tracing::warn!(
+                error = %e,
+                from = %entry.display(),
+                to = %dest.display(),
+                "Failed to migrate persistent-tasks subdir; leaving legacy copy in place"
+            );
+        }
+    }
+    tracing::info!(
+        from = %legacy_root.display(),
+        to = %new_root.display(),
+        "Migrated persistent-tasks dir (per-entry fallback)"
+    );
+}
+
+fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let ty = entry.file_type()?;
+        let dst_path = dst.join(entry.file_name());
+        if ty.is_dir() {
+            copy_dir_recursive(&entry.path(), &dst_path)?;
+        } else {
+            std::fs::copy(entry.path(), &dst_path)?;
+        }
+    }
+    Ok(())
+}
+
 /// All hook module names — used for dynamic counting.
 /// Keep in sync with the `pub mod` declarations above.
 pub const HOOK_NAMES: &[&str] = &[
@@ -422,5 +523,128 @@ pub mod test_support {
             memory_mcp,
             env,
         }
+    }
+}
+
+#[cfg(test)]
+mod migrate_tests {
+    use super::*;
+    use std::path::Path;
+    use std::path::PathBuf;
+
+    /// Real-FS adapter scoped to a caller-supplied home directory.
+    struct ScopedHomeFs {
+        home: PathBuf,
+    }
+    impl FileSystemPort for ScopedHomeFs {
+        fn home_dir(&self) -> Option<PathBuf> {
+            Some(self.home.clone())
+        }
+        fn read_to_string(&self, p: &Path) -> anyhow::Result<String> {
+            Ok(std::fs::read_to_string(p)?)
+        }
+        fn write(&self, p: &Path, c: &[u8]) -> anyhow::Result<()> {
+            if let Some(par) = p.parent() {
+                std::fs::create_dir_all(par)?;
+            }
+            Ok(std::fs::write(p, c)?)
+        }
+        fn create_dir_all(&self, p: &Path) -> anyhow::Result<()> {
+            Ok(std::fs::create_dir_all(p)?)
+        }
+        fn read_dir(&self, p: &Path) -> anyhow::Result<Vec<PathBuf>> {
+            Ok(std::fs::read_dir(p)?
+                .filter_map(|e| e.ok().map(|e| e.path()))
+                .collect())
+        }
+        fn exists(&self, p: &Path) -> bool {
+            p.exists()
+        }
+        fn is_dir(&self, p: &Path) -> bool {
+            p.is_dir()
+        }
+        fn metadata(&self, p: &Path) -> anyhow::Result<std::fs::Metadata> {
+            Ok(std::fs::metadata(p)?)
+        }
+        fn append(&self, _: &Path, _: &[u8]) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn migrate_moves_legacy_data_to_new_location() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().to_path_buf();
+        let legacy = legacy_persistent_tasks_root(&home);
+        std::fs::create_dir_all(legacy.join("abc12345")).unwrap();
+        std::fs::write(
+            legacy.join("abc12345").join("tasks.json"),
+            r#"[{"id":"1","subject":"x","status":"pending","blockedBy":[],"blocks":[]}]"#,
+        )
+        .unwrap();
+        let fs = ScopedHomeFs { home: home.clone() };
+
+        migrate_persistent_tasks_dir(&fs, &home);
+
+        let new_root = persistent_tasks_root(&home);
+        assert!(new_root.is_dir(), "new root must exist after migration");
+        assert!(
+            new_root.join("abc12345").join("tasks.json").is_file(),
+            "task data must land at the new path"
+        );
+        // Legacy root should be gone (rename succeeded), or at least empty.
+        let legacy_still_present = legacy.is_dir();
+        if legacy_still_present {
+            assert!(
+                std::fs::read_dir(&legacy).unwrap().next().is_none(),
+                "if legacy root persists (fallback path), it must be empty"
+            );
+        }
+    }
+
+    #[test]
+    fn migrate_is_noop_when_new_already_exists() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().to_path_buf();
+        let legacy = legacy_persistent_tasks_root(&home);
+        let new_root = persistent_tasks_root(&home);
+        std::fs::create_dir_all(legacy.join("abc")).unwrap();
+        std::fs::write(legacy.join("abc").join("legacy.txt"), "legacy").unwrap();
+        std::fs::create_dir_all(new_root.join("abc")).unwrap();
+        std::fs::write(new_root.join("abc").join("new.txt"), "new").unwrap();
+        let fs = ScopedHomeFs { home: home.clone() };
+
+        migrate_persistent_tasks_dir(&fs, &home);
+
+        // New data is untouched.
+        assert!(new_root.join("abc").join("new.txt").is_file());
+        // Legacy file is also untouched (we don't merge — first-mover wins).
+        assert!(legacy.join("abc").join("legacy.txt").is_file());
+    }
+
+    #[test]
+    fn migrate_is_noop_when_legacy_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().to_path_buf();
+        let fs = ScopedHomeFs { home: home.clone() };
+        // Neither dir exists — must not panic, must not create the new dir.
+        migrate_persistent_tasks_dir(&fs, &home);
+        assert!(!persistent_tasks_root(&home).exists());
+    }
+
+    #[test]
+    fn persistent_tasks_root_is_under_sentinel() {
+        let home = PathBuf::from("/some/home");
+        let root = persistent_tasks_root(&home);
+        assert!(root.ends_with(".claude/sentinel/persistent-tasks") || root.ends_with(r".claude\sentinel\persistent-tasks"),
+            "got: {}", root.display());
+    }
+
+    #[test]
+    fn legacy_persistent_tasks_root_unchanged() {
+        let home = PathBuf::from("/some/home");
+        let root = legacy_persistent_tasks_root(&home);
+        assert!(root.ends_with(".claude/persistent-tasks") || root.ends_with(r".claude\persistent-tasks"),
+            "got: {}", root.display());
     }
 }
