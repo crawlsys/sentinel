@@ -93,13 +93,19 @@ impl<'a> GitInterceptorService<'a> {
 
         // Flutter SDK exception
         if interceptor::is_flutter_sdk_path(cwd) {
-            return GitResult::Executed(self.executor.exec(&real_git, args));
+            let code = self.executor.exec(&real_git, args);
+            post_exec_cleanup(args, cwd, &code);
+            return GitResult::Executed(code);
         }
 
         // Evaluate policy
         let args_joined = args.join(" ");
         match interceptor::evaluate_git_command(&args_joined) {
-            InterceptorPolicy::Allow => GitResult::Executed(self.executor.exec(&real_git, args)),
+            InterceptorPolicy::Allow => {
+                let code = self.executor.exec(&real_git, args);
+                post_exec_cleanup(args, cwd, &code);
+                GitResult::Executed(code)
+            }
             InterceptorPolicy::Block {
                 reason,
                 alternatives,
@@ -124,7 +130,9 @@ impl<'a> GitInterceptorService<'a> {
                     let _ = std::io::Write::flush(&mut std::io::stderr());
                     let mut input = String::new();
                     if std::io::stdin().read_line(&mut input).is_ok() && input.trim() == "yes" {
-                        GitResult::Executed(self.executor.exec(&real_git, args))
+                        let code = self.executor.exec(&real_git, args);
+                        post_exec_cleanup(args, cwd, &code);
+                        GitResult::Executed(code)
                     } else {
                         GitResult::Declined
                     }
@@ -169,11 +177,160 @@ impl<'a> GitInterceptorService<'a> {
 
         if self.bypass.show_bypass_dialog(&msg) {
             eprintln!("\x1b[0;32mApproved - executing...\x1b[0m");
-            GitResult::Executed(self.executor.exec(real_git, args))
+            let code = self.executor.exec(real_git, args);
+            post_exec_cleanup(args, cwd, &code);
+            GitResult::Executed(code)
         } else {
             eprintln!("\x1b[0;31mDeclined\x1b[0m");
             GitResult::Declined
         }
+    }
+}
+
+/// Post-exec hygiene: when the wrapped git command was `worktree remove`,
+/// `git` itself unregisters the worktree from its admin state but on Windows
+/// it routinely fails to delete the on-disk directory shell because some
+/// process (file watcher, mcp-router, IDE) holds a handle. Git returns 0
+/// regardless, leaving an orphaned dir that hygiene_reminders later flags.
+///
+/// This helper detects `worktree remove [--force] <path>`, and if the dir
+/// still exists after git's exit, retries `std::fs::remove_dir_all` with
+/// short backoff. Unix paths fall through to a single best-effort retry —
+/// `git worktree remove` is reliable there but no harm in being defensive.
+///
+/// Failures are logged to stderr and otherwise ignored — we never fail the
+/// overall command, since git already considers it successful.
+fn post_exec_cleanup(args: &[String], cwd: &str, code: &ExitCode) {
+    // Compare ExitCode by formatted string — `ExitCode` doesn't expose its raw
+    // value, but `Debug` renders 0 as "ExitCode(unix_exit_status(0))" on Unix
+    // and "ExitCode(ExitCode(0))" on Windows. The "(0)" substring is stable.
+    let code_str = format!("{code:?}");
+    if !code_str.contains("(0)") {
+        return;
+    }
+    let Some(target) = parse_worktree_remove_target(args, cwd) else {
+        return;
+    };
+    if !target.exists() {
+        return;
+    }
+    let attempts = 3u32;
+    let mut last_err: Option<std::io::Error> = None;
+    for attempt in 0..attempts {
+        if attempt > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(150 * u64::from(attempt)));
+        }
+        match std::fs::remove_dir_all(&target) {
+            Ok(()) => {
+                if attempt > 0 {
+                    eprintln!(
+                        "\x1b[0;32m[sentinel] Removed orphaned worktree dir on retry #{}: {}\x1b[0m",
+                        attempt + 1,
+                        target.display()
+                    );
+                }
+                return;
+            }
+            Err(e) => last_err = Some(e),
+        }
+    }
+    if let Some(e) = last_err {
+        // Treat NotFound as a benign race (another process beat us to it).
+        if e.kind() == std::io::ErrorKind::NotFound {
+            return;
+        }
+        eprintln!(
+            "\x1b[1;33m[sentinel] worktree remove succeeded but on-disk shell could not be deleted ({}): {}\x1b[0m",
+            target.display(),
+            e
+        );
+    }
+}
+
+/// Parse `worktree remove [--force] <path>` and return the absolute path
+/// to the worktree directory. Returns `None` for any other git command.
+///
+/// Tolerates flag ordering: `--force` may appear before or after the path.
+/// Other args (long options like `--quiet`) are accepted and skipped.
+fn parse_worktree_remove_target(args: &[String], cwd: &str) -> Option<PathBuf> {
+    let mut iter = args.iter().peekable();
+    if iter.next()?.as_str() != "worktree" {
+        return None;
+    }
+    if iter.next()?.as_str() != "remove" {
+        return None;
+    }
+    let mut path: Option<&str> = None;
+    for arg in iter {
+        if arg.starts_with('-') {
+            continue;
+        }
+        path = Some(arg.as_str());
+        break;
+    }
+    let path = path?;
+    let p = PathBuf::from(path);
+    Some(if p.is_absolute() {
+        p
+    } else {
+        PathBuf::from(cwd).join(p)
+    })
+}
+
+#[cfg(test)]
+mod parse_worktree_remove_tests {
+    use super::*;
+
+    fn s(v: &[&str]) -> Vec<String> {
+        v.iter().map(ToString::to_string).collect()
+    }
+
+    #[test]
+    fn parses_relative_path() {
+        let got = parse_worktree_remove_target(&s(&["worktree", "remove", ".claude/wt/x"]), "/repo");
+        assert_eq!(got.unwrap(), PathBuf::from("/repo").join(".claude/wt/x"));
+    }
+
+    #[test]
+    fn parses_with_force_flag() {
+        let got = parse_worktree_remove_target(
+            &s(&["worktree", "remove", "--force", ".claude/wt/x"]),
+            "/repo",
+        );
+        assert_eq!(got.unwrap(), PathBuf::from("/repo").join(".claude/wt/x"));
+    }
+
+    #[test]
+    fn parses_path_before_flag() {
+        // Some users pass `--force` after the path; git accepts both orders.
+        let got = parse_worktree_remove_target(
+            &s(&["worktree", "remove", ".claude/wt/x", "--force"]),
+            "/repo",
+        );
+        assert_eq!(got.unwrap(), PathBuf::from("/repo").join(".claude/wt/x"));
+    }
+
+    #[test]
+    fn parses_absolute_path_unchanged() {
+        let got = parse_worktree_remove_target(
+            &s(&["worktree", "remove", "/abs/path"]),
+            "/repo",
+        );
+        assert_eq!(got.unwrap(), PathBuf::from("/abs/path"));
+    }
+
+    #[test]
+    fn ignores_non_worktree_commands() {
+        assert!(parse_worktree_remove_target(&s(&["status"]), "/r").is_none());
+        assert!(parse_worktree_remove_target(&s(&["worktree", "list"]), "/r").is_none());
+        assert!(parse_worktree_remove_target(&s(&["worktree", "add", "x"]), "/r").is_none());
+    }
+
+    #[test]
+    fn handles_empty_args() {
+        assert!(parse_worktree_remove_target(&s(&[]), "/r").is_none());
+        assert!(parse_worktree_remove_target(&s(&["worktree"]), "/r").is_none());
+        assert!(parse_worktree_remove_target(&s(&["worktree", "remove"]), "/r").is_none());
     }
 }
 

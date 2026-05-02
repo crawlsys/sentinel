@@ -213,11 +213,25 @@ pub fn process_prompt(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
         .collect();
 
     if !still_stale.is_empty() {
+        // Per-dir `rm -rf` is the only reliable cleanup for orphaned shells
+        // (directories left behind when `git worktree remove` succeeded in
+        // unregistering but failed to delete the dir, typically because of
+        // Windows file locks). `ExitWorktree(action: "remove")` only handles
+        // the worktree this session is currently inside; `git worktree remove`
+        // refuses paths git no longer registers. So the reminder hands the
+        // user an `rm -rf` one-liner that works in either shell.
+        let rel_paths: Vec<String> = still_stale
+            .iter()
+            .map(|n| format!(".claude/worktrees/{n}"))
+            .collect();
+        let cleanup_cmd = format!("rm -rf {}", rel_paths.join(" "));
         reminders.push(format!(
-            "[Worktree Cleanup] {} stale worktree(s) found: {}. \
-             Clean up with `ExitWorktree(action: \"remove\")` or `git worktree remove`.",
-            still_stale.len(),
-            still_stale.join(", ")
+            "[Worktree Cleanup] {n} orphaned worktree shell(s) under `.claude/worktrees/`: \
+             {names}. These are dirs whose git registration was already removed but \
+             whose on-disk shells got stranded (typical cause: Windows file locks during \
+             `git worktree remove`). Cleanup:\n  {cleanup_cmd}",
+            n = still_stale.len(),
+            names = still_stale.join(", ")
         ));
     }
 

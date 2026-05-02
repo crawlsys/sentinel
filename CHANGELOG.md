@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Orphaned worktree shells on Windows**: `git worktree remove` on Windows routinely fails to delete the on-disk directory because some process (file watcher, mcp-router, IDE) holds a handle inside the tree. Git itself unregisters the worktree and exits 0, leaving an empty (or near-empty) directory shell behind that `hygiene_reminders` then correctly flags as stale on every prompt. Two-layer fix:
+  - `sentinel-git-interceptor` now runs a `post_exec_cleanup` pass after every wrapped git invocation (allow path, confirm path, and `--bypass` path). When the args parse as `worktree remove [--force] <path>` and git returned 0 *and* the on-disk directory still exists, retries `std::fs::remove_dir_all` up to 3 times with 150ms backoff. Failures are logged to stderr and never bubble up — git already considered the command successful. NotFound errors are treated as a benign race.
+  - `hygiene_reminders` cleanup message now includes a copy-paste `rm -rf <path1> <path2> ...` one-liner spanning every detected stale shell, so users can wipe leftovers from prior sessions in one shot. The reminder also now explains the typical cause (Windows file locks) so future-Gary doesn't have to re-derive it.
+  - 6 unit tests pin the `worktree remove` arg parser (relative + absolute path, `--force` before/after path, non-`worktree-remove` commands, empty args). Existing 7 hygiene_reminders tests still green. Full sentinel-application lib suite: 762/762.
+
 ### Changed
 
 - **Persistent-tasks dir relocated under `sentinel/`**: snapshots written by `task_persist` and read by `task_rehydrate` (and the CLAUDE.md "Active Tasks" section in `session_init`) now live at `~/.claude/sentinel/persistent-tasks/{project_hash}/` instead of `~/.claude/persistent-tasks/`. Centralizes sentinel-owned state alongside `metrics/`, `state/`, `proofs/`, etc. so `~/.claude/` stays clean. New `persistent_tasks_root(home)` and `legacy_persistent_tasks_root(home)` helpers in `hooks::mod.rs`; both `task_persist` and `task_rehydrate` resolve their dir through them. One-time migration via `migrate_persistent_tasks_dir(fs, home)` triggers on first read after upgrade — atomic rename when possible, per-entry copy fallback for cross-mount or Windows-locked cases. Idempotent: no-op when the new dir already exists or the legacy dir doesn't. `session_init::render_tasks_section` reads new location first, falls back to legacy during the migration window so CLAUDE.md generation stays correct mid-upgrade. 5 new unit tests in `migrate_tests` (move, no-op when new exists, no-op when legacy missing, path shape under sentinel, legacy path unchanged).
