@@ -446,17 +446,17 @@ mod tests {
     fn test_trigger_detection() {
         assert!(TRIGGER_SUFFIXES
             .iter()
-            .any(|s| "mcp__accounts__account_switch".ends_with(s)));
+            .any(|s| "mcp__claude-accounts__account_switch".ends_with(s)));
         assert!(TRIGGER_SUFFIXES
             .iter()
-            .any(|s| "mcp__accounts__project_switch".ends_with(s)));
+            .any(|s| "mcp__claude-accounts__project_switch".ends_with(s)));
         // account_rotate is intentionally NOT a trigger — rate limit rotation shouldn't cascade
         assert!(!TRIGGER_SUFFIXES
             .iter()
-            .any(|s| "mcp__accounts__account_rotate".ends_with(s)));
+            .any(|s| "mcp__claude-accounts__account_rotate".ends_with(s)));
         assert!(!TRIGGER_SUFFIXES
             .iter()
-            .any(|s| "mcp__accounts__account_list".ends_with(s)));
+            .any(|s| "mcp__claude-accounts__account_list".ends_with(s)));
     }
 
     #[test]
@@ -471,7 +471,7 @@ mod tests {
     #[test]
     fn test_process_ignores_empty_result() {
         let mut input = HookInput::default();
-        input.tool_name = Some("mcp__accounts__account_switch".to_string());
+        input.tool_name = Some("mcp__claude-accounts__account_switch".to_string());
         input.tool_result = None;
         let ctx = crate::hooks::test_support::stub_ctx();
         let output = process(&input, &ctx);
@@ -481,7 +481,7 @@ mod tests {
     #[test]
     fn test_process_ignores_error_result() {
         let mut input = HookInput::default();
-        input.tool_name = Some("mcp__accounts__account_switch".to_string());
+        input.tool_name = Some("mcp__claude-accounts__account_switch".to_string());
         input.tool_result = Some(serde_json::json!("Error: profile 'bad' not found"));
         let ctx = crate::hooks::test_support::stub_ctx();
         let output = process(&input, &ctx);
