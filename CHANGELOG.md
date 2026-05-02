@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added
+
+- **Cycle-time event capture (SEN-1, persistence half)**: new `cycle_time` module in `sentinel-application` extracts Linear `Issue.update` state transitions from incoming Hookdeck webhook bodies and appends them to `~/.claude/sentinel/metrics/cycle-time.jsonl`. Fires as a side effect inside `channel_event_from_webhook` so the existing channel-emission contract is unchanged — JSONL persistence is opportunistic and never blocks the channel event. Schema matches the SEN-1 spec verbatim (`issue_id`, optional `team`, `from_state`, `to_state`, `timestamp`, `estimate`, `priority`, `labels`). Pure parser (`extract_from_linear_webhook`) is fully fixture-driven; 9 unit tests cover the transition-vs-not-a-transition matrix, prior-state-name fallback, label array shape variants (objects vs strings), missing-optional serialization, and append round-trip. The Hookdeck route admin and 60-day Linear backfill are tracked as follow-up tasks. 771/771 sentinel-application tests still green.
+
 ### Changed
 
 - **Doc updates for `accounts-mcp` → `claude-accounts-mcp` rename**: the `accounts` MCP and its CLI sibling were renamed to `claude-accounts` (across GitHub repos, local dirs, Cargo packages, internal crates, and binaries) on 2026-05-02 to disambiguate from "Linear accounts" / "Doppler accounts" / "project configs" — the word "accounts" was massively overloaded. Sentinel itself only had two stale comments referencing the old name in `account_cascade.rs::process` and `is_error_result`; both updated to point at `claude-accounts-mcp` with a parenthetical noting the rename date.
