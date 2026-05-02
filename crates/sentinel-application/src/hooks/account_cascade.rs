@@ -43,7 +43,8 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
         .unwrap_or_default();
 
     // If the tool errored, don't cascade.
-    // Check for known error prefixes from accounts-mcp, not bare "error".
+    // Check for known error prefixes from claude-accounts-mcp (formerly
+    // `accounts-mcp` — renamed 2026-05-02), not bare "error".
     if result_text.is_empty() || is_error_result(input, &result_text) {
         return HookOutput::allow();
     }
@@ -99,7 +100,7 @@ fn is_error_result(input: &HookInput, result_text: &str) -> bool {
         }
     }
 
-    // Known error prefixes from accounts-mcp
+    // Known error prefixes from claude-accounts-mcp
     result_text.starts_with("Error:")
         || result_text.contains("not found")
         || result_text.contains("No saved accounts")

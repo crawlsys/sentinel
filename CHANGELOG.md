@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Changed
+
+- **Doc updates for `accounts-mcp` → `claude-accounts-mcp` rename**: the `accounts` MCP and its CLI sibling were renamed to `claude-accounts` (across GitHub repos, local dirs, Cargo packages, internal crates, and binaries) on 2026-05-02 to disambiguate from "Linear accounts" / "Doppler accounts" / "project configs" — the word "accounts" was massively overloaded. Sentinel itself only had two stale comments referencing the old name in `account_cascade.rs::process` and `is_error_result`; both updated to point at `claude-accounts-mcp` with a parenthetical noting the rename date.
+
 ### Fixed
 
 - **Interceptor false-positives on flag-like text inside commit messages**: `evaluate_git_command` substring-matched the joined args string, so a commit body containing literal `--force` (or `reset --hard`, `filter-branch`, etc.) would block the commit. Real-world reproduction this session: `git commit -m "fix(interceptor): rm -rf orphaned worktree shells on Windows + better cleanup reminder ... worktree remove [--force] path ..."` was rejected as if `--force` were a real flag. Fix: new `evaluate_git_args(&[String])` entrypoint that strips the values of `-m` / `--message` / `-F` / `--file` (both space-separated and `=` forms) before applying substring-match policy. The application layer (`crates/sentinel-application/src/interceptor.rs`) now uses the args-aware entrypoint. The legacy `evaluate_git_command(&str)` stays for backward compat. 11 new unit tests pin the false-positive cases (commit with `--force` / `reset --hard` / `filter-branch` / `--force-with-lease` / `rebase -i` in the message body, long-form `--message`, `=` form, `-F path`) AND verify real `--force`, `push --force`, `reset --hard` are still blocked/confirmed correctly. 762/762 app + 26/26 domain tests still green.
