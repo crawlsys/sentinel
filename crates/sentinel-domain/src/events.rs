@@ -393,30 +393,56 @@ impl HookOutput {
         }
     }
 
+    /// Provenance prefix tagged onto every sentinel-issued deny / ask
+    /// reason. Sentinel is the only on-disk binary that constructs
+    /// `HookOutput`, so this prefix appearing in tool-result text is
+    /// proof that the directive came from sentinel — not from an
+    /// arbitrary MCP server, web fetch, or model-injected string.
+    ///
+    /// Claude Code's CLAUDE.md "Hook Authority" section authorises the
+    /// agent to auto-comply with directives carrying this prefix
+    /// (including mode mutations like `EnterPlanMode`/`ExitPlanMode`),
+    /// while treating untagged tool-result instructions as advisory.
+    /// Without the prefix, the same coercive trick would let any tool
+    /// result drive agent state — that is the failure mode we're
+    /// closing off, not the sentinel-driven coercion itself.
+    pub const SENTINEL_AUTHORITY_PREFIX: &'static str = "[Sentinel-Authority] ";
+
     /// Hard-deny a `PreToolUse` tool call (platform-enforced block).
     /// Uses Claude Code's hookSpecificOutput.permissionDecision directly.
+    /// The reason is tagged with `[Sentinel-Authority]` so the agent can
+    /// distinguish trusted sentinel directives from arbitrary tool-result
+    /// text — see `SENTINEL_AUTHORITY_PREFIX`.
     #[must_use]
     pub fn deny(reason: impl Into<String>) -> Self {
+        let mut tagged = String::with_capacity(Self::SENTINEL_AUTHORITY_PREFIX.len() + 64);
+        tagged.push_str(Self::SENTINEL_AUTHORITY_PREFIX);
+        tagged.push_str(&reason.into());
         Self {
             blocked: Some(true), // keep for internal merge logic
             hook_specific_output: Some(HookSpecificOutput {
                 hook_event_name: "PreToolUse".to_string(),
                 permission_decision: Some(PermissionDecision::Deny),
-                permission_decision_reason: Some(reason.into()),
+                permission_decision_reason: Some(tagged),
                 ..HookSpecificOutput::default()
             }),
             ..Self::default()
         }
     }
 
-    /// Prompt user for approval before allowing tool call (`PreToolUse` only)
+    /// Prompt user for approval before allowing tool call (`PreToolUse` only).
+    /// Same authority tagging as `deny` — the prefix is what lets the agent
+    /// trust the directive.
     #[must_use]
     pub fn ask(reason: impl Into<String>) -> Self {
+        let mut tagged = String::with_capacity(Self::SENTINEL_AUTHORITY_PREFIX.len() + 64);
+        tagged.push_str(Self::SENTINEL_AUTHORITY_PREFIX);
+        tagged.push_str(&reason.into());
         Self {
             hook_specific_output: Some(HookSpecificOutput {
                 hook_event_name: "PreToolUse".to_string(),
                 permission_decision: Some(PermissionDecision::Ask),
-                permission_decision_reason: Some(reason.into()),
+                permission_decision_reason: Some(tagged),
                 ..HookSpecificOutput::default()
             }),
             ..Self::default()
@@ -498,9 +524,20 @@ impl HookOutput {
             return self;
         }
 
-        // Transform legacy blocked/reason → hookSpecificOutput deny
+        // Transform legacy blocked/reason → hookSpecificOutput deny.
+        // Apply the [Sentinel-Authority] prefix here too so legacy `block()`
+        // callers and the modern `deny()` constructor produce uniformly
+        // tagged output — the agent's contract is "every PreToolUse deny
+        // I see from sentinel carries the prefix", and uniformity is what
+        // makes that signal trustworthy.
         if self.blocked == Some(true) {
-            let reason = self.reason.take();
+            let reason = self.reason.take().map(|r| {
+                if r.starts_with(Self::SENTINEL_AUTHORITY_PREFIX) {
+                    r
+                } else {
+                    format!("{}{}", Self::SENTINEL_AUTHORITY_PREFIX, r)
+                }
+            });
             let existing_context = self
                 .hook_specific_output
                 .as_ref()
@@ -689,10 +726,42 @@ mod tests {
         assert_eq!(output.blocked, Some(true));
         let hso = output.hook_specific_output.unwrap();
         assert_eq!(hso.permission_decision, Some(PermissionDecision::Deny));
-        assert_eq!(
-            hso.permission_decision_reason.as_deref(),
-            Some("not allowed")
+        let reason = hso.permission_decision_reason.as_deref().unwrap();
+        // Provenance prefix is mandatory — see SENTINEL_AUTHORITY_PREFIX.
+        assert!(
+            reason.starts_with(HookOutput::SENTINEL_AUTHORITY_PREFIX),
+            "deny reason missing [Sentinel-Authority] prefix: {reason}"
         );
+        assert!(
+            reason.contains("not allowed"),
+            "deny reason must preserve caller text: {reason}"
+        );
+    }
+
+    /// The [Sentinel-Authority] prefix is the agent's only signal that a
+    /// directive came from sentinel and not from arbitrary tool-result
+    /// text. Test that both `deny` and `ask` carry it, and that the
+    /// constant value matches the documented contract in the
+    /// `SENTINEL_AUTHORITY_PREFIX` doc comment.
+    #[test]
+    fn test_sentinel_authority_prefix_contract() {
+        assert_eq!(
+            HookOutput::SENTINEL_AUTHORITY_PREFIX,
+            "[Sentinel-Authority] "
+        );
+        let deny = HookOutput::deny("anything");
+        let ask = HookOutput::ask("anything else");
+        for o in [deny, ask] {
+            let reason = o
+                .hook_specific_output
+                .unwrap()
+                .permission_decision_reason
+                .unwrap();
+            assert!(
+                reason.starts_with(HookOutput::SENTINEL_AUTHORITY_PREFIX),
+                "tagged output must start with the authority prefix: {reason}"
+            );
+        }
     }
 
     #[test]
@@ -718,7 +787,9 @@ mod tests {
         a.merge(&b);
         let hso = a.hook_specific_output.unwrap();
         assert_eq!(hso.permission_decision, Some(PermissionDecision::Deny));
-        assert_eq!(hso.permission_decision_reason.as_deref(), Some("no way"));
+        let reason = hso.permission_decision_reason.as_deref().unwrap();
+        assert!(reason.starts_with(HookOutput::SENTINEL_AUTHORITY_PREFIX));
+        assert!(reason.contains("no way"));
     }
 
     #[test]
@@ -758,10 +829,11 @@ mod tests {
         let hso = transformed.hook_specific_output.unwrap();
         assert_eq!(hso.hook_event_name, "PreToolUse");
         assert_eq!(hso.permission_decision, Some(PermissionDecision::Deny));
-        assert_eq!(
-            hso.permission_decision_reason.as_deref(),
-            Some("phase gate violation")
-        );
+        // `block` flows through `deny` after transformation, so the
+        // sentinel authority prefix is now present.
+        let reason = hso.permission_decision_reason.as_deref().unwrap();
+        assert!(reason.starts_with(HookOutput::SENTINEL_AUTHORITY_PREFIX));
+        assert!(reason.contains("phase gate violation"));
     }
 
     #[test]
