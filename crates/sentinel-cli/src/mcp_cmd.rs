@@ -466,6 +466,15 @@ fn tool_definitions() -> serde_json::Value {
                     "properties": {},
                     "required": []
                 }
+            },
+            {
+                "name": "sentinel__get_wip_snapshot",
+                "description": "Get the current WIP-by-stage snapshot — count of in-flight Linear tickets per team per workflow state, plus any active bottleneck flags (review_clog, qa_ceiling). Reads ~/.claude/sentinel/state/wip-snapshot.json populated by the 5-min poller. Returns {captured_at, total_wip, teams: {<key>: {<state>: count}}, bottlenecks: [...]} or {captured_at: null, message: 'no snapshot captured yet'} when the poller hasn't run. Takes no arguments.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                }
             }
         ]
     })
@@ -652,6 +661,42 @@ async fn handle_request(
                     Err(e) => JsonRpcResponse::success(
                         request.id.clone(),
                         mcp_tool_result(false, serde_json::json!({"error": e.to_string()})),
+                    ),
+                };
+            }
+
+            // SEN-8: WIP-by-stage snapshot read. The poller is a separate
+            // task; this only surfaces whatever the file contains right now.
+            if tool_name == "sentinel__get_wip_snapshot" {
+                return match sentinel_application::wip_snapshot::read() {
+                    Ok(Some(snap)) => JsonRpcResponse::success(
+                        request.id.clone(),
+                        mcp_tool_result(
+                            true,
+                            serde_json::json!({
+                                "captured_at": snap.captured_at,
+                                "total_wip": snap.total_wip(),
+                                "teams": snap.teams,
+                                "bottlenecks": snap.bottlenecks,
+                            }),
+                        ),
+                    ),
+                    Ok(None) => JsonRpcResponse::success(
+                        request.id.clone(),
+                        mcp_tool_result(
+                            true,
+                            serde_json::json!({
+                                "captured_at": null,
+                                "message": "no snapshot captured yet — poller has not run"
+                            }),
+                        ),
+                    ),
+                    Err(e) => JsonRpcResponse::success(
+                        request.id.clone(),
+                        mcp_tool_result(
+                            false,
+                            serde_json::json!({"error": e.to_string()}),
+                        ),
                     ),
                 };
             }

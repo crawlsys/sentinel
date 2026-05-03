@@ -26,3 +26,4 @@ pub mod scanner;
 pub mod tokens;
 pub mod verifier;
 pub mod webhook_replay;
+pub mod wip_snapshot;
