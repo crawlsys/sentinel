@@ -218,6 +218,69 @@ pub fn mark_task_active(fs: &dyn FileSystemPort, session_id: &str) {
     write_marker(fs, TASK_ACTIVE_PREFIX, session_id);
 }
 
+/// True when at least one task in the persisted task store has
+/// `status == "in_progress"`. Authoritative check for "is the agent
+/// actively working on something tracked?".
+///
+/// We don't have the project hash here, so we scan every
+/// `~/.claude/sentinel/persistent-tasks/*/tasks.json` (and the legacy
+/// `~/.claude/persistent-tasks/*/tasks.json` location during the
+/// migration window). Returning `true` early on first match keeps the
+/// hot path fast — typically a single small file read.
+///
+/// On any IO/parse error this returns `false`, leaving the existing
+/// marker-based fallback to take over (see callers).
+fn persistent_store_has_active_task(fs: &dyn FileSystemPort) -> bool {
+    let Some(home) = fs.home_dir() else {
+        return false;
+    };
+
+    // Scan both the new (sentinel-owned) and legacy roots — `task_persist`
+    // migrates lazily, so during the migration window data may live in
+    // either location.
+    let roots = [
+        home.join(".claude").join("sentinel").join("persistent-tasks"),
+        home.join(".claude").join("persistent-tasks"),
+    ];
+
+    for root in &roots {
+        if !fs.is_dir(root) {
+            continue;
+        }
+        let projects = match fs.read_dir(root) {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+        for proj in projects {
+            let tasks_file = proj.join("tasks.json");
+            if !fs.exists(&tasks_file) {
+                continue;
+            }
+            let content = match fs.read_to_string(&tasks_file) {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+            let json: serde_json::Value = match serde_json::from_str(&content) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            // Two shapes seen in the wild: `{"tasks": [...]}` (current) and
+            // a bare top-level array (older snapshots). Accept both.
+            let tasks = json
+                .get("tasks")
+                .and_then(|t| t.as_array())
+                .or_else(|| json.as_array());
+            let Some(tasks) = tasks else { continue };
+            for task in tasks {
+                if task.get("status").and_then(|v| v.as_str()) == Some("in_progress") {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
 /// Best-effort lookup for the most recent pending task ID in this project,
 /// to give the user an actionable ID in the block message. Returns
 /// `Some("Task #N is pending — …")` when a pending task file is found,
@@ -606,9 +669,10 @@ pub fn process(input: &HookInput, fs: &dyn FileSystemPort, env: &dyn EnvPort) ->
     // Check 2: At least one task must exist this session
     if !has_marker(fs, TASK_MARKER_PREFIX, session_id) {
         return HookOutput::deny(
-            "🔴 [Tool Usage Gate] BLOCKED: Create a task with `TaskCreate` (agent-team \
-             harness) or `TodoWrite` (core Claude Code) before making code changes. \
-             All work must be tracked as a task.",
+            "🔴 [Tool Usage Gate] BLOCKED: Create a task with `TaskCreate` before \
+             making code changes. All work must be tracked as a task. \
+             Note: `TodoWrite` is NOT accepted — Gary's CLAUDE.md mandates the \
+             agent-harness `TaskCreate`/`TaskUpdate` (TaskList) tool.",
         );
     }
 
@@ -669,25 +733,31 @@ pub fn process(input: &HookInput, fs: &dyn FileSystemPort, env: &dyn EnvPort) ->
 
     // Check 4: A task must be actively in_progress.
     //
-    // Normally satisfied by `mark_task_active` firing on a PostToolUse for
-    // TaskUpdate(status="in_progress") or a TodoWrite whose payload already
-    // has an item in_progress. As of sentinel main (late April 2026), we
-    // *also* activate on `TaskCreate` / `TodoWrite` creation — agents usually
-    // create a task and start working on it in the same turn, and forcing a
-    // dedicated TaskUpdate turn before any Edit is pure friction.
-    if !has_marker(fs, TASK_ACTIVE_PREFIX, session_id) {
+    // Authoritative check first: read the persisted task store and look for
+    // ANY task with status=in_progress across any project subdir. The
+    // sticky-marker (`TASK_ACTIVE_PREFIX`) only flips ON — it never reflects
+    // task completion — so on its own it lets the gate pass forever once
+    // any task was created. Reading the store catches the "all tasks are
+    // completed but agent is still editing" drift pattern that motivated
+    // the recurring complaint about task enforcement.
+    //
+    // Marker is kept as a fast-path/fallback for the rare case where the
+    // store can't be read (no home dir, malformed JSON, etc.).
+    if !persistent_store_has_active_task(fs) && !has_marker(fs, TASK_ACTIVE_PREFIX, session_id) {
         let hint = recent_pending_task_hint(fs, session_id).unwrap_or_default();
         let msg = if hint.is_empty() {
-            "🔴 [Tool Usage Gate] BLOCKED: Create a task with `TaskCreate` (agent-team \
-             harness) or `TodoWrite` (core Claude Code) before making code changes. \
-             All work must be tracked as an active task."
+            "🔴 [Tool Usage Gate] BLOCKED: Create a task with `TaskCreate` and have \
+             one in `in_progress` before making code changes. All work must be \
+             tracked as an active task. Note: `TodoWrite` is NOT accepted — \
+             Gary's CLAUDE.md mandates the agent-harness `TaskCreate`/`TaskUpdate` \
+             (TaskList) tool."
                 .to_string()
         } else {
             format!(
                 "🔴 [Tool Usage Gate] BLOCKED: Mark a task as `in_progress` before making \
                  code changes. {hint} Use `TaskUpdate(taskId: \"<id>\", \
-                 status: \"in_progress\")` or update a `TodoWrite` entry's status \
-                 to `in_progress`."
+                 status: \"in_progress\")`. Note: `TodoWrite` is NOT accepted — \
+                 Gary's CLAUDE.md mandates the agent-harness TaskList tool."
             )
         };
         return HookOutput::deny(msg);
@@ -1061,6 +1131,33 @@ mod tests {
         );
     }
 
+    /// Regression test for the strict TaskCreate-only policy: the deny
+    /// message must (a) name `TaskCreate` and (b) explicitly reject
+    /// `TodoWrite`. If either invariant is removed, the policy wording
+    /// has drifted and agents will start using TodoWrite again.
+    #[test]
+    fn test_check2_deny_message_rejects_todowrite_and_names_taskcreate() {
+        let fs = MockFs::with_marker(SEQUENTIAL_MARKER_PREFIX, "test-session");
+        let output = process(
+            &edit_input("test-session"),
+            &fs,
+            &crate::hooks::test_support::StubEnv::new(),
+        );
+        let reason = output
+            .hook_specific_output
+            .as_ref()
+            .and_then(|h| h.permission_decision_reason.as_deref())
+            .unwrap_or("");
+        assert!(
+            reason.contains("TaskCreate"),
+            "Check 2 deny message must name `TaskCreate` — got: {reason}"
+        );
+        assert!(
+            reason.contains("TodoWrite") && reason.contains("NOT accepted"),
+            "Check 2 deny message must explicitly reject TodoWrite — got: {reason}"
+        );
+    }
+
     #[test]
     fn test_blocks_edit_without_active_task() {
         let fs = MockFs::with_markers(
@@ -1140,6 +1237,90 @@ mod tests {
         assert!(!has_marker(&fs, TASK_ACTIVE_PREFIX, "s1"));
         mark_task_active(&fs, "s1");
         assert!(has_marker(&fs, TASK_ACTIVE_PREFIX, "s1"));
+    }
+
+    /// `persistent_store_has_active_task` reads real files. Test it
+    /// against a tempdir-backed `FileSystemPort` rather than `MockFs`,
+    /// which doesn't model directory listing.
+    #[test]
+    fn test_persistent_store_active_task_detection() {
+        struct TmpFs {
+            home: PathBuf,
+        }
+        impl FileSystemPort for TmpFs {
+            fn home_dir(&self) -> Option<PathBuf> {
+                Some(self.home.clone())
+            }
+            fn read_to_string(&self, p: &Path) -> anyhow::Result<String> {
+                Ok(std::fs::read_to_string(p)?)
+            }
+            fn write(&self, _: &Path, _: &[u8]) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn create_dir_all(&self, _: &Path) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn read_dir(&self, p: &Path) -> anyhow::Result<Vec<PathBuf>> {
+                Ok(std::fs::read_dir(p)?
+                    .filter_map(|e| e.ok().map(|e| e.path()))
+                    .collect())
+            }
+            fn exists(&self, p: &Path) -> bool {
+                p.exists()
+            }
+            fn is_dir(&self, p: &Path) -> bool {
+                p.is_dir()
+            }
+            fn metadata(&self, p: &Path) -> anyhow::Result<std::fs::Metadata> {
+                Ok(std::fs::metadata(p)?)
+            }
+            fn append(&self, _: &Path, _: &[u8]) -> anyhow::Result<()> {
+                Ok(())
+            }
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().to_path_buf();
+        let proj_root = home
+            .join(".claude")
+            .join("sentinel")
+            .join("persistent-tasks")
+            .join("proj-hash");
+        std::fs::create_dir_all(&proj_root).unwrap();
+        let tasks_file = proj_root.join("tasks.json");
+
+        let fs = TmpFs { home };
+
+        // No file → no active task.
+        assert!(!persistent_store_has_active_task(&fs));
+
+        // All pending → no active task.
+        std::fs::write(
+            &tasks_file,
+            r#"{"tasks":[{"id":"1","status":"pending"},{"id":"2","status":"completed"}]}"#,
+        )
+        .unwrap();
+        assert!(!persistent_store_has_active_task(&fs));
+
+        // One in_progress → active.
+        std::fs::write(
+            &tasks_file,
+            r#"{"tasks":[{"id":"1","status":"in_progress"}]}"#,
+        )
+        .unwrap();
+        assert!(persistent_store_has_active_task(&fs));
+
+        // Bare-array shape (older snapshot format).
+        std::fs::write(
+            &tasks_file,
+            r#"[{"id":"1","status":"in_progress"}]"#,
+        )
+        .unwrap();
+        assert!(persistent_store_has_active_task(&fs));
+
+        // Malformed JSON → degrades to false (caller falls back to marker).
+        std::fs::write(&tasks_file, "not-json").unwrap();
+        assert!(!persistent_store_has_active_task(&fs));
     }
 
     #[test]

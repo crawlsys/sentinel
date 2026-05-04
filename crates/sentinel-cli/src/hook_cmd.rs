@@ -525,6 +525,12 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
                 // `pre_commit_verification`; replaces transcript-parsing.
                 let evidence_output = hooks::test_evidence_recorder::process(&input, &ctx);
                 output.merge(&evidence_output);
+
+                // Good citizen observer — scan Bash output for warnings,
+                // dead-code, test failures, TODO/FIXME markers. Records
+                // observations for the Stop reminder.
+                let citizen_output = hooks::good_citizen_observer::process_post_tool(&input, &ctx);
+                output.merge(&citizen_output);
             }
 
             // Linear lifecycle — inject CronCreate for issue lifecycle monitoring
@@ -537,19 +543,19 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
                     if tool.contains("sequentialthinking") {
                         hooks::tool_usage_gate::mark_sequential_thinking_used(ctx.fs, session_id);
                     }
-                    // Task creation: agent-team `TaskCreate` OR core Claude Code `TodoWrite`
-                    // (per claude-code-2.1.88 `sdk-tools.d.ts`: the real core tool is TodoWrite —
-                    // previously the gate blocked core sessions forever because this branch
-                    // only matched "TaskCreate").
+                    // Task creation: agent-team `TaskCreate` ONLY. `TodoWrite` is the
+                    // core Claude Code fallback, but per Gary's stated policy (CLAUDE.md
+                    // "Required Tool Usage" §3) the agent-harness `TaskCreate`/`TaskUpdate`
+                    // (TaskList) is mandatory — TodoWrite no longer satisfies the gate.
                     //
                     // We also mark the task as *active* on TaskCreate — the common workflow
                     // is "create a task and immediately start working on it", and forcing a
                     // separate `TaskUpdate(status="in_progress")` turn before any Edit is
-                    // pure DX friction. A follow-up TaskUpdate(status="completed") clears
-                    // the task normally; the active marker persists for the session which
-                    // is correct (the session is still working on SOME task until its TaskList
-                    // is empty).
-                    if tool == "TaskCreate" || tool == "TodoWrite" {
+                    // pure DX friction. The authoritative active-task check is now reading
+                    // `~/.claude/sentinel/persistent-tasks/*/tasks.json` for any task with
+                    // `status=in_progress` (see `persistent_store_has_active_task`); the
+                    // marker is a fast-path/fallback only.
+                    if tool == "TaskCreate" {
                         hooks::tool_usage_gate::mark_task_created(ctx.fs, session_id);
                         hooks::tool_usage_gate::mark_task_active(ctx.fs, session_id);
                     }
@@ -564,26 +570,12 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
                     if tool == "EnterPlanMode" {
                         hooks::tool_usage_gate::mark_plan_approved(ctx.fs, session_id);
                     }
-                    // Active-task marker: agent-team `TaskUpdate(status="in_progress")` OR
-                    // core `TodoWrite` payload where any todo item has status "in_progress".
+                    // Active-task marker: agent-team `TaskUpdate(status="in_progress")`
+                    // only. The TodoWrite branch was deliberately removed — TodoWrite
+                    // is no longer a substitute for TaskUpdate per CLAUDE.md policy.
                     if tool == "TaskUpdate" {
                         if let Some(ti) = input.tool_input.as_ref() {
                             if ti.get("status").and_then(|v| v.as_str()) == Some("in_progress") {
-                                hooks::tool_usage_gate::mark_task_active(ctx.fs, session_id);
-                            }
-                        }
-                    }
-                    if tool == "TodoWrite" {
-                        if let Some(todos) = input
-                            .tool_input
-                            .as_ref()
-                            .and_then(|ti| ti.get("todos"))
-                            .and_then(|v| v.as_array())
-                        {
-                            let has_active = todos.iter().any(|t| {
-                                t.get("status").and_then(|s| s.as_str()) == Some("in_progress")
-                            });
-                            if has_active {
                                 hooks::tool_usage_gate::mark_task_active(ctx.fs, session_id);
                             }
                         }
@@ -630,6 +622,11 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
             // Task coverage check — warn if uncommitted changes but no active task
             let coverage_output = hooks::task_coverage_check::process(&input, &ctx);
             output.merge(&coverage_output);
+
+            // Good citizen observer — surface unaddressed warnings/findings
+            // observed during the turn, prompt agent to file TaskCreate.
+            let citizen_output = hooks::good_citizen_observer::process_stop(&input, &ctx);
+            output.merge(&citizen_output);
 
             // Activity tracker — build session summary from activity log
             let activity_stop_output = hooks::activity_tracker::process_stop(&input, &ctx);
@@ -1434,29 +1431,6 @@ fn extract_skill_name(context: &str) -> Option<String> {
 mod tests {
     use super::*;
     use std::process::Stdio;
-
-    fn test_command(command_str: &str) -> tokio::process::Child {
-        #[cfg(windows)]
-        let mut cmd = {
-            let mut cmd = tokio::process::Command::new("cmd");
-            cmd.arg("/C").arg(command_str);
-            cmd
-        };
-
-        #[cfg(not(windows))]
-        let mut cmd = {
-            let mut cmd = tokio::process::Command::new("sh");
-            cmd.arg("-c").arg(command_str);
-            cmd
-        };
-
-        cmd.stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()
-            .unwrap()
-    }
 
     #[test]
     fn test_extract_skill_name() {

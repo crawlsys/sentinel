@@ -23,6 +23,7 @@ pub mod error_reporter;
 pub mod evidence_collector;
 pub mod execution_log;
 pub mod git_hygiene;
+pub mod good_citizen_observer;
 pub mod hookdeck_decoders;
 pub mod hygiene_override;
 pub mod hygiene_reminders;
@@ -205,6 +206,7 @@ pub const HOOK_NAMES: &[&str] = &[
     "evidence_collector",
     "execution_log",
     "git_hygiene",
+    "good_citizen_observer",
     "hygiene_override",
     "hygiene_reminders",
     "linear_lifecycle",

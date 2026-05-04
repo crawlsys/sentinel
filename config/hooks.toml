@@ -157,6 +157,14 @@ depends_on = []
 has_api_call = false
 
 [[hooks]]
+id = "good-citizen-observer-record"
+event = "PostToolUse"
+matcher = ["Bash"]
+description = "Scan Bash output for warnings, dead-code, test failures, TODO/FIXME — record observations to ~/.claude/sentinel/state/good-citizen/{session_id}.jsonl"
+depends_on = []
+has_api_call = false
+
+[[hooks]]
 id = "account-cascade"
 event = "PostToolUse"
 description = "Auto-switch all MCP servers after account_switch/account_rotate/project_switch"
@@ -229,6 +237,13 @@ event = "Stop"
 description = "Boost used memories, flag corrections for review"
 depends_on = ["memory-extract"]
 has_api_call = true  # Qdrant set_payload call
+
+[[hooks]]
+id = "good-citizen-observer-remind"
+event = "Stop"
+description = "Surface unaddressed warnings/findings observed during the turn — soft reminder to file TaskCreate for pre-existing issues"
+depends_on = []
+has_api_call = false
 
 # === PreCompact ===
 
