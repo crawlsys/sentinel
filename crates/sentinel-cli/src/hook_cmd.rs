@@ -519,6 +519,12 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
                 // Build auto-monitor — suggest monitoring for background builds (Bash only)
                 let build_monitor_output = hooks::build_auto_monitor::process(&input);
                 output.merge(&build_monitor_output);
+
+                // Test evidence recorder — append a JSONL entry for any
+                // Bash command matching a test/build pattern. Read by
+                // `pre_commit_verification`; replaces transcript-parsing.
+                let evidence_output = hooks::test_evidence_recorder::process(&input, &ctx);
+                output.merge(&evidence_output);
             }
 
             // Linear lifecycle — inject CronCreate for issue lifecycle monitoring

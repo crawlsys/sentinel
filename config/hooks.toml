@@ -149,6 +149,14 @@ depends_on = []
 has_api_call = false
 
 [[hooks]]
+id = "test-evidence-recorder"
+event = "PostToolUse"
+matcher = ["Bash"]
+description = "Append a JSONL line keyed by session_id when a Bash command matches a test/build pattern. Read by pre_commit_verification; replaces transcript-parsing."
+depends_on = []
+has_api_call = false
+
+[[hooks]]
 id = "account-cascade"
 event = "PostToolUse"
 description = "Auto-switch all MCP servers after account_switch/account_rotate/project_switch"

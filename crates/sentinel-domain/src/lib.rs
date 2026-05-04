@@ -25,6 +25,7 @@ pub mod repo_kind;
 pub mod routing;
 pub mod session;
 pub mod state;
+pub mod test_evidence;
 pub mod workflow;
 
 // Re-export commonly used types

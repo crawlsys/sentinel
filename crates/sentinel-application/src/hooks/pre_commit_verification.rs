@@ -1,215 +1,54 @@
 //! Pre-Commit Verification Gate
 //!
 //! Blocks `git commit` and `git push` unless test/build evidence exists
-//! in the session transcript.
+//! for the current session.
 //!
-//! Two-layer verification (ported from Node.js pre-commit-verification.js):
-//!   Layer 1 (regex): Did any tests/builds run? (fast, ~0ms)
-//!   Layer 2 (AI):    Skipped for now — regex-only detection
+//! ## Source of evidence
 //!
-//! Override: session-scoped temp file (60s TTL, via hygiene_override module)
+//! Sentinel records its own evidence on `PostToolUse` (see
+//! [`super::test_evidence_recorder`]). Every Bash invocation that matches a
+//! test/build pattern is appended to
+//! `~/.claude/sentinel/state/test-evidence/{session_id}.jsonl`. This hook
+//! checks that file — keyed by the **same** session_id Claude Code passes in
+//! — and allows the commit/push if it contains at least one entry.
+//!
+//! Why not parse Claude Code's transcript? The hook input `session_id`
+//! (harness wrapper) does **not** match the on-disk transcript filename
+//! (Claude Code's internal `G8.sessionId`). Searching by the wrong key never
+//! finds the file, so the old transcript-based check falsely blocked every
+//! commit. The new design uses sentinel's own session-keyed evidence so the
+//! lookup is always exact.
+//!
+//! Override: session-scoped signed file (via [`super::hygiene_override`]).
 
 use regex::Regex;
 use sentinel_domain::events::{HookInput, HookOutput};
+use sentinel_domain::test_evidence::evidence_path;
 use std::path::PathBuf;
 
-/// Search all project directories for a session transcript JSONL.
-/// Fallback when `input.transcript_path` is missing or points to
-/// a worktree-scoped dir that doesn't contain the transcript file.
-///
-/// Returns the **largest** matching transcript, not the first — worktree-scoped
-/// project dirs often have small/empty transcripts while the original project
-/// dir has the real one with test evidence.
-///
-/// Also searches one level deeper (subdirectories within project dirs) to catch
-/// cases where Claude Code nests transcripts under session-scoped subdirs.
-fn find_transcript_by_session(fs: &dyn super::FileSystemPort, session_id: &str) -> Option<String> {
-    let projects_dir = fs.home_dir()?.join(".claude").join("projects");
-    if !fs.exists(&projects_dir) {
-        return None;
-    }
-    let filename = format!("{session_id}.jsonl");
-    let mut best: Option<(u64, String)> = None;
-    let mut candidates_checked = 0u32;
-
-    for path in fs.read_dir(&projects_dir).ok()?.into_iter() {
-        if !fs.is_dir(&path) {
-            continue;
-        }
-
-        // Check top-level: projects/{dir}/{session_id}.jsonl
-        let candidate = path.join(&filename);
-        if let Ok(meta) = fs.metadata(&candidate) {
-            let size = meta.len();
-            candidates_checked += 1;
-            if best.as_ref().is_none_or(|(best_size, _)| size > *best_size) {
-                best = Some((size, candidate.to_string_lossy().to_string()));
-            }
-        }
-
-        // Check one level deeper: projects/{dir}/{subdir}/{session_id}.jsonl
-        // Claude Code sometimes nests transcripts in session-scoped subdirs
-        if let Ok(subdirs) = fs.read_dir(&path) {
-            for subdir in subdirs {
-                if fs.is_dir(&subdir) {
-                    let subpath = subdir.join(&filename);
-                    if let Ok(meta) = fs.metadata(&subpath) {
-                        let size = meta.len();
-                        candidates_checked += 1;
-                        if best.as_ref().is_none_or(|(best_size, _)| size > *best_size) {
-                            best = Some((size, subpath.to_string_lossy().to_string()));
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    if let Some((size, ref path)) = best {
-        eprintln!(
-            "[sentinel] pre-commit-verify: transcript fallback found {} candidate(s), \
-             best: {} ({} bytes)",
-            candidates_checked, path, size
-        );
-    } else {
-        eprintln!(
-            "[sentinel] pre-commit-verify: transcript fallback found 0 candidates \
-             for session '{}'",
-            session_id
-        );
-    }
-
-    best.map(|(_, path)| path)
-}
-
-/// Test command patterns that count as verification evidence
-const TEST_COMMAND_PATTERNS: &[&str] = &[
-    r"\bnpm\s+test\b",
-    r"\bnpx\s+(vitest|jest|mocha|cypress)\b",
-    r"\byarn\s+test\b",
-    r"\bpnpm\s+test\b",
-    r"\bcargo\s+test\b",
-    r"\bcargo\s+build\b",
-    r"\bcargo\s+check\b",
-    r"\bcargo\s+clippy\b",
-    r"\bpytest\b",
-    r"\bgo\s+test\b",
-    r"\bgo\s+build\b",
-    r"\bgo\s+vet\b",
-    r"\bnpm\s+run\s+(test|build|lint|check|typecheck)\b",
-    r"\btsc\b.*--noEmit",
-    r"\bvitest\b",
-    r"\bjest\b",
-    r"\bmake\s+test\b",
-    r"\bmake\s+build\b",
-    r"\bnpm\s+run\s+build\b",
-    r"\bdocker\s+build\b",
-    r"\bdepot\s+build\b",
-    r"\bdepot\s+list\s+builds\b",
-];
-
-/// Test output patterns that confirm tests ran
-const TEST_OUTPUT_PATTERNS: &[&str] = &[
-    r"\d+\s+pass(?:ing|ed)?",
-    r"\d+\s+fail(?:ing|ed)?",
-    r"exit code:?\s*0",
-    r"tests?\s+suites?.*passed",
-    r"PASS",
-    r"BUILD SUCCESS",
-    r"Successfully compiled",
-    r"All \d+ tests? passed",
-];
-
-/// Path to the default override file (session-scoped via hygiene_override).
+/// Path to the default override file (session-scoped via `hygiene_override`).
 fn default_override_path(fs: &dyn super::FileSystemPort, session_id: &str) -> PathBuf {
     super::hygiene_override::verification_override_path(fs, session_id)
 }
 
-/// Check the transcript for test evidence (Layer 1: regex)
-fn transcript_has_test_evidence(fs: &dyn super::FileSystemPort, transcript_path: &str) -> bool {
-    let content = match fs.read_to_string(std::path::Path::new(transcript_path)) {
-        Ok(c) => c,
-        Err(_) => return false,
+/// Does the sentinel-recorded evidence file exist (and contain at least
+/// one entry) for this session?
+///
+/// Single source of truth for "have tests/builds run in this session?". The
+/// recorder hook only writes when a command matches a test pattern, so the
+/// mere existence of a non-empty file is sufficient evidence.
+fn session_has_recorded_evidence(fs: &dyn super::FileSystemPort, session_id: &str) -> bool {
+    let Some(home) = fs.home_dir() else {
+        return false;
     };
-
-    // Build regex patterns
-    let cmd_patterns: Vec<Regex> = TEST_COMMAND_PATTERNS
-        .iter()
-        .filter_map(|p| Regex::new(p).ok())
-        .collect();
-
-    let output_patterns: Vec<Regex> = TEST_OUTPUT_PATTERNS
-        .iter()
-        .filter_map(|p| Regex::new(p).ok())
-        .collect();
-
-    // Check each line of the transcript
-    for line in content.lines() {
-        // Try to parse as JSON transcript entry
-        if let Ok(entry) = serde_json::from_str::<serde_json::Value>(line) {
-            // Check assistant messages for Bash tool_use with test commands
-            if entry.get("type").and_then(|t| t.as_str()) == Some("assistant") {
-                if let Some(content_arr) = entry
-                    .get("message")
-                    .and_then(|m| m.get("content"))
-                    .and_then(|c| c.as_array())
-                {
-                    for block in content_arr {
-                        if block.get("type").and_then(|t| t.as_str()) == Some("tool_use")
-                            && block.get("name").and_then(|n| n.as_str()) == Some("Bash")
-                        {
-                            let cmd = block
-                                .get("input")
-                                .and_then(|i| i.get("command"))
-                                .and_then(|c| c.as_str())
-                                .unwrap_or("");
-                            for pattern in &cmd_patterns {
-                                if pattern.is_match(cmd) {
-                                    return true;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Check tool results for test output
-            if entry.get("type").and_then(|t| t.as_str()) == Some("tool_result") {
-                let text = entry
-                    .get("content")
-                    .map(|c| {
-                        if let Some(s) = c.as_str() {
-                            s.to_string()
-                        } else if let Some(arr) = c.as_array() {
-                            arr.iter()
-                                .filter_map(|item| {
-                                    item.as_str().map(String::from).or_else(|| {
-                                        item.get("text").and_then(|t| t.as_str()).map(String::from)
-                                    })
-                                })
-                                .collect::<Vec<_>>()
-                                .join(" ")
-                        } else {
-                            String::new()
-                        }
-                    })
-                    .unwrap_or_default();
-
-                for pattern in &output_patterns {
-                    if pattern.is_match(&text) {
-                        return true;
-                    }
-                }
-            }
-        }
-
-        // **Attack #59 fix**: Removed raw line fallback. Only structured JSON entries
-        // are trusted for test evidence. Raw text lines could be injected by an
-        // attacker (e.g., `echo "Tests: 5 passed" >> transcript.jsonl`) to fake
-        // passing test evidence without actually running tests.
+    let path = evidence_path(&home, session_id);
+    if !fs.exists(&path) {
+        return false;
     }
-
-    false
+    match fs.read_to_string(&path) {
+        Ok(contents) => contents.lines().any(|line| !line.trim().is_empty()),
+        Err(_) => false,
+    }
 }
 
 // `BUILD_CONFIG_MARKERS`, `DOCS_ONLY_EXTENSIONS`, and the `is_docs_only_path`
@@ -232,7 +71,6 @@ fn is_content_only_repo(cwd: Option<&str>) -> bool {
     !BUILD_CONFIG_MARKERS.iter().any(|f| dir.join(f).exists())
 }
 
-/// Trait for running `git diff` — injectable so tests can stub it.
 /// Check if a git commit/push only touches non-code files.
 /// Returns true if ALL files have docs-only extensions.
 fn is_docs_only_commit_with(command: &str, git: &dyn super::GitStatusPort, cwd: &str) -> bool {
@@ -338,62 +176,20 @@ fn process_with_override(
         return HookOutput::allow();
     }
 
-    // Layer 1: Check transcript for test evidence.
-    // Try input.transcript_path first, then fall back to searching by session ID.
-    // In worktrees, Claude Code sends a transcript_path to a worktree-scoped
-    // project dir that exists but is nearly empty (1 line). The real transcript
-    // with test evidence is in the original project dir. So we check BOTH:
-    // the provided path first, then the fallback if no evidence was found.
-    eprintln!(
-        "[sentinel] pre-commit-verify: session_id={}, transcript_path={:?}, cwd={:?}",
-        session_id,
-        input.transcript_path.as_deref().unwrap_or("(none)"),
-        input.cwd.as_deref().unwrap_or("(none)")
-    );
-
-    if let Some(ref transcript_path) = input.transcript_path {
-        let path = std::path::Path::new(transcript_path.as_str());
-        let exists = fs.exists(path);
-        let size = fs.metadata(path).map(|m| m.len()).unwrap_or(0);
+    // Look up sentinel-recorded evidence for THIS session_id. The recorder
+    // hook writes the file on PostToolUse with the same session_id we get
+    // here, so the lookup is exact — no transcript parsing required.
+    if session_has_recorded_evidence(fs, session_id) {
         eprintln!(
-            "[sentinel] pre-commit-verify: checking input.transcript_path: {} (exists={}, {} bytes)",
-            transcript_path, exists, size
+            "[sentinel] pre-commit-verify: evidence file present for session '{session_id}'"
         );
-        if transcript_has_test_evidence(fs, transcript_path) {
-            eprintln!("[sentinel] pre-commit-verify: EVIDENCE FOUND in input.transcript_path");
-            return HookOutput::allow();
-        }
-        eprintln!(
-            "[sentinel] pre-commit-verify: no evidence in input.transcript_path, trying fallback"
-        );
-    } else {
-        eprintln!("[sentinel] pre-commit-verify: no input.transcript_path, trying fallback");
-    }
-
-    // Fallback: search all project dirs for the largest transcript with this session ID
-    if let Some(ref fallback_path) = find_transcript_by_session(fs, session_id) {
-        let size = fs
-            .metadata(std::path::Path::new(fallback_path))
-            .map(|m| m.len())
-            .unwrap_or(0);
-        eprintln!(
-            "[sentinel] pre-commit-verify: fallback transcript: {} ({} bytes)",
-            fallback_path, size
-        );
-        if transcript_has_test_evidence(fs, fallback_path) {
-            eprintln!("[sentinel] pre-commit-verify: EVIDENCE FOUND in fallback transcript");
-            return HookOutput::allow();
-        }
-        eprintln!("[sentinel] pre-commit-verify: NO evidence in fallback transcript either");
-    } else {
-        eprintln!(
-            "[sentinel] pre-commit-verify: fallback found NO transcript for session '{}'",
-            session_id
-        );
+        return HookOutput::allow();
     }
 
     // No evidence found — BLOCK
-    eprintln!("[sentinel] pre-commit-verify: BLOCKING — no test evidence found anywhere");
+    eprintln!(
+        "[sentinel] pre-commit-verify: BLOCKING — no recorded test evidence for session '{session_id}'"
+    );
     let message = format!(
         "\
 +============================================================+
@@ -420,7 +216,70 @@ fn process_with_override(
 mod tests {
     use super::*;
     use crate::hooks::hygiene_override;
-    use std::io::Write;
+    use sentinel_domain::test_evidence::TestEvidenceEntry;
+    use std::path::Path;
+
+    /// Real-FS adapter scoped to a caller-supplied home directory.
+    struct ScopedHomeFs {
+        home: PathBuf,
+    }
+    impl super::super::FileSystemPort for ScopedHomeFs {
+        fn home_dir(&self) -> Option<PathBuf> {
+            Some(self.home.clone())
+        }
+        fn read_to_string(&self, p: &Path) -> anyhow::Result<String> {
+            Ok(std::fs::read_to_string(p)?)
+        }
+        fn write(&self, p: &Path, c: &[u8]) -> anyhow::Result<()> {
+            if let Some(par) = p.parent() {
+                std::fs::create_dir_all(par)?;
+            }
+            Ok(std::fs::write(p, c)?)
+        }
+        fn create_dir_all(&self, p: &Path) -> anyhow::Result<()> {
+            Ok(std::fs::create_dir_all(p)?)
+        }
+        fn read_dir(&self, _: &Path) -> anyhow::Result<Vec<PathBuf>> {
+            Ok(vec![])
+        }
+        fn exists(&self, p: &Path) -> bool {
+            p.exists()
+        }
+        fn is_dir(&self, p: &Path) -> bool {
+            p.is_dir()
+        }
+        fn metadata(&self, p: &Path) -> anyhow::Result<std::fs::Metadata> {
+            Ok(std::fs::metadata(p)?)
+        }
+        fn append(&self, p: &Path, c: &[u8]) -> anyhow::Result<()> {
+            if let Some(par) = p.parent() {
+                std::fs::create_dir_all(par)?;
+            }
+            use std::io::Write;
+            let mut f = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(p)?;
+            f.write_all(c)?;
+            Ok(())
+        }
+    }
+
+    fn seed_evidence(home: &Path, session_id: &str, command: &str) {
+        let path = evidence_path(home, session_id);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        let entry = TestEvidenceEntry {
+            ts_ms: 1_700_000_000_000,
+            session_id: session_id.into(),
+            cwd: "/repo".into(),
+            command: command.into(),
+            success: true,
+        };
+        let line = serde_json::to_string(&entry).unwrap();
+        std::fs::write(&path, format!("{line}\n")).unwrap();
+    }
 
     #[test]
     fn test_allows_non_bash_tool() {
@@ -479,8 +338,6 @@ mod tests {
             ..Default::default()
         };
         // Stub git: pretend there are code files changed (not docs-only).
-        // Implements GitStatusPort directly — diff_names is the only method
-        // is_docs_only_commit_with reaches; everything else returns defaults.
         struct StubCodeDiff;
         impl super::super::GitStatusPort for StubCodeDiff {
             fn has_uncommitted_changes(&self, _: &str) -> anyhow::Result<bool> {
@@ -532,70 +389,47 @@ mod tests {
     }
 
     #[test]
-    fn test_allows_when_transcript_has_evidence() {
-        // Create a temp transcript with test evidence
-        let mut tmpfile = tempfile::NamedTempFile::new().unwrap();
-        writeln!(
-            tmpfile,
-            r#"{{"type":"assistant","message":{{"content":[{{"type":"tool_use","name":"Bash","input":{{"command":"npm test"}}}}]}}}}"#
-        )
-        .unwrap();
+    fn test_allows_when_recorded_evidence_present() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let session_id = "test-evidence-present";
+        seed_evidence(tmpdir.path(), session_id, "cargo test");
+
+        let fs = ScopedHomeFs {
+            home: tmpdir.path().to_path_buf(),
+        };
+        let git = crate::hooks::test_support::StubGit;
+        let override_path = tmpdir.path().join("no-override");
 
         let input = HookInput {
-            tool_name: Some("Bash".to_string()),
+            tool_name: Some("Bash".into()),
             tool_input: Some(serde_json::json!({"command": "git commit -m 'tested'"})),
-            transcript_path: Some(tmpfile.path().to_string_lossy().to_string()),
             ..Default::default()
         };
-        // `transcript_has_test_evidence` reads via FileSystemPort; the default
-        // StubFs returns `bail!()` for read_to_string, which would break the
-        // evidence detection. Use a real-FS stub that delegates to std::fs.
-        struct RealFsStub;
-        impl super::super::FileSystemPort for RealFsStub {
-            fn home_dir(&self) -> Option<PathBuf> {
-                dirs::home_dir()
-            }
-            fn read_to_string(&self, p: &std::path::Path) -> anyhow::Result<String> {
-                Ok(std::fs::read_to_string(p)?)
-            }
-            fn write(&self, _: &std::path::Path, _: &[u8]) -> anyhow::Result<()> {
-                Ok(())
-            }
-            fn create_dir_all(&self, _: &std::path::Path) -> anyhow::Result<()> {
-                Ok(())
-            }
-            fn read_dir(&self, _: &std::path::Path) -> anyhow::Result<Vec<PathBuf>> {
-                Ok(vec![])
-            }
-            fn exists(&self, p: &std::path::Path) -> bool {
-                p.exists()
-            }
-            fn is_dir(&self, p: &std::path::Path) -> bool {
-                p.is_dir()
-            }
-            fn metadata(&self, p: &std::path::Path) -> anyhow::Result<std::fs::Metadata> {
-                Ok(std::fs::metadata(p)?)
-            }
-            fn append(&self, _: &std::path::Path, _: &[u8]) -> anyhow::Result<()> {
-                Ok(())
-            }
-        }
-        let real_fs = RealFsStub;
-        let stub_git = crate::hooks::test_support::StubGit;
-        let stub_proc = crate::hooks::test_support::StubProcess;
-        let stub_mcp = crate::hooks::test_support::StubMemoryMcp;
-        let stub_env = crate::hooks::test_support::StubEnv::new();
-        let ctx = super::super::HookContext {
-            git: &stub_git,
-            vector_store: None,
-            fs: &real_fs,
-            process: &stub_proc,
-            llm: None,
-            memory_mcp: &stub_mcp,
-            env: &stub_env,
-        };
-        let output = process(&input, &ctx);
+        let output = process_with_override(&input, &override_path, session_id, &fs, &git);
         assert!(output.blocked.is_none());
+    }
+
+    #[test]
+    fn test_blocks_when_evidence_file_empty() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let session_id = "test-evidence-empty";
+        let path = evidence_path(tmpdir.path(), session_id);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "").unwrap();
+
+        let fs = ScopedHomeFs {
+            home: tmpdir.path().to_path_buf(),
+        };
+        let git = crate::hooks::test_support::StubGit;
+        let override_path = tmpdir.path().join("no-override");
+
+        let input = HookInput {
+            tool_name: Some("Bash".into()),
+            tool_input: Some(serde_json::json!({"command": "git commit -m 'no tests'"})),
+            ..Default::default()
+        };
+        let output = process_with_override(&input, &override_path, session_id, &fs, &git);
+        assert_eq!(output.blocked, Some(true));
     }
 
     #[test]
@@ -614,41 +448,10 @@ mod tests {
             session_id
         ));
 
-        // For write/read roundtrip, use a real-FS wrapper
-        struct RealTestFs;
-        impl super::super::FileSystemPort for RealTestFs {
-            fn home_dir(&self) -> Option<PathBuf> {
-                dirs::home_dir()
-            }
-            fn read_to_string(&self, p: &std::path::Path) -> anyhow::Result<String> {
-                Ok(std::fs::read_to_string(p)?)
-            }
-            fn write(&self, p: &std::path::Path, c: &[u8]) -> anyhow::Result<()> {
-                if let Some(par) = p.parent() {
-                    std::fs::create_dir_all(par)?;
-                }
-                Ok(std::fs::write(p, c)?)
-            }
-            fn create_dir_all(&self, p: &std::path::Path) -> anyhow::Result<()> {
-                Ok(std::fs::create_dir_all(p)?)
-            }
-            fn read_dir(&self, _: &std::path::Path) -> anyhow::Result<Vec<PathBuf>> {
-                Ok(vec![])
-            }
-            fn exists(&self, p: &std::path::Path) -> bool {
-                p.exists()
-            }
-            fn is_dir(&self, p: &std::path::Path) -> bool {
-                p.is_dir()
-            }
-            fn metadata(&self, p: &std::path::Path) -> anyhow::Result<std::fs::Metadata> {
-                Ok(std::fs::metadata(p)?)
-            }
-            fn append(&self, _: &std::path::Path, _: &[u8]) -> anyhow::Result<()> {
-                Ok(())
-            }
-        }
-        let real_fs = RealTestFs;
+        // For write/read roundtrip, use the real-FS wrapper
+        let real_fs = ScopedHomeFs {
+            home: tmpdir.path().to_path_buf(),
+        };
 
         // Write a properly signed override file
         hygiene_override::write_signed_override_for_test(
@@ -699,71 +502,6 @@ mod tests {
     }
 
     #[test]
-    fn test_transcript_output_patterns_detected() {
-        let mut tmpfile = tempfile::NamedTempFile::new().unwrap();
-        writeln!(
-            tmpfile,
-            r#"{{"type":"tool_result","content":"5 passing (200ms)"}}"#
-        )
-        .unwrap();
-
-        let input = HookInput {
-            tool_name: Some("Bash".to_string()),
-            tool_input: Some(serde_json::json!({"command": "git push origin main"})),
-            transcript_path: Some(tmpfile.path().to_string_lossy().to_string()),
-            ..Default::default()
-        };
-        // Use a real-FS stub so transcript_has_test_evidence can read the
-        // tempfile we just wrote (default StubFs.read_to_string returns bail!).
-        struct RealFsStub;
-        impl super::super::FileSystemPort for RealFsStub {
-            fn home_dir(&self) -> Option<PathBuf> {
-                dirs::home_dir()
-            }
-            fn read_to_string(&self, p: &std::path::Path) -> anyhow::Result<String> {
-                Ok(std::fs::read_to_string(p)?)
-            }
-            fn write(&self, _: &std::path::Path, _: &[u8]) -> anyhow::Result<()> {
-                Ok(())
-            }
-            fn create_dir_all(&self, _: &std::path::Path) -> anyhow::Result<()> {
-                Ok(())
-            }
-            fn read_dir(&self, _: &std::path::Path) -> anyhow::Result<Vec<PathBuf>> {
-                Ok(vec![])
-            }
-            fn exists(&self, p: &std::path::Path) -> bool {
-                p.exists()
-            }
-            fn is_dir(&self, p: &std::path::Path) -> bool {
-                p.is_dir()
-            }
-            fn metadata(&self, p: &std::path::Path) -> anyhow::Result<std::fs::Metadata> {
-                Ok(std::fs::metadata(p)?)
-            }
-            fn append(&self, _: &std::path::Path, _: &[u8]) -> anyhow::Result<()> {
-                Ok(())
-            }
-        }
-        let real_fs = RealFsStub;
-        let stub_git = crate::hooks::test_support::StubGit;
-        let stub_proc = crate::hooks::test_support::StubProcess;
-        let stub_mcp = crate::hooks::test_support::StubMemoryMcp;
-        let stub_env = crate::hooks::test_support::StubEnv::new();
-        let ctx = super::super::HookContext {
-            git: &stub_git,
-            vector_store: None,
-            fs: &real_fs,
-            process: &stub_proc,
-            llm: None,
-            memory_mcp: &stub_mcp,
-            env: &stub_env,
-        };
-        let output = process(&input, &ctx);
-        assert!(output.blocked.is_none());
-    }
-
-    #[test]
     fn test_blocks_git_commit_amend() {
         // Use a non-existent override path to isolate from parallel tests
         let tmpdir = tempfile::tempdir().unwrap();
@@ -782,77 +520,6 @@ mod tests {
             &crate::hooks::test_support::StubGit,
         );
         assert_eq!(output.blocked, Some(true));
-    }
-
-    #[test]
-    fn test_find_transcript_picks_largest_file() {
-        // Simulates worktree bug: two project dirs have the same session JSONL,
-        // but the worktree-scoped one is empty and the original has real content.
-        let tmpdir = tempfile::tempdir().unwrap();
-        let session_id = "test-find-largest";
-
-        // Create two "project" dirs
-        let worktree_dir = tmpdir.path().join("C--repo--worktree");
-        let original_dir = tmpdir.path().join("C--repo");
-        std::fs::create_dir_all(&worktree_dir).unwrap();
-        std::fs::create_dir_all(&original_dir).unwrap();
-
-        // Worktree transcript: empty
-        let worktree_transcript = worktree_dir.join(format!("{session_id}.jsonl"));
-        std::fs::write(&worktree_transcript, "").unwrap();
-
-        // Original transcript: has test evidence
-        let original_transcript = original_dir.join(format!("{session_id}.jsonl"));
-        std::fs::write(
-            &original_transcript,
-            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"cargo test"}}]}}"#,
-        )
-        .unwrap();
-
-        // Use a real-fs wrapper for read_to_string — `transcript_has_test_evidence`
-        // takes a `FileSystemPort`, and we need actual file IO here.
-        struct RealTestFs;
-        impl super::super::FileSystemPort for RealTestFs {
-            fn home_dir(&self) -> Option<PathBuf> {
-                dirs::home_dir()
-            }
-            fn read_to_string(&self, p: &std::path::Path) -> anyhow::Result<String> {
-                Ok(std::fs::read_to_string(p)?)
-            }
-            fn write(&self, _: &std::path::Path, _: &[u8]) -> anyhow::Result<()> {
-                Ok(())
-            }
-            fn create_dir_all(&self, _: &std::path::Path) -> anyhow::Result<()> {
-                Ok(())
-            }
-            fn read_dir(&self, _: &std::path::Path) -> anyhow::Result<Vec<PathBuf>> {
-                Ok(vec![])
-            }
-            fn exists(&self, p: &std::path::Path) -> bool {
-                p.exists()
-            }
-            fn is_dir(&self, p: &std::path::Path) -> bool {
-                p.is_dir()
-            }
-            fn metadata(&self, p: &std::path::Path) -> anyhow::Result<std::fs::Metadata> {
-                Ok(std::fs::metadata(p)?)
-            }
-            fn append(&self, _: &std::path::Path, _: &[u8]) -> anyhow::Result<()> {
-                Ok(())
-            }
-        }
-        let real_fs = RealTestFs;
-
-        // The original (larger) transcript should have evidence
-        assert!(transcript_has_test_evidence(
-            &real_fs,
-            &original_transcript.to_string_lossy()
-        ));
-        // The worktree (empty) one should not
-        assert!(!transcript_has_test_evidence(
-            &real_fs,
-            &worktree_transcript.to_string_lossy()
-        ));
     }
 
     #[test]
@@ -899,8 +566,6 @@ mod tests {
 
     #[test]
     fn test_is_docs_only_not_commit() {
-        // Use an explicit stub so the test doesn't depend on the ambient git repo state.
-        // Reports zero diffed files via GitStatusPort.diff_names.
         struct NoFiles;
         impl super::super::GitStatusPort for NoFiles {
             fn has_uncommitted_changes(&self, _: &str) -> anyhow::Result<bool> {
