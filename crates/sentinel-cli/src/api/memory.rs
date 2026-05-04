@@ -156,6 +156,26 @@ fn daemon_unavailable(base: &str, reason: &str) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    /// Serializes every test in this module that mutates
+    /// `SENTINEL_MEMORY_DAEMON_URL`. Cargo runs tests in parallel by default,
+    /// and the previous "the only env-touching test" comment was wrong —
+    /// `daemon_url_uses_env_override_when_set`, `daemon_url_falls_back_to_default_when_unset`,
+    /// and `daemon_unreachable_returns_503` all read+mutate the same env
+    /// var, so without a shared mutex they race and intermittently see
+    /// each other's writes (the fall-back test would observe the override
+    /// test's value before its own `remove_var` ran). Holding the mutex
+    /// across both the mutation AND the `daemon_url()` read closes the
+    /// window completely.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Acquire the env lock, tolerating poisoning (a panic in another
+    /// test holding the lock leaves it poisoned, but the env state itself
+    /// is still recoverable from the saved `prev`).
+    fn lock_env() -> std::sync::MutexGuard<'static, ()> {
+        ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
 
     #[test]
     fn default_daemon_url_is_3011() {
@@ -166,12 +186,9 @@ mod tests {
 
     #[test]
     fn daemon_url_uses_env_override_when_set() {
-        // SAFETY: test-only. Rust sets this in the test thread's env; no
-        // other code in this crate reads DAEMON_URL_ENV concurrently.
+        let _guard = lock_env();
         let key = DAEMON_URL_ENV;
         let prev = std::env::var(key).ok();
-        // SAFETY-B: set_var is safe in single-threaded tests; we run this
-        // test serially by virtue of it being the only env-touching test.
         std::env::set_var(key, "http://10.0.0.7:3099");
         assert_eq!(daemon_url(), "http://10.0.0.7:3099");
         match prev {
@@ -182,6 +199,7 @@ mod tests {
 
     #[test]
     fn daemon_url_falls_back_to_default_when_unset() {
+        let _guard = lock_env();
         let key = DAEMON_URL_ENV;
         let prev = std::env::var(key).ok();
         std::env::remove_var(key);
@@ -196,6 +214,7 @@ mod tests {
         // Point at a port that is almost certainly closed. reqwest will
         // fail fast with ConnectionRefused, so we get the 503 without
         // waiting for the 3s timeout.
+        let _guard = lock_env();
         let key = DAEMON_URL_ENV;
         let prev = std::env::var(key).ok();
         std::env::set_var(key, "http://127.0.0.1:1");
