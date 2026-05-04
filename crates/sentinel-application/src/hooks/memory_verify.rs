@@ -1,11 +1,19 @@
-//! Memory Verify Hook — verify stored memories against ground truth on SessionStart.
+//! Memory Verify Hook — verify stored memories against ground truth on PreCompact.
 //!
-//! Runs on SessionStart with a 24h cooldown. Scrolls Qdrant for memories not
+//! Runs on PreCompact with a 24h cooldown. Scrolls Qdrant for memories not
 //! verified in the last 7 days, extracts claims via Claude API (claude-haiku-4-5-20251001),
 //! verifies file_path claims with fs::exists(), and updates Qdrant payloads.
 //!
-//! All network calls run inside `run_async()` which enforces a 3-second wall-clock
-//! timeout — the hook never blocks SessionStart.
+//! ## Why PreCompact, not SessionStart
+//!
+//! Originally lived on SessionStart, but Qdrant scroll + per-claim Cerebras
+//! verification blocked startup for 5–20s on a cold cache. Moved to PreCompact
+//! (background, non-critical path) so latency doesn't affect user-perceived
+//! session readiness. The 24h cooldown means a long session typically
+//! verifies once, on its first compaction event of the day.
+//!
+//! All network calls still run inside `run_async()` which enforces a 3-second
+//! wall-clock timeout as a defence in depth.
 
 use chrono::Utc;
 use sentinel_domain::constants;
@@ -244,7 +252,7 @@ async fn update_payload(
     }
 }
 
-/// Process SessionStart — verify stale memories.
+/// Process PreCompact — verify stale memories against ground truth.
 pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     // 1. Check 24h cooldown
     if !check_cooldown(ctx.fs) {
@@ -320,7 +328,7 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
             stale_count
         );
         let _ = input; // suppress unused warning
-        return HookOutput::inject_context(HookEvent::SessionStart, &msg);
+        return HookOutput::inject_context(HookEvent::PreCompact, &msg);
     }
 
     HookOutput::allow()

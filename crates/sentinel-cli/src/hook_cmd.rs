@@ -691,6 +691,14 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
             // Session index — upsert transcript exchanges to Qdrant for search
             let index_output = hooks::session_index::process(&input, &ctx);
             output.merge(&index_output);
+
+            // Memory verify — re-check stored memories against ground truth
+            // (24h cooldown, 3s wall-clock timeout, silently no-ops without
+            // Qdrant + LLM). Moved here from SessionStart on 2026-04 because
+            // verification blocked startup 5-20s; PreCompact is the right
+            // home — background, non-critical, runs once per long session.
+            let verify_output = hooks::memory_verify::process(&input, &ctx);
+            output.merge(&verify_output);
         }
 
         HookEvent::TeammateIdle => {

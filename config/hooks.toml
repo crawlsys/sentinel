@@ -13,10 +13,8 @@ depends_on = []
 has_api_call = false
 
 # Note: `memory-verify` was removed from SessionStart on 2026-04 because
-# Qdrant HTTP calls blocked startup for 5–20s. The Rust module
-# (`crates/sentinel-application/src/hooks/memory_verify.rs`) is currently
-# orphaned — kept on disk for the planned PreCompact relocation (background,
-# non-critical path) but not dispatched anywhere yet. Filed as a follow-up.
+# Qdrant HTTP calls blocked startup for 5–20s. It now runs on PreCompact
+# instead — see the PreCompact section below.
 
 # === UserPromptSubmit ===
 
@@ -280,3 +278,10 @@ event = "PreCompact"
 description = "Upsert transcript exchanges to Qdrant `claude-sessions` collection for cross-session search"
 depends_on = ["pre-compact"]
 has_api_call = true  # Qdrant upsert
+
+[[hooks]]
+id = "memory-verify"
+event = "PreCompact"
+description = "Re-check stored memories against ground truth (Qdrant scroll + claim verification, 24h cooldown, 3s wall-clock timeout)"
+depends_on = ["pre-compact"]
+has_api_call = true  # Qdrant scroll + Cerebras claim extraction
