@@ -12,12 +12,11 @@ description = "Initialize session state, generate CLAUDE.md"
 depends_on = []
 has_api_call = false
 
-[[hooks]]
-id = "memory-verify"
-event = "SessionStart"
-description = "Verify stale memories against ground truth (24h cooldown)"
-depends_on = ["session-init"]
-has_api_call = true
+# Note: `memory-verify` was removed from SessionStart on 2026-04 because
+# Qdrant HTTP calls blocked startup for 5–20s. The Rust module
+# (`crates/sentinel-application/src/hooks/memory_verify.rs`) is currently
+# orphaned — kept on disk for the planned PreCompact relocation (background,
+# non-critical path) but not dispatched anywhere yet. Filed as a follow-up.
 
 # === UserPromptSubmit ===
 
@@ -55,6 +54,13 @@ event = "UserPromptSubmit"
 description = "Override hygiene rules when appropriate"
 depends_on = []
 has_api_call = false
+
+[[hooks]]
+id = "memory-inject"
+event = "UserPromptSubmit"
+description = "Search Qdrant for semantically relevant memories and inject into context"
+depends_on = []
+has_api_call = true  # Qdrant HTTP search
 
 # === PreToolUse ===
 
@@ -232,11 +238,25 @@ depends_on = ["execution-log"]
 has_api_call = false
 
 [[hooks]]
+id = "memory-extract"
+event = "Stop"
+description = "Sync recently modified memory files (~/.claude/session-env/.../memory/*.md) to Qdrant"
+depends_on = []
+has_api_call = true  # Qdrant upsert
+
+[[hooks]]
 id = "memory-feedback"
 event = "Stop"
 description = "Boost used memories, flag corrections for review"
 depends_on = ["memory-extract"]
 has_api_call = true  # Qdrant set_payload call
+
+[[hooks]]
+id = "memory-inject-precompute"
+event = "Stop"
+description = "Pre-compute Qdrant search results for the next UserPromptSubmit's memory-inject"
+depends_on = []
+has_api_call = true  # Qdrant HTTP search
 
 [[hooks]]
 id = "good-citizen-observer-remind"
@@ -253,3 +273,10 @@ event = "PreCompact"
 description = "Preserve critical context before auto-compact"
 depends_on = []
 has_api_call = false
+
+[[hooks]]
+id = "session-index"
+event = "PreCompact"
+description = "Upsert transcript exchanges to Qdrant `claude-sessions` collection for cross-session search"
+depends_on = ["pre-compact"]
+has_api_call = true  # Qdrant upsert
