@@ -4,9 +4,19 @@
 .env
 .claude/worktrees/
 
+# Session state — sentinel writes these per-session, never commit
+.claude/scheduled_tasks.lock
+.claude/settings.local.json
+
+# Auto-managed by hooks — content is current state, snapshots rot
+/tasks.md
+/BLOCKED.md
+
 # apps/dashboard (Next.js)
 apps/dashboard/node_modules/
 apps/dashboard/.next/
 apps/dashboard/dist/
 apps/dashboard/.env.local
 apps/dashboard/coverage/
+# pnpm-lock.yaml is the source of truth here; npm-style lockfile is not tracked
+apps/dashboard/package-lock.json
