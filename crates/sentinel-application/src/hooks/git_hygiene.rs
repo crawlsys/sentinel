@@ -446,7 +446,9 @@ mod tests {
 
     #[test]
     fn test_blocks_edit_over_threshold() {
-        let files: Vec<String> = (0..15).map(|i| format!("file{i}.rs")).collect();
+        let files: Vec<String> = (0..(MAX_UNCOMMITTED_FILES + 1))
+            .map(|i| format!("file{i}.rs"))
+            .collect();
         let git = StubGit::default_with(true, files);
         let input = HookInput {
             tool_name: Some("Edit".to_string()),
@@ -459,7 +461,9 @@ mod tests {
 
     #[test]
     fn test_blocks_write_over_threshold() {
-        let files: Vec<String> = (0..12).map(|i| format!("file{i}.rs")).collect();
+        let files: Vec<String> = (0..(MAX_UNCOMMITTED_FILES + 1))
+            .map(|i| format!("file{i}.rs"))
+            .collect();
         let git = StubGit::default_with(true, files);
         let input = HookInput {
             tool_name: Some("Write".to_string()),

@@ -95,8 +95,15 @@ pub const PROOF_MAX_RAPID_FAILURES: u32 = 3;
 // Git / hygiene
 // ---------------------------------------------------------------------------
 
-/// Max uncommitted files before `git_hygiene` warns.
-pub const MAX_UNCOMMITTED_FILES: usize = 10;
+/// Max uncommitted files before `git_hygiene` blocks Edit/Write.
+///
+/// Set high (150) because the threshold's purpose is catching genuinely
+/// out-of-control sessions, not blocking work in repos with legacy index
+/// noise (stale build dirs, large refactors-in-progress, .gitignore drift).
+/// At 10 the gate constantly false-fires on routine work and forces a
+/// cleanup detour before the actual task can resume. 150 catches "agent
+/// has gone wild" without hassling normal sessions.
+pub const MAX_UNCOMMITTED_FILES: usize = 150;
 
 /// Hygiene override token TTL (seconds).
 pub const OVERRIDE_TTL_SECS: u64 = 60;
