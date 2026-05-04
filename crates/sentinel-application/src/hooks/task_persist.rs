@@ -549,6 +549,7 @@ fn write_memory_summary(
         ip = in_progress,
     ));
     body.push_str("type: project\n");
+    body.push_str("source: auto\n");
     body.push_str("---\n\n");
     body.push_str(&format!(
         "**{open}** open · **{ip}** in progress · **{done}** completed (full state in `tasks.md` at the repo root)\n\n",
@@ -1239,6 +1240,7 @@ mod tests {
         let memory_file = project_dir.join("memory").join("project_tasks.md");
         let body = std::fs::read_to_string(&memory_file).unwrap();
         assert!(body.contains("type: project"));
+        assert!(body.contains("source: auto"));
         assert!(body.contains("**#1** alpha"));
         assert!(body.contains("**#2** beta"));
         assert!(body.contains("blocked by 1"));
