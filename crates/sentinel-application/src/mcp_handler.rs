@@ -79,6 +79,8 @@ impl McpHandler {
             "sentinel__get_step_proof" => self.get_step_proof(call.arguments).await,
             "sentinel__get_step_chain" => self.get_step_chain(call.arguments).await,
             "sentinel__get_active_step" => self.get_active_step(call.arguments).await,
+            // ── Step-level write (M4.2) ──────────────────────────────
+            "sentinel__submit_step_complete" => self.submit_step_complete(call.arguments).await,
             _ => McpToolResult::err(format!("Unknown tool: {}", call.name)),
         }
     }
@@ -300,6 +302,125 @@ impl McpHandler {
         });
         McpToolResult::ok(payload)
     }
+
+    /// Seal a judged step into the proof chain (M4.2).
+    ///
+    /// Wraps [`ProofEngine::submit_step_evidence`] so external MCP
+    /// servers (skills-mcp, agents-mcp) can advance the chain remotely
+    /// without needing direct access to sentinel-application internals.
+    ///
+    /// Required arguments:
+    /// - `skill` (string)
+    /// - `phase_id` (string)
+    /// - `step_id` (string)
+    /// - `step_description` (string) — what "sufficient" means for this step
+    /// - `verdict` (object) — JudgeVerdict { sufficient, confidence, reasoning, requested_evidence? }
+    ///
+    /// Optional arguments (sensible defaults applied when omitted):
+    /// - `evidence` (object) — defaults to empty Evidence
+    /// - `judge_model` (string: "sonnet" | "opus" | "haiku") — defaults to "sonnet"
+    /// - `artifact` (any JSON value) — defaults to null
+    /// - `account_context` (string|null) — defaults to null
+    /// - `started_at` (RFC3339 string) — defaults to now-1ms
+    ///
+    /// Returns the sealed StepProof on success, or an error on
+    /// insufficient verdict / chain-link mismatch / serialization
+    /// failure. Refusing to seal an insufficient verdict is the
+    /// engine's job — surface the error here for caller telemetry.
+    async fn submit_step_complete(&self, args: serde_json::Value) -> McpToolResult {
+        // Required string fields.
+        let Some(skill) = args.get("skill").and_then(|v| v.as_str()) else {
+            return McpToolResult::err("Missing 'skill' argument");
+        };
+        let Some(phase_id) = args.get("phase_id").and_then(|v| v.as_str()) else {
+            return McpToolResult::err("Missing 'phase_id' argument");
+        };
+        let Some(step_id) = args.get("step_id").and_then(|v| v.as_str()) else {
+            return McpToolResult::err("Missing 'step_id' argument");
+        };
+        let Some(step_description) = args.get("step_description").and_then(|v| v.as_str()) else {
+            return McpToolResult::err("Missing 'step_description' argument");
+        };
+
+        // Required: the verdict. Deserialize, sanitize, surface clear
+        // errors when the shape is wrong.
+        let verdict_raw = match args.get("verdict") {
+            Some(v) => v.clone(),
+            None => return McpToolResult::err("Missing 'verdict' argument"),
+        };
+        let verdict: sentinel_domain::judge::JudgeVerdict =
+            match serde_json::from_value(verdict_raw) {
+                Ok(v) => sentinel_domain::judge::JudgeVerdict::sanitized(v),
+                Err(e) => return McpToolResult::err(format!("Invalid 'verdict' shape: {e}")),
+            };
+
+        // Optional fields with defaults.
+        let evidence: sentinel_domain::evidence::Evidence = match args.get("evidence") {
+            Some(v) => match serde_json::from_value(v.clone()) {
+                Ok(e) => e,
+                Err(e) => return McpToolResult::err(format!("Invalid 'evidence' shape: {e}")),
+            },
+            None => sentinel_domain::evidence::Evidence::default(),
+        };
+
+        let judge_model = match args.get("judge_model").and_then(|v| v.as_str()) {
+            Some("sonnet") | None => sentinel_domain::judge::JudgeModel::Sonnet,
+            Some("opus") => sentinel_domain::judge::JudgeModel::Opus,
+            Some("haiku") => sentinel_domain::judge::JudgeModel::Haiku,
+            Some(other) => {
+                return McpToolResult::err(format!(
+                    "Unknown judge_model '{other}' — expected sonnet | opus | haiku"
+                ));
+            }
+        };
+
+        let artifact = args
+            .get("artifact")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+
+        let account_context = args
+            .get("account_context")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        // started_at — accept RFC3339 string, fall back to now-1ms so
+        // started_at < completed_at (set inside the engine = now).
+        let started_at = match args.get("started_at").and_then(|v| v.as_str()) {
+            Some(ts) => match chrono::DateTime::parse_from_rfc3339(ts) {
+                Ok(dt) => dt.with_timezone(&chrono::Utc),
+                Err(e) => {
+                    return McpToolResult::err(format!(
+                        "Invalid 'started_at' (expected RFC3339): {e}"
+                    ));
+                }
+            },
+            None => chrono::Utc::now() - chrono::Duration::milliseconds(1),
+        };
+
+        match self
+            .proof_engine
+            .submit_step_evidence(
+                skill,
+                phase_id,
+                step_id,
+                step_description,
+                evidence,
+                verdict,
+                judge_model,
+                artifact,
+                account_context,
+                started_at,
+            )
+            .await
+        {
+            Ok(proof) => match serde_json::to_value(&proof) {
+                Ok(v) => McpToolResult::ok(v),
+                Err(e) => McpToolResult::err(format!("Serialization error: {e}")),
+            },
+            Err(e) => McpToolResult::err(format!("submit_step_complete failed: {e}")),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -508,6 +629,245 @@ mod step_tools_tests {
         assert_eq!(last.get("step_id").and_then(|v| v.as_str()), Some("2"));
         assert_eq!(last.get("phase_id").and_then(|v| v.as_str()), Some("claim"));
         assert!(last.get("combined_hash").is_some());
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // M4.2: submit_step_complete tests
+    // ─────────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn submit_step_complete_seals_step_with_minimal_args() {
+        // Smallest legal call: skill + phase_id + step_id + step_description + verdict.
+        // Everything else takes defaults.
+        let state = Arc::new(RwLock::new(SessionState::new("test-session")));
+        let engine = Arc::new(ProofEngine::new(state.clone(), Arc::new(StubJudge)));
+        let handler = McpHandler::new(state, engine);
+
+        let result = handler
+            .handle(McpToolCall {
+                name: "sentinel__submit_step_complete".into(),
+                arguments: serde_json::json!({
+                    "skill": "linear",
+                    "phase_id": "claim",
+                    "step_id": "1",
+                    "step_description": "fetch ticket",
+                    "verdict": {
+                        "sufficient": true,
+                        "confidence": 0.93,
+                        "reasoning": "evidence present",
+                    },
+                }),
+            })
+            .await;
+
+        assert!(result.success, "error: {:?}", result.error);
+        let proof = result.content;
+        assert_eq!(proof.get("skill").and_then(|v| v.as_str()), Some("linear"));
+        assert_eq!(proof.get("step_id").and_then(|v| v.as_str()), Some("1"));
+        assert_eq!(proof.get("phase_id").and_then(|v| v.as_str()), Some("claim"));
+        assert!(proof.get("combined_hash").is_some());
+        // Default judge_model is sonnet.
+        assert_eq!(
+            proof.get("judge_model").and_then(|v| v.as_str()),
+            Some("openai/gpt-5.3"),
+        );
+    }
+
+    #[tokio::test]
+    async fn submit_step_complete_propagates_artifact_and_account_context() {
+        let state = Arc::new(RwLock::new(SessionState::new("test-session")));
+        let engine = Arc::new(ProofEngine::new(state.clone(), Arc::new(StubJudge)));
+        let handler = McpHandler::new(state, engine);
+
+        let result = handler
+            .handle(McpToolCall {
+                name: "sentinel__submit_step_complete".into(),
+                arguments: serde_json::json!({
+                    "skill": "linear",
+                    "phase_id": "claim",
+                    "step_id": "1",
+                    "step_description": "open PR",
+                    "verdict": {"sufficient": true, "confidence": 0.95, "reasoning": "ok"},
+                    "artifact": {"pr_url": "https://github.com/foo/bar/pull/9", "pr_number": 9},
+                    "account_context": "firefly-pro",
+                    "judge_model": "opus",
+                }),
+            })
+            .await;
+
+        assert!(result.success);
+        let proof = result.content;
+        assert_eq!(
+            proof.get("account_context").and_then(|v| v.as_str()),
+            Some("firefly-pro"),
+        );
+        assert_eq!(
+            proof.get("artifact").and_then(|v| v.get("pr_url")).and_then(|v| v.as_str()),
+            Some("https://github.com/foo/bar/pull/9"),
+        );
+        assert_eq!(
+            proof.get("judge_model").and_then(|v| v.as_str()),
+            Some("anthropic/opus-4.6"),
+        );
+    }
+
+    #[tokio::test]
+    async fn submit_step_complete_rejects_insufficient_verdict() {
+        let state = Arc::new(RwLock::new(SessionState::new("test-session")));
+        let engine = Arc::new(ProofEngine::new(state.clone(), Arc::new(StubJudge)));
+        let handler = McpHandler::new(state.clone(), engine);
+
+        let result = handler
+            .handle(McpToolCall {
+                name: "sentinel__submit_step_complete".into(),
+                arguments: serde_json::json!({
+                    "skill": "linear",
+                    "phase_id": "claim",
+                    "step_id": "1",
+                    "step_description": "fetch ticket",
+                    "verdict": {
+                        "sufficient": false,
+                        "confidence": 0.7,
+                        "reasoning": "missing FPCRM ref in PR body",
+                        "requested_evidence": ["Ref FPCRM-XXX in PR body"],
+                    },
+                }),
+            })
+            .await;
+
+        assert!(!result.success);
+        let err = result.error.unwrap();
+        assert!(err.contains("insufficient"), "error mentions insufficient: {err}");
+        // No chain mutation on failure.
+        let s = state.read().await;
+        assert!(!s.proof_chains.contains_key("linear"));
+    }
+
+    #[tokio::test]
+    async fn submit_step_complete_validates_required_args() {
+        let state = Arc::new(RwLock::new(SessionState::new("test-session")));
+        let engine = Arc::new(ProofEngine::new(state.clone(), Arc::new(StubJudge)));
+        let handler = McpHandler::new(state, engine);
+
+        // Each entry below is missing exactly one required field.
+        let cases = [
+            (serde_json::json!({}), "skill"),
+            (
+                serde_json::json!({"skill": "linear"}),
+                "phase_id",
+            ),
+            (
+                serde_json::json!({"skill": "linear", "phase_id": "claim"}),
+                "step_id",
+            ),
+            (
+                serde_json::json!({
+                    "skill": "linear", "phase_id": "claim", "step_id": "1"
+                }),
+                "step_description",
+            ),
+            (
+                serde_json::json!({
+                    "skill": "linear", "phase_id": "claim", "step_id": "1",
+                    "step_description": "fetch",
+                }),
+                "verdict",
+            ),
+        ];
+
+        for (args, missing) in cases {
+            let result = handler
+                .handle(McpToolCall {
+                    name: "sentinel__submit_step_complete".into(),
+                    arguments: args,
+                })
+                .await;
+            assert!(!result.success, "expected failure when missing {missing}");
+            assert!(
+                result.error.as_deref().unwrap().contains(missing),
+                "error must name the missing arg '{missing}', got: {:?}",
+                result.error,
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn submit_step_complete_rejects_unknown_judge_model() {
+        let state = Arc::new(RwLock::new(SessionState::new("test-session")));
+        let engine = Arc::new(ProofEngine::new(state.clone(), Arc::new(StubJudge)));
+        let handler = McpHandler::new(state, engine);
+
+        let result = handler
+            .handle(McpToolCall {
+                name: "sentinel__submit_step_complete".into(),
+                arguments: serde_json::json!({
+                    "skill": "linear",
+                    "phase_id": "claim",
+                    "step_id": "1",
+                    "step_description": "fetch",
+                    "verdict": {"sufficient": true, "confidence": 0.9, "reasoning": "ok"},
+                    "judge_model": "bogus-model-name",
+                }),
+            })
+            .await;
+
+        assert!(!result.success);
+        assert!(result.error.as_deref().unwrap().contains("bogus-model-name"));
+    }
+
+    #[tokio::test]
+    async fn submit_step_complete_chains_to_existing_proof() {
+        // Two sequential submits via the MCP tool — second's previous_hash
+        // must equal the first's combined_hash.
+        let state = Arc::new(RwLock::new(SessionState::new("test-session")));
+        let engine = Arc::new(ProofEngine::new(state.clone(), Arc::new(StubJudge)));
+        let handler = McpHandler::new(state.clone(), engine);
+
+        let r1 = handler
+            .handle(McpToolCall {
+                name: "sentinel__submit_step_complete".into(),
+                arguments: serde_json::json!({
+                    "skill": "linear",
+                    "phase_id": "claim",
+                    "step_id": "1",
+                    "step_description": "fetch ticket",
+                    "verdict": {"sufficient": true, "confidence": 0.95, "reasoning": "ok"},
+                }),
+            })
+            .await;
+        assert!(r1.success);
+        let combined_1 = r1
+            .content
+            .get("combined_hash")
+            .and_then(|v| v.as_str())
+            .unwrap()
+            .to_string();
+
+        // Brief pause so step 2's started_at > step 1's completed_at.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let r2 = handler
+            .handle(McpToolCall {
+                name: "sentinel__submit_step_complete".into(),
+                arguments: serde_json::json!({
+                    "skill": "linear",
+                    "phase_id": "claim",
+                    "step_id": "2",
+                    "step_description": "create branch",
+                    "verdict": {"sufficient": true, "confidence": 0.95, "reasoning": "ok"},
+                }),
+            })
+            .await;
+        assert!(r2.success);
+        let prev_2 = r2
+            .content
+            .get("previous_hash")
+            .and_then(|v| v.as_str())
+            .unwrap();
+        assert_eq!(
+            prev_2, combined_1,
+            "step 2 previous_hash must equal step 1 combined_hash via head_hash() resolution",
+        );
     }
 
     #[tokio::test]
