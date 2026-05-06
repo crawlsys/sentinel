@@ -18,6 +18,7 @@ mod claude_md_cmd;
 mod config_cmd;
 mod cost_per_point_cmd;
 mod daemon_cmd;
+mod federation_cmd;
 mod hook_cmd;
 mod init_cmd;
 mod mcp_cmd;
@@ -85,6 +86,12 @@ enum Commands {
         /// Session ID to verify
         #[arg(long)]
         session: String,
+    },
+
+    /// Federation tooling — Apollo-style supergraph composition checks (M2.4)
+    Federation {
+        #[command(subcommand)]
+        action: FederationAction,
     },
 
     /// Start the MCP server over stdio (Claude Code connects here)
@@ -255,6 +262,23 @@ enum Commands {
     },
 }
 
+/// `sentinel federation` subcommands (Apollo-style federation tooling, M2.4).
+#[derive(Subcommand)]
+enum FederationAction {
+    /// Compose the federated step supergraph from `~/.claude/sentinel/config/steps/*.toml`
+    /// and report any inconsistencies. Exit code 1 on errors.
+    Compose {
+        /// Emit machine-readable JSON instead of human-readable text.
+        /// The `sentinel federation check` CI command consumes this.
+        #[arg(long)]
+        json: bool,
+
+        /// Override the config directory (default: `~/.claude/sentinel/config/`).
+        #[arg(long)]
+        config_dir: Option<String>,
+    },
+}
+
 #[derive(Subcommand)]
 enum ConfigAction {
     /// Set a config value (e.g., `sentinel config set name "Gary"`)
@@ -372,6 +396,9 @@ async fn main() -> anyhow::Result<()> {
             standalone,
         } => hook_cmd::run_internal(&event, matcher.as_deref(), standalone).await,
         Commands::Verify { session } => verify_cmd::run(&session),
+        Commands::Federation { action } => match action {
+            FederationAction::Compose { json, config_dir } => federation_cmd::run(json, config_dir),
+        },
         Commands::Mcp => mcp_cmd::run().await,
         Commands::Scan {
             counts_only,
