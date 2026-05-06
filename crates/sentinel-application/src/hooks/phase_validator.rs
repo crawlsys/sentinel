@@ -289,6 +289,7 @@ mod tests {
     fn test_steps() -> SkillSteps {
         SkillSteps {
             skill: "linear".to_string(),
+            federation_version: "1".to_string(),
             phases: vec![
                 PhaseSteps {
                     phase_id: "claim".to_string(),

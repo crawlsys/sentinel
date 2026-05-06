@@ -53,6 +53,14 @@ pub struct PhaseSteps {
     pub steps: Vec<WorkflowStep>,
 }
 
+/// Default federation version for SkillSteps configs that pre-date M2.7.
+/// Pre-M2.7 configs have no `federation_version` field; serde fills in
+/// `"1"` so they keep loading and the rest of the system can assume the
+/// field is always present.
+fn default_federation_version() -> String {
+    "1".to_string()
+}
+
 /// All step definitions for a skill
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SkillSteps {
@@ -61,6 +69,22 @@ pub struct SkillSteps {
     /// This struct is never round-tripped through JSON.
     #[serde(skip)]
     pub skill: String,
+
+    /// **Federation version (M2.7 — Apollo schema versioning lesson)**.
+    /// Bumped on breaking changes to the skill's federated step namespace
+    /// (handoff signature change, step removal, phase removal, anything
+    /// that would invalidate a chain composed against the prior version).
+    /// Non-breaking changes (added optional fields, new steps, new phases,
+    /// description edits, tag edits) keep the same version.
+    ///
+    /// Defaults to `"1"` for configs written before M2.7 — they keep
+    /// loading without modification. New configs should set this
+    /// explicitly so authors think about the contract from the start.
+    ///
+    /// `sentinel federation check` (M2.8) compares versions across
+    /// branches and refuses to allow breaking changes without a bump.
+    #[serde(default = "default_federation_version")]
+    pub federation_version: String,
 
     /// Steps per phase
     pub phases: Vec<PhaseSteps>,

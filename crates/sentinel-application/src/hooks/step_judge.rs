@@ -464,6 +464,7 @@ mod tests {
             "linear".to_string(),
             SkillSteps {
                 skill: "linear".into(),
+                federation_version: "1".into(),
                 phases: vec![PhaseSteps {
                     phase_id: "claim".into(),
                     steps: vec![WorkflowStep {
@@ -635,6 +636,7 @@ mod tests {
             "linear".to_string(),
             SkillSteps {
                 skill: "linear".into(),
+                federation_version: "1".into(),
                 phases: vec![PhaseSteps {
                     phase_id: "claim".into(),
                     steps: vec![WorkflowStep {

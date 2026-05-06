@@ -239,7 +239,15 @@ pub fn load_workflows(config_path: &Path) -> Result<Vec<SkillWorkflow>> {
 /// Raw TOML config for skill steps
 #[derive(Debug, Deserialize)]
 struct StepsConfig {
+    /// Federation version (M2.7). Defaults to "1" for pre-M2.7 configs.
+    /// Bumped on breaking changes — see SkillSteps::federation_version.
+    #[serde(default = "default_federation_version_str")]
+    federation_version: String,
     phases: Vec<StepsPhaseToml>,
+}
+
+fn default_federation_version_str() -> String {
+    "1".to_string()
 }
 
 #[derive(Debug, Deserialize)]
@@ -289,6 +297,7 @@ pub fn load_skill_steps(config_path: &Path, skill: &str) -> Result<Option<SkillS
 
     let skill_steps = SkillSteps {
         skill: skill.to_string(),
+        federation_version: config.federation_version,
         phases: config
             .phases
             .into_iter()
@@ -547,6 +556,89 @@ description = "Get comments"
         let dir = tempfile::tempdir().unwrap();
         let result = load_skill_steps(dir.path(), "nonexistent").unwrap();
         assert!(result.is_none());
+    }
+
+    // ─── M2.7 federation_version tests ─────────────────────────────────
+
+    #[test]
+    fn federation_version_defaults_to_one_when_omitted() {
+        // Pre-M2.7 configs (no federation_version field) must continue
+        // to load. Serde's #[serde(default)] fills in "1" so downstream
+        // code can always assume the field is populated.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("steps")).unwrap();
+        let toml = r#"
+[[phases]]
+id = "claim"
+
+[[phases.steps]]
+id = "1"
+description = "fetch"
+"#;
+        let path = dir.path().join("steps").join("legacy.toml");
+        std::fs::File::create(&path)
+            .unwrap()
+            .write_all(toml.as_bytes())
+            .unwrap();
+        let result = load_skill_steps(dir.path(), "legacy").unwrap().unwrap();
+        assert_eq!(result.federation_version, "1");
+    }
+
+    #[test]
+    fn federation_version_round_trips_when_set_explicitly() {
+        // Configs that DO declare federation_version preserve it through
+        // the loader. New skills that opt into M2.7 explicitly will see
+        // the version they wrote, not the default.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("steps")).unwrap();
+        let toml = r#"
+federation_version = "2"
+
+[[phases]]
+id = "claim"
+
+[[phases.steps]]
+id = "1"
+description = "fetch"
+"#;
+        let path = dir.path().join("steps").join("modern.toml");
+        std::fs::File::create(&path)
+            .unwrap()
+            .write_all(toml.as_bytes())
+            .unwrap();
+        let result = load_skill_steps(dir.path(), "modern").unwrap().unwrap();
+        assert_eq!(result.federation_version, "2");
+    }
+
+    #[test]
+    fn federation_version_accepts_arbitrary_string_values() {
+        // The field is `String`, not an enum — bumps can be "2",
+        // "2025-05-06", or anything operators want as long as it's
+        // unique per breaking change. The loader doesn't impose a
+        // grammar; M2.8 federation check compares versions for
+        // inequality, not for ordering.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("steps")).unwrap();
+        let toml = r#"
+federation_version = "2026-05-06-pre-deploy-cutover"
+
+[[phases]]
+id = "claim"
+
+[[phases.steps]]
+id = "1"
+description = "fetch"
+"#;
+        let path = dir.path().join("steps").join("dated.toml");
+        std::fs::File::create(&path)
+            .unwrap()
+            .write_all(toml.as_bytes())
+            .unwrap();
+        let result = load_skill_steps(dir.path(), "dated").unwrap().unwrap();
+        assert_eq!(
+            result.federation_version,
+            "2026-05-06-pre-deploy-cutover",
+        );
     }
 
     #[test]
