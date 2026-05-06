@@ -52,6 +52,7 @@ pub mod skill_invocation_gate;
 pub mod skill_router;
 pub mod skill_telemetry;
 pub mod step_gate;
+pub mod step_judge;
 pub mod stop_failure;
 pub mod subagent_start;
 pub mod subagent_stop;
@@ -270,6 +271,7 @@ pub const HOOK_NAMES: &[&str] = &[
     "skill_router",
     "skill_telemetry",
     "step_gate",
+    "step_judge",
     "stop_failure",
     "subagent_start",
     "subagent_stop",
