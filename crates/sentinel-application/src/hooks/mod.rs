@@ -6,6 +6,7 @@
 
 pub mod account_cascade;
 pub mod activity_tracker;
+pub mod agent_revocation;
 mod block_context;
 pub mod bug_task_gate;
 pub mod build_auto_monitor;
@@ -230,6 +231,7 @@ fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::
 pub const HOOK_NAMES: &[&str] = &[
     "account_cascade",
     "activity_tracker",
+    "agent_revocation",
     "bug_task_gate",
     "build_auto_monitor",
     "commit_hygiene",

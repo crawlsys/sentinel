@@ -3,7 +3,7 @@
 //! In-memory state shared across hook engine, MCP server, and dashboard API.
 //! This is the single source of truth for a running sentinel daemon.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -72,6 +72,19 @@ pub struct SessionState {
     /// When active (and not expired), phase gate allows all tools through.
     #[serde(default)]
     pub glass_break: Option<GlassBreak>,
+
+    /// **Agent revocation kill switch (AEGIS pattern)**: agent IDs that
+    /// have been explicitly revoked via `sentinel agent revoke <id>` or
+    /// auto-revoked by the violation policy. Tool calls bearing these
+    /// agent_ids in `HookInput.agent_id` are denied at PreToolUse with
+    /// a `[Sentinel-Authority]` message.
+    ///
+    /// Per-session today; revocation does NOT persist across SessionStart
+    /// because a fresh session is the natural place to give an agent
+    /// another chance. Operators who want durable revocations can
+    /// re-issue `sentinel agent revoke` at SessionStart via a hook.
+    #[serde(default)]
+    pub revoked_agents: HashSet<String>,
 
     /// **Cold-start baseline (M1.8 — AEGIS pattern)**: per-step counts of
     /// successful judgements observed *before* enforcement engages. Keyed
@@ -212,7 +225,27 @@ impl SessionState {
             state_generation: 0,
             glass_break: None,
             step_baselines: HashMap::new(),
+            revoked_agents: HashSet::new(),
         }
+    }
+
+    /// Revoke an agent — every subsequent tool call carrying this
+    /// `agent_id` will be denied at PreToolUse. Idempotent (revoking
+    /// an already-revoked agent is a no-op).
+    pub fn revoke_agent(&mut self, agent_id: impl Into<String>) {
+        self.revoked_agents.insert(agent_id.into());
+    }
+
+    /// Lift a revocation. Mostly useful in tests / interactive recovery
+    /// from operator error; production paths should rarely call this.
+    pub fn unrevoke_agent(&mut self, agent_id: &str) -> bool {
+        self.revoked_agents.remove(agent_id)
+    }
+
+    /// Check whether an agent_id has been revoked.
+    #[must_use]
+    pub fn is_agent_revoked(&self, agent_id: &str) -> bool {
+        self.revoked_agents.contains(agent_id)
     }
 
     /// Build the `(skill, phase_id, step_id)` baseline key. Static helper
