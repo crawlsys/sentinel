@@ -241,6 +241,33 @@ pub struct WorkflowStep {
     /// so consumers know the contract is changing.
     #[serde(default)]
     pub r#override: Option<String>,
+
+    // ─── Apollo Federation plugin extensibility (M2.9) ──────────────
+    //
+    // Apollo's `@composeDirective` lets external plugins attach typed
+    // metadata to schema elements without the core schema needing to
+    // know about every plugin. We mirror that with a free-form JSON
+    // value that the loader treats as opaque — plugins (lenses, custom
+    // routers, telemetry adapters) read their own keys out of it.
+    //
+    // This is deliberately untyped at the core level. Plugins enforce
+    // their own schemas at their boundaries (Pydantic-style validation
+    // M4.8). The core only guarantees round-trip preservation.
+
+    /// **Plugin metadata** — opaque to the core, structured for
+    /// plugins. Defaults to `Value::Null` so existing TOML loads
+    /// unchanged.
+    ///
+    /// Example shapes plugins might use:
+    /// - `{ "lens": { "code_review": { "rubric": "owasp" } } }`
+    /// - `{ "telemetry": { "skip": true } }`
+    /// - `{ "router": { "boost_when": ["security_issue"] } }`
+    ///
+    /// The TOML grammar accepts inline tables; the loader converts
+    /// the TOML representation to a `serde_json::Value` for stable
+    /// downstream consumption.
+    #[serde(default)]
+    pub extra: serde_json::Value,
 }
 
 /// Steps for a single phase

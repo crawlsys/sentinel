@@ -291,6 +291,48 @@ struct StepToml {
     deprecated: Option<String>,
     #[serde(default, rename = "override")]
     r#override: Option<String>,
+    /// Plugin extensibility (M2.9). See `WorkflowStep::extra`. Captured as
+    /// `Option<toml::Value>` because TOML and JSON have different native
+    /// types (TOML has `Datetime`, JSON has `null`); the loader converts
+    /// `None` to `Value::Null` and `Some(v)` via `toml_to_json`.
+    #[serde(default)]
+    extra: Option<toml::Value>,
+}
+
+/// Convert a `toml::Value` into a `serde_json::Value` for the M2.9
+/// `extra` plugin metadata field.
+///
+/// TOML and JSON have overlapping but not identical native types:
+/// - TOML `Datetime` → JSON string (ISO-8601 representation, what
+///   downstream JSON consumers expect anyway).
+/// - TOML doesn't have `null` so `serde_json::Value::Null` only
+///   appears via the `Option<toml::Value>` wrapper at the field
+///   boundary, not from this function.
+/// - All other types (String, Integer, Float, Boolean, Array, Table)
+///   map cleanly.
+///
+/// We do this explicitly rather than via serde round-trip so future
+/// edits to the field's TOML/JSON shape are deliberate, not
+/// accidentally mediated by some intermediate representation.
+fn toml_to_json(v: toml::Value) -> serde_json::Value {
+    match v {
+        toml::Value::String(s) => serde_json::Value::String(s),
+        toml::Value::Integer(i) => serde_json::Value::Number(i.into()),
+        toml::Value::Float(f) => serde_json::Number::from_f64(f)
+            .map_or(serde_json::Value::Null, serde_json::Value::Number),
+        toml::Value::Boolean(b) => serde_json::Value::Bool(b),
+        toml::Value::Datetime(dt) => serde_json::Value::String(dt.to_string()),
+        toml::Value::Array(arr) => {
+            serde_json::Value::Array(arr.into_iter().map(toml_to_json).collect())
+        }
+        toml::Value::Table(tbl) => {
+            let map: serde_json::Map<String, serde_json::Value> = tbl
+                .into_iter()
+                .map(|(k, v)| (k, toml_to_json(v)))
+                .collect();
+            serde_json::Value::Object(map)
+        }
+    }
 }
 
 /// Load step definitions for a skill from `config/steps/<skill>.toml`
@@ -343,6 +385,7 @@ pub fn load_skill_steps(config_path: &Path, skill: &str) -> Result<Option<SkillS
                         inaccessible: s.inaccessible,
                         deprecated: s.deprecated,
                         r#override: s.r#override,
+                        extra: s.extra.map_or(serde_json::Value::Null, toml_to_json),
                     })
                     .collect(),
             })
@@ -879,6 +922,137 @@ override = "claim.old"
         let new_step = &result.phases[0].steps[1];
         assert_eq!(new_step.id, "new");
         assert_eq!(new_step.r#override.as_deref(), Some("claim.old"));
+    }
+
+    // ─── M2.9 plugin extensibility tests ─────────────────────────────
+    //
+    // Cover the `extra: serde_json::Value` field round-trip and the
+    // `toml_to_json` conversion. Plugins (lenses, custom routers,
+    // telemetry adapters) read their own keys out of this opaque
+    // value — the core only guarantees round-trip preservation, not
+    // schema validation. M4.8 brings Pydantic-style validation in.
+
+    #[test]
+    fn extra_field_defaults_to_null_when_omitted() {
+        // Pre-M2.9 configs that don't declare `extra` load with
+        // `serde_json::Value::Null`. Backwards-compat invariant.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("steps")).unwrap();
+        let toml = r#"
+[[phases]]
+id = "claim"
+
+[[phases.steps]]
+id = "1"
+description = "fetch"
+"#;
+        let path = dir.path().join("steps").join("noextra.toml");
+        std::fs::File::create(&path)
+            .unwrap()
+            .write_all(toml.as_bytes())
+            .unwrap();
+        let result = load_skill_steps(dir.path(), "noextra").unwrap().unwrap();
+        let step = &result.phases[0].steps[0];
+        assert!(step.extra.is_null());
+    }
+
+    #[test]
+    fn extra_field_round_trips_nested_table() {
+        // The realistic plugin shape: a nested table where each plugin
+        // owns a top-level key. This is what enables the M2.9 contract
+        // — multiple plugins coexist on one step without colliding.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("steps")).unwrap();
+        let toml = r#"
+[[phases]]
+id = "review"
+
+[[phases.steps]]
+id = "1"
+description = "code review"
+
+[phases.steps.extra.lens.code_review]
+rubric = "owasp"
+weight = 0.7
+
+[phases.steps.extra.telemetry]
+skip = true
+"#;
+        let path = dir.path().join("steps").join("withextra.toml");
+        std::fs::File::create(&path)
+            .unwrap()
+            .write_all(toml.as_bytes())
+            .unwrap();
+        let result = load_skill_steps(dir.path(), "withextra").unwrap().unwrap();
+        let step = &result.phases[0].steps[0];
+        // Drill into the nested structure plugins would consume.
+        assert_eq!(
+            step.extra
+                .pointer("/lens/code_review/rubric")
+                .and_then(|v| v.as_str()),
+            Some("owasp"),
+        );
+        assert_eq!(
+            step.extra
+                .pointer("/lens/code_review/weight")
+                .and_then(serde_json::Value::as_f64),
+            Some(0.7),
+        );
+        assert_eq!(
+            step.extra
+                .pointer("/telemetry/skip")
+                .and_then(serde_json::Value::as_bool),
+            Some(true),
+        );
+    }
+
+    #[test]
+    fn toml_to_json_converts_primitive_types() {
+        // Direct unit tests on the conversion helper. Each TOML
+        // primitive maps to the expected JSON shape.
+        assert_eq!(
+            toml_to_json(toml::Value::String("hi".into())),
+            serde_json::Value::String("hi".into()),
+        );
+        assert_eq!(
+            toml_to_json(toml::Value::Integer(42)),
+            serde_json::json!(42),
+        );
+        assert_eq!(
+            toml_to_json(toml::Value::Boolean(true)),
+            serde_json::Value::Bool(true),
+        );
+        let f = toml_to_json(toml::Value::Float(0.5));
+        assert_eq!(f.as_f64(), Some(0.5));
+    }
+
+    #[test]
+    fn toml_to_json_converts_nested_array_and_table() {
+        // Compound types: array of tables, the shape plugins use.
+        let inner = toml::value::Table::from_iter([
+            ("name".to_string(), toml::Value::String("a".into())),
+            ("score".to_string(), toml::Value::Integer(10)),
+        ]);
+        let arr = toml::Value::Array(vec![toml::Value::Table(inner)]);
+        let json = toml_to_json(arr);
+        assert_eq!(
+            json.pointer("/0/name").and_then(|v| v.as_str()),
+            Some("a"),
+        );
+        assert_eq!(
+            json.pointer("/0/score").and_then(serde_json::Value::as_i64),
+            Some(10),
+        );
+    }
+
+    #[test]
+    fn toml_to_json_converts_nan_to_null() {
+        // NaN and Infinity have no JSON representation. Rather than
+        // panic or write invalid JSON, we coerce to `null`. Plugins
+        // requiring strict numeric values catch this at their
+        // boundary (M4.8 fail-fast validation).
+        let nan = toml_to_json(toml::Value::Float(f64::NAN));
+        assert!(nan.is_null());
     }
 
     #[test]

@@ -308,6 +308,7 @@ mod tests {
                             inaccessible: false,
                             deprecated: None,
                             r#override: None,
+                            extra: serde_json::Value::Null,
                         },
                         WorkflowStep {
                             id: "0.2".to_string(),
@@ -323,6 +324,7 @@ mod tests {
                             inaccessible: false,
                             deprecated: None,
                             r#override: None,
+                            extra: serde_json::Value::Null,
                         },
                         WorkflowStep {
                             id: "0.3".to_string(),
@@ -338,6 +340,7 @@ mod tests {
                             inaccessible: false,
                             deprecated: None,
                             r#override: None,
+                            extra: serde_json::Value::Null,
                         },
                     ],
                 },
@@ -358,6 +361,7 @@ mod tests {
                             inaccessible: false,
                             deprecated: None,
                             r#override: None,
+                            extra: serde_json::Value::Null,
                         },
                         WorkflowStep {
                             id: "1.2".to_string(),
@@ -373,6 +377,7 @@ mod tests {
                             inaccessible: false,
                             deprecated: None,
                             r#override: None,
+                            extra: serde_json::Value::Null,
                         },
                     ],
                 },
