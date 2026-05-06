@@ -214,6 +214,33 @@ pub struct WorkflowStep {
     /// shouldn't expose to virtual skill packs (M7). Default false.
     #[serde(default)]
     pub inaccessible: bool,
+
+    // ─── Apollo Federation deprecation/migration (M2.6) ─────────────
+    //
+    // Apollo's `@deprecated` directive carries a reason string; we
+    // mirror that and add `@override` for explicit replacement
+    // declarations. Both default to None so existing TOML loads
+    // unchanged.
+
+    /// **`@deprecated`** — when `Some(reason)`, this step is on its
+    /// way out and operators should migrate. The reason is shown by
+    /// federation compose as a warning (not an error — deprecated
+    /// steps still function). To mark a step as un-deprecated, omit
+    /// the field or set it to `None`.
+    #[serde(default)]
+    pub deprecated: Option<String>,
+
+    /// **`@override`** — names a step this one replaces. Form:
+    /// `"phase.step_id"` (same skill, the common case) or
+    /// `"skill.phase.step_id"` (cross-skill, when one skill takes
+    /// over capability previously owned by another).
+    ///
+    /// Federation compose errors on dangling override targets and
+    /// warns when the target isn't itself marked `deprecated` —
+    /// disciplined migration paths declare the deprecation up-front
+    /// so consumers know the contract is changing.
+    #[serde(default)]
+    pub r#override: Option<String>,
 }
 
 /// Steps for a single phase

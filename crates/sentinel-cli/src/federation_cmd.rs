@@ -33,11 +33,27 @@
 //!    so the report can later inform router (M7) which steps to omit
 //!    from virtual skill packs. No validation today; M7 reads it.
 //!
-//! # What's still NOT validated (M2.6+ follow-up)
+//! # What landed with M2.6 deprecation directives
 //!
-//! Apollo Federation validators go further — `@deprecated` migration
-//! paths, type alignment between `provides` and `requires` shapes,
-//! version skew. M2.6+ will grow those check passes without changing
+//! 7. **`deprecated` surfacing** — when a step declares `deprecated =
+//!    "..."`, compose emits a warning naming the step plus the
+//!    migration message. Deprecated steps still function (no error)
+//!    so existing chains continue to work; the warning gets the
+//!    operator's attention and gives them the target to migrate to.
+//! 8. **`override` target resolution** — when a step declares
+//!    `override = "phase.step_id"` (same skill) or
+//!    `"skill.phase.step_id"` (cross-skill), compose verifies the
+//!    target step exists. Dangling override targets are hard errors —
+//!    you can't replace a step that isn't there. If the target
+//!    exists but isn't itself marked `deprecated`, compose emits a
+//!    warning encouraging disciplined migration paths (declare the
+//!    deprecation up-front so consumers know the contract is changing).
+//!
+//! # What's still NOT validated (M2.9+ follow-up)
+//!
+//! Type alignment between `provides` and `requires` shapes, version
+//! skew across `federation_version` boundaries, signed config
+//! manifests (M2.13). Those land in later passes without changing
 //! the CLI shape.
 //!
 //! # Output modes
@@ -285,10 +301,111 @@ fn check_directives(
         }
     }
 
+    // Index deprecated coordinates so override targets can be checked
+    // for "is the target itself deprecated?" — if not, we warn so the
+    // migration path is declared up-front. Key shape mirrors the
+    // override grammar: same-skill `(skill, phase, step_id)` triples.
+    let mut deprecated_coords: std::collections::HashSet<(String, String, String)> =
+        std::collections::HashSet::new();
+    for (skill, ss) in loaded {
+        for phase in &ss.phases {
+            for step in &phase.steps {
+                if step.deprecated.is_some() {
+                    deprecated_coords.insert((
+                        skill.clone(),
+                        phase.phase_id.clone(),
+                        step.id.clone(),
+                    ));
+                }
+            }
+        }
+    }
+
     // Walk every step's requires/external. Error on any unresolved.
     for (skill, ss) in loaded {
         for phase in &ss.phases {
             for step in &phase.steps {
+                // M2.6 — surface deprecation warnings up front.
+                if let Some(reason) = &step.deprecated {
+                    let body = if reason.is_empty() {
+                        format!(
+                            "step ({phase_id}, {step_id}) in skill '{skill}' is deprecated",
+                            phase_id = phase.phase_id,
+                            step_id = step.id,
+                        )
+                    } else {
+                        format!(
+                            "step ({phase_id}, {step_id}) in skill '{skill}' is deprecated: \
+                             {reason}",
+                            phase_id = phase.phase_id,
+                            step_id = step.id,
+                        )
+                    };
+                    report.findings.push(ComposeFinding {
+                        severity: ComposeSeverity::Warning,
+                        skill: Some(skill.clone()),
+                        phase_id: Some(phase.phase_id.clone()),
+                        step_id: Some(step.id.clone()),
+                        message: body,
+                    });
+                }
+
+                // M2.6 — verify override target exists and is itself
+                // deprecated. Override grammar: "phase.step_id" (same
+                // skill) or "skill.phase.step_id" (cross-skill).
+                if let Some(target) = &step.r#override {
+                    let target_coord = parse_override_target(skill, target);
+                    match target_coord {
+                        Some(coord) => {
+                            if !coordinates.contains(&coord) {
+                                report.findings.push(ComposeFinding {
+                                    severity: ComposeSeverity::Error,
+                                    skill: Some(skill.clone()),
+                                    phase_id: Some(phase.phase_id.clone()),
+                                    step_id: Some(step.id.clone()),
+                                    message: format!(
+                                        "step ({phase_id}, {step_id}) in skill '{skill}' \
+                                         declares override of '{target}' which does not \
+                                         exist in the supergraph",
+                                        phase_id = phase.phase_id,
+                                        step_id = step.id,
+                                    ),
+                                });
+                            } else if !deprecated_coords.contains(&coord) {
+                                report.findings.push(ComposeFinding {
+                                    severity: ComposeSeverity::Warning,
+                                    skill: Some(skill.clone()),
+                                    phase_id: Some(phase.phase_id.clone()),
+                                    step_id: Some(step.id.clone()),
+                                    message: format!(
+                                        "step ({phase_id}, {step_id}) in skill '{skill}' \
+                                         overrides '{target}' but the target is not marked \
+                                         `deprecated` — declare the deprecation on the \
+                                         target so consumers know the contract is changing",
+                                        phase_id = phase.phase_id,
+                                        step_id = step.id,
+                                    ),
+                                });
+                            }
+                        }
+                        None => {
+                            report.findings.push(ComposeFinding {
+                                severity: ComposeSeverity::Error,
+                                skill: Some(skill.clone()),
+                                phase_id: Some(phase.phase_id.clone()),
+                                step_id: Some(step.id.clone()),
+                                message: format!(
+                                    "step ({phase_id}, {step_id}) in skill '{skill}' has \
+                                     malformed override target '{target}' — expected \
+                                     'phase.step_id' or 'skill.phase.step_id'",
+                                    phase_id = phase.phase_id,
+                                    step_id = step.id,
+                                ),
+                            });
+                        }
+                    }
+                }
+
                 for artifact in &step.requires {
                     if !providers.contains_key(artifact) {
                         report.findings.push(ComposeFinding {
@@ -345,6 +462,35 @@ fn check_directives(
                 }
             }
         }
+    }
+}
+
+/// Parse an `override` target string into a `(skill, phase, step_id)`
+/// triple. Two grammars are accepted:
+///
+/// - `"phase.step_id"` — same-skill override; `current_skill` fills the
+///   skill slot.
+/// - `"skill.phase.step_id"` — cross-skill override; explicit skill.
+///
+/// Returns `None` for any other shape. The caller treats a `None` as
+/// a malformed-override hard error.
+fn parse_override_target(
+    current_skill: &str,
+    target: &str,
+) -> Option<(String, String, String)> {
+    let parts: Vec<&str> = target.split('.').collect();
+    match parts.len() {
+        2 => Some((
+            current_skill.to_string(),
+            parts[0].to_string(),
+            parts[1].to_string(),
+        )),
+        3 => Some((
+            parts[0].to_string(),
+            parts[1].to_string(),
+            parts[2].to_string(),
+        )),
+        _ => None,
     }
 }
 
@@ -865,6 +1011,188 @@ id = "open_pr"
             msg.contains("malformed external reference"),
             "expected malformed-external error, got: {msg}",
         );
+    }
+
+    // ─── M2.6 deprecation/migration cross-skill checks ───────────────
+
+    #[test]
+    fn compose_warns_on_deprecated_step() {
+        // Deprecated steps don't break compose — they just surface a
+        // warning naming the migration message. The chain composes
+        // (report.ok() == true), but operators see the heads-up.
+        let toml = r#"
+[[phases]]
+id = "claim"
+
+  [[phases.steps]]
+  id = "1"
+  description = "fetch (legacy)"
+  deprecated = "Use claim.2 — fetches by ID, not URL"
+"#;
+        let (_g, path) = temp_config(&[("linear", toml)]);
+        let report = compose(&path).unwrap();
+        assert!(report.ok(), "deprecated steps shouldn't fail compose");
+        assert_eq!(report.findings.len(), 1);
+        assert_eq!(report.findings[0].severity, ComposeSeverity::Warning);
+        let msg = &report.findings[0].message;
+        assert!(msg.contains("deprecated"));
+        assert!(msg.contains("Use claim.2"));
+    }
+
+    #[test]
+    fn compose_errors_on_dangling_override_target() {
+        // override = "claim.99" — target step doesn't exist. Hard
+        // error: you can't replace a step that isn't there.
+        let toml = r#"
+[[phases]]
+id = "claim"
+
+  [[phases.steps]]
+  id = "new"
+  description = "modern fetch"
+  override = "claim.99"
+"#;
+        let (_g, path) = temp_config(&[("linear", toml)]);
+        let report = compose(&path).unwrap();
+        assert!(!report.ok());
+        let msg = &report.findings[0].message;
+        assert!(msg.contains("override of 'claim.99'"));
+        assert!(msg.contains("does not exist"));
+    }
+
+    #[test]
+    fn compose_warns_when_override_target_not_deprecated() {
+        // override target exists but is not itself marked deprecated.
+        // Compose composes (no error) but warns — declare the
+        // deprecation up-front so consumers know.
+        let toml = r#"
+[[phases]]
+id = "claim"
+
+  [[phases.steps]]
+  id = "old"
+  description = "fetch (still alive)"
+
+  [[phases.steps]]
+  id = "new"
+  description = "modern fetch"
+  override = "claim.old"
+"#;
+        let (_g, path) = temp_config(&[("linear", toml)]);
+        let report = compose(&path).unwrap();
+        assert!(report.ok(), "warning-only situation should still compose");
+        let warning = report
+            .findings
+            .iter()
+            .find(|f| f.severity == ComposeSeverity::Warning)
+            .expect("override-without-deprecation warning expected");
+        assert!(warning.message.contains("not marked `deprecated`"));
+    }
+
+    #[test]
+    fn compose_clean_when_override_target_is_deprecated() {
+        // The disciplined migration path: declare deprecated on the
+        // old step, declare override on the new step. Compose emits
+        // exactly one warning (the deprecation), no override warning.
+        let toml = r#"
+[[phases]]
+id = "claim"
+
+  [[phases.steps]]
+  id = "old"
+  description = "legacy fetch"
+  deprecated = "use claim.new"
+
+  [[phases.steps]]
+  id = "new"
+  description = "modern fetch"
+  override = "claim.old"
+"#;
+        let (_g, path) = temp_config(&[("linear", toml)]);
+        let report = compose(&path).unwrap();
+        assert!(report.ok());
+        // Exactly one finding — the deprecation warning. No override
+        // warning because the target IS deprecated.
+        assert_eq!(report.findings.len(), 1);
+        assert!(report.findings[0].message.contains("deprecated"));
+    }
+
+    #[test]
+    fn compose_errors_on_malformed_override_target() {
+        // override = "claim/old" — wrong separator. Compose can't
+        // parse the grammar so it errors instead of resolving.
+        let toml = r#"
+[[phases]]
+id = "claim"
+
+  [[phases.steps]]
+  id = "new"
+  description = "modern fetch"
+  override = "claim/old"
+"#;
+        let (_g, path) = temp_config(&[("linear", toml)]);
+        let report = compose(&path).unwrap();
+        assert!(!report.ok());
+        let msg = &report.findings[0].message;
+        assert!(msg.contains("malformed override target"));
+    }
+
+    #[test]
+    fn compose_resolves_cross_skill_override() {
+        // Cross-skill override grammar: "skill.phase.step_id". The
+        // git skill takes over a capability previously owned by
+        // linear. Both halves are needed — declare deprecation on the
+        // linear side, declare override on the git side.
+        let producer = r#"
+[[phases]]
+id = "claim"
+
+  [[phases.steps]]
+  id = "1"
+  description = "old linear-side claim"
+  deprecated = "moved to git.claim.1"
+"#;
+        let consumer = r#"
+[[phases]]
+id = "claim"
+
+  [[phases.steps]]
+  id = "1"
+  description = "new git-side claim"
+  override = "linear.claim.1"
+"#;
+        let (_g, path) = temp_config(&[("linear", producer), ("git", consumer)]);
+        let report = compose(&path).unwrap();
+        assert!(report.ok());
+        // One deprecation warning, no override warnings.
+        let warnings: Vec<_> = report
+            .findings
+            .iter()
+            .filter(|f| f.severity == ComposeSeverity::Warning)
+            .collect();
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].message.contains("deprecated"));
+    }
+
+    // ── parse_override_target unit tests ─────────────────────────────
+
+    #[test]
+    fn parse_override_target_two_parts_uses_current_skill() {
+        let r = parse_override_target("linear", "claim.old").unwrap();
+        assert_eq!(r, ("linear".into(), "claim".into(), "old".into()));
+    }
+
+    #[test]
+    fn parse_override_target_three_parts_uses_explicit_skill() {
+        let r = parse_override_target("git", "linear.claim.1").unwrap();
+        assert_eq!(r, ("linear".into(), "claim".into(), "1".into()));
+    }
+
+    #[test]
+    fn parse_override_target_rejects_other_arities() {
+        assert!(parse_override_target("linear", "single").is_none());
+        assert!(parse_override_target("linear", "a.b.c.d").is_none());
+        assert!(parse_override_target("linear", "").is_none());
     }
 
     #[test]

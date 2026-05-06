@@ -286,6 +286,11 @@ struct StepToml {
     external: Vec<String>,
     #[serde(default)]
     inaccessible: bool,
+    /// Federation deprecation (M2.6). See `WorkflowStep::deprecated/override`.
+    #[serde(default)]
+    deprecated: Option<String>,
+    #[serde(default, rename = "override")]
+    r#override: Option<String>,
 }
 
 /// Load step definitions for a skill from `config/steps/<skill>.toml`
@@ -336,6 +341,8 @@ pub fn load_skill_steps(config_path: &Path, skill: &str) -> Result<Option<SkillS
                         requires: s.requires,
                         external: s.external,
                         inaccessible: s.inaccessible,
+                        deprecated: s.deprecated,
+                        r#override: s.r#override,
                     })
                     .collect(),
             })
@@ -776,6 +783,102 @@ inaccessible = true
         assert!(step.provides.is_empty());
         assert!(step.requires.is_empty());
         assert!(step.external.is_empty());
+    }
+
+    // ─── M2.6 deprecation/migration directives tests ──────────────────
+    //
+    // Cover `deprecated: Option<String>` and `override: Option<String>`
+    // round-trip plus default behavior. The compose-side validation
+    // (warn on deprecated usage, error on dangling override targets)
+    // is tested in `federation_cmd.rs`.
+
+    #[test]
+    fn deprecation_fields_default_to_none_when_omitted() {
+        // Pre-M2.6 configs that don't declare the fields load with
+        // `None` for both. This is the backwards-compat invariant —
+        // adding M2.6 must not break any existing skill TOML.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("steps")).unwrap();
+        let toml = r#"
+[[phases]]
+id = "claim"
+
+[[phases.steps]]
+id = "1"
+description = "fetch"
+"#;
+        let path = dir.path().join("steps").join("nodepr.toml");
+        std::fs::File::create(&path)
+            .unwrap()
+            .write_all(toml.as_bytes())
+            .unwrap();
+        let result = load_skill_steps(dir.path(), "nodepr").unwrap().unwrap();
+        let step = &result.phases[0].steps[0];
+        assert!(step.deprecated.is_none());
+        assert!(step.r#override.is_none());
+    }
+
+    #[test]
+    fn deprecated_string_round_trips() {
+        // Configs that DO declare `deprecated = "..."` preserve the
+        // exact migration message. This is what compose surfaces in
+        // its warning, so it has to round-trip verbatim.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("steps")).unwrap();
+        let toml = r#"
+[[phases]]
+id = "claim"
+
+[[phases.steps]]
+id = "1"
+description = "fetch ticket (legacy)"
+deprecated = "Use claim.2 — fetches by ID, not URL"
+"#;
+        let path = dir.path().join("steps").join("legacy.toml");
+        std::fs::File::create(&path)
+            .unwrap()
+            .write_all(toml.as_bytes())
+            .unwrap();
+        let result = load_skill_steps(dir.path(), "legacy").unwrap().unwrap();
+        let step = &result.phases[0].steps[0];
+        assert_eq!(
+            step.deprecated.as_deref(),
+            Some("Use claim.2 — fetches by ID, not URL"),
+        );
+    }
+
+    #[test]
+    fn override_field_round_trips() {
+        // Configs declaring `override = "phase.step_id"` preserve
+        // the exact target reference. Compose uses this to validate
+        // the target exists and is itself deprecated.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("steps")).unwrap();
+        let toml = r#"
+[[phases]]
+id = "claim"
+
+[[phases.steps]]
+id = "old"
+description = "fetch (legacy)"
+deprecated = "Use claim.new"
+
+[[phases.steps]]
+id = "new"
+description = "fetch (modern)"
+override = "claim.old"
+"#;
+        let path = dir.path().join("steps").join("withoverride.toml");
+        std::fs::File::create(&path)
+            .unwrap()
+            .write_all(toml.as_bytes())
+            .unwrap();
+        let result = load_skill_steps(dir.path(), "withoverride")
+            .unwrap()
+            .unwrap();
+        let new_step = &result.phases[0].steps[1];
+        assert_eq!(new_step.id, "new");
+        assert_eq!(new_step.r#override.as_deref(), Some("claim.old"));
     }
 
     #[test]

@@ -268,6 +268,8 @@ mod tests {
                         requires: Vec::new(),
                         external: Vec::new(),
                         inaccessible: false,
+                        deprecated: None,
+                        r#override: None,
                     },
                     WorkflowStep {
                         id: "2".to_string(),
@@ -281,6 +283,8 @@ mod tests {
                         requires: Vec::new(),
                         external: Vec::new(),
                         inaccessible: false,
+                        deprecated: None,
+                        r#override: None,
                     },
                     WorkflowStep {
                         id: "3".to_string(),
@@ -294,6 +298,8 @@ mod tests {
                         requires: Vec::new(),
                         external: Vec::new(),
                         inaccessible: false,
+                        deprecated: None,
+                        r#override: None,
                     },
                 ],
             }],
