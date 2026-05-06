@@ -31,6 +31,7 @@
 //!   stays via SHA-256; signing is the AEGIS-borrowed enterprise opt-in.
 
 use chrono::{DateTime, Utc};
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -176,6 +177,57 @@ impl StepProof {
         format!("{:x}", hasher.finalize())
     }
 
+    /// Sign this proof's `combined_hash` with an Ed25519 key (M1.7 — AEGIS pattern).
+    ///
+    /// Mutates `self.signature` to contain the hex-encoded 64-byte
+    /// Ed25519 signature over the bytes of `combined_hash`. Idempotent:
+    /// signing a proof that's already signed re-signs it (the signature
+    /// is a deterministic function of the key + combined_hash).
+    ///
+    /// **Mandatory chain integrity stays SHA-256.** Signing is the
+    /// enterprise compliance opt-in: when `SENTINEL_SIGNING_KEY` is
+    /// configured upstream, every StepProof gets signed at write time,
+    /// and verifiers can confirm "this chain entry was authored by the
+    /// holder of <public_key>" — closing the residual "did sentinel
+    /// really write this?" question that hash-only chains can't answer.
+    ///
+    /// Caller owns the key material. sentinel-domain stays pure — no
+    /// env reads, no key management. Infrastructure / CLI / hooks
+    /// load the key, sentinel-domain does the math.
+    pub fn sign_with(&mut self, key: &SigningKey) {
+        let signature: Signature = key.sign(self.combined_hash.as_bytes());
+        self.signature = Some(hex::encode(signature.to_bytes()));
+    }
+
+    /// Verify this proof's signature (if present) against a public key.
+    ///
+    /// Returns:
+    /// - `Ok(true)` — signature is present and valid for this `combined_hash`
+    /// - `Ok(false)` — signature is absent (chain entry was written
+    ///   without signing enabled — not a failure, just unsigned)
+    /// - `Err(SignatureError)` — signature is present but malformed,
+    ///   wrong length, or doesn't verify against the supplied key
+    ///
+    /// The 3-way return is deliberate: callers walking a chain need
+    /// to distinguish "unsigned by policy" from "signed but tampered."
+    /// Treating absence as failure would break backwards compat with
+    /// existing chains that pre-date M1.7.
+    pub fn verify_signature(&self, key: &VerifyingKey) -> Result<bool, SignatureError> {
+        let Some(sig_hex) = &self.signature else {
+            return Ok(false);
+        };
+        let sig_bytes = hex::decode(sig_hex).map_err(|_| SignatureError::InvalidEncoding)?;
+        if sig_bytes.len() != ed25519_dalek::SIGNATURE_LENGTH {
+            return Err(SignatureError::InvalidLength);
+        }
+        let mut sig_array = [0u8; ed25519_dalek::SIGNATURE_LENGTH];
+        sig_array.copy_from_slice(&sig_bytes);
+        let signature = Signature::from_bytes(&sig_array);
+        key.verify(self.combined_hash.as_bytes(), &signature)
+            .map(|_| true)
+            .map_err(|_| SignatureError::VerificationFailed)
+    }
+
     /// Verify this proof's hashes and timestamps are internally consistent.
     ///
     /// Returns false if any of the following are wrong:
@@ -218,6 +270,31 @@ impl StepProof {
         self.combined_hash == expected_combined
     }
 }
+
+/// Errors from [`StepProof::verify_signature`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SignatureError {
+    /// Signature field is not valid hex.
+    InvalidEncoding,
+    /// Signature is hex-decoded but not 64 bytes (Ed25519 length).
+    InvalidLength,
+    /// Signature decodes correctly but doesn't verify against the
+    /// supplied public key for this proof's `combined_hash`. Indicates
+    /// either tampering OR wrong public key.
+    VerificationFailed,
+}
+
+impl std::fmt::Display for SignatureError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidEncoding => write!(f, "signature is not valid hex"),
+            Self::InvalidLength => write!(f, "signature is not 64 bytes (Ed25519 length)"),
+            Self::VerificationFailed => write!(f, "signature does not verify against the supplied public key"),
+        }
+    }
+}
+
+impl std::error::Error for SignatureError {}
 
 #[cfg(test)]
 mod tests {
@@ -411,5 +488,105 @@ mod tests {
         let json = serde_json::to_string(&p).expect("serialize");
         let back: StepProof = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(back.signature.as_deref(), Some("abcd1234"));
+    }
+
+    // ── Ed25519 signing (M1.7 — AEGIS pattern) ─────────────────────────
+
+    fn make_signing_key() -> SigningKey {
+        // Deterministic key for tests — never use this seed in real code.
+        let seed = [42u8; 32];
+        SigningKey::from_bytes(&seed)
+    }
+
+    #[test]
+    fn sign_with_populates_signature_field() {
+        let mut p = make_step("1", "claim", "linear", GENESIS_HASH, serde_json::Value::Null);
+        assert!(p.signature.is_none(), "fresh proof has no signature");
+        p.sign_with(&make_signing_key());
+        assert!(p.signature.is_some(), "sign_with must populate signature");
+        // Hex-encoded Ed25519 sig is 128 hex chars (64 bytes * 2).
+        assert_eq!(p.signature.as_ref().unwrap().len(), 128);
+    }
+
+    #[test]
+    fn sign_then_verify_succeeds_with_matching_key() {
+        let key = make_signing_key();
+        let public = key.verifying_key();
+        let mut p = make_step("1", "claim", "linear", GENESIS_HASH, serde_json::Value::Null);
+        p.sign_with(&key);
+        let result = p.verify_signature(&public).expect("verify should not error");
+        assert!(result, "valid signature must verify true");
+    }
+
+    #[test]
+    fn verify_returns_false_for_unsigned_proof() {
+        // Backwards compat: chains written before M1.7 have no signature.
+        // verify_signature must distinguish "unsigned by policy" from
+        // "signed but tampered" — return Ok(false), not Err.
+        let p = make_step("1", "claim", "linear", GENESIS_HASH, serde_json::Value::Null);
+        let public = make_signing_key().verifying_key();
+        let result = p.verify_signature(&public).expect("unsigned must not error");
+        assert!(!result, "unsigned proof returns Ok(false)");
+    }
+
+    #[test]
+    fn verify_fails_with_wrong_public_key() {
+        let key_a = make_signing_key();
+        let key_b = SigningKey::from_bytes(&[7u8; 32]);
+        let mut p = make_step("1", "claim", "linear", GENESIS_HASH, serde_json::Value::Null);
+        p.sign_with(&key_a);
+        // Verify against B's public key — must fail.
+        let result = p.verify_signature(&key_b.verifying_key());
+        assert_eq!(result, Err(SignatureError::VerificationFailed));
+    }
+
+    #[test]
+    fn verify_fails_when_combined_hash_was_tampered_after_signing() {
+        // Signature commits to combined_hash. Mutating combined_hash
+        // after signing must break verification — that's the whole
+        // point of signing layered on top of hash chaining.
+        let key = make_signing_key();
+        let public = key.verifying_key();
+        let mut p = make_step("1", "claim", "linear", GENESIS_HASH, serde_json::Value::Null);
+        p.sign_with(&key);
+        p.combined_hash = "0".repeat(64); // tamper
+        let result = p.verify_signature(&public);
+        assert_eq!(result, Err(SignatureError::VerificationFailed));
+    }
+
+    #[test]
+    fn verify_errors_on_malformed_signature_hex() {
+        let key = make_signing_key();
+        let public = key.verifying_key();
+        let mut p = make_step("1", "claim", "linear", GENESIS_HASH, serde_json::Value::Null);
+        p.signature = Some("not-valid-hex!!".into());
+        let result = p.verify_signature(&public);
+        assert_eq!(result, Err(SignatureError::InvalidEncoding));
+    }
+
+    #[test]
+    fn verify_errors_on_wrong_length_signature() {
+        let key = make_signing_key();
+        let public = key.verifying_key();
+        let mut p = make_step("1", "claim", "linear", GENESIS_HASH, serde_json::Value::Null);
+        // Hex-valid but only 32 bytes (half the required length).
+        p.signature = Some("ab".repeat(32));
+        let result = p.verify_signature(&public);
+        assert_eq!(result, Err(SignatureError::InvalidLength));
+    }
+
+    #[test]
+    fn signature_persists_through_serde_round_trip() {
+        let key = make_signing_key();
+        let public = key.verifying_key();
+        let mut p = make_step("1", "claim", "linear", GENESIS_HASH, serde_json::Value::Null);
+        p.sign_with(&key);
+
+        // Round trip through JSON.
+        let json = serde_json::to_string(&p).unwrap();
+        let restored: StepProof = serde_json::from_str(&json).unwrap();
+
+        // Restored proof must still verify against the same key.
+        assert!(restored.verify_signature(&public).expect("verify post-round-trip"));
     }
 }
