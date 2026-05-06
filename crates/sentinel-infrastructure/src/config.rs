@@ -277,6 +277,15 @@ struct StepToml {
     /// Circuit breaker (M4.4). See `WorkflowStep::circuit_breaker`. Default = disabled.
     #[serde(default)]
     circuit_breaker: sentinel_domain::workflow::CircuitBreaker,
+    /// Federation directives (M2.5). See `WorkflowStep::provides/requires/external/inaccessible`.
+    #[serde(default)]
+    provides: Vec<String>,
+    #[serde(default)]
+    requires: Vec<String>,
+    #[serde(default)]
+    external: Vec<String>,
+    #[serde(default)]
+    inaccessible: bool,
 }
 
 /// Load step definitions for a skill from `config/steps/<skill>.toml`
@@ -323,6 +332,10 @@ pub fn load_skill_steps(config_path: &Path, skill: &str) -> Result<Option<SkillS
                         timeout_ms: s.timeout_ms,
                         retry_policy: s.retry_policy,
                         circuit_breaker: s.circuit_breaker,
+                        provides: s.provides,
+                        requires: s.requires,
+                        external: s.external,
+                        inaccessible: s.inaccessible,
                     })
                     .collect(),
             })
@@ -651,6 +664,118 @@ description = "fetch"
             result.federation_version,
             "2026-05-06-pre-deploy-cutover",
         );
+    }
+
+    // ─── M2.5 federation directives tests ─────────────────────────────
+    //
+    // These cover the four directive fields added in M2.5:
+    // `provides`, `requires`, `external`, and `inaccessible`. The loader
+    // must (1) accept legacy configs that don't declare them (empty
+    // defaults), (2) preserve declared values verbatim, and (3) round-
+    // trip the boolean flag. Federation compose (M2.4) consumes these
+    // values to validate cross-skill contracts.
+
+    #[test]
+    fn federation_directives_default_to_empty_when_omitted() {
+        // Pre-M2.5 configs without any directive fields load with empty
+        // Vec defaults and inaccessible=false. This is the backwards-
+        // compat safety net — every existing skill TOML in the repo
+        // must continue to load unchanged.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("steps")).unwrap();
+        let toml = r#"
+[[phases]]
+id = "claim"
+
+[[phases.steps]]
+id = "1"
+description = "fetch"
+"#;
+        let path = dir.path().join("steps").join("nodirectives.toml");
+        std::fs::File::create(&path)
+            .unwrap()
+            .write_all(toml.as_bytes())
+            .unwrap();
+        let result = load_skill_steps(dir.path(), "nodirectives")
+            .unwrap()
+            .unwrap();
+        let step = &result.phases[0].steps[0];
+        assert!(step.provides.is_empty());
+        assert!(step.requires.is_empty());
+        assert!(step.external.is_empty());
+        assert!(!step.inaccessible);
+    }
+
+    #[test]
+    fn federation_directives_round_trip_when_declared() {
+        // Configs that DO declare directive arrays preserve every
+        // element verbatim through the loader. This is the contract
+        // that M2.4 federation compose depends on — if a step's
+        // declared `provides` got stripped, compose couldn't validate
+        // that downstream `requires` are satisfiable.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("steps")).unwrap();
+        let toml = r#"
+[[phases]]
+id = "open_pr"
+
+[[phases.steps]]
+id = "1"
+description = "create the PR"
+provides = ["git.pr_url", "git.pr_number"]
+requires = ["linear.ticket_id", "git.branch_name"]
+external = ["linear.claim.3"]
+"#;
+        let path = dir.path().join("steps").join("withdirectives.toml");
+        std::fs::File::create(&path)
+            .unwrap()
+            .write_all(toml.as_bytes())
+            .unwrap();
+        let result = load_skill_steps(dir.path(), "withdirectives")
+            .unwrap()
+            .unwrap();
+        let step = &result.phases[0].steps[0];
+        assert_eq!(step.provides, vec!["git.pr_url", "git.pr_number"]);
+        assert_eq!(
+            step.requires,
+            vec!["linear.ticket_id", "git.branch_name"]
+        );
+        assert_eq!(step.external, vec!["linear.claim.3"]);
+        assert!(!step.inaccessible);
+    }
+
+    #[test]
+    fn federation_inaccessible_flag_round_trips() {
+        // Internal-only steps mark themselves inaccessible=true. The
+        // future router (M7) must not include these in virtual skill
+        // packs — they're skill-internal helpers other steps in the
+        // same skill chain into. The flag has to survive the loader
+        // so the router can filter on it.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("steps")).unwrap();
+        let toml = r#"
+[[phases]]
+id = "internal"
+
+[[phases.steps]]
+id = "helper"
+description = "skill-internal helper"
+inaccessible = true
+"#;
+        let path = dir.path().join("steps").join("internalonly.toml");
+        std::fs::File::create(&path)
+            .unwrap()
+            .write_all(toml.as_bytes())
+            .unwrap();
+        let result = load_skill_steps(dir.path(), "internalonly")
+            .unwrap()
+            .unwrap();
+        let step = &result.phases[0].steps[0];
+        assert!(step.inaccessible);
+        // Other directives still default cleanly.
+        assert!(step.provides.is_empty());
+        assert!(step.requires.is_empty());
+        assert!(step.external.is_empty());
     }
 
     #[test]

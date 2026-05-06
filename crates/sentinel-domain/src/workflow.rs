@@ -176,6 +176,44 @@ pub struct WorkflowStep {
     /// that may degrade and need fallback routing.
     #[serde(default)]
     pub circuit_breaker: CircuitBreaker,
+
+    // ─── Apollo Federation directives (M2.5) ────────────────────────
+    //
+    // Cross-skill handoff contracts for the federated step namespace.
+    // All four are optional; existing TOML configs without them load
+    // unchanged. Future federation compose validation passes consult
+    // these to verify cross-skill contracts hold.
+
+    /// **`@provides`** — artifact types this step's StepProof exposes
+    /// for downstream consumers. Strings are skill-namespaced (e.g.
+    /// `"linear.ticket_id"`, `"git.pr_url"`). When other skills declare
+    /// `requires` of the same string, federation compose can verify
+    /// the producer-consumer chain at composition time, before any
+    /// chain runs.
+    #[serde(default)]
+    pub provides: Vec<String>,
+
+    /// **`@requires`** — artifact types from other skills' steps that
+    /// this step consumes. Inverse of `provides`. Federation compose
+    /// errors when a step requires an artifact no other step provides.
+    #[serde(default)]
+    pub requires: Vec<String>,
+
+    /// **`@external`** — references to other skills' step IDs that
+    /// this step's logic depends on (e.g. `"git.create_pr.4"`).
+    /// Different from `requires`: requires is the data shape contract,
+    /// external is the execution-order contract — "this step assumes
+    /// step X has run." Federation compose can verify the referenced
+    /// step exists.
+    #[serde(default)]
+    pub external: Vec<String>,
+
+    /// **`@inaccessible`** — internal-only step, not callable by the
+    /// router. Useful for skill-internal helpers that other steps in
+    /// the same skill chain into but the federated supergraph
+    /// shouldn't expose to virtual skill packs (M7). Default false.
+    #[serde(default)]
+    pub inaccessible: bool,
 }
 
 /// Steps for a single phase

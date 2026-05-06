@@ -16,14 +16,29 @@
 //!    declaring zero phases or zero steps is reported as a warning so
 //!    operators know about half-finished configs.
 //!
-//! # What's NOT validated yet (M2.5+ follow-up)
+//! # What landed with M2.5 directives
 //!
-//! Apollo Federation validators do much more — `@key` directive
-//! consistency, handoff type alignment, deprecation paths, version
-//! compat. Those land when M2.5 (federation directives in step config
-//! TOML) ships. The hook here is the v1 minimum: parse + load + lift
-//! collisions to errors. When the directive layer arrives, this same
-//! command grows new check passes without changing its CLI shape.
+//! After per-skill internal checks, a cross-skill pass runs:
+//!
+//! 4. **`requires` ↔ `provides` reachability** — every artifact a step
+//!    declares it `requires` must be `provides`d by some step somewhere
+//!    in the supergraph. A `requires` with no producer is a hard error
+//!    (the analog of an Apollo `@requires` referencing a field no
+//!    subgraph owns).
+//! 5. **`external` reference resolution** — every `external` step
+//!    coordinate (`"skill.phase.step_id"` form) must point to an
+//!    existing `(skill, phase_id, step_id)` triple in the supergraph.
+//!    Dangling externals are hard errors.
+//! 6. **`inaccessible` is not an error** — but it's a useful signal
+//!    so the report can later inform router (M7) which steps to omit
+//!    from virtual skill packs. No validation today; M7 reads it.
+//!
+//! # What's still NOT validated (M2.6+ follow-up)
+//!
+//! Apollo Federation validators go further — `@deprecated` migration
+//! paths, type alignment between `provides` and `requires` shapes,
+//! version skew. M2.6+ will grow those check passes without changing
+//! the CLI shape.
 //!
 //! # Output modes
 //!
@@ -117,6 +132,12 @@ pub fn compose(config_dir: &Path) -> Result<ComposeReport> {
     }
     skill_names.sort_unstable();
 
+    // First pass: per-skill internal validation, plus harvest the
+    // supergraph-wide artifact provider table and step coordinate set
+    // needed for the cross-skill pass below. We collect successful
+    // loads so the directive pass only sees skills that actually
+    // parsed cleanly.
+    let mut loaded: Vec<(String, sentinel_domain::workflow::SkillSteps)> = Vec::new();
     for skill in &skill_names {
         report.skills_seen += 1;
         match sentinel_infrastructure::config::load_skill_steps(config_dir, skill) {
@@ -132,6 +153,7 @@ pub fn compose(config_dir: &Path) -> Result<ComposeReport> {
                     continue;
                 }
                 check_skill(skill, &skill_steps, &mut report);
+                loaded.push((skill.clone(), skill_steps));
             }
             Ok(None) => {
                 // load_skill_steps returned None — skill name didn't pass
@@ -159,6 +181,12 @@ pub fn compose(config_dir: &Path) -> Result<ComposeReport> {
             }
         }
     }
+
+    // Second pass: cross-skill federation directive validation.
+    // Builds two indexes from the union of all loaded skills, then
+    // walks `requires`/`external` declarations on every step and
+    // raises errors for unsatisfied references.
+    check_directives(&loaded, &mut report);
 
     report.error_count = report
         .findings
@@ -208,6 +236,113 @@ fn check_skill(
                 });
             } else {
                 seen_coords.insert(coord, ());
+            }
+        }
+    }
+}
+
+/// Cross-skill federation directive validation (M2.5). Walks the
+/// loaded skills twice: first to build provider/coordinate indexes,
+/// then to verify every `requires` / `external` reference resolves.
+///
+/// `provides` is namespaced by string identity — the producer side
+/// declares an artifact name, consumers cite the same string. We
+/// don't impose grammar on the strings themselves: skills can use
+/// `"linear.ticket_id"`, `"git.pr_url"`, or anything else, as long
+/// as both sides spell it identically.
+///
+/// `external` references take the form `"skill.phase.step_id"` and
+/// must resolve to a step that actually exists in the supergraph.
+fn check_directives(
+    loaded: &[(String, sentinel_domain::workflow::SkillSteps)],
+    report: &mut ComposeReport,
+) {
+    // Index every artifact a step claims to provide. The value type
+    // is the location for diagnostics — when a `requires` finds a
+    // hit, we don't report it (success is silent), but if there's a
+    // mismatch the operator gets the location.
+    let mut providers: HashMap<String, (String, String, String)> = HashMap::new();
+    // Index every step coordinate so `external` references can be
+    // resolved without re-walking the loaded skills for each lookup.
+    let mut coordinates: std::collections::HashSet<(String, String, String)> =
+        std::collections::HashSet::new();
+
+    for (skill, ss) in loaded {
+        for phase in &ss.phases {
+            for step in &phase.steps {
+                coordinates.insert((skill.clone(), phase.phase_id.clone(), step.id.clone()));
+                for artifact in &step.provides {
+                    // Last writer wins on duplicate provides — collisions
+                    // are a separate consistency check we could lift to
+                    // a warning, but that's a M2.6 concern (deprecation
+                    // / overrides). For now: just register.
+                    providers.insert(
+                        artifact.clone(),
+                        (skill.clone(), phase.phase_id.clone(), step.id.clone()),
+                    );
+                }
+            }
+        }
+    }
+
+    // Walk every step's requires/external. Error on any unresolved.
+    for (skill, ss) in loaded {
+        for phase in &ss.phases {
+            for step in &phase.steps {
+                for artifact in &step.requires {
+                    if !providers.contains_key(artifact) {
+                        report.findings.push(ComposeFinding {
+                            severity: ComposeSeverity::Error,
+                            skill: Some(skill.clone()),
+                            phase_id: Some(phase.phase_id.clone()),
+                            step_id: Some(step.id.clone()),
+                            message: format!(
+                                "step ({phase_id}, {step_id}) in skill '{skill}' requires \
+                                 artifact '{artifact}', but no step in the supergraph \
+                                 declares it via `provides`",
+                                phase_id = phase.phase_id,
+                                step_id = step.id,
+                            ),
+                        });
+                    }
+                }
+                for ext in &step.external {
+                    let parts: Vec<&str> = ext.splitn(3, '.').collect();
+                    if parts.len() != 3 {
+                        report.findings.push(ComposeFinding {
+                            severity: ComposeSeverity::Error,
+                            skill: Some(skill.clone()),
+                            phase_id: Some(phase.phase_id.clone()),
+                            step_id: Some(step.id.clone()),
+                            message: format!(
+                                "step ({phase_id}, {step_id}) in skill '{skill}' has malformed \
+                                 external reference '{ext}' — expected 'skill.phase.step_id'",
+                                phase_id = phase.phase_id,
+                                step_id = step.id,
+                            ),
+                        });
+                        continue;
+                    }
+                    let coord = (
+                        parts[0].to_string(),
+                        parts[1].to_string(),
+                        parts[2].to_string(),
+                    );
+                    if !coordinates.contains(&coord) {
+                        report.findings.push(ComposeFinding {
+                            severity: ComposeSeverity::Error,
+                            skill: Some(skill.clone()),
+                            phase_id: Some(phase.phase_id.clone()),
+                            step_id: Some(step.id.clone()),
+                            message: format!(
+                                "step ({phase_id}, {step_id}) in skill '{skill}' references \
+                                 external step '{ext}' which does not exist in the supergraph",
+                                phase_id = phase.phase_id,
+                                step_id = step.id,
+                            ),
+                        });
+                    }
+                }
             }
         }
     }
@@ -619,5 +754,150 @@ id = "branch"
         assert_eq!(restored.error_count, 1);
         assert_eq!(restored.findings.len(), 1);
         assert_eq!(restored.findings[0].severity, ComposeSeverity::Error);
+    }
+
+    // ─── M2.5 federation directive cross-skill checks ────────────────
+
+    #[test]
+    fn compose_clean_when_provides_satisfies_requires_across_skills() {
+        // Skill A's step 1 provides "linear.ticket_id"; skill B's step 1
+        // requires it. Cross-skill resolution succeeds — clean compose.
+        // This is the happy path that proves the federation contract
+        // is more than annotation: it actually wires producers to
+        // consumers across the supergraph.
+        let producer = r#"
+[[phases]]
+id = "claim"
+
+  [[phases.steps]]
+  id = "1"
+  description = "fetch ticket"
+  provides = ["linear.ticket_id"]
+"#;
+        let consumer = r#"
+[[phases]]
+id = "open_pr"
+
+  [[phases.steps]]
+  id = "1"
+  description = "create the PR"
+  requires = ["linear.ticket_id"]
+"#;
+        let (_g, path) = temp_config(&[("linear", producer), ("git", consumer)]);
+        let report = compose(&path).unwrap();
+        assert!(
+            report.ok(),
+            "cross-skill provides/requires should resolve, got {:?}",
+            report.findings,
+        );
+    }
+
+    #[test]
+    fn compose_errors_when_requires_has_no_provider() {
+        // Skill declares `requires = ["nobody.ever.provides.this"]`.
+        // No skill in the supergraph offers that artifact, so compose
+        // must error. Without this check, virtual skill packs (M7)
+        // could plan executions that physically can't run because a
+        // required input is never produced.
+        let toml = r#"
+[[phases]]
+id = "open_pr"
+
+  [[phases.steps]]
+  id = "1"
+  description = "open"
+  requires = ["nonexistent.artifact"]
+"#;
+        let (_g, path) = temp_config(&[("git", toml)]);
+        let report = compose(&path).unwrap();
+        assert!(!report.ok());
+        let msg = &report.findings[0].message;
+        assert!(
+            msg.contains("requires artifact 'nonexistent.artifact'"),
+            "expected unsatisfied-requires error, got: {msg}",
+        );
+    }
+
+    #[test]
+    fn compose_errors_on_dangling_external_reference() {
+        // `external = ["linear.claim.99"]` references a step that
+        // doesn't exist. Compose must catch this — otherwise routers
+        // emit plans depending on phantom steps.
+        let toml = r#"
+[[phases]]
+id = "open_pr"
+
+  [[phases.steps]]
+  id = "1"
+  description = "open"
+  external = ["linear.claim.99"]
+"#;
+        let (_g, path) = temp_config(&[("git", toml)]);
+        let report = compose(&path).unwrap();
+        assert!(!report.ok());
+        let msg = &report.findings[0].message;
+        assert!(
+            msg.contains("external step 'linear.claim.99'"),
+            "expected dangling-external error, got: {msg}",
+        );
+    }
+
+    #[test]
+    fn compose_errors_on_malformed_external_reference() {
+        // External must be `skill.phase.step_id` — anything else is
+        // a malformed reference. Catch it at compose time so operators
+        // see the typo before any execution attempts to follow the
+        // dangling pointer.
+        let toml = r#"
+[[phases]]
+id = "open_pr"
+
+  [[phases.steps]]
+  id = "1"
+  description = "open"
+  external = ["linear-claim-2"]
+"#;
+        let (_g, path) = temp_config(&[("git", toml)]);
+        let report = compose(&path).unwrap();
+        assert!(!report.ok());
+        let msg = &report.findings[0].message;
+        assert!(
+            msg.contains("malformed external reference"),
+            "expected malformed-external error, got: {msg}",
+        );
+    }
+
+    #[test]
+    fn compose_inaccessible_step_does_not_break_provides_chain() {
+        // Inaccessible steps still participate in the provides graph —
+        // they're just not exposed to the router. So a chain
+        // `internal_helper (inaccessible) → public_consumer` should
+        // still compose cleanly. Federation correctness ≠ router
+        // visibility.
+        let toml = r#"
+[[phases]]
+id = "internal"
+
+  [[phases.steps]]
+  id = "helper"
+  description = "skill-internal"
+  provides = ["git.computed_branch"]
+  inaccessible = true
+
+[[phases]]
+id = "open_pr"
+
+  [[phases.steps]]
+  id = "1"
+  description = "open"
+  requires = ["git.computed_branch"]
+"#;
+        let (_g, path) = temp_config(&[("git", toml)]);
+        let report = compose(&path).unwrap();
+        assert!(
+            report.ok(),
+            "inaccessible producers should still satisfy requires, got {:?}",
+            report.findings,
+        );
     }
 }
