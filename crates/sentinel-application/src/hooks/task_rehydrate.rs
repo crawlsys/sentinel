@@ -73,12 +73,51 @@ fn persistent_tasks_dir(fs: &dyn FileSystemPort, project_hash: &str) -> Option<P
     Some(super::persistent_tasks_root(&home).join(project_hash))
 }
 
-/// Read tasks from the persistent JSON file
+/// Read tasks from the persistent JSON file.
+///
+/// **Bug fix (2026-05-06)**: Previously used `serde_json::from_str(&content).ok()?`
+/// which silently swallowed parse errors and returned None. If tasks.json was
+/// ever corrupted (half-written from a non-atomic write, malformed by an
+/// external editor, disk error), the rehydrator would treat it as "no tasks"
+/// and inject nothing — silent data loss with zero warning to the user.
+///
+/// The companion fix in task_persist.rs makes the write atomic, but we still
+/// want defense in depth: if a parse fails for any reason (concurrent writer,
+/// disk issue, manual edit gone wrong), log a loud warning so the user knows
+/// their persistent task store is corrupt. They can then recover from the
+/// per-session task dir at ~/.claude/tasks/<session>/ before it's too late.
 fn read_persistent_tasks(fs: &dyn FileSystemPort, project_hash: &str) -> Option<Vec<Task>> {
     let dir = persistent_tasks_dir(fs, project_hash)?;
     let path = dir.join("tasks.json");
-    let content = fs.read_to_string(&path).ok()?;
-    serde_json::from_str(&content).ok()
+    let content = match fs.read_to_string(&path) {
+        Ok(c) => c,
+        Err(_) => return None, // file simply doesn't exist yet — quiet path
+    };
+    match serde_json::from_str::<Vec<Task>>(&content) {
+        Ok(tasks) => Some(tasks),
+        Err(e) => {
+            tracing::warn!(
+                project_hash = project_hash,
+                path = %path.display(),
+                error = %e,
+                content_len = content.len(),
+                "CORRUPT tasks.json detected during rehydration — refusing to \
+                 silently treat as empty. User's tasks may be in a half-written \
+                 state. Recover from ~/.claude/tasks/<session>/ if available."
+            );
+            // Print to stderr too so it surfaces in the SessionStart hook output
+            // even when tracing is misconfigured.
+            eprintln!(
+                "[sentinel] task_rehydrate: corrupt tasks.json at {} — {} bytes, \
+                 parse error: {}. Tasks NOT rehydrated. Investigate before \
+                 creating new tasks (they may overlap or collide).",
+                path.display(),
+                content.len(),
+                e
+            );
+            None
+        }
+    }
 }
 
 /// Read metadata

@@ -633,8 +633,32 @@ fn write_persistent_tasks(
     fs.create_dir_all(&global_dir)?;
 
     // Always update the global JSON snapshot (used by task_rehydrate).
-    let json = serde_json::to_string_pretty(tasks).unwrap_or_default();
-    fs.write(&global_dir.join("tasks.json"), json.as_bytes())?;
+    //
+    // **Bug fix (2026-05-06)**: Previously did a direct fs.write(), which is
+    // NOT atomic — a kill / crash / laptop-close mid-write leaves tasks.json
+    // half-written. Next SessionStart's task_rehydrate sees malformed JSON,
+    // serde_json::from_str fails, .ok()? converts to None, the rehydrator
+    // silently injects nothing. The user's task list APPEARS empty in the new
+    // session even though all 70 tasks "existed" five minutes ago. This is
+    // the worst-case data-loss path in the whole system.
+    //
+    // Now: serialize first, then atomic_write (write-temp + rename). The
+    // rename is atomic on POSIX and on Windows for same-filesystem moves;
+    // worst case is the rename fails AFTER the temp is written, leaving the
+    // *prior* tasks.json intact and a stale tmp file beside it (cleanup is
+    // tolerated by atomic_write).
+    //
+    // **Refuse to write empty/invalid JSON**: if serialization somehow yields
+    // an empty string, refuse to clobber the prior good snapshot. Better to
+    // return an error and keep the old data than overwrite with garbage.
+    let json = serde_json::to_string_pretty(tasks)
+        .map_err(|e| anyhow::anyhow!("serialize tasks for persistence: {e}"))?;
+    if json.trim().is_empty() || !json.trim_start().starts_with('[') {
+        return Err(anyhow::anyhow!(
+            "refusing to write malformed tasks.json (would clobber prior good snapshot)"
+        ));
+    }
+    atomic_write(fs, &global_dir.join("tasks.json"), &json)?;
 
     // Write the project-level tasks.md when we're in a git repo.
     let repo_root = project_repo_root(git, cwd);
@@ -676,8 +700,14 @@ fn write_persistent_tasks(
         incomplete_count,
         last_block_hash: block_hash,
     };
-    let meta_json = serde_json::to_string_pretty(&meta).unwrap_or_default();
-    fs.write(&global_dir.join("meta.json"), meta_json.as_bytes())?;
+    let meta_json = serde_json::to_string_pretty(&meta)
+        .map_err(|e| anyhow::anyhow!("serialize meta for persistence: {e}"))?;
+    // **Bug fix (2026-05-06)**: atomic write — same reasoning as tasks.json
+    // above. A half-written meta.json with truncated JSON would make
+    // task_rehydrate's read_meta() return None silently, defeating the
+    // is_current_session() check and over-rehydrating tasks the user has
+    // already worked on this session.
+    atomic_write(fs, &global_dir.join("meta.json"), &meta_json)?;
 
     tracing::debug!(
         project_hash = proj_hash,
@@ -697,7 +727,35 @@ fn write_persistent_tasks(
 /// - `~/.claude/persistent-tasks/{project_hash}/tasks.json` (rehydration source)
 /// - `~/.claude/persistent-tasks/{project_hash}/meta.json` (skip-if-unchanged)
 pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
-    let session_id = input.session_id.as_deref().unwrap_or("unknown");
+    // **Bug fix (2026-05-06)**: Previously fell back to "unknown" silently
+    // when input.session_id was absent. Then find_active_task_dir() would
+    // search ~/.claude/tasks/unknown/ — which never exists — and bail with
+    // "no active task directory" while emitting a debug log nobody sees.
+    // Result: tasks created in-memory this session NEVER persisted to disk,
+    // and you only discovered it the next time you opened a new session and
+    // saw a much shorter task list than expected.
+    //
+    // Same shape as the hook_cmd.rs fix: prefer input.session_id, then
+    // $CLAUDE_SESSION_ID env var, then refuse with a tracing::warn so the
+    // failure is visible. Returning HookOutput::allow() unblocks the tool
+    // call (we never want to block a user action over a persistence issue),
+    // but the warn surfaces the durability gap.
+    let session_id = match input.session_id.as_deref() {
+        Some(s) if !s.is_empty() => s.to_string(),
+        _ => match std::env::var("CLAUDE_SESSION_ID") {
+            Ok(s) if !s.is_empty() => s,
+            _ => {
+                tracing::warn!(
+                    "task_persist: no session_id (input.session_id absent and \
+                     CLAUDE_SESSION_ID env var unset). Tasks will NOT be \
+                     persisted to disk this fire — durability gap. Investigate \
+                     why HookInput is missing session_id."
+                );
+                return HookOutput::allow();
+            }
+        },
+    };
+    let session_id: &str = &session_id;
     let cwd = input.cwd.as_deref().unwrap_or(".");
 
     let task_dir = match find_active_task_dir(ctx.fs, session_id) {
