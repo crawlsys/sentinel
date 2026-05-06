@@ -318,8 +318,34 @@ fn extract_tool_payload(resp: &serde_json::Value) -> Result<serde_json::Value> {
         .ok_or_else(|| {
             anyhow!("memory-mcp response missing structuredContent and content[0].text: {resp}")
         })?;
-    serde_json::from_str(text)
-        .with_context(|| format!("parse memory-mcp tool text payload: {text}"))
+
+    // **Bug fix (2026-05-06)**: Previously parsed `content[0].text` directly as
+    // JSON and surfaced a noisy `parse memory-mcp tool text payload: <error>`
+    // warning when the upstream returned a plain-text error. The most common
+    // case: mcp-router emits `Error: Server '<name>' not found` as
+    // `content[0].text` when the wrapped server isn't registered in
+    // ~/.claude.json. That string isn't JSON, so every hook invocation logs a
+    // confusing parse failure even though the *real* error is "memory-mcp not
+    // registered" or "wrong --single arg".
+    //
+    // New behaviour:
+    //   1. Try parsing as JSON (the common, healthy path).
+    //   2. If parse fails AND the text starts with "Error:" / "error:" /
+    //      "ERROR:", treat the whole text as the error message and return a
+    //      clean Err(anyhow!) — caller logs surface the real cause.
+    //   3. Otherwise, return the raw text wrapped in a `{"text": "..."}` JSON
+    //      object so callers that just want the string still work.
+    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(text) {
+        return Ok(parsed);
+    }
+    let trimmed = text.trim_start();
+    if trimmed.starts_with("Error:")
+        || trimmed.starts_with("error:")
+        || trimmed.starts_with("ERROR:")
+    {
+        return Err(anyhow!("memory-mcp upstream error: {trimmed}"));
+    }
+    Ok(serde_json::json!({ "text": text }))
 }
 
 /// Implement `MemoryMcpPort` so hooks can call any memory-mcp tool through

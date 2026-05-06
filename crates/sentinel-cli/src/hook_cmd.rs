@@ -87,7 +87,32 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
     // `std::fs::File` handle with fs2 advisory lock. Rust's Drop trait
     // guarantees the file handle is closed on unwind (panic), which releases
     // the advisory lock. No manual cleanup needed.
-    let session_id = input.session_id.as_deref().unwrap_or("unknown");
+    // **Bug fix (2026-05-06)**: Previously fell back to "unknown" silently when
+    // session_id was missing — which meant CLI invocations from bash (no stdin
+    // HookInput) would do work against a synthetic "unknown" session, never
+    // matching the active Claude Code session. State writes/reads landed in the
+    // wrong place (ghost session_id), and tasks.md regeneration appeared to
+    // succeed but operated on the wrong session's task store.
+    //
+    // Now: prefer input.session_id, then $CLAUDE_SESSION_ID env var (set by
+    // mcp-router and cron contexts), then fail loudly with a clear message
+    // instead of silently corrupting state under "unknown".
+    let session_id_owned: String = match input.session_id.as_deref() {
+        Some(s) if !s.is_empty() => s.to_string(),
+        _ => match std::env::var("CLAUDE_SESSION_ID") {
+            Ok(s) if !s.is_empty() => s,
+            _ => {
+                eprintln!(
+                    "[sentinel] hook: no session_id available — pass via stdin HookInput.session_id or set CLAUDE_SESSION_ID env var. Refusing to operate against synthetic 'unknown' session."
+                );
+                // Return safe empty JSON so callers don't crash, but do not
+                // proceed with state mutations.
+                println!("{{}}");
+                return Ok(());
+            }
+        },
+    };
+    let session_id: &str = &session_id_owned;
 
     // **Rate limiting**: Check per-session invocation rate BEFORE acquiring session lock.
     // This prevents flood attacks from even contending for the lock, reducing DoS impact.
