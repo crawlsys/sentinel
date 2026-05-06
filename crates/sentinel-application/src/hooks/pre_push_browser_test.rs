@@ -8,7 +8,7 @@
 //! the Linear review phase. If the skill-level gate was followed, the state
 //! file will already exist and this hook allows the push instantly.
 //!
-//! Session state tracked via temp file: {tmpdir}/claude-steel-test-{session_id}.json
+//! Session state tracked via temp file: {tmpdir}/claude-browser-test-{session_id}.json
 //! State format: {"passed": true, "sessionId": "...", "timestamp": "ISO8601"}
 //!
 //! Logic:
@@ -53,18 +53,18 @@ fn state_file_path(fs: &dyn super::FileSystemPort, session_id: &str) -> PathBuf 
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".claude")
         .join("sentinel")
-        .join("steel-test")
+        .join("browser-test")
         .join(format!("{id}.json"))
 }
 
 /// Check if a passing Steel test exists for this session within the validity window
 /// (Public wrapper for CLI access — caller injects the FS adapter).
-pub fn has_recent_steel_test_pub(fs: &dyn super::FileSystemPort, session_id: &str) -> bool {
-    has_recent_steel_test(fs, session_id)
+pub fn has_recent_browser_test_pub(fs: &dyn super::FileSystemPort, session_id: &str) -> bool {
+    has_recent_browser_test(fs, session_id)
 }
 
 /// Check if a passing Steel test exists for this session within the validity window
-fn has_recent_steel_test(fs: &dyn super::FileSystemPort, session_id: &str) -> bool {
+fn has_recent_browser_test(fs: &dyn super::FileSystemPort, session_id: &str) -> bool {
     let path = state_file_path(fs, session_id);
     let content = match fs.read_to_string(&path) {
         Ok(c) => c,
@@ -284,9 +284,9 @@ fn diff_has_frontend_files(git: &dyn super::GitStatusPort, cwd: Option<&str>) ->
 
 /// Write the Steel test state file after a successful Steel session.
 /// Called from the PostToolUse handler when `mcp__steel__release_session` succeeds.
-pub fn record_steel_test_passed(fs: &dyn super::FileSystemPort, session_id: &str) {
+pub fn record_browser_test_passed(fs: &dyn super::FileSystemPort, session_id: &str) {
     let path = state_file_path(fs, session_id);
-    // Ensure parent directory exists (Attack #61: now in ~/.claude/sentinel/steel-test/)
+    // Ensure parent directory exists (Attack #61: now in ~/.claude/sentinel/browser-test/)
     if let Some(parent) = path.parent() {
         let _ = fs.create_dir_all(parent);
     }
@@ -301,7 +301,7 @@ pub fn record_steel_test_passed(fs: &dyn super::FileSystemPort, session_id: &str
     ) {
         tracing::warn!("Failed to write Steel test state file: {e}");
     } else {
-        tracing::debug!("Steel test state recorded at {}", path.display());
+        tracing::debug!("Browser test state recorded at {}", path.display());
     }
 }
 
@@ -321,7 +321,7 @@ pub fn process_post_tool(input: &HookInput, ctx: &super::HookContext<'_>) -> Hoo
 
     // Path 1: Steel MCP release_session
     if tool == "mcp__steel__release_session" {
-        record_steel_test_passed(ctx.fs, session_id);
+        record_browser_test_passed(ctx.fs, session_id);
         return HookOutput::allow();
     }
 
@@ -335,7 +335,7 @@ pub fn process_post_tool(input: &HookInput, ctx: &super::HookContext<'_>) -> Hoo
             .and_then(|r| r.as_str())
             .map_or(false, |s| s.contains("STEEL_TEST_PASS"));
         if has_marker {
-            record_steel_test_passed(ctx.fs, session_id);
+            record_browser_test_passed(ctx.fs, session_id);
         }
     }
 
@@ -385,7 +385,7 @@ pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
     let session_id = input.session_id.as_deref().unwrap_or("unknown");
 
     // Check if Steel test passed recently
-    if has_recent_steel_test(ctx.fs, session_id) {
+    if has_recent_browser_test(ctx.fs, session_id) {
         return HookOutput::allow();
     }
 
@@ -465,7 +465,7 @@ mod tests {
     }
 
     /// Build a `HookContext` whose `fs` is the real-disk adapter so
-    /// tests of `record_steel_test_passed` actually persist a file.
+    /// tests of `record_browser_test_passed` actually persist a file.
     fn real_fs_ctx() -> super::super::HookContext<'static> {
         use crate::hooks::test_support::*;
         let git: &'static StubGit = Box::leak(Box::new(StubGit));
@@ -592,7 +592,7 @@ mod tests {
     }
 
     #[test]
-    fn test_allows_push_with_recent_steel_test() {
+    fn test_allows_push_with_recent_browser_test() {
         let session_id = "test-steel-recent";
         let state_path = state_file_path(&RealFsTest, session_id);
 
@@ -623,9 +623,9 @@ mod tests {
     }
 
     #[test]
-    fn test_expired_steel_test_not_valid() {
+    fn test_expired_browser_test_not_valid() {
         let session_id = "test-steel-expired";
-        let result = has_recent_steel_test(&RealFsTest, session_id);
+        let result = has_recent_browser_test(&RealFsTest, session_id);
         assert!(!result);
     }
 
@@ -644,7 +644,7 @@ mod tests {
         });
         std::fs::write(&state_path, serde_json::to_string(&state).unwrap()).unwrap();
 
-        let result = has_recent_steel_test(&RealFsTest, session_id);
+        let result = has_recent_browser_test(&RealFsTest, session_id);
         assert!(!result);
 
         let _ = std::fs::remove_file(&state_path);
@@ -940,14 +940,14 @@ mod tests {
     }
 
     #[test]
-    fn test_record_steel_test_passed_writes_state_file() {
+    fn test_record_browser_test_passed_writes_state_file() {
         let session_id = "test-record-steel";
         let state_path = state_file_path(&RealFsTest, session_id);
 
         // Ensure clean state
         let _ = std::fs::remove_file(&state_path);
 
-        record_steel_test_passed(&RealFsTest, session_id);
+        record_browser_test_passed(&RealFsTest, session_id);
 
         assert!(state_path.exists(), "State file should be created");
         let content = std::fs::read_to_string(&state_path).unwrap();
@@ -957,7 +957,7 @@ mod tests {
         assert!(state["timestamp"].is_string());
 
         // Verify it's recognized as a recent test
-        assert!(has_recent_steel_test(&RealFsTest, session_id));
+        assert!(has_recent_browser_test(&RealFsTest, session_id));
 
         // Cleanup
         let _ = std::fs::remove_file(&state_path);
@@ -981,7 +981,7 @@ mod tests {
         let output = process_post_tool(&input, &ctx);
         assert!(output.blocked.is_none());
         assert!(
-            has_recent_steel_test(&RealFsTest, session_id),
+            has_recent_browser_test(&RealFsTest, session_id),
             "State file should be written after release"
         );
 
@@ -1025,7 +1025,7 @@ mod tests {
         let output = process_post_tool(&input, &ctx);
         assert!(output.blocked.is_none());
         assert!(
-            has_recent_steel_test(&RealFsTest, session_id),
+            has_recent_browser_test(&RealFsTest, session_id),
             "State file should be written after CDP test with STEEL_TEST_PASS marker"
         );
 

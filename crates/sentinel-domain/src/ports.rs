@@ -50,14 +50,14 @@ pub trait GitStatusPort {
 
     /// Resolve `git merge-base HEAD <base_ref>` and return the SHA, or `None`
     /// if the ref doesn't resolve / merge-base fails. Used by
-    /// `pre_push_steel_test` to find the closest common ancestor against
+    /// `pre_push_browser_test` to find the closest common ancestor against
     /// candidate base refs (`origin/main`, `@{upstream}`, etc.) so frontend-
     /// file detection scopes to the branch's own commits.
     fn merge_base(&self, repo_path: &str, base_ref: &str) -> Option<String>;
 
     /// Count commits in `<from>..HEAD` (exclusive `from`, inclusive HEAD).
     /// Returns `None` if the range can't be evaluated (bad ref / not a repo).
-    /// Used by `pre_push_steel_test` to pick the merge-base candidate whose
+    /// Used by `pre_push_browser_test` to pick the merge-base candidate whose
     /// distance from HEAD is shortest (most-recent common ancestor).
     fn rev_list_count(&self, repo_path: &str, from: &str) -> Option<u32>;
 
@@ -234,7 +234,7 @@ pub trait FileSystemPort: Send + Sync {
 ///
 /// Abstracts `std::process::Command` calls for binary execution and
 /// fire-and-forget spawns. Used by `session_init` (qdrant sync, git),
-/// `pre_push_steel_test` (git).
+/// `pre_push_browser_test` (git).
 pub trait ProcessPort: Send + Sync {
     /// Run a command and capture output. Returns (`exit_success`, stdout, stderr).
     fn run(&self, command: &str, args: &[&str], cwd: Option<&str>)

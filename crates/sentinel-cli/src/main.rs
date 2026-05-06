@@ -28,7 +28,7 @@ mod rotate_key_cmd;
 mod scan_cmd;
 mod stage_cmd;
 mod stats_cmd;
-mod steel_test_cmd;
+mod browser_test_cmd;
 mod tokens_cmd;
 mod verify_cmd;
 
@@ -155,10 +155,10 @@ enum Commands {
         action: RoiAction,
     },
 
-    /// Manage Steel browser test state
-    SteelTest {
+    /// Manage browser test (used by browserbase-tester skill) state
+    BrowserTest {
         #[command(subcommand)]
-        action: SteelTestAction,
+        action: BrowserTestAction,
     },
 
     /// Stage a new sentinel-engine binary with integrity verification
@@ -331,7 +331,7 @@ enum RoiAction {
 }
 
 #[derive(Subcommand)]
-enum SteelTestAction {
+enum BrowserTestAction {
     /// Record a passing browser test for the current session
     Record {
         /// Session ID (reads from stdin if not provided)
@@ -400,9 +400,9 @@ async fn main() -> anyhow::Result<()> {
         Commands::Roi { action } => match action {
             RoiAction::Scan => roi_cmd::run(),
         },
-        Commands::SteelTest { action } => match action {
-            SteelTestAction::Record { session } => steel_test_cmd::record(session),
-            SteelTestAction::Check { session } => steel_test_cmd::check(session),
+        Commands::BrowserTest { action } => match action {
+            BrowserTestAction::Record { session } => browser_test_cmd::record(session),
+            BrowserTestAction::Check { session } => browser_test_cmd::check(session),
         },
         Commands::Stage { binary } => stage_cmd::run(binary),
         Commands::RotateKey => rotate_key_cmd::run(),

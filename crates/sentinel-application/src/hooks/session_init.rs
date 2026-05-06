@@ -1216,8 +1216,8 @@ sentinel scan --sync-counts --dry-run # Preview count changes
 sentinel scan --manifest              # Regenerate manifest.json with SHA-256 hashes
 sentinel scan --counts-only           # Output component counts as JSON
 sentinel daemon                       # Start dashboard API server (port 3001)
-sentinel steel-test record            # Record a passing browser test
-sentinel steel-test check             # Check if valid browser test exists
+sentinel browser-test record            # Record a passing browser test
+sentinel browser-test check             # Check if valid browser test exists
 ```
 
 ### Project Configs
@@ -1498,7 +1498,7 @@ zones, agents do ALL exploration and research.
 `debug` for bugs, `plan` for design, `test` for coverage, `commit` / `pr`
 for git flow, `memory` / `qdrant` for recall and storage, `research` for
 external docs, `refactor` / `cleanup` / `tech-debt` for code health,
-`deploy` for releases, `linear` for issue ops, `steel-tester` for UI
+`deploy` for releases, `linear` for issue ops, `browserbase-tester` for UI
 verification. If a skill fits the work, use it.
 - Skills compose. Chain them when appropriate (e.g. `plan` → `execute` →
 `review` → `commit` → `pr`).
@@ -1566,7 +1566,7 @@ enforce — these do):
 edit under `client/src/**`, `components/**`, `pages/**`, a `*.tsx` /
 `*.vue` / `*.html` file, or a server route that feeds UI data. Pure
 backend, pure config, pure tooling, and pure docs changes don't need
-it. When in doubt and the repo has a `sentinel steel-test check`
+it. When in doubt and the repo has a `sentinel browser-test check`
 configured, run the check.
 
 **What you CAN do in Autopilot without asking (non-prod = free rein):**

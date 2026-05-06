@@ -405,7 +405,7 @@ pub fn infer_category(name: &str) -> String {
                 "sequential-thinking",
                 "ssh",
                 "steel",
-                "steel-tester",
+                "browserbase-tester",
                 "tailscale",
                 "traffic-light",
             ],

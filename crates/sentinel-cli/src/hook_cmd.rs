@@ -440,8 +440,8 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
                 output.merge(&msg_output);
 
                 // Pre-push Steel test — block git push without Steel test (Bash only)
-                let steel_output = time_and_record(ctx.fs, &mk_ctx("pre_push_steel_test"), || {
-                    hooks::pre_push_steel_test::process(&input, &ctx)
+                let steel_output = time_and_record(ctx.fs, &mk_ctx("pre_push_browser_test"), || {
+                    hooks::pre_push_browser_test::process(&input, &ctx)
                 });
                 output.merge(&steel_output);
 
@@ -494,7 +494,7 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
             output.merge(&activity_output);
 
             // Steel test recorder — write state file on successful session release
-            let steel_output = hooks::pre_push_steel_test::process_post_tool(&input, &ctx);
+            let steel_output = hooks::pre_push_browser_test::process_post_tool(&input, &ctx);
             output.merge(&steel_output);
 
             // Plan organizer — inject plan file organization instructions (ExitPlanMode only)
