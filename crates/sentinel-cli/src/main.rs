@@ -262,7 +262,7 @@ enum Commands {
     },
 }
 
-/// `sentinel federation` subcommands (Apollo-style federation tooling, M2.4).
+/// `sentinel federation` subcommands (Apollo-style federation tooling, M2.4 + M2.8).
 #[derive(Subcommand)]
 enum FederationAction {
     /// Compose the federated step supergraph from `~/.claude/sentinel/config/steps/*.toml`
@@ -273,6 +273,15 @@ enum FederationAction {
         #[arg(long)]
         json: bool,
 
+        /// Override the config directory (default: `~/.claude/sentinel/config/`).
+        #[arg(long)]
+        config_dir: Option<String>,
+    },
+
+    /// CI-flavored federation check for PRs (M2.8). Always emits JSON
+    /// shaped for GitHub Checks API. `conclusion` is one of
+    /// success/neutral/failure. Exit 1 on failure, 0 otherwise.
+    Check {
         /// Override the config directory (default: `~/.claude/sentinel/config/`).
         #[arg(long)]
         config_dir: Option<String>,
@@ -398,6 +407,7 @@ async fn main() -> anyhow::Result<()> {
         Commands::Verify { session } => verify_cmd::run(&session),
         Commands::Federation { action } => match action {
             FederationAction::Compose { json, config_dir } => federation_cmd::run(json, config_dir),
+            FederationAction::Check { config_dir } => federation_cmd::run_check(config_dir),
         },
         Commands::Mcp => mcp_cmd::run().await,
         Commands::Scan {

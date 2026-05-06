@@ -267,6 +267,78 @@ pub fn run(json: bool, config_dir_override: Option<String>) -> Result<()> {
     }
 }
 
+/// CI-flavored check output (M2.8). Designed to be consumed by GitHub
+/// Actions / PR-status pipelines: the JSON shape is small, stable, and
+/// includes the fields a status-check API expects.
+///
+/// `conclusion` matches GitHub Checks API enum values for direct
+/// posting: "success" | "failure" | "neutral". `summary` is the
+/// short human-readable headline (suitable for a PR-check title);
+/// `details` is the full text dump (suitable for the check body).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FederationCheckOutput {
+    pub conclusion: &'static str,
+    pub summary: String,
+    pub details: String,
+    pub report: ComposeReport,
+}
+
+impl FederationCheckOutput {
+    fn from_report(report: ComposeReport) -> Self {
+        let warnings = report.findings.len() - report.error_count;
+        let conclusion: &'static str = if report.error_count > 0 {
+            "failure"
+        } else if warnings > 0 {
+            "neutral" // warnings don't fail the check, but flag them
+        } else {
+            "success"
+        };
+        let summary = if report.error_count > 0 {
+            format!(
+                "Federation check failed: {} error(s), {warnings} warning(s) across {} skill(s)",
+                report.error_count, report.skills_seen,
+            )
+        } else if warnings > 0 {
+            format!(
+                "Federation check passed with {warnings} warning(s) across {} skill(s)",
+                report.skills_seen,
+            )
+        } else {
+            format!(
+                "Federation check passed: {} skill(s), {} step(s)",
+                report.skills_seen, report.total_steps,
+            )
+        };
+        let details = render_text(&report);
+        Self {
+            conclusion,
+            summary,
+            details,
+            report,
+        }
+    }
+}
+
+/// CLI entry: `sentinel federation check [--config-dir DIR]`.
+///
+/// Always emits JSON (no human text mode — this is the CI surface).
+/// Exit code: 0 on success/neutral (warnings ok in PRs), 1 on failure.
+/// PR pipelines consume the JSON to post a status check; the
+/// `conclusion` field maps directly to GitHub Checks API.
+pub fn run_check(config_dir_override: Option<String>) -> Result<()> {
+    let config_dir = match config_dir_override {
+        Some(p) => std::path::PathBuf::from(p),
+        None => sentinel_infrastructure::config::config_dir(),
+    };
+    let report = compose(&config_dir)?;
+    let output = FederationCheckOutput::from_report(report);
+    println!("{}", serde_json::to_string_pretty(&output)?);
+    if output.conclusion == "failure" {
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -439,6 +511,90 @@ id = "branch"
         assert!(text.contains("[ERROR] boom"));
         assert!(text.contains("[warn ] hmm"));
         assert!(text.contains("1 error(s), 1 warning(s)"));
+    }
+
+    // ─── M2.8 federation check (CI flavor) tests ─────────────────────
+
+    #[test]
+    fn check_output_concludes_success_for_clean_report() {
+        let report = ComposeReport {
+            skills_seen: 2,
+            total_phases: 3,
+            total_steps: 7,
+            findings: Vec::new(),
+            error_count: 0,
+        };
+        let out = FederationCheckOutput::from_report(report);
+        assert_eq!(out.conclusion, "success");
+        assert!(out.summary.contains("passed"));
+        assert!(out.summary.contains("2 skill"));
+        assert!(out.summary.contains("7 step"));
+    }
+
+    #[test]
+    fn check_output_concludes_neutral_when_only_warnings() {
+        // Warnings don't fail PRs. neutral conclusion lets reviewers
+        // see them without blocking merge.
+        let report = ComposeReport {
+            skills_seen: 1,
+            total_phases: 1,
+            total_steps: 0,
+            findings: vec![ComposeFinding {
+                severity: ComposeSeverity::Warning,
+                skill: Some("emptyskill".into()),
+                phase_id: None,
+                step_id: None,
+                message: "skill 'emptyskill' declares zero steps".into(),
+            }],
+            error_count: 0,
+        };
+        let out = FederationCheckOutput::from_report(report);
+        assert_eq!(out.conclusion, "neutral");
+        assert!(out.summary.contains("warning"));
+    }
+
+    #[test]
+    fn check_output_concludes_failure_when_errors_present() {
+        let report = ComposeReport {
+            skills_seen: 1,
+            total_phases: 1,
+            total_steps: 2,
+            findings: vec![ComposeFinding {
+                severity: ComposeSeverity::Error,
+                skill: Some("linear".into()),
+                phase_id: Some("claim".into()),
+                step_id: Some("1".into()),
+                message: "duplicate step coordinate".into(),
+            }],
+            error_count: 1,
+        };
+        let out = FederationCheckOutput::from_report(report);
+        assert_eq!(out.conclusion, "failure");
+        assert!(out.summary.contains("failed"));
+        assert!(out.summary.contains("1 error"));
+    }
+
+    #[test]
+    fn check_output_serializes_with_stable_field_names() {
+        // PR-CI consumers depend on the field names — guard them
+        // explicitly so we don't accidentally rename them.
+        let report = ComposeReport {
+            skills_seen: 0,
+            total_phases: 0,
+            total_steps: 0,
+            findings: Vec::new(),
+            error_count: 0,
+        };
+        let out = FederationCheckOutput::from_report(report);
+        let json = serde_json::to_string(&out).unwrap();
+        for required_field in ["conclusion", "summary", "details", "report"] {
+            assert!(
+                json.contains(&format!("\"{required_field}\":")),
+                "missing required field '{required_field}', got: {json}",
+            );
+        }
+        // conclusion is one of the GitHub Checks API enum values.
+        assert!(json.contains("\"conclusion\":\"success\""));
     }
 
     #[test]
