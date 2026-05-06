@@ -527,6 +527,7 @@ mod tests {
             judge_model: "sonnet".into(),
             judge_verdict: JudgeVerdict::pass(0.9, "ok"),
             signature: None,
+            trace_context: None,
             started_at: Utc::now() - chrono::Duration::seconds(1),
             completed_at: Utc::now(),
             duration_ms,

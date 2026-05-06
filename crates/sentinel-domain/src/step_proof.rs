@@ -37,6 +37,7 @@ use sha2::{Digest, Sha256};
 
 use crate::evidence::Evidence;
 use crate::judge::JudgeVerdict;
+use crate::tracing::TraceContext;
 
 /// A single step's proof of work.
 ///
@@ -115,6 +116,20 @@ pub struct StepProof {
     /// chain's metadata so verifiers know which key to expect.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signature: Option<String>,
+
+    // ── Optional OpenTelemetry trace linkage (M4.5) ──
+    /// W3C trace context the step was emitted under. `None` when OTEL
+    /// isn't configured (the common case until the OTLP exporter lands).
+    /// `Some(ctx)` once tracing is wired up so a corpus query can pivot
+    /// directly to Grafana / Tempo / Honeycomb.
+    ///
+    /// **Not included in the combined hash.** Trace context is
+    /// operational metadata, not part of the audit contract — adding
+    /// it to the hash would mean a chain emitted with OTEL on couldn't
+    /// be verified by a sentinel build with OTEL off, which defeats the
+    /// purpose. The audit story is the proof chain; OTEL is alongside.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace_context: Option<TraceContext>,
 
     // ── Metadata ──
     pub started_at: DateTime<Utc>,
@@ -339,6 +354,7 @@ mod tests {
                 requested_evidence: None,
             },
             signature: None,
+            trace_context: None,
             started_at: Utc::now(),
             completed_at: Utc::now(),
             duration_ms: 42,
@@ -588,5 +604,108 @@ mod tests {
 
         // Restored proof must still verify against the same key.
         assert!(restored.verify_signature(&public).expect("verify post-round-trip"));
+    }
+
+    // ─── M4.5 trace_context tests ────────────────────────────────────
+
+    #[test]
+    fn trace_context_defaults_to_none_on_new_proof() {
+        // Fresh StepProofs constructed via make_step have no trace
+        // context — that's the OTEL-off baseline. Existing chains
+        // serialized before M4.5 deserialize with this same shape.
+        let p = make_step("1", "claim", "linear", GENESIS_HASH, serde_json::Value::Null);
+        assert!(p.trace_context.is_none());
+    }
+
+    #[test]
+    fn trace_context_is_skipped_when_none_in_serialized_form() {
+        // skip_serializing_if = "Option::is_none" — chains written
+        // with OTEL off must be byte-identical to pre-M4.5 chains.
+        // If this regresses, every chain on disk gets a `null`
+        // field appended and verification breaks subtly.
+        let p = make_step("1", "claim", "linear", GENESIS_HASH, serde_json::Value::Null);
+        let json = serde_json::to_string(&p).unwrap();
+        assert!(
+            !json.contains("trace_context"),
+            "None trace_context must not appear in JSON, got: {json}",
+        );
+    }
+
+    #[test]
+    fn trace_context_round_trips_through_serde() {
+        // When OTEL is on, the field is Some(ctx) and serialization
+        // must preserve every sub-field including parent_span_id and
+        // tracestate.
+        use crate::tracing::{TraceContext, FLAG_SAMPLED};
+        let mut p = make_step(
+            "1",
+            "claim",
+            "linear",
+            GENESIS_HASH,
+            serde_json::Value::Null,
+        );
+        p.trace_context = Some(TraceContext {
+            trace_id: "0af7651916cd43dd8448eb211c80319c".into(),
+            span_id: "b7ad6b7169203331".into(),
+            parent_span_id: Some("a1b2c3d4e5f60789".into()),
+            flags: FLAG_SAMPLED,
+            tracestate: vec![("vendor".into(), "value".into())],
+        });
+
+        let json = serde_json::to_string(&p).unwrap();
+        let restored: StepProof = serde_json::from_str(&json).unwrap();
+        let ctx = restored.trace_context.expect("trace_context preserved");
+        assert_eq!(ctx.trace_id, "0af7651916cd43dd8448eb211c80319c");
+        assert_eq!(ctx.span_id, "b7ad6b7169203331");
+        assert_eq!(ctx.parent_span_id.as_deref(), Some("a1b2c3d4e5f60789"));
+        assert!(ctx.is_sampled());
+        assert_eq!(ctx.tracestate.len(), 1);
+    }
+
+    #[test]
+    fn trace_context_does_not_affect_combined_hash() {
+        // The audit contract: trace_context is operational metadata,
+        // not part of the chain hash. Two proofs identical in every
+        // proof-relevant field but differing only in trace_context
+        // must hash to the same combined_hash. Otherwise OTEL-on
+        // sentinel and OTEL-off sentinel can't share chains.
+        use crate::tracing::TraceContext;
+        let p1 = make_step("1", "claim", "linear", GENESIS_HASH, serde_json::Value::Null);
+        let mut p2 = make_step("1", "claim", "linear", GENESIS_HASH, serde_json::Value::Null);
+        p2.trace_context = Some(TraceContext::new_root(
+            "0af7651916cd43dd8448eb211c80319c",
+            "b7ad6b7169203331",
+        ));
+        // Both proofs were built with the same compute_combined_hash
+        // inputs — the hash must be identical regardless of
+        // trace_context state.
+        assert_eq!(
+            p1.combined_hash, p2.combined_hash,
+            "trace_context must not be folded into combined_hash",
+        );
+    }
+
+    #[test]
+    fn trace_context_does_not_affect_signature_verification() {
+        // Signing covers combined_hash only; trace_context lives
+        // outside the signed envelope. A proof signed with OTEL off
+        // must verify cleanly even after a tracer attaches a
+        // trace_context post-hoc (e.g. for a corpus migration).
+        use crate::tracing::TraceContext;
+        let key = make_signing_key();
+        let public = key.verifying_key();
+        let mut p = make_step("1", "claim", "linear", GENESIS_HASH, serde_json::Value::Null);
+        p.sign_with(&key);
+        assert!(p.verify_signature(&public).unwrap());
+
+        // Attach trace_context after signing — verification still passes.
+        p.trace_context = Some(TraceContext::new_root(
+            "0af7651916cd43dd8448eb211c80319c",
+            "b7ad6b7169203331",
+        ));
+        assert!(
+            p.verify_signature(&public).unwrap(),
+            "post-hoc trace_context attachment must not invalidate the signature",
+        );
     }
 }

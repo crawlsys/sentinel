@@ -281,6 +281,7 @@ impl ProofEngine {
                 judge_model: judge_model.to_string(),
                 judge_verdict: verdict,
                 signature: None, // M1.7 (Ed25519 opt-in) wires this when configured
+                trace_context: None, // M4.5 — exporter wiring lands separately
                 started_at,
                 completed_at,
                 duration_ms: (completed_at - started_at)

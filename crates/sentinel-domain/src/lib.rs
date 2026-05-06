@@ -27,6 +27,7 @@ pub mod routing;
 pub mod session;
 pub mod state;
 pub mod test_evidence;
+pub mod tracing;
 pub mod workflow;
 
 // Re-export commonly used types
@@ -38,6 +39,7 @@ pub use pricing::{cost_for, short_model_label, tier_for_model, PricingTier, Toke
 pub use proof::{PhaseProof, ProofChain};
 pub use step_proof::StepProof;
 pub use routing::RegexRouter;
+pub use tracing::{TraceContext, TraceParseError};
 pub use session::SessionId;
 pub use state::SessionState;
 pub use workflow::{SkillWorkflow, WorkflowPhase};

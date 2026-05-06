@@ -679,6 +679,7 @@ mod tests {
             account_context: None,
             previous_hash: previous_hash.to_string(),
             combined_hash,
+            trace_context: None,
             judge_model: "sonnet-4.6".to_string(),
             judge_verdict: JudgeVerdict {
                 sufficient: true,
