@@ -12,6 +12,123 @@ use crate::judge::JudgeModel;
 // Step definitions (loaded from config/steps/<skill>.toml)
 // ============================================================================
 
+/// **Retry policy (M4.4 — Apollo runtime resilience)**.
+/// Configures automatic retry behavior for a single step. Consumed by
+/// skills-mcp (M2) at execution time — sentinel-domain just carries the
+/// declared policy.
+///
+/// `Default::default()` returns the no-retry policy (max_attempts=1,
+/// backoff_ms=100, no retry_on filter). The `#[serde(default = ...)]`
+/// attributes on individual fields apply to deserialization only —
+/// the manual `Default` impl below ensures `Default::default()` matches
+/// the deserialization behavior.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RetryPolicy {
+    /// Maximum number of attempts (1 = no retries, 3 = original + 2 retries).
+    /// Default 1 (no retries) — opt-in for steps where transient failures
+    /// are expected (network calls, external API hits).
+    #[serde(default = "default_max_attempts")]
+    pub max_attempts: u32,
+
+    /// Initial backoff in milliseconds. Exponential growth between
+    /// attempts: backoff_ms, backoff_ms*2, backoff_ms*4, ...
+    /// Default 100ms.
+    #[serde(default = "default_backoff_ms")]
+    pub backoff_ms: u64,
+
+    /// Optional list of error categories to retry on. Empty list means
+    /// "retry on any error." When non-empty, the step must classify its
+    /// failure into one of these categories for the retry to fire.
+    /// Categories are skill-defined strings (e.g. "transient",
+    /// "rate-limit", "timeout").
+    #[serde(default)]
+    pub retry_on: Vec<String>,
+}
+
+fn default_max_attempts() -> u32 {
+    1
+}
+fn default_backoff_ms() -> u64 {
+    100
+}
+
+impl Default for RetryPolicy {
+    fn default() -> Self {
+        Self {
+            max_attempts: default_max_attempts(),
+            backoff_ms: default_backoff_ms(),
+            retry_on: Vec::new(),
+        }
+    }
+}
+
+impl RetryPolicy {
+    /// Returns true if this policy actually retries (max_attempts > 1).
+    /// Steps without a retry_policy in TOML get the default which is
+    /// "no retry" — `should_retry()` short-circuits cleanly for them.
+    #[must_use]
+    pub fn enabled(&self) -> bool {
+        self.max_attempts > 1
+    }
+
+    /// Compute the backoff (ms) for attempt N (1-indexed). Returns 0
+    /// for the first attempt (no wait); exponential thereafter capped
+    /// at 60 seconds to prevent pathological waits.
+    #[must_use]
+    pub fn backoff_for_attempt(&self, attempt: u32) -> u64 {
+        if attempt <= 1 {
+            return 0;
+        }
+        let raw = self.backoff_ms.saturating_mul(1u64 << (attempt - 2).min(20));
+        raw.min(60_000)
+    }
+}
+
+/// **Circuit breaker (M4.4 — Apollo runtime resilience)**.
+/// After N consecutive failures of this step, the skill MCP is
+/// circuit-broken: subsequent invocations short-circuit to a "circuit
+/// open" error without running the step body. The router can then fall
+/// back to alternative steps. After `cooldown_ms`, the breaker
+/// half-opens — the next invocation runs and either resets the breaker
+/// (success) or re-trips it (failure).
+///
+/// `Default::default()` returns the disabled breaker
+/// (failure_threshold=0, cooldown_ms=30000). Manual impl ensures the
+/// cooldown matches the serde-default value.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CircuitBreaker {
+    /// Consecutive failures before the breaker trips. Default 0 means
+    /// "no circuit breaker" — opt-in only.
+    #[serde(default)]
+    pub failure_threshold: u32,
+
+    /// Wall-clock cooldown in milliseconds before the breaker
+    /// half-opens. Default 30 seconds.
+    #[serde(default = "default_cooldown_ms")]
+    pub cooldown_ms: u64,
+}
+
+fn default_cooldown_ms() -> u64 {
+    30_000
+}
+
+impl Default for CircuitBreaker {
+    fn default() -> Self {
+        Self {
+            failure_threshold: 0,
+            cooldown_ms: default_cooldown_ms(),
+        }
+    }
+}
+
+impl CircuitBreaker {
+    /// Returns true if this breaker is configured (failure_threshold > 0).
+    #[must_use]
+    pub fn enabled(&self) -> bool {
+        self.failure_threshold > 0
+    }
+}
+
 /// A trackable step within a phase
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkflowStep {
@@ -39,6 +156,26 @@ pub struct WorkflowStep {
     /// hit cold-start false-positives.
     #[serde(default)]
     pub baseline_threshold: u64,
+
+    /// **Per-step timeout (M4.4 — Apollo resilience)**. Wall-clock cap
+    /// in milliseconds. Skills-mcp aborts the step if exceeded. None =
+    /// no timeout (the default) — appropriate for steps with their own
+    /// internal timeout management or steps where wall-clock isn't the
+    /// right axis to bound.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<u64>,
+
+    /// **Retry policy (M4.4)**. See [`RetryPolicy`]. Default is the
+    /// no-retry policy (max_attempts=1) — opt-in for steps where
+    /// transient failures are expected.
+    #[serde(default)]
+    pub retry_policy: RetryPolicy,
+
+    /// **Circuit breaker (M4.4)**. See [`CircuitBreaker`]. Default
+    /// (failure_threshold=0) means no breaker — opt-in for skills
+    /// that may degrade and need fallback routing.
+    #[serde(default)]
+    pub circuit_breaker: CircuitBreaker,
 }
 
 /// Steps for a single phase
@@ -554,6 +691,148 @@ pub struct WorkflowBlock {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── M4.4 RetryPolicy / CircuitBreaker tests ─────────────────────
+
+    #[test]
+    fn retry_policy_default_has_no_retries() {
+        // Default policy = max_attempts: 1 = no retries. Steps without
+        // a retry_policy in TOML get this; behavior must be "execute
+        // once, never retry."
+        let p = RetryPolicy::default();
+        assert_eq!(p.max_attempts, 1);
+        assert!(!p.enabled(), "default policy must report not-enabled");
+    }
+
+    #[test]
+    fn retry_policy_enabled_when_max_attempts_above_one() {
+        let p = RetryPolicy {
+            max_attempts: 3,
+            backoff_ms: 100,
+            retry_on: vec![],
+        };
+        assert!(p.enabled());
+    }
+
+    #[test]
+    fn retry_backoff_first_attempt_is_zero() {
+        // Attempt 1 = the original call, so no wait before it.
+        let p = RetryPolicy {
+            max_attempts: 5,
+            backoff_ms: 100,
+            retry_on: vec![],
+        };
+        assert_eq!(p.backoff_for_attempt(1), 0);
+        assert_eq!(p.backoff_for_attempt(0), 0, "attempt 0 also no-wait");
+    }
+
+    #[test]
+    fn retry_backoff_grows_exponentially() {
+        let p = RetryPolicy {
+            max_attempts: 10,
+            backoff_ms: 100,
+            retry_on: vec![],
+        };
+        // Attempt 2 = first retry: backoff_ms * 2^0 = 100
+        // Attempt 3 = second retry: backoff_ms * 2^1 = 200
+        // Attempt 4: 400, etc.
+        assert_eq!(p.backoff_for_attempt(2), 100);
+        assert_eq!(p.backoff_for_attempt(3), 200);
+        assert_eq!(p.backoff_for_attempt(4), 400);
+        assert_eq!(p.backoff_for_attempt(5), 800);
+    }
+
+    #[test]
+    fn retry_backoff_caps_at_60_seconds() {
+        // Pathological case: backoff_ms=1000, attempt 30 would be
+        // 1000 * 2^28 ms ≈ 2.7 trillion ms (~85 years). Cap at 60s
+        // so a misconfigured retry doesn't hang forever.
+        let p = RetryPolicy {
+            max_attempts: 100,
+            backoff_ms: 1000,
+            retry_on: vec![],
+        };
+        let huge = p.backoff_for_attempt(30);
+        assert_eq!(huge, 60_000, "backoff must cap at 60s, got {huge}");
+    }
+
+    #[test]
+    fn retry_backoff_handles_overflow_safely() {
+        // saturating_mul + the 1<<20 cap on the shift amount must
+        // prevent integer overflow even at hostile input sizes.
+        let p = RetryPolicy {
+            max_attempts: u32::MAX,
+            backoff_ms: u64::MAX,
+            retry_on: vec![],
+        };
+        // Doesn't panic.
+        let _ = p.backoff_for_attempt(u32::MAX);
+    }
+
+    #[test]
+    fn circuit_breaker_default_disabled() {
+        let cb = CircuitBreaker::default();
+        assert_eq!(cb.failure_threshold, 0);
+        assert!(!cb.enabled(), "default breaker must report not-enabled");
+    }
+
+    #[test]
+    fn circuit_breaker_enabled_when_threshold_above_zero() {
+        let cb = CircuitBreaker {
+            failure_threshold: 5,
+            cooldown_ms: 30_000,
+        };
+        assert!(cb.enabled());
+    }
+
+    #[test]
+    fn workflow_step_loads_with_no_resilience_fields() {
+        // Backwards compat: step config without timeout/retry/breaker
+        // fields must serde-default to no-timeout / no-retry /
+        // no-breaker. Existing skill configs (from before M4.4) get
+        // the safe-default "execute once with no resilience" behavior.
+        // Using JSON round-trip here (rather than TOML) because
+        // sentinel-domain doesn't depend on the toml crate; the
+        // serde-default property is format-agnostic.
+        let json = serde_json::json!({
+            "id": "1",
+            "description": "fetch ticket",
+        });
+        let step: WorkflowStep = serde_json::from_value(json).expect("loads");
+        assert_eq!(step.id, "1");
+        assert!(step.timeout_ms.is_none());
+        assert!(!step.retry_policy.enabled());
+        assert!(!step.circuit_breaker.enabled());
+        assert_eq!(step.baseline_threshold, 0);
+    }
+
+    #[test]
+    fn workflow_step_loads_with_resilience_fields() {
+        // New skill configs that opt into M4.4 see their declared
+        // values preserved through the loader.
+        let json = serde_json::json!({
+            "id": "deploy_prod",
+            "description": "Deploy to production",
+            "blocker": true,
+            "timeout_ms": 60000_u64,
+            "retry_policy": {
+                "max_attempts": 3,
+                "backoff_ms": 500,
+                "retry_on": ["transient", "rate-limit"],
+            },
+            "circuit_breaker": {
+                "failure_threshold": 3,
+                "cooldown_ms": 60000_u64,
+            },
+        });
+        let step: WorkflowStep = serde_json::from_value(json).expect("loads");
+        assert_eq!(step.timeout_ms, Some(60_000));
+        assert_eq!(step.retry_policy.max_attempts, 3);
+        assert_eq!(step.retry_policy.backoff_ms, 500);
+        assert_eq!(step.retry_policy.retry_on, vec!["transient", "rate-limit"]);
+        assert_eq!(step.circuit_breaker.failure_threshold, 3);
+        assert_eq!(step.circuit_breaker.cooldown_ms, 60_000);
+    }
 
     fn linear_workflow() -> SkillWorkflow {
         SkillWorkflow {

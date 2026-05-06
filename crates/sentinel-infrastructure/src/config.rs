@@ -268,6 +268,15 @@ struct StepToml {
     /// continue to load unchanged.
     #[serde(default)]
     baseline_threshold: u64,
+    /// Per-step timeout (M4.4). See `WorkflowStep::timeout_ms`. None = no timeout.
+    #[serde(default)]
+    timeout_ms: Option<u64>,
+    /// Retry policy (M4.4). See `WorkflowStep::retry_policy`. Default = no retries.
+    #[serde(default)]
+    retry_policy: sentinel_domain::workflow::RetryPolicy,
+    /// Circuit breaker (M4.4). See `WorkflowStep::circuit_breaker`. Default = disabled.
+    #[serde(default)]
+    circuit_breaker: sentinel_domain::workflow::CircuitBreaker,
 }
 
 /// Load step definitions for a skill from `config/steps/<skill>.toml`
@@ -311,6 +320,9 @@ pub fn load_skill_steps(config_path: &Path, skill: &str) -> Result<Option<SkillS
                         description: s.description,
                         blocker: s.blocker,
                         baseline_threshold: s.baseline_threshold,
+                        timeout_ms: s.timeout_ms,
+                        retry_policy: s.retry_policy,
+                        circuit_breaker: s.circuit_breaker,
                     })
                     .collect(),
             })
