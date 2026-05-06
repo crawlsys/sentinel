@@ -81,6 +81,8 @@ impl McpHandler {
             "sentinel__get_active_step" => self.get_active_step(call.arguments).await,
             // ── Step-level write (M4.2) ──────────────────────────────
             "sentinel__submit_step_complete" => self.submit_step_complete(call.arguments).await,
+            // ── Proof corpus query (M4.3) ────────────────────────────
+            "sentinel__query_proof_corpus" => self.query_proof_corpus(call.arguments).await,
             _ => McpToolResult::err(format!("Unknown tool: {}", call.name)),
         }
     }
@@ -420,6 +422,136 @@ impl McpHandler {
             },
             Err(e) => McpToolResult::err(format!("submit_step_complete failed: {e}")),
         }
+    }
+
+    /// Query the proof corpus for historical chains matching a pattern (M4.3).
+    ///
+    /// **The moat tool** — what the router-as-planner (M7) reads from to
+    /// decide which step combinations have worked in the past. No other
+    /// agent system has this because no other agent system produces
+    /// hash-verified execution chains in the first place.
+    ///
+    /// **Current scope (M4.3 v1)**: searches the *live* in-memory state
+    /// across all skills in this session. Cross-session corpus aggregation
+    /// (scanning `~/.claude/sentinel/proofs/` for archived chains from
+    /// prior sessions) requires the persistence layer that doesn't exist
+    /// yet — see follow-up task. The tool surface stays the same when
+    /// cross-session lands; only the data source widens.
+    ///
+    /// Arguments:
+    /// - `skill_filter` (optional string) — restrict to chains for this skill
+    /// - `min_steps` (optional u64) — only return chains with at least N step entries
+    /// - `successful_only` (optional bool, default true) — filter to chains where
+    ///    every step has `judge_verdict.sufficient == true`
+    /// - `max_results` (optional u64, default 50, capped at 500) — pagination cap
+    ///
+    /// Response shape:
+    /// ```json
+    /// {
+    ///   "scope": "live-session",   // or "cross-session" once persistence lands
+    ///   "total_matched": N,
+    ///   "chains": [
+    ///     {
+    ///       "skill": "linear",
+    ///       "session_id": "...",
+    ///       "step_count": 3,
+    ///       "phase_count": 0,
+    ///       "all_sufficient": true,
+    ///       "head_hash": "...",
+    ///       "step_sequence": ["claim.1", "claim.2", "review.1"]  // pattern signal
+    ///     },
+    ///     ...
+    ///   ]
+    /// }
+    /// ```
+    ///
+    /// The `step_sequence` field is the key signal: it lets the M7 router
+    /// query "for prompts like X, what step-sequence patterns have worked
+    /// before?" without dragging the full StepProof payloads across the
+    /// MCP boundary.
+    async fn query_proof_corpus(&self, args: serde_json::Value) -> McpToolResult {
+        let skill_filter = args.get("skill_filter").and_then(|v| v.as_str());
+        let min_steps = args.get("min_steps").and_then(|v| v.as_u64()).unwrap_or(0);
+        let successful_only = args
+            .get("successful_only")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+        let max_results = args
+            .get("max_results")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(50)
+            .min(500) as usize;
+
+        let state = self.state.read().await;
+
+        // Iterate every chain in the live session. Filter and shape
+        // into the response payload. Cross-session aggregation will
+        // append additional sources here without changing the shape.
+        let mut summaries: Vec<serde_json::Value> = Vec::new();
+        let mut total_matched: u64 = 0;
+
+        for (skill, chain) in state.proof_chains.iter() {
+            if let Some(want) = skill_filter {
+                if skill != want {
+                    continue;
+                }
+            }
+
+            let step_entries: Vec<&sentinel_domain::step_proof::StepProof> = chain
+                .entries
+                .iter()
+                .filter_map(|e| match e {
+                    ProofEntry::Step(s) => Some(s),
+                    _ => None,
+                })
+                .collect();
+
+            if (step_entries.len() as u64) < min_steps {
+                continue;
+            }
+
+            let all_sufficient = step_entries
+                .iter()
+                .all(|s| s.judge_verdict.sufficient)
+                && chain.proofs.iter().all(|p| p.judge_verdict.sufficient);
+            if successful_only && !all_sufficient {
+                continue;
+            }
+
+            let phase_count = chain.proofs.len()
+                + chain
+                    .entries
+                    .iter()
+                    .filter(|e| matches!(e, ProofEntry::Phase(_)))
+                    .count();
+
+            // step_sequence: ordered "phase_id.step_id" coordinates. This
+            // is the pattern signal the router queries against for
+            // "which step combinations have worked before?"
+            let step_sequence: Vec<String> = step_entries
+                .iter()
+                .map(|s| format!("{}.{}", s.phase_id, s.step_id))
+                .collect();
+
+            total_matched += 1;
+            if summaries.len() < max_results {
+                summaries.push(serde_json::json!({
+                    "skill": chain.skill,
+                    "session_id": chain.session_id,
+                    "step_count": step_entries.len(),
+                    "phase_count": phase_count,
+                    "all_sufficient": all_sufficient,
+                    "head_hash": chain.head_hash(),
+                    "step_sequence": step_sequence,
+                }));
+            }
+        }
+
+        McpToolResult::ok(serde_json::json!({
+            "scope": "live-session",
+            "total_matched": total_matched,
+            "chains": summaries,
+        }))
     }
 }
 
@@ -867,6 +999,143 @@ mod step_tools_tests {
         assert_eq!(
             prev_2, combined_1,
             "step 2 previous_hash must equal step 1 combined_hash via head_hash() resolution",
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // M4.3: query_proof_corpus tests
+    // ─────────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn query_proof_corpus_returns_summaries_for_live_chains() {
+        let handler = handler_with_chain().await;
+        let result = handler
+            .handle(McpToolCall {
+                name: "sentinel__query_proof_corpus".into(),
+                arguments: serde_json::json!({}),
+            })
+            .await;
+        assert!(result.success);
+        let payload = result.content;
+        assert_eq!(payload.get("scope").and_then(|v| v.as_str()), Some("live-session"));
+        assert_eq!(payload.get("total_matched").and_then(|v| v.as_u64()), Some(1));
+        let chains = payload.get("chains").and_then(|v| v.as_array()).unwrap();
+        assert_eq!(chains.len(), 1);
+        let c0 = &chains[0];
+        assert_eq!(c0.get("skill").and_then(|v| v.as_str()), Some("linear"));
+        assert_eq!(c0.get("step_count").and_then(|v| v.as_u64()), Some(2));
+        assert_eq!(c0.get("all_sufficient").and_then(|v| v.as_bool()), Some(true));
+        // step_sequence is the pattern signal — exact ordered coordinates.
+        let seq = c0.get("step_sequence").and_then(|v| v.as_array()).unwrap();
+        let labels: Vec<&str> = seq.iter().filter_map(|v| v.as_str()).collect();
+        assert_eq!(labels, vec!["claim.1", "claim.2"]);
+    }
+
+    #[tokio::test]
+    async fn query_proof_corpus_skill_filter_excludes_non_matches() {
+        let handler = handler_with_chain().await;
+        let result = handler
+            .handle(McpToolCall {
+                name: "sentinel__query_proof_corpus".into(),
+                arguments: serde_json::json!({"skill_filter": "deploy"}),
+            })
+            .await;
+        assert!(result.success);
+        let payload = result.content;
+        assert_eq!(payload.get("total_matched").and_then(|v| v.as_u64()), Some(0));
+        assert!(payload.get("chains").and_then(|v| v.as_array()).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn query_proof_corpus_min_steps_filter_works() {
+        let handler = handler_with_chain().await;
+        // Chain has 2 step entries; min_steps=3 must exclude.
+        let result = handler
+            .handle(McpToolCall {
+                name: "sentinel__query_proof_corpus".into(),
+                arguments: serde_json::json!({"min_steps": 3}),
+            })
+            .await;
+        assert!(result.success);
+        assert_eq!(
+            result.content.get("total_matched").and_then(|v| v.as_u64()),
+            Some(0),
+        );
+
+        // min_steps=2 must include.
+        let result2 = handler
+            .handle(McpToolCall {
+                name: "sentinel__query_proof_corpus".into(),
+                arguments: serde_json::json!({"min_steps": 2}),
+            })
+            .await;
+        assert!(result2.success);
+        assert_eq!(
+            result2.content.get("total_matched").and_then(|v| v.as_u64()),
+            Some(1),
+        );
+    }
+
+    #[tokio::test]
+    async fn query_proof_corpus_max_results_caps_returned_chains() {
+        // Build a state with 3 chains; query with max_results=2 should
+        // return 2 chains but report total_matched=3.
+        let state = Arc::new(RwLock::new(SessionState::new("test-session")));
+        let engine = Arc::new(ProofEngine::new(state.clone(), Arc::new(StubJudge)));
+        let handler = McpHandler::new(state.clone(), engine.clone());
+
+        for skill in ["linear", "git", "deploy"] {
+            engine
+                .submit_step_evidence(
+                    skill,
+                    "claim",
+                    "1",
+                    "fetch",
+                    Evidence::default(),
+                    JudgeVerdict::pass(0.95, "ok"),
+                    JudgeModel::Sonnet,
+                    serde_json::Value::Null,
+                    None,
+                    Utc::now() - chrono::Duration::milliseconds(10),
+                )
+                .await
+                .unwrap();
+        }
+
+        let result = handler
+            .handle(McpToolCall {
+                name: "sentinel__query_proof_corpus".into(),
+                arguments: serde_json::json!({"max_results": 2}),
+            })
+            .await;
+        assert!(result.success);
+        let payload = result.content;
+        assert_eq!(payload.get("total_matched").and_then(|v| v.as_u64()), Some(3));
+        let chains = payload.get("chains").and_then(|v| v.as_array()).unwrap();
+        assert_eq!(chains.len(), 2, "max_results caps returned chains");
+    }
+
+    #[tokio::test]
+    async fn query_proof_corpus_successful_only_filters_failed_chains() {
+        // Hard to forge a "failed but sealed" chain — the engine refuses
+        // to seal insufficient verdicts. So this test verifies the
+        // *positive* case: a fully-sufficient chain is included by
+        // default. A separate test would seed a chain with a manually
+        // crafted failed StepProof, but that requires bypassing the
+        // engine — out of scope for the M4.3 stub.
+        let handler = handler_with_chain().await;
+        let result = handler
+            .handle(McpToolCall {
+                name: "sentinel__query_proof_corpus".into(),
+                arguments: serde_json::json!({"successful_only": true}),
+            })
+            .await;
+        assert!(result.success);
+        let chains = result.content.get("chains").and_then(|v| v.as_array()).unwrap();
+        assert_eq!(chains.len(), 1);
+        assert_eq!(
+            chains[0].get("all_sufficient").and_then(|v| v.as_bool()),
+            Some(true),
         );
     }
 
