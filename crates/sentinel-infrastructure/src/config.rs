@@ -255,6 +255,11 @@ struct StepToml {
     description: String,
     #[serde(default)]
     blocker: bool,
+    /// Cold-start baseline threshold (M1.8). See `WorkflowStep::baseline_threshold`.
+    /// Default 0 — enforce immediately. Existing TOML configs without this field
+    /// continue to load unchanged.
+    #[serde(default)]
+    baseline_threshold: u64,
 }
 
 /// Load step definitions for a skill from `config/steps/<skill>.toml`
@@ -296,6 +301,7 @@ pub fn load_skill_steps(config_path: &Path, skill: &str) -> Result<Option<SkillS
                         id: s.id,
                         description: s.description,
                         blocker: s.blocker,
+                        baseline_threshold: s.baseline_threshold,
                     })
                     .collect(),
             })

@@ -72,6 +72,58 @@ pub struct SessionState {
     /// When active (and not expired), phase gate allows all tools through.
     #[serde(default)]
     pub glass_break: Option<GlassBreak>,
+
+    /// **Cold-start baseline (M1.8 — AEGIS pattern)**: per-step counts of
+    /// successful judgements observed *before* enforcement engages. Keyed
+    /// by `"<skill>:<phase_id>:<step_id>"`. Lets new skills run their
+    /// first N executions in observation mode — judge runs and produces
+    /// verdicts, but verdicts don't gate chain progression until the
+    /// step has accumulated `baseline_threshold` successful judgements.
+    ///
+    /// Prevents new skills from being unusable day-one due to over-strict
+    /// initial AI judgements (the typical pattern in adversarial judges
+    /// is high false-positive on early data, then calibration). Borrowed
+    /// directly from AEGIS's 200-trace cold-start safety.
+    ///
+    /// Today this is per-session — new sessions start fresh. Cross-session
+    /// baseline persistence is filed as a follow-up that depends on #78
+    /// (proof chain persistence) since both walk the same disk archive.
+    #[serde(default)]
+    pub step_baselines: HashMap<String, BaselineCounter>,
+}
+
+/// Counter tracking successful judgements for a single
+/// `(skill, phase_id, step_id)` tuple. Used by step_judge to decide
+/// whether the step has cleared its cold-start window.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct BaselineCounter {
+    /// Number of successful (sufficient = true) judgements observed for
+    /// this step in the current baseline window.
+    #[serde(default)]
+    pub successful_count: u64,
+
+    /// Number of insufficient judgements observed during warmup.
+    /// Tracked for telemetry — high counts during warmup signal the
+    /// judge prompt or evidence shape may need iteration before
+    /// enforcement engages.
+    #[serde(default)]
+    pub insufficient_count: u64,
+
+    /// Wall-clock timestamp of the most recent judgement. Helps
+    /// diagnose stalled baselines (a step that hasn't run in weeks
+    /// vs one in active warmup).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_observed_at: Option<DateTime<Utc>>,
+}
+
+impl BaselineCounter {
+    /// Returns true if this counter has cleared the threshold for
+    /// enforcement to engage. `threshold == 0` means "enforce
+    /// immediately" — return true even on a fresh counter.
+    #[must_use]
+    pub fn cleared(&self, threshold: u64) -> bool {
+        self.successful_count >= threshold
+    }
 }
 
 /// Glass break emergency override state.
@@ -159,7 +211,53 @@ impl SessionState {
             phase_file_hashes: HashMap::new(),
             state_generation: 0,
             glass_break: None,
+            step_baselines: HashMap::new(),
         }
+    }
+
+    /// Build the `(skill, phase_id, step_id)` baseline key. Static helper
+    /// so both step_judge and the persistence layer compute keys
+    /// identically.
+    #[must_use]
+    pub fn baseline_key(skill: &str, phase_id: &str, step_id: &str) -> String {
+        format!("{skill}:{phase_id}:{step_id}")
+    }
+
+    /// Record a step judgement against the cold-start baseline.
+    /// Called by step_judge after every verdict — both passing and failing
+    /// judgements bump their respective counters so telemetry shows
+    /// warmup-time false-positive rates.
+    ///
+    /// Returns the post-update counter so callers can decide whether
+    /// the step has cleared its threshold.
+    pub fn record_step_judgement(
+        &mut self,
+        skill: &str,
+        phase_id: &str,
+        step_id: &str,
+        sufficient: bool,
+    ) -> BaselineCounter {
+        let key = Self::baseline_key(skill, phase_id, step_id);
+        let counter = self.step_baselines.entry(key).or_default();
+        if sufficient {
+            counter.successful_count = counter.successful_count.saturating_add(1);
+        } else {
+            counter.insufficient_count = counter.insufficient_count.saturating_add(1);
+        }
+        counter.last_observed_at = Some(Utc::now());
+        counter.clone()
+    }
+
+    /// Read the baseline counter for a step without mutating it.
+    /// Returns the default (zero) counter when no judgements have been
+    /// recorded yet — callers see "no observations yet" as the natural
+    /// initial state, not None.
+    #[must_use]
+    pub fn step_baseline(&self, skill: &str, phase_id: &str, step_id: &str) -> BaselineCounter {
+        self.step_baselines
+            .get(&Self::baseline_key(skill, phase_id, step_id))
+            .cloned()
+            .unwrap_or_default()
     }
 
     /// **Attack #169 fix**: Maximum distinct skills per session.

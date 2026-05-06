@@ -24,6 +24,21 @@ pub struct WorkflowStep {
     /// Whether this step is a blocker/gate (failure stops progress)
     #[serde(default)]
     pub blocker: bool,
+
+    /// **Cold-start baseline threshold (M1.8 — AEGIS pattern)**: number
+    /// of successful judgements this step must accumulate before the
+    /// AI judge's verdict starts gating chain progression. Below the
+    /// threshold, the judge runs and produces verdicts but they are
+    /// observational — the chain doesn't refuse to seal on early
+    /// over-strict negatives.
+    ///
+    /// Default `0` means "enforce immediately" — right for high-stakes
+    /// steps (deploy_prod, prod_migration) where we'd rather refuse a
+    /// real action than let unproven evidence through. Routine steps
+    /// can set this to `5` or `10` so first-runs in fresh skills don't
+    /// hit cold-start false-positives.
+    #[serde(default)]
+    pub baseline_threshold: u64,
 }
 
 /// Steps for a single phase

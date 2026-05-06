@@ -65,6 +65,7 @@ use std::collections::HashMap;
 use sentinel_domain::evidence::{Evidence, ToolCallEvidence, ToolResultEvidence};
 use sentinel_domain::events::{HookInput, HookOutput};
 use sentinel_domain::judge::{JudgeModel, JudgeVerdict};
+use sentinel_domain::state::{BaselineCounter, SessionState};
 use sentinel_domain::workflow::SkillSteps;
 
 use crate::judge_service::JudgeService;
@@ -119,6 +120,23 @@ pub enum StepJudgeOutcome {
         verdict: JudgeVerdict,
         judge_model: JudgeModel,
     },
+    /// **Cold-start baseline (M1.8)**: judge ran but the step is still in
+    /// its warmup window. Verdict is observational — `submit_step_complete`
+    /// must NOT seal a StepProof for this outcome (the chain only carries
+    /// enforced verdicts). The verdict is still surfaced for telemetry so
+    /// operators can watch warmup-time false-positive rates and decide
+    /// when to lower the threshold.
+    JudgedWarmup {
+        skill: String,
+        phase_id: String,
+        step_id: String,
+        step_description: String,
+        evidence: Evidence,
+        verdict: JudgeVerdict,
+        judge_model: JudgeModel,
+        baseline: BaselineCounter,
+        threshold: u64,
+    },
     /// Judge call returned an error (network, missing API keys, parse
     /// failure). The chain is NOT extended — `submit_step_complete` only
     /// runs on `Judged` outcomes.
@@ -129,16 +147,21 @@ pub enum StepJudgeOutcome {
     },
 }
 
-/// Resolve `(phase_id, step_description)` for a given `step_id` within a
-/// skill's step config. Returns `None` if the step isn't found in any phase.
+/// Resolve `(phase_id, step_description, baseline_threshold)` for a given
+/// `step_id` within a skill's step config. Returns `None` if the step
+/// isn't found in any phase.
 fn locate_step<'a>(
     skill_steps: &'a SkillSteps,
     step_id: &str,
-) -> Option<(&'a str, &'a str)> {
+) -> Option<(&'a str, &'a str, u64)> {
     for phase in &skill_steps.phases {
         for step in &phase.steps {
             if step.id == step_id {
-                return Some((phase.phase_id.as_str(), step.description.as_str()));
+                return Some((
+                    phase.phase_id.as_str(),
+                    step.description.as_str(),
+                    step.baseline_threshold,
+                ));
             }
         }
     }
@@ -231,6 +254,7 @@ fn gather_evidence(input: &HookInput) -> Evidence {
 /// `Outcome::Judged`.
 pub async fn process(
     input: &HookInput,
+    state: &mut SessionState,
     step_configs: &HashMap<String, SkillSteps>,
     judge: &dyn JudgeService,
     glass_break_active: bool,
@@ -254,18 +278,19 @@ pub async fn process(
         None => return (HookOutput::allow(), StepJudgeOutcome::NoStepConfig),
     };
 
-    let (phase_id, step_description) = match locate_step(skill_steps, &step_ref.step_id) {
-        Some(pair) => (pair.0.to_string(), pair.1.to_string()),
-        None => {
-            return (
-                HookOutput::allow(),
-                StepJudgeOutcome::UnknownStep {
-                    skill: step_ref.skill,
-                    step_id: step_ref.step_id,
-                },
-            );
-        }
-    };
+    let (phase_id, step_description, baseline_threshold) =
+        match locate_step(skill_steps, &step_ref.step_id) {
+            Some((p, d, t)) => (p.to_string(), d.to_string(), t),
+            None => {
+                return (
+                    HookOutput::allow(),
+                    StepJudgeOutcome::UnknownStep {
+                        skill: step_ref.skill,
+                        step_id: step_ref.step_id,
+                    },
+                );
+            }
+        };
 
     let evidence = gather_evidence(input);
 
@@ -286,18 +311,61 @@ pub async fn process(
         .await;
 
     match result {
-        Ok(verdict) => (
-            HookOutput::allow(),
-            StepJudgeOutcome::Judged {
-                skill: step_ref.skill,
-                phase_id,
-                step_id: step_ref.step_id,
-                step_description,
-                evidence,
-                verdict: verdict.sanitized(),
-                judge_model: model,
-            },
-        ),
+        Ok(verdict) => {
+            let verdict = verdict.sanitized();
+
+            // **Cold-start baseline (M1.8)**: snapshot the *pre-update*
+            // counter so we decide warmup vs enforced based on what the
+            // step had cleared BEFORE this judgement. Otherwise the very
+            // judgement that crosses the threshold would also be the
+            // first one enforced — we want one clean post-threshold
+            // judgement before enforcement engages.
+            let pre_baseline = state.step_baseline(
+                &step_ref.skill,
+                &phase_id,
+                &step_ref.step_id,
+            );
+            let in_warmup = !pre_baseline.cleared(baseline_threshold);
+
+            // Record the judgement (both passing and insufficient) so
+            // telemetry shows the warmup-time false-positive rate.
+            let updated = state.record_step_judgement(
+                &step_ref.skill,
+                &phase_id,
+                &step_ref.step_id,
+                verdict.sufficient,
+            );
+
+            if in_warmup {
+                (
+                    HookOutput::allow(),
+                    StepJudgeOutcome::JudgedWarmup {
+                        skill: step_ref.skill,
+                        phase_id,
+                        step_id: step_ref.step_id,
+                        step_description,
+                        evidence,
+                        verdict,
+                        judge_model: model,
+                        baseline: updated,
+                        threshold: baseline_threshold,
+                    },
+                )
+            } else {
+                (
+                    HookOutput::allow(),
+                    StepJudgeOutcome::Judged {
+                        skill: step_ref.skill,
+                        phase_id,
+                        step_id: step_ref.step_id,
+                        step_description,
+                        evidence,
+                        verdict,
+                        judge_model: model,
+                    },
+                )
+            }
+        }
         Err(e) => (
             HookOutput::allow(),
             StepJudgeOutcome::JudgeError {
@@ -383,6 +451,13 @@ mod tests {
         }
     }
 
+    /// Fresh test state — empty session, no baselines yet. Each test
+    /// gets its own independent state so M1.8's per-step counters
+    /// don't bleed across tests.
+    fn fresh_state() -> SessionState {
+        SessionState::new("test-step-judge")
+    }
+
     fn linear_step_config() -> HashMap<String, SkillSteps> {
         let mut m = HashMap::new();
         m.insert(
@@ -395,6 +470,7 @@ mod tests {
                         id: "1".into(),
                         description: "Open PR with Ref FPCRM-XXX".into(),
                         blocker: false,
+                        baseline_threshold: 0,
                     }],
                 }],
             },
@@ -405,8 +481,9 @@ mod tests {
     #[tokio::test]
     async fn passes_through_non_step_tools() {
         let judge = RecordingJudge::passing();
+        let mut state = fresh_state();
         let (out, outcome) =
-            process(&step_input("Read"), &linear_step_config(), &judge, false).await;
+            process(&step_input("Read"), &mut state, &linear_step_config(), &judge, false).await;
         assert!(matches!(outcome, StepJudgeOutcome::NotAStepTool));
         assert!(out.hook_specific_output.is_none());
         assert_eq!(judge.calls.load(Ordering::SeqCst), 0, "judge must NOT fire on non-step tools");
@@ -415,8 +492,10 @@ mod tests {
     #[tokio::test]
     async fn skipped_during_glass_break() {
         let judge = RecordingJudge::passing();
+        let mut state = fresh_state();
         let (_, outcome) = process(
             &step_input("mcp__skills__linear__step_1"),
+            &mut state,
             &linear_step_config(),
             &judge,
             true, // glass_break_active
@@ -430,8 +509,10 @@ mod tests {
     async fn no_step_config_for_skill_is_a_quiet_noop() {
         let judge = RecordingJudge::passing();
         let configs = HashMap::new(); // empty — no skill registered
+        let mut state = fresh_state();
         let (_, outcome) = process(
             &step_input("mcp__skills__deploy__step_1"),
+            &mut state,
             &configs,
             &judge,
             false,
@@ -444,8 +525,10 @@ mod tests {
     #[tokio::test]
     async fn unknown_step_id_in_known_skill_reports_error_outcome() {
         let judge = RecordingJudge::passing();
+        let mut state = fresh_state();
         let (_, outcome) = process(
             &step_input("mcp__skills__linear__step_99"),
+            &mut state,
             &linear_step_config(),
             &judge,
             false,
@@ -464,8 +547,10 @@ mod tests {
     #[tokio::test]
     async fn passing_step_produces_judged_outcome_with_verdict() {
         let judge = RecordingJudge::passing();
+        let mut state = fresh_state();
         let (_, outcome) = process(
             &step_input("mcp__skills__linear__step_1"),
+            &mut state,
             &linear_step_config(),
             &judge,
             false,
@@ -501,8 +586,10 @@ mod tests {
         // the StepProof when verdict.sufficient == false. step_judge's job
         // is just to produce the verdict.
         let judge = RecordingJudge::failing();
+        let mut state = fresh_state();
         let (_, outcome) = process(
             &step_input("mcp__skills__linear__step_1"),
+            &mut state,
             &linear_step_config(),
             &judge,
             false,
@@ -520,8 +607,10 @@ mod tests {
     #[tokio::test]
     async fn judge_call_failure_surfaces_as_judge_error() {
         let judge = ErroringJudge;
+        let mut state = fresh_state();
         let (_, outcome) = process(
             &step_input("mcp__skills__linear__step_1"),
+            &mut state,
             &linear_step_config(),
             &judge,
             false,
@@ -534,6 +623,160 @@ mod tests {
                 assert!(error.contains("simulated upstream failure"), "got: {error}");
             }
             other => panic!("expected JudgeError, got {other:?}"),
+        }
+    }
+
+    // ── M1.8 cold-start baseline tests ─────────────────────────────────
+
+    /// Build a step config with the given baseline_threshold.
+    fn config_with_threshold(threshold: u64) -> HashMap<String, SkillSteps> {
+        let mut m = HashMap::new();
+        m.insert(
+            "linear".to_string(),
+            SkillSteps {
+                skill: "linear".into(),
+                phases: vec![PhaseSteps {
+                    phase_id: "claim".into(),
+                    steps: vec![WorkflowStep {
+                        id: "1".into(),
+                        description: "Open PR with Ref FPCRM-XXX".into(),
+                        blocker: false,
+                        baseline_threshold: threshold,
+                    }],
+                }],
+            },
+        );
+        m
+    }
+
+    #[tokio::test]
+    async fn warmup_outcome_when_baseline_not_yet_cleared() {
+        // Threshold = 3, fresh state with zero successes => first run
+        // is in warmup. The verdict is still produced (observational)
+        // but the outcome is JudgedWarmup so submit_step_complete won't
+        // seal a StepProof for it.
+        let judge = RecordingJudge::passing();
+        let mut state = fresh_state();
+        let (_, outcome) = process(
+            &step_input("mcp__skills__linear__step_1"),
+            &mut state,
+            &config_with_threshold(3),
+            &judge,
+            false,
+        )
+        .await;
+        match outcome {
+            StepJudgeOutcome::JudgedWarmup {
+                threshold,
+                baseline,
+                verdict,
+                ..
+            } => {
+                assert_eq!(threshold, 3);
+                assert_eq!(baseline.successful_count, 1, "this judgement counted");
+                assert_eq!(baseline.insufficient_count, 0);
+                assert!(verdict.sufficient, "verdict still produced for telemetry");
+            }
+            other => panic!("expected JudgedWarmup, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn enforcement_engages_after_threshold_clears() {
+        // Threshold = 2. First two passing runs are warmup; third
+        // produces full Judged outcome.
+        let judge = RecordingJudge::passing();
+        let mut state = fresh_state();
+        let configs = config_with_threshold(2);
+
+        // Run 1 — warmup.
+        let (_, outcome1) = process(
+            &step_input("mcp__skills__linear__step_1"),
+            &mut state,
+            &configs,
+            &judge,
+            false,
+        )
+        .await;
+        assert!(matches!(outcome1, StepJudgeOutcome::JudgedWarmup { .. }));
+
+        // Run 2 — still warmup (counter is 1, threshold is 2).
+        let (_, outcome2) = process(
+            &step_input("mcp__skills__linear__step_1"),
+            &mut state,
+            &configs,
+            &judge,
+            false,
+        )
+        .await;
+        assert!(matches!(outcome2, StepJudgeOutcome::JudgedWarmup { .. }));
+
+        // Run 3 — counter at 2 BEFORE this run, threshold cleared.
+        // This is the first enforced verdict.
+        let (_, outcome3) = process(
+            &step_input("mcp__skills__linear__step_1"),
+            &mut state,
+            &configs,
+            &judge,
+            false,
+        )
+        .await;
+        match outcome3 {
+            StepJudgeOutcome::Judged { skill, step_id, .. } => {
+                assert_eq!(skill, "linear");
+                assert_eq!(step_id, "1");
+            }
+            other => panic!("run 3 should be Judged (threshold cleared), got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn threshold_zero_enforces_immediately_no_warmup() {
+        // baseline_threshold = 0 means "enforce from step 1" — right
+        // for high-stakes steps that should never be observed before
+        // gating. The default fresh_state has zero successes; a fresh
+        // counter with threshold=0 must clear immediately, so the
+        // outcome must be Judged not JudgedWarmup.
+        let judge = RecordingJudge::passing();
+        let mut state = fresh_state();
+        let (_, outcome) = process(
+            &step_input("mcp__skills__linear__step_1"),
+            &mut state,
+            &config_with_threshold(0),
+            &judge,
+            false,
+        )
+        .await;
+        assert!(
+            matches!(outcome, StepJudgeOutcome::Judged { .. }),
+            "threshold=0 must enforce immediately, got {outcome:?}",
+        );
+    }
+
+    #[tokio::test]
+    async fn warmup_records_insufficient_judgements_for_telemetry() {
+        // During warmup, BOTH passing and failing judgements must be
+        // recorded so operators can see warmup-time false-positive
+        // rates and decide when to lower the threshold. The chain
+        // doesn't seal anything during warmup, but the counter still
+        // tracks observations.
+        let judge = RecordingJudge::failing();
+        let mut state = fresh_state();
+        let (_, outcome) = process(
+            &step_input("mcp__skills__linear__step_1"),
+            &mut state,
+            &config_with_threshold(3),
+            &judge,
+            false,
+        )
+        .await;
+        match outcome {
+            StepJudgeOutcome::JudgedWarmup { baseline, verdict, .. } => {
+                assert!(!verdict.sufficient);
+                assert_eq!(baseline.successful_count, 0, "no passing yet");
+                assert_eq!(baseline.insufficient_count, 1, "this failing run counted");
+            }
+            other => panic!("expected JudgedWarmup with failing verdict, got {other:?}"),
         }
     }
 
