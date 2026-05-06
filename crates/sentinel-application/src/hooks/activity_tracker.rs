@@ -31,6 +31,15 @@ struct ActivityEntry {
     mcp_server: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     mcp_action: Option<String>,
+    /// **Telemetry gap fix (2026-05-06)**: Skill name when `tool == "Skill"`.
+    /// Previously activity-log.jsonl recorded `{"tool":"Skill"}` with no
+    /// indication of *which* skill was invoked, making "which skills get
+    /// used most" impossible to answer without inferring from MCP traffic
+    /// (linear -> linear skill, doppler -> doppler skill, etc — only
+    /// works when a skill maps cleanly to one MCP server, which most
+    /// don't). Now captured directly from tool_input.skill.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    skill: Option<String>,
     session_id: String,
     ts: String,
 }
@@ -122,6 +131,22 @@ fn extract_command(input: &serde_json::Value) -> Option<String> {
     })
 }
 
+/// Extract the skill name from a `Skill` tool call's tool_input.
+///
+/// Claude Code sends `{"skill": "<name>", "args": "..."}` as the tool_input
+/// for the Skill tool. Returns None for non-Skill tools or when `skill`
+/// is missing/non-string (defensive — malformed input shouldn't crash
+/// the activity tracker).
+fn extract_skill_name(tool: &str, input: &serde_json::Value) -> Option<String> {
+    if tool != "Skill" {
+        return None;
+    }
+    input
+        .get("skill")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+}
+
 /// Extract MCP server and action from tool name like `mcp__linear__create_issue`.
 fn extract_mcp_info(tool: &str) -> Option<(String, String)> {
     if !tool.starts_with("mcp__") {
@@ -157,6 +182,7 @@ pub fn process_post_tool(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput
     let (mcp_server, mcp_action) = extract_mcp_info(&tool)
         .map(|(s, a)| (Some(s), Some(a)))
         .unwrap_or((None, None));
+    let skill = extract_skill_name(&tool, &tool_input);
 
     let entry = ActivityEntry {
         tool,
@@ -164,6 +190,7 @@ pub fn process_post_tool(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput
         command,
         mcp_server,
         mcp_action,
+        skill,
         session_id,
         ts: chrono::Utc::now().to_rfc3339(),
     };
@@ -464,6 +491,80 @@ mod tests {
     fn test_extract_mcp_info_none() {
         assert!(extract_mcp_info("Edit").is_none());
         assert!(extract_mcp_info("Bash").is_none());
+    }
+
+    // ── Telemetry gap fix (2026-05-06): skill-name capture ─────────────
+
+    #[test]
+    fn test_extract_skill_name_captures_skill_arg() {
+        // The whole point of this fix: when tool=="Skill", we must
+        // record which skill was invoked instead of dropping the info.
+        let input = json!({"skill": "linear", "args": "ship FPCRM-429"});
+        assert_eq!(extract_skill_name("Skill", &input), Some("linear".into()));
+    }
+
+    #[test]
+    fn test_extract_skill_name_returns_none_for_non_skill_tools() {
+        // Non-Skill tools must never have a skill field populated, even
+        // if their tool_input happens to contain a `skill` key (defensive
+        // — wouldn't want a synthetic skill arg on a Bash call to muddy
+        // the activity log).
+        let input = json!({"skill": "linear"});
+        assert!(extract_skill_name("Bash", &input).is_none());
+        assert!(extract_skill_name("Edit", &input).is_none());
+        assert!(extract_skill_name("mcp__linear__create_issue", &input).is_none());
+    }
+
+    #[test]
+    fn test_extract_skill_name_returns_none_when_skill_missing() {
+        // Malformed Skill tool_input (no `skill` key, or non-string)
+        // shouldn't crash the activity tracker — return None gracefully.
+        assert!(extract_skill_name("Skill", &json!({})).is_none());
+        assert!(extract_skill_name("Skill", &json!({"args": "foo"})).is_none());
+        // Non-string skill value: still None.
+        assert!(extract_skill_name("Skill", &json!({"skill": 123})).is_none());
+        assert!(extract_skill_name("Skill", &json!({"skill": null})).is_none());
+    }
+
+    #[test]
+    fn test_activity_entry_serializes_skill_when_present() {
+        // The serde representation must include `"skill":"<name>"` so
+        // downstream tools (telemetry dashboards, M7 router corpus
+        // queries) can group by skill without re-deriving from MCP
+        // traffic patterns.
+        let entry = ActivityEntry {
+            tool: "Skill".into(),
+            file_path: None,
+            command: None,
+            mcp_server: None,
+            mcp_action: None,
+            skill: Some("linear".into()),
+            session_id: "sess-1".into(),
+            ts: "2026-05-06T17:00:00Z".into(),
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        assert!(json.contains(r#""skill":"linear""#), "got: {json}");
+        assert!(json.contains(r#""tool":"Skill""#), "got: {json}");
+    }
+
+    #[test]
+    fn test_activity_entry_omits_skill_field_when_none() {
+        // For non-Skill tool calls, `skill` must NOT appear in the JSON
+        // (skip_serializing_if). Old log entries that don't have a skill
+        // field stay parseable, and new entries don't bloat the log
+        // file with empty skill: null on every line.
+        let entry = ActivityEntry {
+            tool: "Edit".into(),
+            file_path: Some("/tmp/foo.rs".into()),
+            command: None,
+            mcp_server: None,
+            mcp_action: None,
+            skill: None,
+            session_id: "sess-1".into(),
+            ts: "2026-05-06T17:00:00Z".into(),
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        assert!(!json.contains("skill"), "skill field must be omitted when None, got: {json}");
     }
 
     #[test]
