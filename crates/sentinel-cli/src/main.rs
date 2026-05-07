@@ -15,6 +15,7 @@ mod api;
 mod break_cmd;
 mod cache_cmd;
 mod claude_md_cmd;
+mod cleanup_cmd;
 mod config_cmd;
 mod cost_per_point_cmd;
 mod daemon_cmd;
@@ -175,6 +176,13 @@ enum Commands {
         binary: Option<String>,
     },
 
+    /// Prune orphan state directories (e.g. persistent-tasks buckets whose
+    /// originating cwd no longer exists on disk)
+    Cleanup {
+        #[command(subcommand)]
+        action: CleanupAction,
+    },
+
     /// Rotate the HMAC signing key (versioned, preserves old keys for verification)
     RotateKey,
 
@@ -285,6 +293,20 @@ enum FederationAction {
         /// Override the config directory (default: `~/.claude/sentinel/config/`).
         #[arg(long)]
         config_dir: Option<String>,
+    },
+}
+
+/// `sentinel cleanup` subcommands.
+#[derive(Subcommand)]
+enum CleanupAction {
+    /// Prune orphan project_hash buckets under
+    /// `~/.claude/sentinel/persistent-tasks/` whose cwd no longer exists.
+    /// Default mode is dry-run; pass `--apply` to actually remove them.
+    PersistentTasks {
+        /// Actually remove orphan buckets. Without this flag, only the
+        /// audit report is printed.
+        #[arg(long)]
+        apply: bool,
     },
 }
 
@@ -442,6 +464,9 @@ async fn main() -> anyhow::Result<()> {
             BrowserTestAction::Check { session } => browser_test_cmd::check(session),
         },
         Commands::Stage { binary } => stage_cmd::run(binary),
+        Commands::Cleanup { action } => match action {
+            CleanupAction::PersistentTasks { apply } => cleanup_cmd::run_persistent_tasks(apply),
+        },
         Commands::RotateKey => rotate_key_cmd::run(),
         Commands::Resign => resign_cmd::run(),
         Commands::Init {
