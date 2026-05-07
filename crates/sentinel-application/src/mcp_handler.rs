@@ -798,10 +798,10 @@ mod step_tools_tests {
         assert_eq!(proof.get("step_id").and_then(|v| v.as_str()), Some("1"));
         assert_eq!(proof.get("phase_id").and_then(|v| v.as_str()), Some("claim"));
         assert!(proof.get("combined_hash").is_some());
-        // Default judge_model is sonnet.
+        // Default judge_model is sonnet (OpenRouter: openai/gpt-5.4).
         assert_eq!(
             proof.get("judge_model").and_then(|v| v.as_str()),
-            Some("openai/gpt-5.3"),
+            Some("openai/gpt-5.4"),
         );
     }
 
@@ -839,7 +839,7 @@ mod step_tools_tests {
         );
         assert_eq!(
             proof.get("judge_model").and_then(|v| v.as_str()),
-            Some("anthropic/opus-4.6"),
+            Some("anthropic/claude-opus-4.7"),
         );
     }
 

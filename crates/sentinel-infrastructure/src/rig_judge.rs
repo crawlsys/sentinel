@@ -1,10 +1,18 @@
-//! Adversarial AI Judge via `OpenRouter` (GPT-5.4)
+//! Adversarial AI Judge via `OpenRouter`
 //!
-//! Uses GPT-5.4 via `OpenRouter` — a DIFFERENT model family from the Anthropic
-//! Opus used for skill routing — to ensure adversarial evaluation. The judge
-//! should never be the same model as the defendant: no "grading your own homework".
+//! Pluggable judge backend that routes every `JudgeModel` tier to the
+//! corresponding model on OpenRouter — single gateway, single auth surface,
+//! automatic provider failover. The judge should never be the same model
+//! as the defendant: the `JudgeModel` enum lives in `sentinel-domain` so
+//! step configs declare their tier, and this layer dispatches by enum
+//! variant via `JudgeModel::openrouter_model_id()`.
 //!
-//! All judge tiers route through `OpenRouter`. Reads `OPENROUTER_API_KEY`.
+//! Default tier is `Kimi` (Moonshot K2.6) — OSS frontier with the best
+//! agentic-coding accuracy at 4-10x lower blended price than the closed
+//! frontier, plus Eastern training-distribution diversity to avoid the
+//! shared-blind-spot failure mode of all-Western-closed judging.
+//!
+//! Reads `OPENROUTER_API_KEY`.
 
 use anyhow::{Context, Result};
 use futures::future::BoxFuture;
@@ -18,11 +26,11 @@ use tracing::{debug, info};
 use sentinel_domain::evidence::Evidence;
 use sentinel_domain::judge::{JudgeModel, JudgeVerdict};
 
-/// GPT-5.4 (latest) via `OpenRouter` — adversarially different from Anthropic classifier
-const JUDGE_MODEL: &str = "openai/gpt-5.4";
-
-/// Type-erased prompt function: (system, `user_msg`) -> response text
-type PromptFn = Arc<dyn Fn(String, String) -> BoxFuture<'static, Result<String>> + Send + Sync>;
+/// Type-erased prompt function: (model_id, system, `user_msg`) -> response text.
+/// The model id is now a runtime parameter so a single provider serves every
+/// `JudgeModel` tier.
+type PromptFn =
+    Arc<dyn Fn(String, String, String) -> BoxFuture<'static, Result<String>> + Send + Sync>;
 
 /// The OpenRouter-backed adversarial judge provider
 struct JudgeProvider {
@@ -38,25 +46,37 @@ impl JudgeProvider {
                 .map_err(|e| anyhow::anyhow!("Failed to build OpenRouter judge client: {e}"))?,
         );
         Ok(Self {
-            prompt_fn: Arc::new(move |system, user_msg| {
+            prompt_fn: Arc::new(move |model_id, system, user_msg| {
                 let client = client.clone();
                 Box::pin(async move {
-                    let agent = AgentBuilder::new(client.completion_model(JUDGE_MODEL))
+                    let agent = AgentBuilder::new(client.completion_model(&model_id))
                         .preamble(&system)
                         .build();
                     let result: Result<String, _> = agent.prompt(user_msg).await;
-                    result.map_err(|e| anyhow::anyhow!("OpenRouter judge: {e}"))
+                    result.map_err(|e| anyhow::anyhow!("OpenRouter judge ({model_id}): {e}"))
                 })
             }),
         })
     }
 
-    /// Send a judge prompt and parse the JSON verdict
-    async fn judge(&self, system: &str, user_msg: &str) -> Result<JudgeVerdict> {
-        let text = (self.prompt_fn)(system.to_string(), user_msg.to_string()).await?;
+    /// Send a judge prompt to the model identified by `model_id` and parse
+    /// the JSON verdict. The model id comes from
+    /// [`JudgeModel::openrouter_model_id`](sentinel_domain::judge::JudgeModel::openrouter_model_id).
+    async fn judge(
+        &self,
+        model_id: &str,
+        system: &str,
+        user_msg: &str,
+    ) -> Result<JudgeVerdict> {
+        let text = (self.prompt_fn)(
+            model_id.to_string(),
+            system.to_string(),
+            user_msg.to_string(),
+        )
+        .await?;
         debug!(
             provider = "openrouter",
-            model = JUDGE_MODEL,
+            model = model_id,
             response_len = text.len(),
             "Adversarial judge response received"
         );
@@ -68,10 +88,13 @@ impl JudgeProvider {
     }
 }
 
-/// Adversarial judge — GPT-5.4 via `OpenRouter`.
+/// Adversarial judge dispatching every `JudgeModel` tier through OpenRouter.
 ///
-/// GPT-5.4 is a different model family from the Anthropic Opus that generates
-/// the work being evaluated, ensuring genuinely adversarial review.
+/// Default tier is Kimi K2.6 (Moonshot, OSS frontier) — different family
+/// from the Anthropic models that typically generate the work, plus
+/// Eastern training-distribution diversity for adversarial review.
+/// Critical-tier work pairs Kimi+Sonnet (or +Opus) — see Stage B
+/// follow-up commit.
 pub struct MultiModelJudge {
     judge: Option<JudgeProvider>,
 }
@@ -84,7 +107,7 @@ impl MultiModelJudge {
         if judge.is_none() {
             eprintln!(
                 "[sentinel] WARNING: No AI judge available. \
-                 Set OPENROUTER_API_KEY for adversarial GPT-5.4 judge. \
+                 Set OPENROUTER_API_KEY for adversarial Kimi K2.6 / GPT-5.4 / Opus 4.7 judge. \
                  All proof submissions will fail until configured."
             );
         }
@@ -94,8 +117,8 @@ impl MultiModelJudge {
             } else {
                 "none"
             },
-            model = JUDGE_MODEL,
-            "Adversarial judge initialized"
+            default_tier = %JudgeModel::default_review_tier(),
+            "Adversarial judge initialized — pluggable across Haiku/Kimi/Sonnet/Opus tiers"
         );
 
         Self { judge }
@@ -115,15 +138,17 @@ impl sentinel_application::judge_service::JudgeService for MultiModelJudge {
         phase_id: &str,
         phase_objectives: &str,
         evidence: &Evidence,
-        _model: JudgeModel,
+        model: JudgeModel,
     ) -> Result<JudgeVerdict> {
         let provider = self.judge.as_ref().ok_or_else(|| {
             anyhow::anyhow!("Adversarial judge not available — set OPENROUTER_API_KEY")
         })?;
 
+        let model_id = model.openrouter_model_id();
         info!(
             provider = "openrouter",
-            model = JUDGE_MODEL,
+            model = model_id,
+            tier = ?model,
             skill = skill,
             phase = phase_id,
             "Adversarial judge evaluation"
@@ -156,7 +181,7 @@ impl sentinel_application::judge_service::JudgeService for MultiModelJudge {
         let user_msg =
             format!("Evaluate this evidence for the '{phase_id}' phase:\n\n{evidence_json}");
 
-        provider.judge(&system, &user_msg).await
+        provider.judge(model_id, &system, &user_msg).await
     }
 }
 
