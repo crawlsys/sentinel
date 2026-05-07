@@ -27,6 +27,7 @@ pub mod roi;
 pub mod scanner;
 pub mod tokens;
 pub mod tracing_service;
+pub mod trust;
 pub mod verifier;
 pub mod webhook_replay;
 pub mod wip_snapshot;
