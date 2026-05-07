@@ -20,3 +20,4 @@ apps/dashboard/.env.local
 apps/dashboard/coverage/
 # pnpm-lock.yaml is the source of truth here; npm-style lockfile is not tracked
 apps/dashboard/package-lock.json
+.commit-msg.tmp
