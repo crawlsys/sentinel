@@ -14,7 +14,6 @@
 use chrono::Utc;
 use regex::Regex;
 use sentinel_domain::events::{HookInput, HookOutput};
-use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 
 use super::{FileSystemPort, HookContext};
@@ -23,17 +22,11 @@ use super::{FileSystemPort, HookContext};
 const TASK_CREATE: &str = "TaskCreate";
 const TASK_UPDATE: &str = "TaskUpdate";
 
-/// Compute a project hash from the working directory (first 8 hex chars of SHA-256)
+/// Compute a project hash from the working directory. Delegates to the shared
+/// canonical implementation in `super::project_hash` so worktrees of the same
+/// repo collapse to the same hash.
 fn project_hash(cwd: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(cwd.as_bytes());
-    let result = hasher.finalize();
-    hex_encode(&result[..4])
-}
-
-/// Encode bytes as lowercase hex string
-fn hex_encode(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+    super::project_hash(cwd)
 }
 
 /// Base directory for todos — flat, no project hash subdirectory

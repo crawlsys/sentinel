@@ -316,12 +316,10 @@ fn project_name(cwd: &str) -> String {
         .unwrap_or_else(|| "unknown".to_string())
 }
 
-/// Compute project hash from cwd.
+/// Compute project hash from cwd. Delegates to the shared canonical
+/// implementation in `super::project_hash`.
 fn project_hash(cwd: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(cwd.as_bytes());
-    let result = hasher.finalize();
-    result[..4].iter().map(|b| format!("{b:02x}")).collect()
+    super::project_hash(cwd)
 }
 
 // `is_substantive_exchange` has moved to `sentinel_domain::exchange`. Re-export

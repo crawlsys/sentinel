@@ -838,16 +838,11 @@ pub fn render_tasks_section(cwd: &Path) -> String {
     out
 }
 
-/// Compute `project_hash` for a cwd — first 8 hex chars of SHA-256(cwd).
-///
-/// Duplicates the inner helper in `task_persist.rs` to avoid exposing that
-/// hook's internals; if the two ever drift, reconcile both.
+/// Compute `project_hash` for a cwd. Delegates to the shared canonical
+/// implementation in `super::project_hash` so worktrees of the same repo
+/// collapse to the same hash.
 fn project_hash_for_cwd(cwd: &str) -> String {
-    use sha2::{Digest, Sha256};
-    let mut hasher = Sha256::new();
-    hasher.update(cwd.as_bytes());
-    let result = hasher.finalize();
-    result[..4].iter().map(|b| format!("{b:02x}")).collect()
+    super::project_hash(cwd)
 }
 
 /// Generate ~/.claude/CLAUDE.md with dynamic counts and current date
