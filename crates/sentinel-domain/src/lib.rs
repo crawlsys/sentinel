@@ -9,6 +9,7 @@ pub mod dependency;
 pub mod error_classifier;
 pub mod events;
 pub mod evidence;
+pub mod evidence_adapter;
 pub mod exchange;
 pub mod file_kind;
 pub mod hooks;
@@ -34,6 +35,10 @@ pub mod workflow;
 // Re-export commonly used types
 pub use events::{HookEnvelope, HookEvent, HookTier};
 pub use evidence::{Evidence, EvidenceEntry};
+pub use evidence_adapter::{
+    compute_payload_hash, compute_provenance_hash, AdapterError, EvidenceClaim,
+    EvidenceReceipt,
+};
 pub use hooks::{HookId, HookResult, HookSpec};
 pub use judge::JudgeVerdict;
 pub use pricing::{cost_for, short_model_label, tier_for_model, PricingTier, TokenUsage};
