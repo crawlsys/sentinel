@@ -4,6 +4,16 @@
 
 Sentinel is a Rust-based hook engine that enforces workflow compliance for Claude Code sessions. It powers 27 lifecycle hooks covering skill routing, phase gates, commit hygiene, Steel browser testing, MCP health checks, and more — all backed by cryptographic proof chains.
 
+## Quick Install
+
+One-command install of sentinel + the linear MCP/CLI + the marketplace:
+
+```bash
+curl -sSL https://raw.githubusercontent.com/garysomerhalder/sentinel/main/scripts/bootstrap.sh | bash
+```
+
+Re-run-safe (skips anything already present). Override paths with `SENTINEL_GH_DIR`, `SENTINEL_CLAUDE_DIR`, `SENTINEL_GH_OWNER`. See [`scripts/bootstrap.sh`](scripts/bootstrap.sh) for the full step list.
+
 ## Architecture
 
 Sentinel follows DDD / Hexagonal Architecture with 5 crates:
