@@ -59,6 +59,20 @@ impl McpToolResult {
 pub struct McpHandler {
     state: Arc<RwLock<SessionState>>,
     proof_engine: Arc<ProofEngine>,
+    /// Optional cross-session proof archive backing — when set,
+    /// `query_proof_corpus` walks the index and merges with live state.
+    /// `None` keeps the M4.3 live-session-only behavior (back-compat for
+    /// existing tests and any caller not wired with archive access).
+    archive: Option<ProofArchiveBacking>,
+}
+
+/// Configuration for cross-session proof corpus reads. Holds the home
+/// directory + a filesystem port — together enough to read
+/// `<home>/.claude/sentinel/proofs/index.jsonl`.
+#[derive(Clone)]
+pub struct ProofArchiveBacking {
+    pub home: std::path::PathBuf,
+    pub fs: std::sync::Arc<dyn sentinel_domain::ports::FileSystemPort>,
 }
 
 impl McpHandler {
@@ -66,7 +80,18 @@ impl McpHandler {
         Self {
             state,
             proof_engine,
+            archive: None,
         }
+    }
+
+    /// Wire the cross-session proof archive backing. After this,
+    /// `query_proof_corpus` returns chains from prior sessions in addition
+    /// to live ones, keying by `(session_id, skill)` with live state
+    /// winning ties.
+    #[must_use]
+    pub fn with_archive(mut self, archive: ProofArchiveBacking) -> Self {
+        self.archive = Some(archive);
+        self
     }
 
     /// Handle an MCP tool call
@@ -547,8 +572,57 @@ impl McpHandler {
             }
         }
 
+        // Track which (session_id, skill) pairs already came from live
+        // state. Live wins ties — a chain that's still in flight is the
+        // current truth; the archived snapshot is a stale frame of that
+        // same chain.
+        let live_keys: std::collections::HashSet<(String, String)> = state
+            .proof_chains
+            .values()
+            .map(|c| (c.session_id.clone(), c.skill.clone()))
+            .collect();
+
+        // Cross-session: walk the index if the handler was wired with an
+        // archive backing. No backing => live-session-only (M4.3 baseline).
+        let mut scope = "live-session";
+        if let Some(arch) = &self.archive {
+            let entries = crate::proof_archive::read_index(arch.fs.as_ref(), &arch.home);
+            if !entries.is_empty() {
+                scope = "cross-session";
+            }
+            for entry in entries {
+                if live_keys.contains(&(entry.session_id.clone(), entry.skill.clone())) {
+                    continue; // Live wins — skip stale archive snapshot.
+                }
+                if let Some(want) = skill_filter {
+                    if entry.skill != want {
+                        continue;
+                    }
+                }
+                if (entry.step_count as u64) < min_steps {
+                    continue;
+                }
+                if successful_only && !entry.all_sufficient {
+                    continue;
+                }
+                total_matched += 1;
+                if summaries.len() < max_results {
+                    summaries.push(serde_json::json!({
+                        "skill": entry.skill,
+                        "session_id": entry.session_id,
+                        "step_count": entry.step_count,
+                        "phase_count": entry.phase_count,
+                        "all_sufficient": entry.all_sufficient,
+                        "head_hash": entry.head_hash,
+                        "step_sequence": entry.step_sequence,
+                        "archived_at": entry.archived_at,
+                    }));
+                }
+            }
+        }
+
         McpToolResult::ok(serde_json::json!({
-            "scope": "live-session",
+            "scope": scope,
             "total_matched": total_matched,
             "chains": summaries,
         }))

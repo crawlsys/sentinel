@@ -513,7 +513,18 @@ pub async fn run() -> Result<()> {
         }
     };
     let proof_engine = Arc::new(ProofEngine::new(state.clone(), judge.clone()));
-    let handler = McpHandler::new(state.clone(), proof_engine.clone());
+    // Wire cross-session proof archive backing (#39): query_proof_corpus
+    // walks the index at ~/.claude/sentinel/proofs/index.jsonl in addition
+    // to live state. Falls back to live-only when home_dir is unavailable.
+    let handler = if let Some(home) = dirs::home_dir() {
+        let fs: Arc<dyn sentinel_domain::ports::FileSystemPort> =
+            Arc::new(sentinel_infrastructure::filesystem::RealFileSystem);
+        McpHandler::new(state.clone(), proof_engine.clone()).with_archive(
+            sentinel_application::mcp_handler::ProofArchiveBacking { home, fs },
+        )
+    } else {
+        McpHandler::new(state.clone(), proof_engine.clone())
+    };
 
     let stdin = tokio::io::stdin();
     let mut stdout = tokio::io::stdout();

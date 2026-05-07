@@ -21,6 +21,7 @@ pub mod mcp_handler;
 pub mod ntfy_push;
 pub mod pr_review;
 pub mod project_init;
+pub mod proof_archive;
 pub mod proof_engine;
 pub mod roi;
 pub mod scanner;

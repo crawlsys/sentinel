@@ -672,6 +672,21 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
             // Memory inject (Stop phase) — pre-compute Qdrant search for next turn
             let memory_precompute_output = hooks::memory_inject::process_stop(&input, &ctx);
             output.merge(&memory_precompute_output);
+
+            // Cross-session proof chain archive (#39). Best-effort write to
+            // `~/.claude/sentinel/proofs/` so query_proof_corpus can answer
+            // across sessions, not just live state. Failures are logged and
+            // do not block Stop.
+            if let Some(home) = dirs::home_dir() {
+                if let Err(e) =
+                    sentinel_application::proof_archive::archive_chains(&state, ctx.fs, &home)
+                {
+                    tracing::warn!(
+                        error = %e,
+                        "proof chain archive failed during Stop — corpus query will fall back to live-session-only"
+                    );
+                }
+            }
         }
 
         HookEvent::SessionStart => {
