@@ -11,7 +11,6 @@
 
 use chrono::Utc;
 use sentinel_domain::events::{HookEvent, HookInput, HookOutput};
-use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 
 use super::{FileSystemPort, HookContext};
@@ -57,12 +56,10 @@ struct PersistMeta {
     session_id: String,
 }
 
-/// Compute project hash (must match task_persist.rs)
+/// Compute project hash (must match task_persist.rs). Delegates to the shared
+/// canonical implementation in `super::project_hash`.
 fn project_hash(cwd: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(cwd.as_bytes());
-    let result = hasher.finalize();
-    result[..4].iter().map(|b| format!("{b:02x}")).collect()
+    super::project_hash(cwd)
 }
 
 /// Get the persistent tasks directory for a project (under
@@ -114,6 +111,51 @@ fn relative_time(updated_at: &str) -> String {
         }
     } else {
         updated_at.to_string()
+    }
+}
+
+/// Format the rehydration instruction tail. Pure function so the
+/// mode-aware branching can be unit-tested without a real `HookContext`.
+///
+/// In Autopilot the agent is meant to drain the queue, not interrupt Gary
+/// every session — instruction directs immediate recreation via TaskCreate.
+/// In Planned mode, Gary may have moved on from stale work, so instruction
+/// directs the agent to ask first.
+fn format_rehydrate_instruction(
+    incomplete_count: usize,
+    has_blocking: bool,
+    autopilot: bool,
+) -> String {
+    if autopilot {
+        if has_blocking {
+            format!(
+                "\n\nINSTRUCTION (AUTOPILOT — AUTO-REHYDRATE): Recreate these {incomplete_count} task(s) immediately \
+                 using TaskCreate + TaskUpdate(addBlockedBy) to wire blocking chains exactly as shown. \
+                 Preserve subjects, descriptions, status, and metadata verbatim. After rehydration, \
+                 brief Gary in one sentence (\"rehydrated N tasks\") and continue with his opening prompt."
+            )
+        } else {
+            format!(
+                "\n\nINSTRUCTION (AUTOPILOT — AUTO-REHYDRATE): Recreate these {incomplete_count} task(s) immediately \
+                 using TaskCreate with the exact subjects, descriptions, status, and metadata shown above. \
+                 After rehydration, brief Gary in one sentence (\"rehydrated N tasks\") and continue \
+                 with his opening prompt."
+            )
+        }
+    } else if has_blocking {
+        format!(
+            "\n\nINSTRUCTION (PLANNED — ASK FIRST): Do NOT auto-recreate these tasks. \
+             Ask Gary: \"Found {incomplete_count} incomplete task(s) from a previous session — rehydrate them? (y/n)\". \
+             If yes, recreate using TaskCreate + TaskUpdate(addBlockedBy) to wire blocking chains exactly as shown. \
+             If no or unclear, skip silently and proceed with the user's opening prompt."
+        )
+    } else {
+        format!(
+            "\n\nINSTRUCTION (PLANNED — ASK FIRST): Do NOT auto-recreate these tasks. \
+             Ask Gary: \"Found {incomplete_count} incomplete task(s) from a previous session — rehydrate them? (y/n)\". \
+             If yes, recreate using TaskCreate with the exact subjects and descriptions shown above. \
+             If no or unclear, skip silently and proceed with the user's opening prompt."
+        )
     }
 }
 
@@ -225,27 +267,12 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
         ));
     }
 
-    // Always ask before rehydrating — regardless of Autopilot/Planned mode.
-    // Gary may have moved on from stale work and doesn't want tasks
-    // auto-recreated without consent.
-    let ask_instruction = if has_blocking {
-        format!(
-            "\n\nINSTRUCTION (ASK FIRST): Do NOT auto-recreate these tasks. \
-             Ask Gary: \"Found {} incomplete task(s) from a previous session — rehydrate them? (y/n)\". \
-             If yes, recreate using TaskCreate + TaskUpdate(addBlockedBy) to wire blocking chains exactly as shown. \
-             If no or unclear, skip silently and proceed with the user's opening prompt.",
-            incomplete.len()
-        )
-    } else {
-        format!(
-            "\n\nINSTRUCTION (ASK FIRST): Do NOT auto-recreate these tasks. \
-             Ask Gary: \"Found {} incomplete task(s) from a previous session — rehydrate them? (y/n)\". \
-             If yes, recreate using TaskCreate with the exact subjects and descriptions shown above. \
-             If no or unclear, skip silently and proceed with the user's opening prompt.",
-            incomplete.len()
-        )
-    };
-    context.push_str(&ask_instruction);
+    let instruction = format_rehydrate_instruction(
+        incomplete.len(),
+        has_blocking,
+        ctx.autopilot_enabled(),
+    );
+    context.push_str(&instruction);
 
     HookOutput::inject_context(HookEvent::SessionStart, &context)
 }
@@ -279,6 +306,49 @@ mod tests {
         };
         assert!(is_current_session(&meta, "abc-123"));
         assert!(!is_current_session(&meta, "def-456"));
+    }
+
+    #[test]
+    fn autopilot_instruction_directs_immediate_recreation() {
+        let s = format_rehydrate_instruction(80, false, true);
+        assert!(s.contains("AUTOPILOT"), "missing mode tag: {s}");
+        assert!(s.contains("AUTO-REHYDRATE"), "missing action: {s}");
+        assert!(s.contains("immediately"), "should say immediately: {s}");
+        assert!(s.contains("80 task(s)"), "missing count: {s}");
+        assert!(
+            !s.contains("ASK FIRST"),
+            "autopilot must not include ASK FIRST: {s}"
+        );
+    }
+
+    #[test]
+    fn autopilot_instruction_with_blocking_mentions_blockedby() {
+        let s = format_rehydrate_instruction(5, true, true);
+        assert!(s.contains("AUTOPILOT"), "missing mode tag: {s}");
+        assert!(
+            s.contains("addBlockedBy"),
+            "blocking variant must direct addBlockedBy: {s}"
+        );
+    }
+
+    #[test]
+    fn planned_instruction_asks_first() {
+        let s = format_rehydrate_instruction(80, false, false);
+        assert!(s.contains("PLANNED"), "missing mode tag: {s}");
+        assert!(s.contains("ASK FIRST"), "missing ask gate: {s}");
+        assert!(s.contains("80 incomplete task(s)"), "missing count: {s}");
+        assert!(
+            !s.contains("AUTO-REHYDRATE"),
+            "planned must not auto-rehydrate: {s}"
+        );
+    }
+
+    #[test]
+    fn planned_instruction_with_blocking_still_asks_first() {
+        let s = format_rehydrate_instruction(5, true, false);
+        assert!(s.contains("PLANNED"));
+        assert!(s.contains("ASK FIRST"));
+        assert!(s.contains("addBlockedBy"));
     }
 
     #[test]

@@ -28,10 +28,7 @@ const MIN_CHUNK_CHARS: usize = constants::MIN_CHUNK_CHARS;
 // ---------------------------------------------------------------------------
 
 fn project_hash(cwd: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(cwd.as_bytes());
-    let result = hasher.finalize();
-    result[..4].iter().map(|b| format!("{b:02x}")).collect()
+    super::project_hash(cwd)
 }
 
 /// Derive project name from cwd (last path component)

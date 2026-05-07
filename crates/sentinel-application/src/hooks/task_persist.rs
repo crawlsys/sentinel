@@ -99,12 +99,11 @@ struct PersistMeta {
     last_block_hash: String,
 }
 
-/// Compute a project hash from the working directory (first 8 hex chars of SHA-256)
+/// Compute a project hash from the working directory. Delegates to the shared
+/// canonical implementation in `super::project_hash` so worktrees of the same
+/// repo collapse to the same hash.
 fn project_hash(cwd: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(cwd.as_bytes());
-    let result = hasher.finalize();
-    result[..4].iter().map(|b| format!("{b:02x}")).collect()
+    super::project_hash(cwd)
 }
 
 /// Hex-encode SHA-256 of a string. Used for content-hash skip checks.

@@ -78,6 +78,42 @@ pub fn sentinel_dir(home: &std::path::Path) -> std::path::PathBuf {
     home.join(".claude").join("sentinel")
 }
 
+/// Canonicalize a working-directory path so that worktrees collapse to their
+/// parent repo. Worktrees live at `<repo>/.claude/worktrees/<name>/...`, and
+/// without this collapse every worktree-switch produces a different
+/// `project_hash`, breaking task rehydration across worktrees.
+///
+/// The transform looks for the literal segment `/.claude/worktrees/` (or the
+/// same with `\` separators on Windows) and strips everything from that point
+/// onward, leaving the original repo root. Paths that don't contain a
+/// worktree segment are returned unchanged.
+#[must_use]
+pub fn canonical_project_cwd(cwd: &str) -> String {
+    const NEEDLE_FWD: &str = "/.claude/worktrees/";
+    const NEEDLE_BWD: &str = r"\.claude\worktrees\";
+    if let Some(idx) = cwd.find(NEEDLE_FWD) {
+        return cwd[..idx].to_string();
+    }
+    if let Some(idx) = cwd.find(NEEDLE_BWD) {
+        return cwd[..idx].to_string();
+    }
+    cwd.to_string()
+}
+
+/// Compute the canonical 4-byte project hash (8 hex chars) for a working
+/// directory. Worktrees of the same repo collapse to the same hash so that
+/// persisted task lists, session indexes, and metrics all key off the repo
+/// root, not the per-worktree path.
+#[must_use]
+pub fn project_hash(cwd: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let canonical = canonical_project_cwd(cwd);
+    let mut hasher = Sha256::new();
+    hasher.update(canonical.as_bytes());
+    let result = hasher.finalize();
+    result[..4].iter().map(|b| format!("{b:02x}")).collect()
+}
+
 /// Return `<home>/.claude/sentinel/metrics`.
 ///
 /// All metric/telemetry JSONL files go here (previously `~/.claude/metrics/`).
@@ -650,5 +686,68 @@ mod migrate_tests {
         let root = legacy_persistent_tasks_root(&home);
         assert!(root.ends_with(".claude/persistent-tasks") || root.ends_with(r".claude\persistent-tasks"),
             "got: {}", root.display());
+    }
+}
+
+#[cfg(test)]
+mod project_hash_tests {
+    use super::*;
+
+    #[test]
+    fn non_worktree_path_is_unchanged() {
+        assert_eq!(canonical_project_cwd("/repo"), "/repo");
+        assert_eq!(
+            canonical_project_cwd("/some/deep/path/with/no/worktrees"),
+            "/some/deep/path/with/no/worktrees"
+        );
+        assert_eq!(canonical_project_cwd(""), "");
+    }
+
+    #[test]
+    fn forward_slash_worktree_collapses_to_repo_root() {
+        assert_eq!(
+            canonical_project_cwd("/repo/.claude/worktrees/feat-x"),
+            "/repo"
+        );
+        assert_eq!(
+            canonical_project_cwd("/repo/.claude/worktrees/feat-x/crates/sentinel-domain"),
+            "/repo"
+        );
+    }
+
+    #[test]
+    fn backslash_worktree_collapses_to_repo_root() {
+        assert_eq!(
+            canonical_project_cwd(r"C:\repo\.claude\worktrees\feat-x"),
+            r"C:\repo"
+        );
+        assert_eq!(
+            canonical_project_cwd(r"C:\repo\.claude\worktrees\feat-x\crates\foo"),
+            r"C:\repo"
+        );
+    }
+
+    #[test]
+    fn worktree_collapse_invariant_holds_for_project_hash() {
+        // The whole point: main repo and any worktree of it produce the same hash.
+        let main = "/Users/gary/Documents/GitHub/sentinel";
+        let wt_a = "/Users/gary/Documents/GitHub/sentinel/.claude/worktrees/feat-stepproof";
+        let wt_b = "/Users/gary/Documents/GitHub/sentinel/.claude/worktrees/feat-other/crates/x";
+        assert_eq!(project_hash(main), project_hash(wt_a));
+        assert_eq!(project_hash(main), project_hash(wt_b));
+    }
+
+    #[test]
+    fn project_hash_distinguishes_different_repos() {
+        let a = "/Users/gary/Documents/GitHub/sentinel";
+        let b = "/Users/gary/Documents/GitHub/twilio-mcp-rust";
+        assert_ne!(project_hash(a), project_hash(b));
+    }
+
+    #[test]
+    fn project_hash_format_is_8_hex_chars() {
+        let h = project_hash("/repo");
+        assert_eq!(h.len(), 8);
+        assert!(h.chars().all(|c| c.is_ascii_hexdigit()), "got: {h}");
     }
 }
