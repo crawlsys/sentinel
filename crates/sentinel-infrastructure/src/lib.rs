@@ -8,6 +8,7 @@ pub mod anthropic;
 pub mod config;
 pub mod env;
 pub mod error_log;
+pub mod evidence_filesystem;
 pub mod filesystem;
 pub mod git;
 pub mod interceptor;
