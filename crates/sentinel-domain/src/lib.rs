@@ -24,6 +24,7 @@ pub mod project;
 pub mod proof;
 pub mod repo_kind;
 pub mod request_limits;
+pub mod ssrf;
 pub mod step_proof;
 pub mod routing;
 pub mod session;
