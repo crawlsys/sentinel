@@ -4,6 +4,7 @@
 //! Defines proof chains, workflows, evidence, hooks, and routing.
 
 pub mod commit;
+pub mod config;
 pub mod constants;
 pub mod dependency;
 pub mod error_classifier;
