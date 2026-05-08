@@ -113,7 +113,11 @@ fn prerequisite_step<'a>(
 fn has_step_proof(chain: &ProofChain, skill: &str, step_id: &str) -> bool {
     chain.entries.iter().any(|e| match e {
         ProofEntry::Step(s) => s.skill == skill && s.step_id == step_id,
-        ProofEntry::Phase(_) => false,
+        // Phase entries are coarser-grained checkpoints, not step proofs.
+        // Disagreement markers (#82 Stage B) are metadata about a prior
+        // StepProof — they don't satisfy the step_gate prerequisite check
+        // by themselves; the underlying StepProof is what counts.
+        ProofEntry::Phase(_) | ProofEntry::Disagreement(_) => false,
     })
 }
 

@@ -117,7 +117,11 @@ fn summarize(chain: &ProofChain) -> ArchivedChainSummary {
         .iter()
         .filter_map(|e| match e {
             ProofEntry::Step(s) => Some(s),
-            ProofEntry::Phase(_) => None,
+            // Disagreement markers carry their own per-judge breakdown
+            // (#82 Stage B); the corpus summary doesn't aggregate them
+            // today. A future commit can extend ArchivedChainSummary to
+            // surface disagreement counts per skill — for now skip.
+            ProofEntry::Phase(_) | ProofEntry::Disagreement(_) => None,
         })
         .collect();
 

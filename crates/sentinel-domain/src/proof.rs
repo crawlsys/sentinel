@@ -111,12 +111,16 @@ impl PhaseProof {
 /// just walks `previous_hash` → `combined_hash` continuity.
 ///
 /// Tagged serde representation so on-disk chains stay self-describing:
-/// `{"kind":"phase",...}` or `{"kind":"step",...}`.
+/// `{"kind":"phase",...}`, `{"kind":"step",...}`, or `{"kind":"disagreement",...}`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum ProofEntry {
     Phase(PhaseProof),
     Step(StepProof),
+    /// Multi-judge disagreement marker (#82 Stage B). Appended right
+    /// after the StepProof that triggered the disagreement so chain
+    /// walkers can find disagreements by filtering on the variant.
+    Disagreement(crate::disagreement::DisagreementMarker),
 }
 
 impl ProofEntry {
@@ -126,6 +130,7 @@ impl ProofEntry {
         match self {
             Self::Phase(p) => &p.combined_hash,
             Self::Step(s) => &s.combined_hash,
+            Self::Disagreement(d) => &d.combined_hash,
         }
     }
 
@@ -135,6 +140,7 @@ impl ProofEntry {
         match self {
             Self::Phase(p) => &p.previous_hash,
             Self::Step(s) => &s.previous_hash,
+            Self::Disagreement(d) => &d.previous_hash,
         }
     }
 
@@ -144,6 +150,7 @@ impl ProofEntry {
         match self {
             Self::Phase(p) => p.verify_self(),
             Self::Step(s) => s.verify_self(),
+            Self::Disagreement(d) => d.verify_self(),
         }
     }
 
@@ -153,15 +160,19 @@ impl ProofEntry {
         match self {
             Self::Phase(p) => p.phase_id.clone(),
             Self::Step(s) => format!("{}.{}", s.phase_id, s.step_id),
+            Self::Disagreement(d) => format!("disagreement({}.{})", d.phase_id, d.step_id),
         }
     }
 
     /// `started_at` timestamp for cross-entry temporal ordering checks.
+    /// `Disagreement` markers use `recorded_at` for both — they're a
+    /// point-in-time annotation, not a span.
     #[must_use]
     pub fn started_at(&self) -> DateTime<Utc> {
         match self {
             Self::Phase(p) => p.started_at,
             Self::Step(s) => s.started_at,
+            Self::Disagreement(d) => d.recorded_at,
         }
     }
 
@@ -171,6 +182,7 @@ impl ProofEntry {
         match self {
             Self::Phase(p) => p.completed_at,
             Self::Step(s) => s.completed_at,
+            Self::Disagreement(d) => d.recorded_at,
         }
     }
 }
@@ -310,6 +322,44 @@ impl ProofChain {
         }
 
         self.entries.push(ProofEntry::Step(proof));
+        Ok(())
+    }
+
+    /// Append a `DisagreementMarker` to the chain (#82 Stage B).
+    /// Behaves like `add_step_proof` — capacity check, link check,
+    /// internal-hash check — but for the multi-judge disagreement
+    /// entry. Producers call this right after a StepProof when the
+    /// per-step `MultiJudgeVerdict.disagreement` is `true`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ChainFull`, `BrokenChain`, or `InvalidProof` for
+    /// the same reasons as the other `add_*` methods. The
+    /// `BrokenChain.phase` field carries `disagreement(<phase>.<step>)`
+    /// so error messages identify the marker source.
+    pub fn add_disagreement(
+        &mut self,
+        marker: crate::disagreement::DisagreementMarker,
+    ) -> Result<(), ProofChainError> {
+        if self.entries.len() + self.proofs.len() >= Self::MAX_PROOFS_PER_CHAIN {
+            return Err(ProofChainError::ChainFull {
+                skill: self.skill.clone(),
+                max: Self::MAX_PROOFS_PER_CHAIN,
+            });
+        }
+        if marker.previous_hash != self.head_hash() {
+            return Err(ProofChainError::BrokenChain {
+                phase: format!("disagreement({}.{})", marker.phase_id, marker.step_id),
+                expected: self.head_hash().to_string(),
+                got: marker.previous_hash,
+            });
+        }
+        if !marker.verify_self() {
+            return Err(ProofChainError::InvalidProof {
+                phase: format!("disagreement({}.{})", marker.phase_id, marker.step_id),
+            });
+        }
+        self.entries.push(ProofEntry::Disagreement(marker));
         Ok(())
     }
 
@@ -843,5 +893,138 @@ mod tests {
         let step_back: ProofEntry = serde_json::from_str(&step_json).unwrap();
         assert!(matches!(phase_back, ProofEntry::Phase(_)));
         assert!(matches!(step_back, ProofEntry::Step(_)));
+    }
+
+    /// Helper: build a sample disagreement marker for a given chain head.
+    fn make_disagreement(
+        skill: &str,
+        session_id: &str,
+        step_id: &str,
+        phase_id: &str,
+        previous_hash: &str,
+    ) -> crate::disagreement::DisagreementMarker {
+        use crate::judge::{JudgeModel, JudgeVerdict};
+        use crate::multi_judge::{JudgeRun, JudgeTrustTier, MultiJudgeVerdict};
+        let mj = MultiJudgeVerdict::synthesize(
+            JudgeTrustTier::Critical,
+            vec![
+                JudgeRun {
+                    model: JudgeModel::Kimi,
+                    verdict: JudgeVerdict::pass(0.95, "ok"),
+                    cost_usd: None,
+                    provider: None,
+                },
+                JudgeRun {
+                    model: JudgeModel::Sonnet,
+                    verdict: JudgeVerdict::fail(0.40, "no", vec![]),
+                    cost_usd: None,
+                    provider: None,
+                },
+            ],
+        );
+        crate::disagreement::DisagreementMarker::new(
+            skill,
+            session_id,
+            step_id,
+            phase_id,
+            mj,
+            previous_hash,
+        )
+    }
+
+    #[test]
+    fn add_disagreement_after_step_advances_chain() {
+        // Real chain shape: StepProof → DisagreementMarker → next entry.
+        // The marker's previous_hash must point at the step's combined_hash;
+        // verify() must accept the resulting chain.
+        let mut chain = ProofChain::new("linear", "sess-1");
+        let step = make_step(
+            "1",
+            "claim",
+            "linear",
+            GENESIS_HASH,
+            serde_json::Value::Null,
+        );
+        chain.add_step_proof(step).unwrap();
+        let marker =
+            make_disagreement("linear", "sess-1", "1", "claim", chain.head_hash());
+        chain.add_disagreement(marker).expect("disagreement after step");
+        assert_eq!(chain.entries.len(), 2);
+        let v = chain.verify();
+        assert!(v.valid, "chain with disagreement marker must verify, errors: {:?}", v.errors);
+    }
+
+    #[test]
+    fn add_disagreement_with_wrong_previous_hash_rejected() {
+        // The marker claims to follow GENESIS but the chain head is a
+        // step. add_disagreement must reject with BrokenChain.
+        let mut chain = ProofChain::new("linear", "sess-1");
+        let step = make_step(
+            "1",
+            "claim",
+            "linear",
+            GENESIS_HASH,
+            serde_json::Value::Null,
+        );
+        chain.add_step_proof(step).unwrap();
+        // Wrong previous_hash — points at GENESIS, not the step's hash.
+        let bad =
+            make_disagreement("linear", "sess-1", "1", "claim", GENESIS_HASH);
+        assert!(matches!(
+            chain.add_disagreement(bad),
+            Err(ProofChainError::BrokenChain { .. })
+        ));
+    }
+
+    #[test]
+    fn add_tampered_disagreement_rejected() {
+        // The marker passes the chain-link check but its multi_judge_hash
+        // doesn't match the verdict bytes. add_disagreement must reject
+        // with InvalidProof.
+        let mut chain = ProofChain::new("linear", "sess-1");
+        let step = make_step(
+            "1",
+            "claim",
+            "linear",
+            GENESIS_HASH,
+            serde_json::Value::Null,
+        );
+        chain.add_step_proof(step).unwrap();
+        let mut marker =
+            make_disagreement("linear", "sess-1", "1", "claim", chain.head_hash());
+        // Tamper after construction — combined_hash and multi_judge_hash
+        // no longer match the captured verdict.
+        marker.multi_judge.sufficient = !marker.multi_judge.sufficient;
+        assert!(matches!(
+            chain.add_disagreement(marker),
+            Err(ProofChainError::InvalidProof { .. })
+        ));
+    }
+
+    #[test]
+    fn proof_entry_disagreement_serde_tagged_correctly() {
+        // The chain JSON format MUST tag the new variant as
+        // {"kind":"disagreement",...}. Round-trip pinned so a future
+        // serde rename can't silently shift the wire format.
+        let mj_marker = make_disagreement("linear", "sess-1", "1", "claim", GENESIS_HASH);
+        let entry = ProofEntry::Disagreement(mj_marker);
+        let json = serde_json::to_string(&entry).unwrap();
+        assert!(
+            json.contains(r#""kind":"disagreement""#),
+            "disagreement tag missing: {json}",
+        );
+        let back: ProofEntry = serde_json::from_str(&json).unwrap();
+        assert!(matches!(back, ProofEntry::Disagreement(_)));
+    }
+
+    #[test]
+    fn proof_entry_combined_hash_dispatches_to_disagreement_variant() {
+        // ProofEntry::combined_hash() must return the marker's
+        // combined_hash for the Disagreement variant, not panic or
+        // return wrong data. Pins the match arm.
+        let marker = make_disagreement("linear", "sess-1", "1", "claim", GENESIS_HASH);
+        let expected = marker.combined_hash.clone();
+        let entry = ProofEntry::Disagreement(marker);
+        assert_eq!(entry.combined_hash(), expected);
     }
 }

@@ -7,6 +7,7 @@ pub mod commit;
 pub mod config;
 pub mod constants;
 pub mod dependency;
+pub mod disagreement;
 pub mod error_classifier;
 pub mod events;
 pub mod evidence;
