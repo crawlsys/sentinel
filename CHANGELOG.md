@@ -6,6 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Removed
+- **All ntfy push code** (2026-05-09, sentinel 0.4.1). Deleted `sentinel-application::ntfy_push` module and all 11 callsites across `hooks/stop_failure.rs` (rate-limit recovery, auth recovery, generic turn-aborted), `hooks/build_notify.rs` (build/deploy notifications), and `sentinel-cli/src/hook_cmd.rs` (hook-level block notifications). Sentinel emits zero ntfy pushes after this. Account-failure notifications moved into `claude-code-handler-rust` so they have direct access to slot/trace/session forensics that sentinel's hook-level vantage point doesn't have. The previous "every event sends a push" volume was unhelpful — too noisy to act on, too generic to debug. Cleaned up now-orphaned helpers `project_name`, `first_error_line`, `truncate_for_push` and the 3 tests that referenced them. 917 tests still pass.
+
 ### Added
 
 - **Multi-judge verdict types in `sentinel-domain` (#82 Stage B Part 1, follow-up to commit 2089896)**: new `crates/sentinel-domain/src/multi_judge.rs` module ships the wire-format types for parallel multi-judge verification — `JudgeTrustTier` (Routine / Review / Critical / CriticalStrict / AuditGrade), `JudgeRun` (one model + verdict + optional cost + optional resolved provider), and `MultiJudgeVerdict` synthesised across N runs with worst-case-wins logic. Mirrors the M3.3 review-types staging strategy: ship the types first so the wire format is locked, then the infrastructure-side producer (`rig_judge::evaluate_multi`) and the chain-entry consumer (`ProofEntry::Disagreement`) wire in next.

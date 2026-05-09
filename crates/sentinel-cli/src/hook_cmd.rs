@@ -1041,35 +1041,6 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
         }
     }
 
-    // ── Phone notification on hook-level block ──────────────────────────
-    //
-    // Any hook that returned blocked=true means Claude cannot proceed. Push
-    // to the attention topic so Gary knows even when the Claude Code window
-    // isn't focused. Single point of egress — every gate, ACL, plan-mode,
-    // etc. funnels through here.
-    if output.blocked == Some(true) {
-        let tool_name = input.tool_name.as_deref().unwrap_or("(no tool)");
-        let title = format!("Claude blocked: {hook_event} / {tool_name}");
-        let reason = output.reason.as_deref().map_or_else(
-            || "(no reason given)".to_string(),
-            |r| {
-                if r.len() > 240 {
-                    format!("{}…", &r[..240])
-                } else {
-                    r.to_string()
-                }
-            },
-        );
-        sentinel_application::ntfy_push::push_attention(
-            &real_fs,
-            &real_env,
-            &title,
-            &reason,
-            5,
-            &["no_entry"],
-        );
-    }
-
     // Record hook invocation with actual elapsed time
     let elapsed_ms = start_time.elapsed().as_millis() as u64;
     state.record_hook_invocation(event, elapsed_ms);

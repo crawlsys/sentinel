@@ -18,7 +18,6 @@
 
 use sentinel_domain::events::{HookInput, HookOutput};
 
-use crate::ntfy_push;
 
 const DEFAULT_RATE_LIMIT_COOLDOWN_MINUTES: u64 = 300;
 
@@ -318,18 +317,6 @@ pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
                     "Rate limit detected, account rotated, fanout complete (in-place token swap)"
                 );
 
-                ntfy_push::push_attention(
-                    ctx.fs,
-                    ctx.env,
-                    "Claude rate-limited (auto-recovered)",
-                    &format!(
-                        "Cooldown {cooldown_minutes}m. {rotate_msg} \
-                         Tokens swapped in-place; next request uses the new account."
-                    ),
-                    5,
-                    &["rotating_light"],
-                );
-
                 return HookOutput {
                     system_message: Some(format!(
                         "[Rate Limit] Account hit rate limit (cooldown: {cooldown_minutes}m). \
@@ -359,18 +346,6 @@ pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
                     "Rate limit detected but account rotation command failed"
                 );
 
-                ntfy_push::push_attention(
-                    ctx.fs,
-                    ctx.env,
-                    "Claude rate-limited: rotation FAILED",
-                    &format!(
-                        "Cooldown {cooldown_minutes}m. {}. Manual intervention needed.",
-                        truncate_for_push(&detail)
-                    ),
-                    5,
-                    &["rotating_light", "x"],
-                );
-
                 return HookOutput {
                     system_message: Some(format!(
                         "[Rate Limit] Account hit rate limit (cooldown: {cooldown_minutes}m), \
@@ -389,18 +364,6 @@ pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
                     error = %e,
                     cooldown_minutes,
                     "Rate limit detected but accounts CLI could not be executed"
-                );
-
-                ntfy_push::push_attention(
-                    ctx.fs,
-                    ctx.env,
-                    "Claude rate-limited: rotation could not start",
-                    &format!(
-                        "Cooldown {cooldown_minutes}m. {}. Manual intervention needed.",
-                        truncate_for_push(&e.to_string())
-                    ),
-                    5,
-                    &["rotating_light", "x"],
                 );
 
                 return HookOutput {
@@ -456,18 +419,6 @@ pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
                     "Auth error detected, account rotated, fanout complete (in-place token swap)"
                 );
 
-                ntfy_push::push_attention(
-                    ctx.fs,
-                    ctx.env,
-                    "Claude auth failure (auto-recovered)",
-                    &format!(
-                        "401/auth error on current slot. {rotate_msg} \
-                         Tokens swapped in-place; next request uses the new account."
-                    ),
-                    4,
-                    &["key", "rotating_light"],
-                );
-
                 return HookOutput {
                     system_message: Some(format!(
                         "[Auth Error] Token rejected by Anthropic. \
@@ -488,18 +439,6 @@ pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
                 let detail = summarize_process_failure(&output);
                 tracing::warn!(detail, "Auth error detected but account rotation failed");
 
-                ntfy_push::push_attention(
-                    ctx.fs,
-                    ctx.env,
-                    "Claude auth failure: rotation FAILED",
-                    &format!(
-                        "401/auth error and rotation didn't recover: {}. Manual intervention needed.",
-                        truncate_for_push(&detail)
-                    ),
-                    5,
-                    &["key", "x"],
-                );
-
                 return HookOutput {
                     system_message: Some(format!(
                         "[Auth Error] Token rejected by Anthropic and auto-rotation failed: {detail}. \
@@ -515,18 +454,6 @@ pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
             }
             Err(e) => {
                 tracing::warn!(error = %e, "Auth error detected but accounts CLI could not be executed");
-
-                ntfy_push::push_attention(
-                    ctx.fs,
-                    ctx.env,
-                    "Claude auth failure: rotation could not start",
-                    &format!(
-                        "401/auth error and rotation didn't start: {}. Manual intervention needed.",
-                        truncate_for_push(&e.to_string())
-                    ),
-                    5,
-                    &["key", "x"],
-                );
 
                 return HookOutput {
                     system_message: Some(format!(
@@ -544,25 +471,11 @@ pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
         }
     }
 
-    // Non-rate-limit, non-auth API error — turn aborted, push so Gary knows.
-    ntfy_push::push_attention(
-        ctx.fs,
-        ctx.env,
-        &format!("Claude turn aborted: {error}"),
-        &truncate_for_push(error_details),
-        4,
-        &["warning"],
-    );
-
+    // Non-rate-limit, non-auth API error — turn aborted. Account-failure
+    // notifications now live in claude-code-handler-rust where they have
+    // direct access to slot/trace/session forensics; this hook just lets
+    // the turn end cleanly.
     HookOutput::allow()
-}
-
-fn truncate_for_push(s: &str) -> String {
-    if s.len() > 200 {
-        format!("{}…", &s[..200])
-    } else {
-        s.to_string()
-    }
 }
 
 #[cfg(test)]
