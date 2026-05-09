@@ -31,6 +31,7 @@ log = logging.getLogger("sentinel")
 LOKI_URL = os.environ.get("LOKI_URL", "http://loki.loki.svc.cluster.local:3100")
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://ollama.ollama.svc.cluster.local:11434")
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen3:32b-q4_K_M")
+OLLAMA_API_KEY = os.environ.get("OLLAMA_API_KEY", "")
 ALERTMANAGER_URL = os.environ.get("ALERTMANAGER_URL", "http://kube-prometheus-stack-alertmanager.monitoring.svc.cluster.local:9093")
 POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL", "60"))
 MAX_LINES_PER_QUERY = int(os.environ.get("MAX_LINES_PER_QUERY", "200"))
@@ -307,10 +308,12 @@ def analyze_with_ollama(name: str, priority: str, context: str, lines: list[str]
         logs="\n".join(truncated),
     )
 
+    headers = {"Authorization": f"Bearer {OLLAMA_API_KEY}"} if OLLAMA_API_KEY else {}
     try:
         with OLLAMA_DURATION.labels(source=name).time():
             resp = requests.post(
-                f"{OLLAMA_URL}/api/chat",
+                f"{OLLAMA_URL}/v1/chat/completions",
+                headers=headers,
                 json={
                     "model": OLLAMA_MODEL,
                     "messages": [
@@ -318,12 +321,16 @@ def analyze_with_ollama(name: str, priority: str, context: str, lines: list[str]
                         {"role": "user", "content": user_prompt},
                     ],
                     "stream": False,
-                    "options": {"temperature": 0.1, "num_predict": 400, "think": False},
+                    "temperature": 0.1,
+                    "max_tokens": 400,
+                    # vLLM extension: disable reasoning trace on thinking models (GLM-4.5, Qwen3, etc.)
+                    "chat_template_kwargs": {"enable_thinking": False},
                 },
                 timeout=120,
             )
             resp.raise_for_status()
-        content = resp.json().get("message", {}).get("content", "").strip()
+        choices = resp.json().get("choices", [])
+        content = (choices[0]["message"]["content"] if choices else "").strip()
 
         # Parse verdict
         verdict = "UNKNOWN"
@@ -524,7 +531,7 @@ def poll_cycle():
 
 def wait_for_services():
     """Block until Loki and Ollama are reachable."""
-    for svc_name, url in [("Loki", f"{LOKI_URL}/ready"), ("Ollama", f"{OLLAMA_URL}/api/tags")]:
+    for svc_name, url in [("Loki", f"{LOKI_URL}/ready"), ("LLM", f"{OLLAMA_URL}/v1/models")]:
         while True:
             try:
                 resp = requests.get(url, timeout=5)
