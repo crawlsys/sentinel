@@ -6,6 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Changed
+- **CLAUDE.md generator includes time-of-day + timezone abbreviation** (2026-05-13, sentinel 0.4.1). The auto-generated `~/.claude/CLAUDE.md` Date Context section now reads `Today is Wednesday, May 13, 2026 at 08:58 AM CDT.` (previously only the date). The assistant was greeting Gary with "Good evening" at 8:55 AM because nothing in the LLM's context disambiguated AM/PM. Switched `chrono::Utc::now()` → `chrono::Local::now()` (also fixes a latent near-midnight off-by-one), formats time as zero-padded 12-hour with AM/PM (`%I:%M %p`), and resolves a DST-aware IANA abbreviation via `iana-time-zone` → `chrono-tz` (chrono's `%Z` on Windows returns "Central Standard Time", not "CDT"). Helper `local_tz_abbreviation()` falls back to `%Z` then `"UTC"` if the IANA lookup fails. Footer `*Auto-generated on session start: …*` also gets the same time + tz. Two new workspace deps: `chrono-tz = "0.10"` and `iana-time-zone = "0.1"`.
+
 ### Removed
 - **All ntfy push code** (2026-05-09, sentinel 0.4.1). Deleted `sentinel-application::ntfy_push` module and all 11 callsites across `hooks/stop_failure.rs` (rate-limit recovery, auth recovery, generic turn-aborted), `hooks/build_notify.rs` (build/deploy notifications), and `sentinel-cli/src/hook_cmd.rs` (hook-level block notifications). Sentinel emits zero ntfy pushes after this. Account-failure notifications moved into `claude-code-handler-rust` so they have direct access to slot/trace/session forensics that sentinel's hook-level vantage point doesn't have. The previous "every event sends a push" volume was unhelpful — too noisy to act on, too generic to debug. Cleaned up now-orphaned helpers `project_name`, `first_error_line`, `truncate_for_push` and the 3 tests that referenced them. 917 tests still pass.
 
