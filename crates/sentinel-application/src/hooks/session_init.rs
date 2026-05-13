@@ -65,6 +65,33 @@ fn time_greeting() -> &'static str {
     }
 }
 
+/// Return the abbreviation for the system local timezone at the given instant.
+///
+/// On Windows, chrono's `%Z` format specifier returns the full Windows zone
+/// name (e.g. "Central Standard Time") rather than the IANA abbreviation
+/// ("CST"/"CDT"). This helper looks up the IANA zone via `iana-time-zone`
+/// and resolves the DST-aware abbreviation via `chrono-tz`, falling back to
+/// chrono's `%Z` if that lookup fails.
+fn local_tz_abbreviation(now: &chrono::DateTime<chrono::Local>) -> String {
+    use chrono_tz::OffsetName;
+    use std::str::FromStr;
+    if let Ok(name) = iana_time_zone::get_timezone() {
+        if let Ok(tz) = chrono_tz::Tz::from_str(&name) {
+            if let Some(abbr) = now.with_timezone(&tz).offset().abbreviation() {
+                if !abbr.is_empty() {
+                    return abbr.to_string();
+                }
+            }
+        }
+    }
+    let fallback = now.format("%Z").to_string();
+    if fallback.is_empty() {
+        "UTC".to_string()
+    } else {
+        fallback
+    }
+}
+
 /// Well-known marketplace repo locations to check
 const REPO_CANDIDATES: &[&str] = &[
     "Documents/GitHub/claude-code-marketplace",
@@ -853,10 +880,15 @@ fn generate_claude_md(
     linear_accounts: &[String],
     tasks_section: &str,
 ) {
-    let now = chrono::Utc::now();
+    let now = chrono::Local::now();
     let date_str = now.format("%A, %B %-d, %Y").to_string();
     let year = now.format("%Y").to_string();
     let month = now.format("%B").to_string();
+    let time_str = format!(
+        "{} {}",
+        now.format("%I:%M %p"),
+        local_tz_abbreviation(&now)
+    );
     let user_name = user_name();
     let greeting = time_greeting();
 
@@ -1043,7 +1075,7 @@ Running bare `/loop` uses `~/.claude/loop.md` which does:
 
 The current year is {year} and the current month is {month}.
 
-Today is {date_str}.
+Today is {date_str} at {time_str}.
 {tasks_section}
 ---
 
@@ -1638,11 +1670,12 @@ CIRCUMSTANCE**
 - **Hooks:** {hooks} (sentinel engine)
 - **Agents:** {agents}
 
-*Auto-generated on session start: {date_str}*
+*Auto-generated on session start: {date_str} at {time_str}*
 "#,
         year = year,
         month = month,
         date_str = date_str,
+        time_str = time_str,
         skills = counts.skills,
         hooks = counts.hooks,
         agents = counts.agents,
