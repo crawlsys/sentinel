@@ -308,6 +308,24 @@ enum CleanupAction {
         #[arg(long)]
         apply: bool,
     },
+    /// Prune orphan session task directories under `~/.claude/tasks/`
+    /// whose session_id (the directory name) does not appear as a
+    /// `.jsonl` transcript file under any project in
+    /// `~/.claude/projects/`. Older-than gating defends against active
+    /// sessions whose transcript hasn't been written yet.
+    Tasks {
+        /// Minimum age in days for a directory to be considered for
+        /// cleanup. Defaults to 30 — only directories older than this
+        /// are candidates, regardless of whether their session_id is
+        /// orphan. Younger orphans are kept (the transcript may be
+        /// about to write).
+        #[arg(long, default_value = "30")]
+        older_than: u64,
+        /// Actually remove orphan directories. Without this flag, only
+        /// the audit report is printed.
+        #[arg(long)]
+        apply: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -466,6 +484,9 @@ async fn main() -> anyhow::Result<()> {
         Commands::Stage { binary } => stage_cmd::run(binary),
         Commands::Cleanup { action } => match action {
             CleanupAction::PersistentTasks { apply } => cleanup_cmd::run_persistent_tasks(apply),
+            CleanupAction::Tasks { older_than, apply } => {
+                cleanup_cmd::run_session_tasks(older_than, apply)
+            }
         },
         Commands::RotateKey => rotate_key_cmd::run(),
         Commands::Resign => resign_cmd::run(),
