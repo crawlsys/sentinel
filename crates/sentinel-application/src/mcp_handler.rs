@@ -64,6 +64,14 @@ pub struct McpHandler {
     /// `None` keeps the M4.3 live-session-only behavior (back-compat for
     /// existing tests and any caller not wired with archive access).
     archive: Option<ProofArchiveBacking>,
+    /// Optional THE BIBLE evidence-adapter registry (sentinel #68). When
+    /// set, `submit_step_complete` calls that pass `evidence_claim` get
+    /// a receipt fetched via the registry and folded into
+    /// `Evidence.custom.evidence_receipt` before the proof is sealed.
+    /// `None` keeps the pre-#68 self-attested-only behavior (every
+    /// caller stays back-compat — supplying `evidence_claim` without a
+    /// registry wired is a fail-fast error, not a silent skip).
+    evidence_adapters: Option<Arc<crate::evidence_adapters::EvidenceAdapterRegistry>>,
 }
 
 /// Configuration for cross-session proof corpus reads. Holds the home
@@ -81,7 +89,23 @@ impl McpHandler {
             state,
             proof_engine,
             archive: None,
+            evidence_adapters: None,
         }
+    }
+
+    /// Wire the THE BIBLE evidence-adapter registry. After this,
+    /// `submit_step_complete` calls that include `evidence_claim`
+    /// in their args go through the registry to fetch a receipt
+    /// before sealing the proof. Without this wired, supplying an
+    /// `evidence_claim` errors loudly (fail-fast — better than
+    /// silently dropping the claim).
+    #[must_use]
+    pub fn with_evidence_adapters(
+        mut self,
+        adapters: Arc<crate::evidence_adapters::EvidenceAdapterRegistry>,
+    ) -> Self {
+        self.evidence_adapters = Some(adapters);
+        self
     }
 
     /// Wire the cross-session proof archive backing. After this,
@@ -382,13 +406,77 @@ impl McpHandler {
             };
 
         // Optional fields with defaults.
-        let evidence: sentinel_domain::evidence::Evidence = match args.get("evidence") {
+        let mut evidence: sentinel_domain::evidence::Evidence = match args.get("evidence") {
             Some(v) => match serde_json::from_value(v.clone()) {
                 Ok(e) => e,
                 Err(e) => return McpToolResult::err(format!("Invalid 'evidence' shape: {e}")),
             },
             None => sentinel_domain::evidence::Evidence::default(),
         };
+
+        // THE BIBLE: optional `evidence_claim` arg dispatches through the
+        // evidence-adapter registry, fetches a receipt, and folds it into
+        // `evidence.custom.evidence_receipt`. Without an adapter registry
+        // wired on this handler, supplying `evidence_claim` is an error —
+        // we fail loudly rather than silently dropping the claim, so
+        // callers know the BIBLE path isn't actually active for them.
+        if let Some(claim_raw) = args.get("evidence_claim") {
+            let claim: sentinel_domain::evidence_adapter::EvidenceClaim =
+                match serde_json::from_value(claim_raw.clone()) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        return McpToolResult::err(format!(
+                            "Invalid 'evidence_claim' shape: {e}"
+                        ));
+                    }
+                };
+            let Some(registry) = self.evidence_adapters.as_ref() else {
+                return McpToolResult::err(
+                    "evidence_claim supplied but no evidence-adapter registry is wired \
+                     on this handler — call McpHandler::with_evidence_adapters() at \
+                     bootstrap, or omit evidence_claim",
+                );
+            };
+            match registry.fetch(&claim).await {
+                Ok(receipt) => {
+                    // Fold the receipt into Evidence.custom under a
+                    // well-known key so verifiers can locate it without
+                    // walking arbitrary JSON. Single key = single source
+                    // of truth; multiple receipts (cross-vendor) go in
+                    // an array (#69 / future work).
+                    let receipt_json = match serde_json::to_value(&receipt) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            return McpToolResult::err(format!(
+                                "Receipt serialization error: {e}"
+                            ));
+                        }
+                    };
+                    // `Evidence.custom` is a `serde_json::Value`. The
+                    // common case is `Null` (no custom data) or an object
+                    // already. Promote `Null` to an object before inserting;
+                    // refuse if it's a non-object scalar/array (caller
+                    // mis-shaped the existing custom payload and we don't
+                    // want to silently clobber it).
+                    if evidence.custom.is_null() {
+                        evidence.custom = serde_json::json!({});
+                    }
+                    let Some(custom_obj) = evidence.custom.as_object_mut() else {
+                        return McpToolResult::err(
+                            "evidence.custom is not an object — refusing to fold \
+                             evidence_receipt into a non-object custom payload",
+                        );
+                    };
+                    custom_obj.insert("evidence_receipt".to_string(), receipt_json);
+                }
+                Err(e) => {
+                    return McpToolResult::err(format!(
+                        "Evidence adapter could not fetch receipt for claim '{}': {e}",
+                        claim.claim_type
+                    ));
+                }
+            }
+        }
 
         let judge_model = match args.get("judge_model").and_then(|v| v.as_str()) {
             Some("sonnet") | None => sentinel_domain::judge::JudgeModel::Sonnet,
@@ -2038,6 +2126,153 @@ mod step_tools_tests {
                 "chain must be linear — prev_hash of step n must equal combined_hash of step n-1"
             );
         }
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // BIBLE: evidence-adapter wireup (sentinel #68)
+    // ─────────────────────────────────────────────────────────────────
+    //
+    // submit_step_complete gains an optional `evidence_claim` arg. When
+    // present + a registry is wired on the handler, the registry fetches
+    // an EvidenceReceipt for the claim and folds it into the sealed
+    // proof's `Evidence.custom.evidence_receipt`. Three behaviors to
+    // pin down:
+    //   1. No claim supplied → behavior unchanged (back-compat).
+    //   2. Claim supplied + registry wired (with self-attested fallback)
+    //      → receipt lands in the proof's evidence.
+    //   3. Claim supplied + registry NOT wired → fail-fast error.
+
+    #[tokio::test]
+    async fn bible_no_evidence_claim_no_registry_works_unchanged() {
+        // Pre-#68 callers must still work without any registry.
+        let state = Arc::new(RwLock::new(SessionState::new("bible-noop")));
+        let engine = Arc::new(ProofEngine::new(state.clone(), Arc::new(StubJudge)));
+        let handler = McpHandler::new(state, engine);
+
+        let result = handler
+            .handle(McpToolCall {
+                name: "sentinel__submit_step_complete".into(),
+                arguments: serde_json::json!({
+                    "skill": "linear",
+                    "phase_id": "claim",
+                    "step_id": "1",
+                    "step_description": "fetch ticket",
+                    "verdict": {
+                        "sufficient": true,
+                        "confidence": 0.9,
+                        "reasoning": "ok",
+                    },
+                }),
+            })
+            .await;
+        assert!(result.success, "back-compat failure: {:?}", result.error);
+    }
+
+    #[tokio::test]
+    async fn bible_evidence_claim_with_registry_folds_receipt_into_evidence() {
+        // Registry with the self-attested fallback only — exercises the
+        // wire-in path without needing a real GitHub/Browserbase adapter.
+        let state = Arc::new(RwLock::new(SessionState::new("bible-receipt")));
+        let engine = Arc::new(ProofEngine::new(state.clone(), Arc::new(StubJudge)));
+        let registry = Arc::new(
+            crate::evidence_adapters::EvidenceAdapterRegistry::with_fallback(),
+        );
+        let handler = McpHandler::new(state.clone(), engine).with_evidence_adapters(registry);
+
+        let result = handler
+            .handle(McpToolCall {
+                name: "sentinel__submit_step_complete".into(),
+                arguments: serde_json::json!({
+                    "skill": "linear",
+                    "phase_id": "review",
+                    "step_id": "3.L3",
+                    "step_description": "open PR with Ref FPCRM-100",
+                    "verdict": {
+                        "sufficient": true,
+                        "confidence": 0.9,
+                        "reasoning": "ok",
+                    },
+                    "evidence_claim": {
+                        "skill": "git",
+                        "phase_id": "review",
+                        "step_id": "3.L3",
+                        "claim_type": "git.pr_opened",
+                        "context": {
+                            "pr_number": 4242,
+                            "repo": "firefly-pro/firefly-pro-crm",
+                        },
+                    },
+                }),
+            })
+            .await;
+        assert!(result.success, "wire-in failure: {:?}", result.error);
+
+        // The sealed proof must carry the receipt in evidence.custom.
+        let s = state.read().await;
+        let chain = s.proof_chains.get("linear").expect("chain exists");
+        let last_step = chain
+            .entries
+            .iter()
+            .filter_map(|e| match e {
+                sentinel_domain::proof::ProofEntry::Step(s) => Some(s),
+                _ => None,
+            })
+            .last()
+            .expect("at least one step sealed");
+        let custom = &last_step.evidence.custom;
+        let receipt = custom
+            .get("evidence_receipt")
+            .expect("evidence_receipt folded into custom");
+        assert_eq!(
+            receipt.get("adapter_name").and_then(|v| v.as_str()),
+            Some("self_attested"),
+            "self-attested fallback should have produced the receipt"
+        );
+        // verified must be false — self-attested means "we know we don't know."
+        assert_eq!(
+            receipt.get("verified").and_then(|v| v.as_bool()),
+            Some(false),
+            "self-attested receipts are NOT verified — corpus queries depend on this signal"
+        );
+    }
+
+    #[tokio::test]
+    async fn bible_evidence_claim_without_registry_fails_loudly() {
+        // No `with_evidence_adapters` call. Supplying evidence_claim
+        // anyway must error — silent skip would defeat the point.
+        let state = Arc::new(RwLock::new(SessionState::new("bible-no-registry")));
+        let engine = Arc::new(ProofEngine::new(state.clone(), Arc::new(StubJudge)));
+        let handler = McpHandler::new(state, engine);
+
+        let result = handler
+            .handle(McpToolCall {
+                name: "sentinel__submit_step_complete".into(),
+                arguments: serde_json::json!({
+                    "skill": "linear",
+                    "phase_id": "claim",
+                    "step_id": "1",
+                    "step_description": "x",
+                    "verdict": {
+                        "sufficient": true,
+                        "confidence": 0.9,
+                        "reasoning": "ok",
+                    },
+                    "evidence_claim": {
+                        "skill": "git",
+                        "phase_id": "claim",
+                        "step_id": "1",
+                        "claim_type": "git.pr_opened",
+                        "context": {"pr_number": 1},
+                    },
+                }),
+            })
+            .await;
+        assert!(!result.success, "must error when registry unwired");
+        let err = result.error.unwrap();
+        assert!(
+            err.contains("evidence_claim") && err.contains("no evidence-adapter registry"),
+            "error must explain the misconfiguration: {err}"
+        );
     }
 
     #[tokio::test]
