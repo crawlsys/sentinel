@@ -321,6 +321,36 @@ enum ProjectAction {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Append a handover stub to `.sentinel/handovers/YYYY-MM-DD-<slug>.md`.
+    /// Requires the repo to have been initialized via `sentinel project init`.
+    Handover {
+        /// Title — becomes the document heading and filename slug.
+        #[arg(long)]
+        title: String,
+        /// Optional pre-filled summary for the Context section.
+        #[arg(long)]
+        summary: Option<String>,
+        /// Override target directory (default: current directory).
+        #[arg(long)]
+        dir: Option<String>,
+    },
+    /// Append a lesson to `.sentinel/lessons/L-<NNN>.json` with the next
+    /// monotonic ID. Requires the repo to have been initialized via
+    /// `sentinel project init`.
+    Lesson {
+        /// Title — short, becomes the lesson's `title` field.
+        #[arg(long)]
+        title: String,
+        /// Optional summary populating the `summary` field.
+        #[arg(long)]
+        summary: Option<String>,
+        /// Tags — pass `--tag X --tag Y` for multiple. Populates `tags`.
+        #[arg(long = "tag")]
+        tags: Vec<String>,
+        /// Override target directory (default: current directory).
+        #[arg(long)]
+        dir: Option<String>,
+    },
 }
 
 /// `sentinel cleanup` subcommands.
@@ -533,6 +563,24 @@ async fn main() -> anyhow::Result<()> {
                 force,
                 dry_run,
             } => project_cmd::run(dir.map(std::path::PathBuf::from), force, dry_run),
+            ProjectAction::Handover { title, summary, dir } => {
+                project_cmd::run_handover(
+                    dir.map(std::path::PathBuf::from),
+                    title,
+                    summary,
+                )
+            }
+            ProjectAction::Lesson {
+                title,
+                summary,
+                tags,
+                dir,
+            } => project_cmd::run_lesson(
+                dir.map(std::path::PathBuf::from),
+                title,
+                summary,
+                tags,
+            ),
         },
         Commands::RegenerateClaudeMd => {
             let result = claude_md_cmd::regenerate()?;
