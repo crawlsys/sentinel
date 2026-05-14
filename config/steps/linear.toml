@@ -16,37 +16,53 @@ id = "claim"
 id = "-0.1"
 description = "Verify issue exists and is actionable"
 blocker = true
+suggested_tools = ["mcp__linear__get_issue"]
+artifact_schema = { issue_id = "string (UUID)", identifier = "string (e.g. FPCRM-123)", title = "string", state_name = "string", state_type = "string (backlog|unstarted|started|completed|canceled)", exists = "bool", actionable = "bool — false if archived, canceled, or done" }
 
 [[phases.steps]]
 id = "-0.2"
 description = "Check existing assignee"
 blocker = true
+suggested_tools = ["mcp__linear__get_issue"]
+artifact_schema = { issue_id = "string (UUID, from -0.1)", assignee_id = "string | null", assignee_name = "string | null", is_unassigned = "bool", is_self = "bool — true if assignee matches viewer from 0.2 (lookup runs later; this step records the raw assignee for the gate decision)" }
 
 [[phases.steps]]
 id = "-0.3"
 description = "Duplicate/spam check"
 blocker = true
+suggested_tools = ["mcp__linear__list_issues", "mcp__linear__search"]
+artifact_schema = { issue_id = "string (from -0.1)", title_query = "string — first 6-10 words of title", duplicate_candidates = "array of {identifier, title, similarity_hint}", is_duplicate = "bool", is_spam = "bool — keyword/regex heuristic" }
 
 [[phases.steps]]
 id = "-0.4"
 description = "Team ownership check"
 blocker = true
+suggested_tools = ["mcp__linear__get_issue", "mcp__linear__get_team"]
+artifact_schema = { issue_id = "string (from -0.1)", team_id = "string", team_key = "string (e.g. FPCRM)", project_team_key = "string — from per-project config", owned_by_this_project = "bool — true iff team_key matches project's linear_team_key" }
 
 [[phases.steps]]
 id = "0.1"
 description = "Look up started state ID (by type)"
+suggested_tools = ["mcp__linear__get_workflow_states"]
+artifact_schema = { team_id = "string (from -0.4)", started_state_id = "string (UUID)", started_state_name = "string — usually 'In Progress'", all_states = "array of {id, name, type} — kept for downstream transitions (0.3, 3.5.4)" }
 
 [[phases.steps]]
 id = "0.2"
 description = "Get current user (viewer)"
+suggested_tools = ["mcp__linear__viewer"]
+artifact_schema = { viewer_id = "string (UUID)", viewer_name = "string", viewer_email = "string", viewer_display_name = "string" }
 
 [[phases.steps]]
 id = "0.3"
 description = "Set In Progress + assign self"
+suggested_tools = ["mcp__linear__update_issue"]
+artifact_schema = { issue_id = "string (from -0.1)", transitioned_from_state_id = "string", transitioned_to_state_id = "string (from 0.1 started_state_id)", assignee_id = "string (from 0.2 viewer_id)", updated_at = "string (ISO-8601)" }
 
 [[phases.steps]]
 id = "0.4"
 description = "Confirm claim"
+suggested_tools = ["mcp__linear__get_issue"]
+artifact_schema = { issue_id = "string (from -0.1)", current_state_name = "string — must equal 'In Progress'", current_assignee_id = "string — must equal viewer_id from 0.2", claim_confirmed = "bool" }
 
 # ============================================================================
 # Phase 1: Fetch Issue
@@ -58,26 +74,37 @@ id = "fetch"
 [[phases.steps]]
 id = "1.1"
 description = "Get issue (includeRelations)"
+suggested_tools = ["mcp__linear__get_issue"]
+artifact_schema = { issue_id = "string (from claim/-0.1)", title = "string", description_md = "string (markdown body)", priority = "int (0-4)", estimate = "int | null", state_id = "string", labels = "array of {id, name}", project_id = "string | null", cycle_id = "string | null", relations_included = "bool" }
 
 [[phases.steps]]
 id = "1.2"
 description = "Get comments"
+suggested_tools = ["mcp__linear__list_comments"]
+artifact_schema = { issue_id = "string (from 1.1)", comments = "array of {id, body, user_id, user_name, created_at, is_resolved}", comment_count = "int", has_qa_failed_comment = "bool — flag for prior QA failures" }
 
 [[phases.steps]]
 id = "1.3"
 description = "Get attachments (+ Loom download sub-step)"
+suggested_tools = ["mcp__linear__list_attachments", "mcp__loom__get_video_info", "mcp__loom__get_transcript", "mcp__loom__download_video"]
+artifact_schema = { issue_id = "string (from 1.1)", attachments = "array of {id, url, title, source_type}", loom_videos = "array of {url, video_id, transcript_excerpt, downloaded_path}", screenshots = "array of {url, filename}" }
 
 [[phases.steps]]
 id = "1.4"
 description = "Get relations"
+suggested_tools = ["mcp__linear__list_issue_relations", "mcp__linear__get_issue_relations"]
+artifact_schema = { issue_id = "string (from 1.1)", blocked_by = "array of {identifier, state_name}", blocks = "array of {identifier, state_name}", related = "array of {identifier, state_name}", duplicate_of = "string | null (identifier)", parent_id = "string | null" }
 
 [[phases.steps]]
 id = "1.5"
 description = "Summarize issue context"
+suggested_tools = ["mcp__sequential-thinking__sequentialthinking"]
+artifact_schema = { issue_id = "string (from 1.1)", summary_md = "string — 3-5 sentence agent-readable digest of title + description + key comments + Loom transcripts + relations", inferred_intent = "string — what the work actually needs to accomplish, one sentence", risk_flags = "array of strings — e.g. 'touches production data', 'requires breaking schema change'" }
 
 [[phases.steps]]
 id = "1.6"
 description = "Proceed to intelligence phase"
+artifact_schema = { issue_id = "string (from 1.1)", fetch_phase_complete = "bool — must be true", ready_for_intelligence = "bool", reason_blocked = "string | null — populated only if ready_for_intelligence is false" }
 
 # ============================================================================
 # Phase 1.5: Intelligence + Transformation
@@ -89,59 +116,87 @@ id = "intelligence"
 [[phases.steps]]
 id = "1.5.1"
 description = "Assess complexity (sizing)"
+suggested_tools = ["mcp__sequential-thinking__sequentialthinking"]
+artifact_schema = { issue_id = "string (from fetch/1.1)", size = "string (XS|S|M|L|XL)", reasoning = "string — why this size", touches = "array of strings — subsystems likely affected", needs_decomposition = "bool — true iff size is L or XL" }
 
 [[phases.steps]]
 id = "1.5.2"
 description = "Auto-decomposition (if Large)"
 blocker = true
+suggested_tools = ["mcp__linear__batch_create_issues", "mcp__sequential-thinking__sequentialthinking"]
+artifact_schema = { parent_issue_id = "string (from fetch/1.1)", decomposed = "bool — false when size < L (no-op success)", child_issues = "array of {identifier, title, estimate}", child_count = "int" }
 
 [[phases.steps]]
 id = "1.5.3a"
 description = "Transform — priority"
+suggested_tools = ["mcp__linear__update_issue"]
+artifact_schema = { issue_id = "string (from fetch/1.1)", priority_before = "int", priority_after = "int (0-4 — 1=urgent, 2=high, 3=med, 4=low)", reason = "string" }
 
 [[phases.steps]]
 id = "1.5.3b"
 description = "Transform — type label"
+suggested_tools = ["mcp__linear__list_labels", "mcp__linear__add_issue_label"]
+artifact_schema = { issue_id = "string (from fetch/1.1)", type_label = "string (feature|bug|chore|spike|docs|refactor)", label_id = "string (UUID, applied)", was_already_present = "bool" }
 
 [[phases.steps]]
 id = "1.5.3c"
 description = "Transform — area label"
+suggested_tools = ["mcp__linear__list_labels", "mcp__linear__add_issue_label"]
+artifact_schema = { issue_id = "string (from fetch/1.1)", area_label = "string (frontend|backend|infra|design|api|data|ops)", label_id = "string", was_already_present = "bool" }
 
 [[phases.steps]]
 id = "1.5.3d"
 description = "Transform — scope label"
+suggested_tools = ["mcp__linear__list_labels", "mcp__linear__add_issue_label"]
+artifact_schema = { issue_id = "string (from fetch/1.1)", scope_label = "string — narrow|moderate|broad|cross-cutting", label_id = "string", was_already_present = "bool" }
 
 [[phases.steps]]
 id = "1.5.3e"
 description = "Transform — estimate"
+suggested_tools = ["mcp__linear__update_issue"]
+artifact_schema = { issue_id = "string (from fetch/1.1)", estimate_before = "int | null", estimate_after = "int (Fibonacci-ish 1|2|3|5|8|13)", reasoning = "string — sized from 1.5.1 result" }
 
 [[phases.steps]]
 id = "1.5.3f"
 description = "Transform — acceptance criteria"
+suggested_tools = ["mcp__linear__update_issue"]
+artifact_schema = { issue_id = "string (from fetch/1.1)", criteria_added = "array of strings — bullet-form acceptance criteria appended to description", criteria_already_present = "bool", description_updated = "bool" }
 
 [[phases.steps]]
 id = "1.5.3g"
 description = "Transform — project"
+suggested_tools = ["mcp__linear__list_projects", "mcp__linear__update_issue"]
+artifact_schema = { issue_id = "string (from fetch/1.1)", project_id_before = "string | null", project_id_after = "string | null", project_name = "string | null", matched_by = "string — 'inferred-from-area' | 'inferred-from-text' | 'unchanged'" }
 
 [[phases.steps]]
 id = "1.5.3h"
 description = "Transform — cycle"
+suggested_tools = ["mcp__linear__list_cycles", "mcp__linear__get_active_cycle", "mcp__linear__update_issue"]
+artifact_schema = { issue_id = "string (from fetch/1.1)", cycle_id_before = "string | null", cycle_id_after = "string | null", cycle_name = "string | null — usually the active cycle when assigning self-claimed work" }
 
 [[phases.steps]]
 id = "1.5.3i"
 description = "Transform — relations search"
+suggested_tools = ["mcp__linear__search", "mcp__linear__create_issue_relation"]
+artifact_schema = { issue_id = "string (from fetch/1.1)", search_queries = "array of strings — terms derived from title + summary", candidate_relations = "array of {identifier, suggested_relation_type, similarity}", relations_added = "array of {identifier, relation_type}" }
 
 [[phases.steps]]
 id = "1.5.3j"
 description = "Transform — description quality"
+suggested_tools = ["mcp__linear__update_issue", "mcp__sequential-thinking__sequentialthinking"]
+artifact_schema = { issue_id = "string (from fetch/1.1)", quality_before = "string (poor|fair|good)", quality_after = "string (poor|fair|good)", description_rewritten = "bool", reasoning_md = "string — captured for audit trail" }
 
 [[phases.steps]]
 id = "1.5.3k"
 description = "Transform — subscribe"
+suggested_tools = ["mcp__linear__subscribe_to_issue"]
+artifact_schema = { issue_id = "string (from fetch/1.1)", viewer_id = "string (from claim/0.2)", was_already_subscribed = "bool", subscribed = "bool — must be true on completion" }
 
 [[phases.steps]]
 id = "1.5.3l"
 description = "Transform — acknowledge comments"
+suggested_tools = ["mcp__linear__create_comment"]
+artifact_schema = { issue_id = "string (from fetch/1.1)", ack_comment_id = "string | null — only emitted if prior unread comments exist", ack_body_md = "string — agent's read-receipt + summary of plan", skipped_reason = "string | null — e.g. 'no comments to acknowledge'" }
 
 # ============================================================================
 # Phase 1.75: Plan Document (conditional — skipped for Small)
@@ -153,22 +208,32 @@ id = "plan-doc"
 [[phases.steps]]
 id = "1.75.1"
 description = "Enter plan mode (read-only analysis)"
+suggested_tools = ["EnterPlanMode"]
+artifact_schema = { issue_id = "string (from fetch/1.1)", plan_mode_entered = "bool", plan_file_path = "string — path to draft markdown plan", read_only = "bool — must be true while drafting" }
 
 [[phases.steps]]
 id = "1.75.2"
 description = "Format plan as markdown"
+suggested_tools = ["mcp__sequential-thinking__sequentialthinking"]
+artifact_schema = { issue_id = "string (from fetch/1.1)", plan_md = "string — full plan content with Context / Approach / Files / Verification sections", plan_file_path = "string (from 1.75.1)" }
 
 [[phases.steps]]
 id = "1.75.3"
 description = "Check idempotency (existing plan doc)"
+suggested_tools = ["mcp__linear__list_documents", "mcp__linear__get_document"]
+artifact_schema = { issue_id = "string (from fetch/1.1)", existing_doc_id = "string | null", should_create_new = "bool — false iff a current doc already covers this issue", existing_doc_url = "string | null" }
 
 [[phases.steps]]
 id = "1.75.4"
 description = "Create Linear document"
+suggested_tools = ["mcp__linear__create_document"]
+artifact_schema = { issue_id = "string (from fetch/1.1)", doc_id = "string (UUID)", doc_url = "string", doc_title = "string", created_at = "string (ISO-8601)", skipped = "bool — true when 1.75.3 reported existing doc" }
 
 [[phases.steps]]
 id = "1.75.5"
 description = "Link document from issue comment"
+suggested_tools = ["mcp__linear__create_comment"]
+artifact_schema = { issue_id = "string (from fetch/1.1)", doc_url = "string (from 1.75.4 or 1.75.3)", comment_id = "string", comment_body_md = "string — typically '📋 Plan: <url>'" }
 
 # ============================================================================
 # Phase 2: Worktree + Implementation
@@ -180,32 +245,44 @@ id = "worktree"
 [[phases.steps]]
 id = "2.1"
 description = "Determine branch name"
+artifact_schema = { issue_id = "string (from fetch/1.1)", identifier = "string (e.g. FPCRM-123)", type_label = "string (from intelligence/1.5.3b)", branch_name = "string — '<type>/<identifier-lower>-<kebab-slug>'", base_ref = "string — usually 'main'" }
 
 [[phases.steps]]
 id = "2.2"
 description = "Create git worktree"
+suggested_tools = ["EnterWorktree"]
+artifact_schema = { branch_name = "string (from 2.1)", worktree_path = "string (absolute)", base_ref = "string", created_at = "string (ISO-8601)" }
 
 [[phases.steps]]
 id = "2.3"
 description = "Install dependencies"
+suggested_tools = ["Bash:pnpm install", "Bash:npm install", "Bash:cargo fetch"]
+artifact_schema = { worktree_path = "string (from 2.2)", package_managers_run = "array of strings", install_succeeded = "bool", install_log_tail = "string — last ~30 lines for evidence" }
 
 [[phases.steps]]
 id = "2.4"
 description = "Run server test baseline"
 blocker = true
+suggested_tools = ["Bash:cargo test --workspace", "Bash:pnpm test", "Bash:npm test"]
+artifact_schema = { worktree_path = "string (from 2.2)", suite = "string ('server'|'rust'|'backend')", passed = "int", failed = "int", skipped = "int", baseline_recorded = "bool — must be true to advance", log_tail = "string" }
 
 [[phases.steps]]
 id = "2.5"
 description = "Run client test baseline"
 blocker = true
+suggested_tools = ["Bash:pnpm --filter client test", "Bash:npm --workspace client test"]
+artifact_schema = { worktree_path = "string (from 2.2)", suite = "string ('client'|'frontend')", passed = "int", failed = "int", skipped = "int", baseline_recorded = "bool — must be true to advance", log_tail = "string" }
 
 [[phases.steps]]
 id = "2.6"
 description = "Post baseline comment to Linear"
+suggested_tools = ["mcp__linear__create_comment"]
+artifact_schema = { issue_id = "string (from fetch/1.1)", comment_id = "string", server_baseline = "string ('PASS'|'FAIL: N failures')", client_baseline = "string ('PASS'|'FAIL: N failures')" }
 
 [[phases.steps]]
 id = "2.7"
 description = "Implement changes"
+artifact_schema = { worktree_path = "string (from 2.2)", files_changed = "array of strings (relative paths)", lines_added = "int", lines_removed = "int", commits = "array of {sha, message}", note = "step is the actual user/agent code work; artifact captures the diff shape so judge can grade it" }
 
 # ============================================================================
 # Phase 3: Review — 6-Layer Pipeline
@@ -220,77 +297,104 @@ id = "review"
 id = "3.L0.1"
 description = "Run server tests post-implementation"
 blocker = true
+suggested_tools = ["Bash:cargo test --workspace", "Bash:pnpm test"]
+artifact_schema = { worktree_path = "string (from worktree/2.2)", passed = "int", failed = "int", suite = "string", regressions_vs_baseline = "array of strings — new failures since worktree/2.4", log_tail = "string" }
 
 [[phases.steps]]
 id = "3.L0.2"
 description = "Run client tests"
 blocker = true
+suggested_tools = ["Bash:pnpm --filter client test"]
+artifact_schema = { worktree_path = "string (from worktree/2.2)", passed = "int", failed = "int", regressions_vs_baseline = "array of strings — new failures since worktree/2.5", log_tail = "string" }
 
 [[phases.steps]]
 id = "3.L0.3"
 description = "Compare against baseline"
 blocker = true
+artifact_schema = { server_baseline = "object (from worktree/2.4)", server_current = "object (from 3.L0.1)", client_baseline = "object (from worktree/2.5)", client_current = "object (from 3.L0.2)", no_regressions = "bool — must be true", regression_summary = "string | null" }
 
 [[phases.steps]]
 id = "3.L0.4"
 description = "Write new tests"
+suggested_tools = ["mcp__agents__test_generator"]
+artifact_schema = { files_added = "array of strings (test file paths)", test_count = "int", coverage_delta_pct = "number — change in coverage from this step's additions", linked_to_changes = "bool — true iff new tests exercise files_changed from worktree/2.7" }
 
 [[phases.steps]]
 id = "3.L0.5"
 description = "Confirm all pass"
 blocker = true
+suggested_tools = ["Bash:cargo test --workspace", "Bash:pnpm test"]
+artifact_schema = { full_suite_run = "bool", total_passed = "int", total_failed = "int — must be 0", layer_0_gate_passed = "bool — must be true to advance to L1" }
 
 # --- Layer 1: Code Review Agent ---
 
 [[phases.steps]]
 id = "3.L1.1"
 description = "Spawn code-reviewer agent"
+suggested_tools = ["mcp__agents__code_reviewer"]
+artifact_schema = { worktree_path = "string (from worktree/2.2)", agent_session_id = "string", lenses_run = "array of strings — security|performance|tests|style|accessibility", verdicts = "array of {lens, verdict (pass|fail|concern), severity, evidence}" }
 
 [[phases.steps]]
 id = "3.L1.2"
 description = "Fix all issues found"
+artifact_schema = { issues_to_fix = "array of {lens, severity, file, line, summary}", fixes_applied = "array of {file, lines, before, after}", remaining_concerns = "array of strings — acceptable concerns left as-is with reasoning" }
 
 [[phases.steps]]
 id = "3.L1.3"
 description = "Confirm clean"
+suggested_tools = ["mcp__agents__code_reviewer"]
+artifact_schema = { second_pass_verdicts = "array of {lens, verdict}", all_lenses_pass_or_acceptable = "bool — must be true to advance", layer_1_gate_passed = "bool" }
 
 # --- Layer 2: Codex (GPT-5.3) ---
 
 [[phases.steps]]
 id = "3.L2.1"
 description = "Get diff"
+suggested_tools = ["Bash:git diff main...HEAD"]
+artifact_schema = { worktree_path = "string (from worktree/2.2)", diff_text = "string — full unified diff", files_changed = "int", lines_added = "int", lines_removed = "int" }
 
 [[phases.steps]]
 id = "3.L2.2"
 description = "Send to Codex"
 blocker = true
+suggested_tools = ["mcp__codex__codex"]
+artifact_schema = { diff_size_chars = "int (from 3.L2.1 diff_text length)", codex_session_id = "string", model_id = "string — usually 'gpt-5.3'", request_id = "string", started_at = "string (ISO-8601)" }
 
 [[phases.steps]]
 id = "3.L2.3"
 description = "Parse Codex response"
+artifact_schema = { codex_session_id = "string (from 3.L2.2)", findings = "array of {severity (critical|high|medium|low), category, file, line, summary, suggestion}", finding_counts_by_severity = "object — {critical: N, high: N, medium: N, low: N}" }
 
 [[phases.steps]]
 id = "3.L2.4"
 description = "Fix critical/high issues"
+artifact_schema = { findings_addressed = "array of {finding_id, file, fix_summary}", findings_acknowledged_but_skipped = "array of {finding_id, reason}", critical_remaining = "int — must be 0 to pass 3.L2.5", high_remaining = "int" }
 
 [[phases.steps]]
 id = "3.L2.5"
 description = "Confirm gate passed"
 blocker = true
+artifact_schema = { critical_remaining = "int (from 3.L2.4) — must be 0", high_remaining = "int (from 3.L2.4) — must be 0", layer_2_gate_passed = "bool — must be true to advance to L3" }
 
 # --- Layer 3: PR ---
 
 [[phases.steps]]
 id = "3.L3.1"
 description = "Push branch"
+suggested_tools = ["Bash:git push -u origin"]
+artifact_schema = { branch_name = "string (from worktree/2.1)", remote = "string — usually 'origin'", pushed_sha = "string (HEAD sha)", remote_url = "string" }
 
 [[phases.steps]]
 id = "3.L3.2"
 description = "Create PR"
+suggested_tools = ["mcp__github__pr_create"]
+artifact_schema = { branch_name = "string (from 3.L3.1)", pr_number = "int", pr_url = "string", title = "string", body_md = "string — must contain 'Ref <identifier>' not 'Fixes' to avoid Linear auto-Done", base_ref = "string" }
 
 [[phases.steps]]
 id = "3.L3.3"
 description = "Link PR to Linear issue"
+suggested_tools = ["mcp__linear__link_attachment_github_pr"]
+artifact_schema = { issue_id = "string (from fetch/1.1)", pr_url = "string (from 3.L3.2)", attachment_id = "string (UUID)", linear_state_after = "string — should be 'Code Review' after merge via .github/workflows/linear-on-merge.yml" }
 
 # --- Layer 4: CI + CodeRabbit ---
 
@@ -298,14 +402,19 @@ description = "Link PR to Linear issue"
 id = "3.L4.1"
 description = "Wait for CI"
 blocker = true
+suggested_tools = ["mcp__github__workflow_list_runs", "Bash:gh pr checks"]
+artifact_schema = { pr_number = "int (from 3.L3.2)", check_runs = "array of {name, status, conclusion}", all_required_passed = "bool — must be true", failed_check_names = "array of strings", waited_seconds = "int" }
 
 [[phases.steps]]
 id = "3.L4.2"
 description = "Read CodeRabbit comments"
+suggested_tools = ["Bash:gh api repos/.../pulls/N/comments"]
+artifact_schema = { pr_number = "int (from 3.L3.2)", coderabbit_comments = "array of {file, line, body_md, severity_inferred}", comment_count = "int" }
 
 [[phases.steps]]
 id = "3.L4.3"
 description = "Fix all CI/CodeRabbit issues"
+artifact_schema = { ci_failures_fixed = "array of {check_name, fix_summary}", coderabbit_comments_addressed = "array of {comment_id, fix_summary}", pushed_followup_sha = "string | null", layer_4_gate_passed = "bool — true iff CI green AND coderabbit comments either fixed or explicitly dismissed" }
 
 # --- Layer 5: Final Gate ---
 
@@ -313,10 +422,13 @@ description = "Fix all CI/CodeRabbit issues"
 id = "3.L5.1"
 description = "Verify all layers pass"
 blocker = true
+artifact_schema = { layer_0_gate = "bool (from 3.L0.5)", layer_1_gate = "bool (from 3.L1.3)", layer_2_gate = "bool (from 3.L2.5)", layer_3_pr_ready = "bool (from 3.L3.3)", layer_4_gate = "bool (from 3.L4.3)", all_layers_pass = "bool — must be true to merge" }
 
 [[phases.steps]]
 id = "3.L5.2"
 description = "Merge PR"
+suggested_tools = ["mcp__github__pr_merge"]
+artifact_schema = { pr_number = "int (from 3.L3.2)", merge_method = "string (squash|merge|rebase)", merge_commit_sha = "string", merged_at = "string (ISO-8601)", linear_transition_triggered = "bool — true iff linear-on-merge.yml fired and moved issue to QA Testing" }
 
 # ============================================================================
 # Phase 3.5: QA Handoff
@@ -330,116 +442,165 @@ id = "qa-handoff"
 [[phases.steps]]
 id = "3.5.0.1"
 description = "Label check (frontend vs backend)"
+suggested_tools = ["mcp__linear__get_issue"]
+artifact_schema = { issue_id = "string (from fetch/1.1)", area_label = "string (from intelligence/1.5.3c)", needs_browser_smoke = "bool — true iff area_label is 'frontend' or touches UI surface" }
 
 [[phases.steps]]
 id = "3.5.0.2"
 description = "Prerequisites check (cloudflared)"
+suggested_tools = ["Bash:which cloudflared", "Bash:cloudflared --version"]
+artifact_schema = { cloudflared_installed = "bool", cloudflared_version = "string | null", skipped_reason = "string | null — populated when 3.5.0.1 needs_browser_smoke is false" }
 
 [[phases.steps]]
 id = "3.5.0.3"
 description = "Start Cloudflare tunnel"
+suggested_tools = ["Bash:cloudflared tunnel --url http://localhost:PORT"]
+artifact_schema = { local_url = "string (http://localhost:PORT)", tunnel_url = "string (https://*.trycloudflare.com)", tunnel_pid = "int", started_at = "string (ISO-8601)" }
 
 [[phases.steps]]
 id = "3.5.0.4"
 description = "Create Steel session"
+suggested_tools = ["mcp__browserbase__create_session"]
+artifact_schema = { tunnel_url = "string (from 3.5.0.3)", session_id = "string (UUID)", live_view_url = "string", recording_enabled = "bool — should be true so judge gets a recording" }
 
 [[phases.steps]]
 id = "3.5.0.5"
 description = "Navigate and screenshot homepage"
+suggested_tools = ["mcp__browserbase__navigate", "mcp__browserbase__screenshot"]
+artifact_schema = { session_id = "string (from 3.5.0.4)", url_visited = "string (from 3.5.0.3 tunnel_url)", screenshot_path = "string (absolute)", page_loaded = "bool" }
 
 [[phases.steps]]
 id = "3.5.0.6"
 description = "Login as test bot"
+suggested_tools = ["mcp__browserbase__navigate", "mcp__browserbase__fill", "mcp__browserbase__click", "mcp__doppler__get_secret"]
+artifact_schema = { session_id = "string (from 3.5.0.4)", login_url = "string", test_user_email = "string — from project config qa.test_user", logged_in = "bool", post_login_screenshot = "string (path)" }
 
 [[phases.steps]]
 id = "3.5.0.7"
 description = "Navigate to feature"
+suggested_tools = ["mcp__browserbase__navigate", "mcp__browserbase__screenshot"]
+artifact_schema = { session_id = "string (from 3.5.0.4)", feature_url = "string", page_loaded = "bool", screenshot_path = "string" }
 
 [[phases.steps]]
 id = "3.5.0.8"
 description = "Verify elements + test flow"
+suggested_tools = ["mcp__browserbase__wait_for_selector", "mcp__browserbase__element_exists", "mcp__browserbase__click", "mcp__browserbase__get_text"]
+artifact_schema = { session_id = "string (from 3.5.0.4)", elements_verified = "array of {selector, exists, visible}", flow_steps_passed = "int", flow_steps_failed = "int", console_errors = "array of strings", final_screenshot = "string (path)" }
 
 [[phases.steps]]
 id = "3.5.0.9"
 description = "Release session + kill cloudflared"
+suggested_tools = ["mcp__browserbase__close_tab", "Bash:taskkill", "Bash:kill"]
+artifact_schema = { session_id = "string (from 3.5.0.4)", session_released = "bool", recording_url = "string — Browserbase session recording for judge", tunnel_killed = "bool", tunnel_pid_terminated = "int (from 3.5.0.3 tunnel_pid)" }
 
 [[phases.steps]]
 id = "3.5.0.10"
 description = "Local Steel gate"
 blocker = true
+artifact_schema = { flow_pass = "bool (from 3.5.0.8)", console_clean = "bool — no errors in 3.5.0.8 console_errors", recording_url = "string (from 3.5.0.9)", local_steel_gate_passed = "bool — must be true to advance to deploy" }
 
 # --- Step 1: Deploy ---
 
 [[phases.steps]]
 id = "3.5.1.1"
 description = "Run deploy command"
+suggested_tools = ["Bash:pnpm deploy:staging", "mcp__vercel__redeploy", "mcp__railway__redeploy"]
+artifact_schema = { command_run = "string", deploy_target = "string ('staging'|'preview')", deploy_id = "string", deploy_url = "string", started_at = "string (ISO-8601)" }
 
 [[phases.steps]]
 id = "3.5.1.2"
 description = "Verify deployment health"
+suggested_tools = ["Bash:curl", "mcp__vercel__get_deployment", "mcp__railway__get_deployment"]
+artifact_schema = { deploy_id = "string (from 3.5.1.1)", deploy_status = "string ('ready'|'error'|'building')", health_check_url = "string", health_status_code = "int — usually 200", health_response_body = "string (excerpt)", deploy_healthy = "bool — must be true to advance" }
 
 # --- Step 2: Staging Steel Smoke Test ---
 
 [[phases.steps]]
 id = "3.5.2.1"
 description = "Create Steel session"
+suggested_tools = ["mcp__browserbase__create_session"]
+artifact_schema = { staging_url = "string (from 3.5.1.1 deploy_url)", session_id = "string", live_view_url = "string", recording_enabled = "bool — true" }
 
 [[phases.steps]]
 id = "3.5.2.2"
 description = "Login as test bot on staging"
+suggested_tools = ["mcp__browserbase__navigate", "mcp__browserbase__fill", "mcp__browserbase__click", "mcp__doppler__get_secret"]
+artifact_schema = { session_id = "string (from 3.5.2.1)", test_user_email = "string", logged_in = "bool", post_login_screenshot = "string (path)" }
 
 [[phases.steps]]
 id = "3.5.2.3"
 description = "Navigate to feature"
+suggested_tools = ["mcp__browserbase__navigate", "mcp__browserbase__screenshot"]
+artifact_schema = { session_id = "string (from 3.5.2.1)", feature_url = "string", page_loaded = "bool", screenshot_path = "string" }
 
 [[phases.steps]]
 id = "3.5.2.4"
 description = "Verify elements + test flow"
+suggested_tools = ["mcp__browserbase__wait_for_selector", "mcp__browserbase__element_exists", "mcp__browserbase__click", "mcp__browserbase__get_text"]
+artifact_schema = { session_id = "string (from 3.5.2.1)", elements_verified = "array of {selector, exists, visible}", flow_steps_passed = "int", flow_steps_failed = "int", console_errors = "array of strings", final_screenshot = "string (path)" }
 
 [[phases.steps]]
 id = "3.5.2.5"
 description = "Release session"
+suggested_tools = ["mcp__browserbase__close_tab"]
+artifact_schema = { session_id = "string (from 3.5.2.1)", session_released = "bool", recording_url = "string — staging recording for judge" }
 
 [[phases.steps]]
 id = "3.5.2.6"
 description = "Staging Steel gate"
 blocker = true
+artifact_schema = { flow_pass = "bool (from 3.5.2.4)", console_clean = "bool", recording_url = "string (from 3.5.2.5)", staging_steel_gate_passed = "bool — must be true to advance to Loom" }
 
 # --- Step 3: Loom Pipeline ---
 
 [[phases.steps]]
 id = "3.5.3.1"
 description = "Collect screenshots"
+artifact_schema = { local_screenshots = "array of strings (paths from 3.5.0.5/7/8)", staging_screenshots = "array of strings (paths from 3.5.2.3/4)", combined_count = "int" }
 
 [[phases.steps]]
 id = "3.5.3.2"
 description = "Check ffmpeg availability"
+suggested_tools = ["Bash:ffmpeg -version"]
+artifact_schema = { ffmpeg_installed = "bool", ffmpeg_version = "string | null", skipped_reason = "string | null — populated when ffmpeg missing; pipeline falls back to direct Browserbase recording" }
 
 [[phases.steps]]
 id = "3.5.3.3"
 description = "Create video from screenshots"
+suggested_tools = ["Bash:ffmpeg -framerate ... -i screenshots/*.png out.mp4"]
+artifact_schema = { input_screenshots = "array of strings (from 3.5.3.1 combined)", output_video_path = "string", duration_seconds = "number", width = "int", height = "int" }
 
 [[phases.steps]]
 id = "3.5.3.4"
 description = "Upload to Loom"
+suggested_tools = ["mcp__loom__upload_video"]
+artifact_schema = { video_path = "string (from 3.5.3.3 output_video_path)", loom_video_id = "string", loom_title = "string — usually '<identifier>: <issue title>'", uploaded_at = "string (ISO-8601)" }
 
 [[phases.steps]]
 id = "3.5.3.5"
 description = "Get share URL"
+suggested_tools = ["mcp__loom__get_video_info"]
+artifact_schema = { loom_video_id = "string (from 3.5.3.4)", share_url = "string", embed_url = "string | null", thumbnail_url = "string | null" }
 
 # --- Steps 4-6: Linear Updates ---
 
 [[phases.steps]]
 id = "3.5.4"
 description = "Update Linear status to review"
+suggested_tools = ["mcp__linear__update_issue", "mcp__linear__get_workflow_states"]
+artifact_schema = { issue_id = "string (from fetch/1.1)", transitioned_from = "string — usually 'In Progress' or 'Code Review'", transitioned_to = "string — 'QA Testing'", state_id_after = "string (UUID)", note = "may be a no-op when linear-on-merge.yml already moved the issue" }
 
 [[phases.steps]]
 id = "3.5.5"
 description = "Assign to QA tester"
+suggested_tools = ["mcp__linear__update_issue", "mcp__linear__get_user_by_email"]
+artifact_schema = { issue_id = "string (from fetch/1.1)", qa_tester_email = "string — from project config qa.tester_email", qa_tester_id = "string (UUID)", assigned_from = "string (UUID, viewer)", assigned_to = "string (UUID, qa_tester_id)" }
 
 [[phases.steps]]
 id = "3.5.6"
 description = "Post implementation comment"
+suggested_tools = ["mcp__linear__create_comment"]
+artifact_schema = { issue_id = "string (from fetch/1.1)", comment_id = "string", comment_body_md = "string — includes PR link, Loom share_url, deploy_url, key changes summary", linear_handoff_complete = "bool" }
 
 # ============================================================================
 # Phase 4: Cleanup
@@ -451,15 +612,23 @@ id = "cleanup"
 [[phases.steps]]
 id = "4.1"
 description = "Remove worktree"
+suggested_tools = ["ExitWorktree", "Bash:git worktree remove"]
+artifact_schema = { worktree_path = "string (from worktree/2.2)", removed = "bool", remaining_worktrees = "array of strings", residual_files_warning = "string | null — populated when Windows file locks left a shell behind" }
 
 [[phases.steps]]
 id = "4.2"
 description = "Delete local branch"
+suggested_tools = ["Bash:git branch -d"]
+artifact_schema = { branch_name = "string (from worktree/2.1)", deleted = "bool", was_merged = "bool — must be true; -d refuses unmerged unless forced", final_sha = "string — last sha the branch pointed at, for audit" }
 
 [[phases.steps]]
 id = "4.3"
 description = "Prune stale references"
+suggested_tools = ["Bash:git fetch --prune", "Bash:git remote prune origin"]
+artifact_schema = { remote = "string — usually 'origin'", pruned_refs = "array of strings", remote_branches_remaining = "int" }
 
 [[phases.steps]]
 id = "4.4"
 description = "Confirm cleanup"
+suggested_tools = ["Bash:git worktree list", "Bash:git branch --list"]
+artifact_schema = { worktree_listed = "bool — false expected", branch_listed = "bool — false expected", cleanup_complete = "bool — must be true to mark linear skill cycle done", issue_id = "string (from fetch/1.1) — passed through for chain-end audit trail" }
