@@ -1,0 +1,47 @@
+# Template: quick-comment
+#
+# Just post a status comment on an existing Linear issue. No state
+# change, no worktree, no PR. Useful for "I'm blocked on X, posting
+# an update" or "the staging deploy I mentioned is now green" type
+# workflows where the agent's contribution is purely communication.
+#
+# This is the smallest viable template — proves the schema handles
+# 3-4 step packs as cleanly as the 50+ step ones.
+
+[template]
+id = "quick-comment"
+name = "Quick status comment"
+description = """
+Read an existing Linear issue, compose a status comment matching
+the agent's recent activity, post the comment. No state transition,
+no assignment change, no worktree.
+"""
+triggers = [
+    "comment on FPCRM-",
+    "post update on FPCRM-",
+    "status comment FPCRM-",
+    "leave a comment on the linear ticket",
+]
+estimate_minutes = 5
+catalog = "default"
+
+# Read the issue to get current state + recent activity context.
+# These steps are part of the fetch phase — we reuse them rather
+# than inventing a separate "comment" phase.
+[[template.steps]]
+ref = "linear.fetch.1.1"
+[[template.steps]]
+ref = "linear.fetch.1.2"
+
+# Acknowledge any prior comments the agent hasn't addressed (the
+# transform from intelligence phase, repurposed here as the only
+# transform we run for comment-only flows).
+[[template.steps]]
+ref = "linear.intelligence.1.5.3l"
+
+# Post the implementation/status comment. Reuses the existing
+# qa-handoff comment step — the difference between "QA handoff
+# comment" and "quick status comment" is the body content the
+# agent composes, not the API call shape.
+[[template.steps]]
+ref = "linear.qa-handoff.3.5.6"

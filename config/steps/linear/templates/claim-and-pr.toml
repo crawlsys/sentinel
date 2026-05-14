@@ -1,0 +1,157 @@
+# Template: claim-and-pr
+#
+# The most common multi-step recipe in the linear skill — pick up an
+# issue, claim it, implement a change in a worktree, run baseline +
+# post-impl tests, run Codex review, open a draft PR. Stops at L3
+# (PR creation). Does NOT include L4 (CI + CodeRabbit), L5 (merge),
+# Phase 3.5 (QA handoff), or Phase 4 (cleanup) — those run separately
+# once the human reviewer engages with the PR.
+#
+# Why stop at L3: opening a draft PR is the natural "I've done my
+# part, others now" handoff point. CI fires automatically; CodeRabbit
+# reviews automatically; the human reviewer comments and the
+# remaining layers fire when they engage. Bundling them into the
+# claim-and-pr template would force the agent to babysit a 30+
+# minute CI/review wait, which is the worst part of the workflow
+# for the agent to own.
+
+[template]
+id = "claim-and-pr"
+name = "Claim and open PR"
+description = """
+Pick up a Linear issue (claim guards + In Progress + assign self),
+fetch context, run intelligence transforms, create worktree with
+test baseline, implement, run post-impl tests + self-review + Codex
+review, push branch, open draft PR with `Ref FPCRM-XXX`. Stop there.
+"""
+triggers = [
+    "claim and pr",
+    "claim and open pr",
+    "pick up issue and open pr",
+    "claim FPCRM-",         # prefix-match — router substitutes the actual ticket ID
+    "draft pr for FPCRM-",
+]
+estimate_minutes = 45
+catalog = "default"
+
+# ─── Phase -0 + 0: claim ────────────────────────────────────────────
+[[template.steps]]
+ref = "linear.claim.-0.1"
+[[template.steps]]
+ref = "linear.claim.-0.2"
+[[template.steps]]
+ref = "linear.claim.-0.3"
+[[template.steps]]
+ref = "linear.claim.-0.4"
+[[template.steps]]
+ref = "linear.claim.0.1"
+[[template.steps]]
+ref = "linear.claim.0.2"
+[[template.steps]]
+ref = "linear.claim.0.3"
+[[template.steps]]
+ref = "linear.claim.0.4"
+
+# ─── Phase 1: fetch ─────────────────────────────────────────────────
+[[template.steps]]
+ref = "linear.fetch.1.1"
+[[template.steps]]
+ref = "linear.fetch.1.2"
+[[template.steps]]
+ref = "linear.fetch.1.3"
+[[template.steps]]
+ref = "linear.fetch.1.4"
+[[template.steps]]
+ref = "linear.fetch.1.5"
+[[template.steps]]
+ref = "linear.fetch.1.6"
+
+# ─── Phase 1.5: intelligence (sizing + transforms) ──────────────────
+# All transforms run — the router includes them all because the
+# Linear-skill convention is "fix every missing field on pickup,"
+# not "fix only what's about to break."
+[[template.steps]]
+ref = "linear.intelligence.1.5.1"
+[[template.steps]]
+ref = "linear.intelligence.1.5.2"
+[[template.steps]]
+ref = "linear.intelligence.1.5.3a"
+[[template.steps]]
+ref = "linear.intelligence.1.5.3b"
+[[template.steps]]
+ref = "linear.intelligence.1.5.3c"
+[[template.steps]]
+ref = "linear.intelligence.1.5.3d"
+[[template.steps]]
+ref = "linear.intelligence.1.5.3e"
+[[template.steps]]
+ref = "linear.intelligence.1.5.3f"
+[[template.steps]]
+ref = "linear.intelligence.1.5.3g"
+[[template.steps]]
+ref = "linear.intelligence.1.5.3h"
+[[template.steps]]
+ref = "linear.intelligence.1.5.3i"
+[[template.steps]]
+ref = "linear.intelligence.1.5.3j"
+[[template.steps]]
+ref = "linear.intelligence.1.5.3k"
+[[template.steps]]
+ref = "linear.intelligence.1.5.3l"
+
+# Phase 1.75 (plan-doc) is conditionally skipped for Small issues —
+# the router decides at runtime based on 1.5.1's sizing output. Not
+# listed here; the planner inserts it when needed.
+
+# ─── Phase 2: worktree + implementation ─────────────────────────────
+[[template.steps]]
+ref = "linear.worktree.2.1"
+[[template.steps]]
+ref = "linear.worktree.2.2"
+[[template.steps]]
+ref = "linear.worktree.2.3"
+[[template.steps]]
+ref = "linear.worktree.2.4"
+[[template.steps]]
+ref = "linear.worktree.2.5"
+[[template.steps]]
+ref = "linear.worktree.2.6"
+[[template.steps]]
+ref = "linear.worktree.2.7"
+
+# ─── Phase 3: review (L0-L3 only) ───────────────────────────────────
+# Stop at L3.3 (PR linked to Linear). L4, L4.5, L5 are owned by the
+# human reviewer + CI; agent's job is to make sure the PR is
+# review-ready.
+[[template.steps]]
+ref = "linear.review.3.L0.1"
+[[template.steps]]
+ref = "linear.review.3.L0.2"
+[[template.steps]]
+ref = "linear.review.3.L0.3"
+[[template.steps]]
+ref = "linear.review.3.L0.4"
+[[template.steps]]
+ref = "linear.review.3.L0.5"
+[[template.steps]]
+ref = "linear.review.3.L1.1"
+[[template.steps]]
+ref = "linear.review.3.L1.2"
+[[template.steps]]
+ref = "linear.review.3.L1.3"
+[[template.steps]]
+ref = "linear.review.3.L2.1"
+[[template.steps]]
+ref = "linear.review.3.L2.2"
+[[template.steps]]
+ref = "linear.review.3.L2.3"
+[[template.steps]]
+ref = "linear.review.3.L2.4"
+[[template.steps]]
+ref = "linear.review.3.L2.5"
+[[template.steps]]
+ref = "linear.review.3.L3.1"
+[[template.steps]]
+ref = "linear.review.3.L3.2"
+[[template.steps]]
+ref = "linear.review.3.L3.3"
