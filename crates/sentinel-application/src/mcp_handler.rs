@@ -1842,4 +1842,259 @@ mod step_tools_tests {
             "QA failure must carry a rejection_reason for the audit trail"
         );
     }
+
+    // ─────────────────────────────────────────────────────────────────
+    // M5.3: Race conditions + batch ops stress test (sentinel #44)
+    // ─────────────────────────────────────────────────────────────────
+    //
+    // Three concurrency scenarios sentinel must handle without losing
+    // proof entries or corrupting the chain:
+    //
+    // 1. Many concurrent submissions, DIFFERENT skills, same handler
+    //    instance. Each skill gets its own chain so there's no shared
+    //    chain to corrupt — but the RwLock around SessionState gates
+    //    every write. If the engine grabs the write lock incorrectly
+    //    (e.g. locks before validating, or releases between read and
+    //    write) entries can be lost.
+    //
+    // 2. Many concurrent submissions, SAME skill, same handler. Every
+    //    write contends for the same chain. The engine must serialize
+    //    these so each entry sees a coherent prev_hash. If two
+    //    submissions race on prev_hash computation, two entries can
+    //    end up with the same prev_hash — a chain fork. The test must
+    //    catch that.
+    //
+    // 3. A "batch" of N submissions sequentially against the same
+    //    chain — proves the chain stays linear when not under
+    //    concurrent pressure, and exposes leaks in the engine's
+    //    bookkeeping that only manifest with depth (e.g. quadratic
+    //    state growth that fails at N=100 but not N=10).
+    //
+    // Tests use the existing handler + state types — no new mocks.
+
+    #[tokio::test]
+    async fn m5_3_concurrent_different_skills_seals_all_chains() {
+        // 50 skills × 1 submission each, fired in parallel through one
+        // shared handler. If the engine has lock-ordering bugs that
+        // cause writes to be dropped, we'll lose chains here.
+        let state = Arc::new(RwLock::new(SessionState::new("m5-3-multi-skill")));
+        let engine = Arc::new(ProofEngine::new(state.clone(), Arc::new(StubJudge)));
+        let handler = Arc::new(McpHandler::new(state.clone(), engine));
+
+        let skill_count: usize = 50;
+        let mut futures = Vec::with_capacity(skill_count);
+        for i in 0..skill_count {
+            let h = Arc::clone(&handler);
+            futures.push(tokio::spawn(async move {
+                let result = h
+                    .handle(McpToolCall {
+                        name: "sentinel__submit_step_complete".into(),
+                        arguments: serde_json::json!({
+                            "skill": format!("stress_skill_{i:03}"),
+                            "phase_id": "claim",
+                            "step_id": "0.1",
+                            "step_description": format!("concurrent submission for skill {i}"),
+                            "verdict": {
+                                "sufficient": true,
+                                "confidence": 0.9,
+                                "reasoning": "stress test",
+                            },
+                            "artifact": {"index": i},
+                        }),
+                    })
+                    .await;
+                (i, result.success)
+            }));
+        }
+
+        let mut results: Vec<(usize, bool)> = Vec::with_capacity(futures.len());
+        for f in futures {
+            results.push(f.await.expect("task panicked"));
+        }
+
+        // Every single submission must succeed.
+        let failures: Vec<usize> = results
+            .iter()
+            .filter_map(|(i, ok)| if !ok { Some(*i) } else { None })
+            .collect();
+        assert!(
+            failures.is_empty(),
+            "{} submissions failed under concurrent load: {:?}",
+            failures.len(),
+            failures
+        );
+
+        // Every skill must end up with exactly one chain entry.
+        let s = state.read().await;
+        assert_eq!(
+            s.proof_chains.len(),
+            skill_count,
+            "every skill must have its own chain"
+        );
+        for i in 0..skill_count {
+            let key = format!("stress_skill_{i:03}");
+            let chain = s.proof_chains.get(&key).unwrap_or_else(|| {
+                panic!("chain for {key} missing — entry lost under concurrent load");
+            });
+            assert_eq!(
+                chain.entries.len(),
+                1,
+                "chain for {key} has wrong entry count: {}",
+                chain.entries.len()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn m5_3_concurrent_same_skill_does_not_fork_chain() {
+        // 30 submissions to the SAME skill, all fired in parallel. The
+        // engine must serialize the writes; the final chain must
+        // contain exactly 30 entries, with UNIQUE combined_hashes
+        // (chain fork → duplicate prev_hash → duplicate combined_hash).
+        let state = Arc::new(RwLock::new(SessionState::new("m5-3-same-skill")));
+        let engine = Arc::new(ProofEngine::new(state.clone(), Arc::new(StubJudge)));
+        let handler = Arc::new(McpHandler::new(state.clone(), engine));
+
+        let submission_count: usize = 30;
+        let mut futures = Vec::with_capacity(submission_count);
+        for i in 0..submission_count {
+            let h = Arc::clone(&handler);
+            futures.push(tokio::spawn(async move {
+                h.handle(McpToolCall {
+                    name: "sentinel__submit_step_complete".into(),
+                    arguments: serde_json::json!({
+                        "skill": "linear",
+                        "phase_id": "claim",
+                        // Unique step_id per submission so the engine
+                        // doesn't reject as duplicate-step. Real-world
+                        // concurrent calls would also have distinct
+                        // step_ids since each step is a different unit
+                        // of work.
+                        "step_id": format!("0.{i}"),
+                        "step_description": format!("concurrent step {i}"),
+                        "verdict": {
+                            "sufficient": true,
+                            "confidence": 0.9,
+                            "reasoning": "stress",
+                        },
+                        "artifact": {"index": i},
+                    }),
+                })
+                .await
+            }));
+        }
+
+        let mut results = Vec::with_capacity(futures.len());
+        for f in futures {
+            results.push(f.await.expect("task panicked"));
+        }
+        let succeeded = results.iter().filter(|r| r.success).count();
+        assert_eq!(
+            succeeded, submission_count,
+            "all {submission_count} concurrent submissions to one skill must succeed"
+        );
+
+        let s = state.read().await;
+        let chain = s.proof_chains.get("linear").expect("chain exists");
+        assert_eq!(
+            chain.entries.len(),
+            submission_count,
+            "chain must have exactly one entry per submission"
+        );
+
+        // Hash uniqueness across the entire chain.
+        let hashes: Vec<&str> = chain
+            .entries
+            .iter()
+            .filter_map(|e| match e {
+                sentinel_domain::proof::ProofEntry::Step(s) => Some(s.combined_hash.as_str()),
+                _ => None,
+            })
+            .collect();
+        let unique_hashes: std::collections::HashSet<&str> =
+            hashes.iter().copied().collect();
+        assert_eq!(
+            unique_hashes.len(),
+            hashes.len(),
+            "all {} chain entries must have distinct combined_hashes (no fork)",
+            hashes.len()
+        );
+
+        // prev_hash chain integrity: every entry's prev_hash must match
+        // the previous entry's combined_hash, except the first which
+        // points at GENESIS_HASH. If two siblings shared a prev_hash,
+        // the chain forked and we'd detect it here.
+        let step_entries: Vec<&sentinel_domain::step_proof::StepProof> = chain
+            .entries
+            .iter()
+            .filter_map(|e| match e {
+                sentinel_domain::proof::ProofEntry::Step(s) => Some(s),
+                _ => None,
+            })
+            .collect();
+        for window in step_entries.windows(2) {
+            assert_eq!(
+                window[1].previous_hash, window[0].combined_hash,
+                "chain must be linear — prev_hash of step n must equal combined_hash of step n-1"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn m5_3_deep_sequential_batch_stays_linear() {
+        // 100 sequential submissions — proves no quadratic blowup, no
+        // bookkeeping leaks, and chain stays linear at depth.
+        let state = Arc::new(RwLock::new(SessionState::new("m5-3-batch")));
+        let engine = Arc::new(ProofEngine::new(state.clone(), Arc::new(StubJudge)));
+        let handler = McpHandler::new(state.clone(), engine);
+
+        let depth: usize = 100;
+        for i in 0..depth {
+            let result = handler
+                .handle(McpToolCall {
+                    name: "sentinel__submit_step_complete".into(),
+                    arguments: serde_json::json!({
+                        "skill": "linear",
+                        "phase_id": if i % 2 == 0 { "claim" } else { "fetch" },
+                        "step_id": format!("{i}"),
+                        "step_description": format!("batch step {i}"),
+                        "verdict": {
+                            "sufficient": true,
+                            "confidence": 0.92,
+                            "reasoning": "batch op",
+                        },
+                        "artifact": {"index": i},
+                    }),
+                })
+                .await;
+            assert!(result.success, "batch step {i} failed: {:?}", result.error);
+        }
+
+        let s = state.read().await;
+        let chain = s.proof_chains.get("linear").unwrap();
+        assert_eq!(chain.entries.len(), depth);
+
+        let step_entries: Vec<&sentinel_domain::step_proof::StepProof> = chain
+            .entries
+            .iter()
+            .filter_map(|e| match e {
+                sentinel_domain::proof::ProofEntry::Step(s) => Some(s),
+                _ => None,
+            })
+            .collect();
+        for window in step_entries.windows(2) {
+            assert_eq!(
+                window[1].previous_hash, window[0].combined_hash,
+                "chain must remain linear at depth"
+            );
+        }
+
+        // Final entry index matches the depth-1, proving nothing got
+        // silently re-ordered or dropped.
+        let final_step = step_entries.last().unwrap();
+        assert_eq!(
+            final_step.artifact.get("index").and_then(|v| v.as_u64()),
+            Some((depth - 1) as u64)
+        );
+    }
 }
