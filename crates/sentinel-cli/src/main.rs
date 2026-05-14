@@ -24,6 +24,7 @@ mod hook_cmd;
 mod init_cmd;
 mod mcp_cmd;
 mod pr_review_cmd;
+mod project_cmd;
 mod resign_cmd;
 mod roi_cmd;
 mod rotate_key_cmd;
@@ -215,6 +216,12 @@ enum Commands {
         action: ConfigAction,
     },
 
+    /// Manage repo-local sentinel state (`.sentinel/` inside the repo)
+    Project {
+        #[command(subcommand)]
+        action: ProjectAction,
+    },
+
     /// Regenerate `~/.claude/CLAUDE.md` from the compiled template
     RegenerateClaudeMd,
 
@@ -294,6 +301,25 @@ enum FederationAction {
         /// Override the config directory (default: `~/.claude/sentinel/config/`).
         #[arg(long)]
         config_dir: Option<String>,
+    },
+}
+
+/// `sentinel project` subcommands.
+#[derive(Subcommand)]
+enum ProjectAction {
+    /// Scaffold `.sentinel/` (repo-local sentinel state) in the current
+    /// directory or a specified path. Idempotent — existing files are
+    /// preserved unless `--force` is passed.
+    Init {
+        /// Override target directory (default: current directory).
+        #[arg(long)]
+        dir: Option<String>,
+        /// Overwrite existing files instead of preserving them.
+        #[arg(long)]
+        force: bool,
+        /// Preview only — show what would be created without writing.
+        #[arg(long)]
+        dry_run: bool,
     },
 }
 
@@ -500,6 +526,13 @@ async fn main() -> anyhow::Result<()> {
         Commands::Config { action } => match action {
             ConfigAction::Set { key, value } => config_cmd::set(&key, &value),
             ConfigAction::Show => config_cmd::show(),
+        },
+        Commands::Project { action } => match action {
+            ProjectAction::Init {
+                dir,
+                force,
+                dry_run,
+            } => project_cmd::run(dir.map(std::path::PathBuf::from), force, dry_run),
         },
         Commands::RegenerateClaudeMd => {
             let result = claude_md_cmd::regenerate()?;
