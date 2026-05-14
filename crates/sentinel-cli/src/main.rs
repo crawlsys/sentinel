@@ -28,6 +28,7 @@ mod resign_cmd;
 mod roi_cmd;
 mod rotate_key_cmd;
 mod scan_cmd;
+mod schema_validator;
 mod stage_cmd;
 mod stats_cmd;
 mod browser_test_cmd;
