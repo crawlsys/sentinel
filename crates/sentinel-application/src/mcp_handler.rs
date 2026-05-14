@@ -1240,4 +1240,291 @@ mod step_tools_tests {
         assert!(payload.get("last_step").unwrap().is_null());
         assert_eq!(payload.get("step_count").and_then(|v| v.as_u64()), Some(0));
     }
+
+    // ─────────────────────────────────────────────────────────────────
+    // M5.1: End-to-end Backlog → Code Review pipeline (sentinel #42)
+    // ─────────────────────────────────────────────────────────────────
+    //
+    // Drives the same submit_step_complete path Claude takes in real
+    // linear-skill execution, end-to-end through the phases that bring
+    // a ticket from Backlog → Code Review (claim → fetch → intelligence
+    // → worktree → review). Asserts each step seals into the chain,
+    // hashes link Merkle-style, and an `insufficient` judge verdict at
+    // any step halts the chain (gate held). Does NOT drive real Linear
+    // or real GitHub — that's the manual recipe in
+    // `docs/m5-linear-e2e-runbook.md`.
+
+    fn ok_verdict(reasoning: &str) -> serde_json::Value {
+        serde_json::json!({
+            "sufficient": true,
+            "confidence": 0.92,
+            "reasoning": reasoning,
+        })
+    }
+
+    async fn submit_linear_step(
+        handler: &McpHandler,
+        phase_id: &str,
+        step_id: &str,
+        description: &str,
+        artifact: serde_json::Value,
+        reasoning: &str,
+    ) -> McpToolResult {
+        handler
+            .handle(McpToolCall {
+                name: "sentinel__submit_step_complete".into(),
+                arguments: serde_json::json!({
+                    "skill": "linear",
+                    "phase_id": phase_id,
+                    "step_id": step_id,
+                    "step_description": description,
+                    "verdict": ok_verdict(reasoning),
+                    "artifact": artifact,
+                    "account_context": "firefly-pro",
+                }),
+            })
+            .await
+    }
+
+    #[tokio::test]
+    async fn m5_1_backlog_to_code_review_pipeline_seals_chain_in_order() {
+        let state = Arc::new(RwLock::new(SessionState::new("m5-1-session")));
+        let engine = Arc::new(ProofEngine::new(state.clone(), Arc::new(StubJudge)));
+        let handler = McpHandler::new(state.clone(), engine);
+
+        let pipeline: Vec<(&str, &str, &str, serde_json::Value)> = vec![
+            (
+                "claim",
+                "0.1",
+                "Set FPCRM-100 to In Progress and assign to viewer",
+                serde_json::json!({
+                    "issue_id": "FPCRM-100",
+                    "previous_state": "Backlog",
+                    "new_state": "In Progress",
+                }),
+            ),
+            (
+                "fetch",
+                "1.1",
+                "Fetch issue with relations + comments + attachments",
+                serde_json::json!({
+                    "issue_id": "FPCRM-100",
+                    "comment_count": 3,
+                    "attachment_count": 1,
+                    "labels": ["bug", "area:auth"],
+                }),
+            ),
+            (
+                "intelligence",
+                "1.5.2",
+                "Size as Small (2 deliverables) and transform missing fields",
+                serde_json::json!({
+                    "issue_id": "FPCRM-100",
+                    "complexity": "small",
+                    "deliverables": 2,
+                    "fields_fixed": ["estimate", "type_label"],
+                }),
+            ),
+            (
+                "worktree",
+                "2.1",
+                "Create git worktree fpcrm-100-fix-auth and run baseline tests",
+                serde_json::json!({
+                    "issue_id": "FPCRM-100",
+                    "branch": "fix/fpcrm-100-auth",
+                    "worktree_path": "../fpcrm-100-fix-auth",
+                    "baseline_tests": {"passed": 412, "failed": 0},
+                }),
+            ),
+            (
+                "worktree",
+                "2.5",
+                "Implement fix and verify tests still green",
+                serde_json::json!({
+                    "issue_id": "FPCRM-100",
+                    "branch": "fix/fpcrm-100-auth",
+                    "files_changed": 3,
+                    "post_impl_tests": {"passed": 414, "failed": 0},
+                }),
+            ),
+            (
+                "review",
+                "3.L0",
+                "Test validation pass — zero regressions vs baseline",
+                serde_json::json!({
+                    "issue_id": "FPCRM-100",
+                    "delta": {"new_pass": 2, "regressions": 0},
+                }),
+            ),
+            (
+                "review",
+                "3.L3",
+                "Push branch, open PR, transition Linear to Code Review",
+                serde_json::json!({
+                    "issue_id": "FPCRM-100",
+                    "pr_url": "https://github.com/firefly-pro/firefly-pro-crm/pull/4242",
+                    "pr_number": 4242,
+                    "linear_state": "Code Review",
+                }),
+            ),
+        ];
+
+        let mut sealed_hashes: Vec<String> = Vec::new();
+        for (phase_id, step_id, description, artifact) in &pipeline {
+            let result = submit_linear_step(
+                &handler,
+                phase_id,
+                step_id,
+                description,
+                artifact.clone(),
+                "claude provided evidence; judge satisfied",
+            )
+            .await;
+            assert!(
+                result.success,
+                "step {phase_id}/{step_id} sealed: {:?}",
+                result.error
+            );
+            let proof = result.content;
+            assert_eq!(proof.get("phase_id").and_then(|v| v.as_str()), Some(*phase_id));
+            assert_eq!(proof.get("step_id").and_then(|v| v.as_str()), Some(*step_id));
+            let hash = proof
+                .get("combined_hash")
+                .and_then(|v| v.as_str())
+                .expect("sealed step has combined_hash")
+                .to_string();
+            assert!(!hash.is_empty(), "combined_hash must not be empty");
+            sealed_hashes.push(hash);
+        }
+
+        let s = state.read().await;
+        let chain = s
+            .proof_chains
+            .get("linear")
+            .expect("linear chain exists after pipeline run");
+        assert_eq!(
+            chain.entries.len(),
+            pipeline.len(),
+            "chain should have one entry per submission"
+        );
+
+        let step_entries: Vec<&sentinel_domain::step_proof::StepProof> = chain
+            .entries
+            .iter()
+            .filter_map(|e| match e {
+                sentinel_domain::proof::ProofEntry::Step(s) => Some(s),
+                _ => None,
+            })
+            .collect();
+
+        let phase_sequence: Vec<&str> =
+            step_entries.iter().map(|s| s.phase_id.as_str()).collect();
+        let expected_sequence: Vec<&str> =
+            pipeline.iter().map(|(p, _, _, _)| *p).collect();
+        assert_eq!(phase_sequence, expected_sequence);
+
+        let step_sequence: Vec<&str> =
+            step_entries.iter().map(|s| s.step_id.as_str()).collect();
+        let expected_step_sequence: Vec<&str> =
+            pipeline.iter().map(|(_, s, _, _)| *s).collect();
+        assert_eq!(step_sequence, expected_step_sequence);
+
+        let unique_hashes: std::collections::HashSet<_> =
+            sealed_hashes.iter().collect();
+        assert_eq!(
+            unique_hashes.len(),
+            sealed_hashes.len(),
+            "every sealed step must have a distinct combined_hash"
+        );
+
+        let final_step = step_entries.last().expect("at least one step in chain");
+        assert_eq!(final_step.phase_id, "review");
+        assert_eq!(final_step.step_id, "3.L3");
+    }
+
+    #[tokio::test]
+    async fn m5_1_insufficient_verdict_halts_pipeline_midflight() {
+        let state = Arc::new(RwLock::new(SessionState::new("m5-1-halt-session")));
+        let engine = Arc::new(ProofEngine::new(state.clone(), Arc::new(StubJudge)));
+        let handler = McpHandler::new(state.clone(), engine);
+
+        let r1 = submit_linear_step(
+            &handler,
+            "claim",
+            "0.1",
+            "claim",
+            serde_json::json!({"issue_id": "FPCRM-101"}),
+            "ok",
+        )
+        .await;
+        assert!(r1.success);
+
+        let r2 = submit_linear_step(
+            &handler,
+            "fetch",
+            "1.1",
+            "fetch issue",
+            serde_json::json!({"issue_id": "FPCRM-101"}),
+            "ok",
+        )
+        .await;
+        assert!(r2.success);
+
+        let chain_len_before_halt = {
+            let s = state.read().await;
+            s.proof_chains.get("linear").unwrap().entries.len()
+        };
+        assert_eq!(chain_len_before_halt, 2);
+
+        let halt = handler
+            .handle(McpToolCall {
+                name: "sentinel__submit_step_complete".into(),
+                arguments: serde_json::json!({
+                    "skill": "linear",
+                    "phase_id": "review",
+                    "step_id": "3.L3",
+                    "step_description": "open PR without FPCRM ref",
+                    "verdict": {
+                        "sufficient": false,
+                        "confidence": 0.7,
+                        "reasoning": "PR body missing Ref FPCRM-101",
+                        "requested_evidence": ["Add Ref FPCRM-101 to PR body"],
+                    },
+                    "artifact": {"pr_url": "https://github.com/foo/bar/pull/1"},
+                    "account_context": "firefly-pro",
+                }),
+            })
+            .await;
+        assert!(!halt.success, "insufficient verdict must not seal");
+
+        let chain_len_after_halt = {
+            let s = state.read().await;
+            s.proof_chains.get("linear").unwrap().entries.len()
+        };
+        assert_eq!(
+            chain_len_after_halt, chain_len_before_halt,
+            "insufficient verdict must not extend the chain"
+        );
+
+        let r3 = submit_linear_step(
+            &handler,
+            "review",
+            "3.L3",
+            "open PR with FPCRM ref",
+            serde_json::json!({
+                "issue_id": "FPCRM-101",
+                "pr_url": "https://github.com/foo/bar/pull/1",
+                "linear_state": "Code Review",
+            }),
+            "evidence corrected",
+        )
+        .await;
+        assert!(r3.success);
+
+        let chain_len_after_retry = {
+            let s = state.read().await;
+            s.proof_chains.get("linear").unwrap().entries.len()
+        };
+        assert_eq!(chain_len_after_retry, chain_len_before_halt + 1);
+    }
 }
