@@ -72,6 +72,16 @@ pub struct McpHandler {
     /// caller stays back-compat — supplying `evidence_claim` without a
     /// registry wired is a fail-fast error, not a silent skip).
     evidence_adapters: Option<Arc<crate::evidence_adapters::EvidenceAdapterRegistry>>,
+    /// Step-level verifier requirements (sentinel #71). Each entry
+    /// says "the step at (skill, phase_id, step_id) cannot seal
+    /// unless its evidence carries a receipt from the named
+    /// adapter." Checked AFTER the BIBLE wireup folds any
+    /// `evidence_claim` receipt into `Evidence.custom`, so verifiers
+    /// see the fresh receipt. Empty vec = no verifiers — all steps
+    /// seal as before. Production case: require a `browserbase`
+    /// adapter receipt at QA-handoff steps so the proof chain
+    /// can't lie about smoke-test passes.
+    step_verifiers: Vec<sentinel_domain::step_verifier::StepVerifierRequirement>,
 }
 
 /// Configuration for cross-session proof corpus reads. Holds the home
@@ -90,7 +100,20 @@ impl McpHandler {
             proof_engine,
             archive: None,
             evidence_adapters: None,
+            step_verifiers: Vec::new(),
         }
+    }
+
+    /// Register one or more step-level verifier requirements
+    /// (sentinel #71). Replaces any previously-set list — call
+    /// once at bootstrap with the full set.
+    #[must_use]
+    pub fn with_step_verifiers(
+        mut self,
+        verifiers: Vec<sentinel_domain::step_verifier::StepVerifierRequirement>,
+    ) -> Self {
+        self.step_verifiers = verifiers;
+        self
     }
 
     /// Wire the THE BIBLE evidence-adapter registry. After this,
@@ -512,6 +535,24 @@ impl McpHandler {
             },
             None => chrono::Utc::now() - chrono::Duration::milliseconds(1),
         };
+
+        // Step verifier requirements (sentinel #71). Check each
+        // requirement that matches these step coordinates against
+        // the evidence we're about to seal. The check sees the
+        // BIBLE-folded receipt (if any) because it runs AFTER the
+        // BIBLE wireup section above. A failed verifier blocks
+        // sealing with a clear error — the proof chain refuses to
+        // record a downstream step on a missing or failed
+        // third-party verification.
+        for req in &self.step_verifiers {
+            if req.matches(skill, phase_id, step_id) {
+                if let Err(e) = req.check(&evidence.custom) {
+                    return McpToolResult::err(format!(
+                        "Step verifier requirement failed at {skill}/{phase_id}/{step_id}: {e}"
+                    ));
+                }
+            }
+        }
 
         match self
             .proof_engine
@@ -2272,6 +2313,180 @@ mod step_tools_tests {
         assert!(
             err.contains("evidence_claim") && err.contains("no evidence-adapter registry"),
             "error must explain the misconfiguration: {err}"
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // #71: Browserbase as third-party verifier (step_verifier wireup)
+    // ─────────────────────────────────────────────────────────────────
+    //
+    // step_verifiers list on McpHandler says "the step at
+    // (skill, phase_id, step_id) cannot seal without a receipt from
+    // the named adapter." Verified after the BIBLE wireup folds the
+    // receipt in, so the verifier sees the freshly-attached receipt.
+    //
+    // Behaviors to pin down:
+    //   1. No matching verifier → behavior unchanged (back-compat).
+    //   2. Matching verifier + correct receipt folded → seal proceeds.
+    //   3. Matching verifier + no receipt → seal blocked with clear error.
+    //   4. Matching verifier + wrong-adapter receipt → seal blocked.
+    //   5. Matching verifier + verified=false receipt → seal blocked.
+
+    #[tokio::test]
+    async fn step_verifier_no_match_no_impact() {
+        let state = Arc::new(RwLock::new(SessionState::new("sv-noop")));
+        let engine = Arc::new(ProofEngine::new(state.clone(), Arc::new(StubJudge)));
+        // A verifier for a different step — won't match the call.
+        let req = sentinel_domain::step_verifier::StepVerifierRequirement::new(
+            "github",
+            "qa-handoff",
+            "3.5.5",
+            "browserbase",
+        );
+        let handler = McpHandler::new(state, engine).with_step_verifiers(vec![req]);
+
+        let result = handler
+            .handle(McpToolCall {
+                name: "sentinel__submit_step_complete".into(),
+                arguments: serde_json::json!({
+                    "skill": "linear", // different skill — no match
+                    "phase_id": "claim",
+                    "step_id": "1",
+                    "step_description": "x",
+                    "verdict": {"sufficient": true, "confidence": 0.9, "reasoning": "ok"},
+                }),
+            })
+            .await;
+        assert!(result.success, "non-matching verifier must not block: {:?}", result.error);
+    }
+
+    #[tokio::test]
+    async fn step_verifier_matches_and_bibled_receipt_satisfies() {
+        // BIBLE registry + matching verifier + the BIBLE wireup folds
+        // a receipt in → verifier sees it → seal proceeds.
+        let state = Arc::new(RwLock::new(SessionState::new("sv-bibled")));
+        let engine = Arc::new(ProofEngine::new(state, Arc::new(StubJudge)));
+        let registry = Arc::new(
+            crate::evidence_adapters::EvidenceAdapterRegistry::with_fallback(),
+        );
+        let req = sentinel_domain::step_verifier::StepVerifierRequirement::provenance_only(
+            "linear",
+            "qa-handoff",
+            "3.5.5",
+            "self_attested",
+        );
+        let handler = McpHandler::new(Arc::new(RwLock::new(SessionState::new("x"))), engine)
+            .with_evidence_adapters(registry)
+            .with_step_verifiers(vec![req]);
+
+        let result = handler
+            .handle(McpToolCall {
+                name: "sentinel__submit_step_complete".into(),
+                arguments: serde_json::json!({
+                    "skill": "linear",
+                    "phase_id": "qa-handoff",
+                    "step_id": "3.5.5",
+                    "step_description": "post implementation comment with Browserbase Loom link",
+                    "verdict": {"sufficient": true, "confidence": 0.9, "reasoning": "ok"},
+                    "evidence_claim": {
+                        "skill": "linear",
+                        "phase_id": "qa-handoff",
+                        "step_id": "3.5.5",
+                        "claim_type": "self.attested",
+                        "context": {"note": "verifier round-trip"}
+                    },
+                }),
+            })
+            .await;
+        assert!(result.success, "verifier should accept the bibled receipt: {:?}", result.error);
+    }
+
+    #[tokio::test]
+    async fn step_verifier_blocks_when_no_receipt() {
+        // Matching verifier but NO evidence_claim supplied → no receipt
+        // folded → verifier fails the seal.
+        let state = Arc::new(RwLock::new(SessionState::new("sv-block")));
+        let engine = Arc::new(ProofEngine::new(state, Arc::new(StubJudge)));
+        let req = sentinel_domain::step_verifier::StepVerifierRequirement::new(
+            "linear",
+            "qa-handoff",
+            "3.5.5",
+            "browserbase",
+        );
+        let handler =
+            McpHandler::new(Arc::new(RwLock::new(SessionState::new("x"))), engine)
+                .with_step_verifiers(vec![req]);
+
+        let result = handler
+            .handle(McpToolCall {
+                name: "sentinel__submit_step_complete".into(),
+                arguments: serde_json::json!({
+                    "skill": "linear",
+                    "phase_id": "qa-handoff",
+                    "step_id": "3.5.5",
+                    "step_description": "x",
+                    "verdict": {"sufficient": true, "confidence": 0.9, "reasoning": "ok"},
+                }),
+            })
+            .await;
+        assert!(!result.success, "verifier must block when receipt missing");
+        let err = result.error.unwrap();
+        assert!(
+            err.contains("browserbase") && err.contains("absent"),
+            "error must name the missing adapter + the absence: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn step_verifier_blocks_on_unverified_receipt() {
+        // Receipt present but verified=false in default verified_only=true
+        // mode → seal blocked. Production case: smoke test FAILED, the
+        // proof chain refuses to seal a downstream "shipping" step.
+        let state = Arc::new(RwLock::new(SessionState::new("sv-unverified")));
+        let engine = Arc::new(ProofEngine::new(state, Arc::new(StubJudge)));
+        let req = sentinel_domain::step_verifier::StepVerifierRequirement::new(
+            "linear",
+            "qa-handoff",
+            "3.5.5",
+            "fake_failing_adapter",
+        );
+        let handler =
+            McpHandler::new(Arc::new(RwLock::new(SessionState::new("x"))), engine)
+                .with_step_verifiers(vec![req]);
+
+        // Pre-build an "evidence" object with a verified=false receipt
+        // manually (bypasses BIBLE wireup; lets us simulate "the
+        // adapter ran but returned a failing verdict").
+        let result = handler
+            .handle(McpToolCall {
+                name: "sentinel__submit_step_complete".into(),
+                arguments: serde_json::json!({
+                    "skill": "linear",
+                    "phase_id": "qa-handoff",
+                    "step_id": "3.5.5",
+                    "step_description": "x",
+                    "verdict": {"sufficient": true, "confidence": 0.9, "reasoning": "ok"},
+                    "evidence": {
+                        "tool_calls": [],
+                        "tool_results": [],
+                        "files_changed": [],
+                        "phase_file_read": false,
+                        "custom": {
+                            "evidence_receipt": {
+                                "adapter_name": "fake_failing_adapter",
+                                "verified": false,
+                                "payload": {"console_errors": 3}
+                            }
+                        }
+                    },
+                }),
+            })
+            .await;
+        assert!(!result.success);
+        let err = result.error.unwrap();
+        assert!(
+            err.contains("verified=true") && err.contains("fake_failing_adapter"),
+            "error must explain verification failure: {err}"
         );
     }
 

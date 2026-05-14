@@ -31,6 +31,7 @@ pub mod review;
 pub mod ssrf;
 pub mod step_manifest;
 pub mod step_proof;
+pub mod step_verifier;
 pub mod routing;
 pub mod session;
 pub mod state;
