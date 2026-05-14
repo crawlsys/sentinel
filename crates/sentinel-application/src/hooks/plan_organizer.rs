@@ -2,9 +2,21 @@
 //!
 //! Fires on PostToolUse when tool_name == "ExitPlanMode".
 //! Claude Code saves plans to `{project}/plans/{slug}.md` by default with
-//! a random slug (e.g. "bright-EAGLE-river.md"). This hook automatically
-//! copies the plan to `~/.claude/plans/{project}/{slug}-v{N}.md` with
-//! auto-incrementing versions — a stable, cross-session archive.
+//! a random slug (e.g. "bright-EAGLE-river.md"). This hook archives plans
+//! to TWO destinations:
+//!
+//! 1. **`~/.claude/plans/{project}/{slug}-v{N}.md`** — per-machine archive,
+//!    always written. Cross-session backup.
+//! 2. **`<repo>/.sentinel/plans/{slug}-v{N}.md`** — repo-local archive,
+//!    written ONLY when the repo has been initialized with
+//!    `sentinel project init` (i.e., `.sentinel/plans/` already exists).
+//!    Travels with the code via git. M9.2 / task #66.
+//!
+//! Versions are tracked independently per destination — the global archive
+//! and the repo-local archive may diverge if a plan is iterated on multiple
+//! machines (the global has every iteration that machine saw; the repo-local
+//! has every iteration that was committed). That's the intended behavior;
+//! the two stores answer different questions.
 //!
 //! The original plan file is left in place so Claude Code's `/plan` command
 //! can still read and edit it.
@@ -48,6 +60,28 @@ fn extract_plan_path(tool_result: Option<&serde_json::Value>) -> Option<PathBuf>
         return Some(PathBuf::from(fp));
     }
     None
+}
+
+/// Walk up from `cwd` looking for a `.git` entry (file OR directory — a
+/// worktree's `.git` is a file, the main repo's is a directory). Returns
+/// the path containing `.git` (i.e. the repo root) on the first match, or
+/// `None` if we hit the filesystem root without finding one.
+///
+/// Used to locate `<repo>/.sentinel/plans/` from inside a deep subdirectory.
+/// When the hook fires from `<repo>/crates/sentinel-application/`, we still
+/// want to write to `<repo>/.sentinel/plans/`, not
+/// `<repo>/crates/sentinel-application/.sentinel/plans/`.
+fn find_repo_root(fs: &dyn FileSystemPort, cwd: &Path) -> Option<PathBuf> {
+    let mut current = cwd.to_path_buf();
+    loop {
+        if fs.exists(&current.join(".git")) {
+            return Some(current);
+        }
+        if !current.pop() {
+            // Reached filesystem root without finding .git.
+            return None;
+        }
+    }
 }
 
 /// Find the next available version number for a given slug in the target dir.
@@ -123,7 +157,19 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
         project = %project,
         slug = %slug,
         path = ?target_path,
-        "Plan organized"
+        "Plan organized (global archive)"
+    );
+
+    // M9.2 — repo-local archive. Opt-in: only writes when
+    // <repo>/.sentinel/plans/ already exists (i.e. someone ran
+    // `sentinel project init` in this repo). Failures here are
+    // best-effort — log and continue; the global archive above is
+    // the authoritative copy.
+    let repo_local_path = try_write_repo_local_archive(
+        ctx.fs,
+        Path::new(cwd),
+        &slug,
+        plan_content.as_bytes(),
     );
 
     // Emit channel event for real-time notification
@@ -138,6 +184,14 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
         "archived_path".to_string(),
         serde_json::Value::String(target_path.display().to_string()),
     );
+    // Mention the repo-local copy in the channel event metadata too,
+    // when it landed.
+    if let Some(p) = &repo_local_path {
+        meta.insert(
+            "repo_local_archived_path".to_string(),
+            serde_json::Value::String(p.display().to_string()),
+        );
+    }
     crate::channel_events::emit(
         ctx.fs,
         ctx.env,
@@ -149,21 +203,68 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
         Some("plan_organizer"),
     );
 
-    // Inject context telling the user and Claude where the archived copy lives
+    // Inject context telling the user and Claude where the archived copies live.
+    let repo_local_line = match &repo_local_path {
+        Some(p) => format!("\nRepo-local: {} (committed with the code via .sentinel/plans/)", p.display()),
+        None => String::new(),
+    };
     let context = format!(
         "[Plan Organizer] Plan archived for cross-session reference.\n\
          \n\
          Project:  {}\n\
          Original: {} (Claude Code's /plan reads from here)\n\
-         Archive:  {}\n\
+         Archive:  {}{}\n\
          \n\
-         The archive is versioned — re-running ExitPlanMode auto-increments to -v2, -v3, etc.",
+         The archive is versioned — re-running ExitPlanMode auto-increments to -v2, -v3, etc.\n\
+         The repo-local archive lands only when `.sentinel/plans/` exists \
+         (run `sentinel project init` once per repo to opt in).",
         project,
         plan_path.display(),
-        target_path.display()
+        target_path.display(),
+        repo_local_line,
     );
 
     HookOutput::inject_context(HookEvent::PostToolUse, context)
+}
+
+/// M9.2 — try to also archive the plan to `<repo>/.sentinel/plans/`.
+///
+/// Best-effort and opt-in:
+/// - Returns `None` if we can't find a repo root (no `.git` above cwd).
+/// - Returns `None` if `<repo>/.sentinel/plans/` doesn't exist (the repo
+///   hasn't been initialized — don't create it implicitly; that's
+///   `sentinel project init`'s job).
+/// - Returns `None` if any FS error occurs while writing.
+/// - On success, returns the path the plan landed at (versioned).
+///
+/// Failures here are intentionally quiet — the global archive at
+/// `~/.claude/plans/...` is the authoritative copy. The repo-local one
+/// is a convenience for collaboration.
+fn try_write_repo_local_archive(
+    fs: &dyn FileSystemPort,
+    cwd: &Path,
+    slug: &str,
+    content: &[u8],
+) -> Option<PathBuf> {
+    let repo_root = find_repo_root(fs, cwd)?;
+    let repo_plans = repo_root.join(".sentinel").join("plans");
+    if !fs.is_dir(&repo_plans) {
+        // Opt-in: only write when the user has run `sentinel project init`.
+        // Don't auto-create — that would surprise users who didn't ask for
+        // it.
+        return None;
+    }
+    let target = next_versioned_path(fs, &repo_plans, slug);
+    match fs.write(&target, content) {
+        Ok(()) => {
+            tracing::info!(path = ?target, "Plan archived (repo-local)");
+            Some(target)
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, path = ?target, "Failed to write repo-local plan copy");
+            None
+        }
+    }
 }
 
 #[cfg(test)]
@@ -285,5 +386,84 @@ mod tests {
         std::fs::write(tmp.path().join("foo-v1.md"), "").unwrap();
         let path = next_versioned_path(&RealFs, tmp.path(), "bar");
         assert_eq!(path, tmp.path().join("bar-v1.md"));
+    }
+
+    // ─── M9.2 repo-local archive tests ────────────────────────────
+
+    #[test]
+    fn find_repo_root_walks_up_to_git_dir() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("my-repo");
+        let deep = repo.join("crates").join("inner");
+        std::fs::create_dir_all(&deep).unwrap();
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        let found = find_repo_root(&RealFs, &deep);
+        assert_eq!(found, Some(repo));
+    }
+
+    #[test]
+    fn find_repo_root_accepts_git_file_not_just_dir() {
+        // Worktrees have a `.git` FILE pointing at the main repo, not a
+        // directory. find_repo_root must accept either.
+        let tmp = TempDir::new().unwrap();
+        let worktree = tmp.path().join("wt");
+        let deep = worktree.join("sub");
+        std::fs::create_dir_all(&deep).unwrap();
+        std::fs::write(worktree.join(".git"), "gitdir: /elsewhere/.git/worktrees/wt").unwrap();
+        let found = find_repo_root(&RealFs, &deep);
+        assert_eq!(found, Some(worktree));
+    }
+
+    #[test]
+    fn find_repo_root_returns_none_outside_a_repo() {
+        let tmp = TempDir::new().unwrap();
+        let found = find_repo_root(&RealFs, tmp.path());
+        assert!(found.is_none());
+    }
+
+    #[test]
+    fn try_write_repo_local_archive_writes_when_dir_exists() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::create_dir_all(repo.join(".sentinel").join("plans")).unwrap();
+
+        let path = try_write_repo_local_archive(&RealFs, &repo, "my-plan", b"plan content");
+        assert!(path.is_some());
+        let p = path.unwrap();
+        assert_eq!(p, repo.join(".sentinel").join("plans").join("my-plan-v1.md"));
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "plan content");
+    }
+
+    #[test]
+    fn try_write_repo_local_archive_skips_when_dir_missing() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+
+        let path = try_write_repo_local_archive(&RealFs, &repo, "my-plan", b"plan content");
+        assert!(path.is_none(), "must NOT auto-create .sentinel/plans/");
+        assert!(!repo.join(".sentinel").exists(), "must not create .sentinel/ implicitly");
+    }
+
+    #[test]
+    fn try_write_repo_local_archive_skips_when_not_in_repo() {
+        let tmp = TempDir::new().unwrap();
+        let path = try_write_repo_local_archive(&RealFs, tmp.path(), "my-plan", b"plan content");
+        assert!(path.is_none());
+    }
+
+    #[test]
+    fn try_write_repo_local_archive_versions_independently() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        let plans = repo.join(".sentinel").join("plans");
+        std::fs::create_dir_all(&plans).unwrap();
+        std::fs::write(plans.join("my-plan-v1.md"), "old version").unwrap();
+
+        let path = try_write_repo_local_archive(&RealFs, &repo, "my-plan", b"new version");
+        assert_eq!(path, Some(plans.join("my-plan-v2.md")));
+        assert_eq!(std::fs::read_to_string(plans.join("my-plan-v1.md")).unwrap(), "old version");
     }
 }
