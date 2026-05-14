@@ -221,8 +221,13 @@ fn rotate_accounts(
     cooldown_minutes: u64,
 ) -> anyhow::Result<super::ProcessOutput> {
     let cooldown_arg = format!("--cooldown-minutes={cooldown_minutes}");
+    // Binary was renamed from `accounts` to `claude-accounts` (per
+    // claude-accounts-cli-rust Cargo.toml `[[bin]] name = "claude-accounts"`).
+    // The legacy name was kept as a shadow copy at ~/.cargo/bin/accounts.exe
+    // for a while, but that shadow drifts: any cargo install of the CLI only
+    // updates `claude-accounts.exe`. Call the canonical name directly.
     ctx.process
-        .run("accounts", &["rotate", cooldown_arg.as_str()], None)
+        .run("claude-accounts", &["rotate", cooldown_arg.as_str()], None)
 }
 
 fn summarize_process_failure(output: &super::ProcessOutput) -> String {
