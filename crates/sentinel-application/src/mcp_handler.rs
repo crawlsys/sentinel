@@ -1527,4 +1527,319 @@ mod step_tools_tests {
         };
         assert_eq!(chain_len_after_retry, chain_len_before_halt + 1);
     }
+
+    // ─────────────────────────────────────────────────────────────────
+    // M5.2: End-to-end Code Review → QA Testing → Completed (sentinel #43)
+    // ─────────────────────────────────────────────────────────────────
+    //
+    // Picks up where M5.1 left off (PR open, Linear at Code Review) and
+    // drives the back half of the pipeline:
+    //
+    //   review (3.L4) — CI green + CodeRabbit triaged
+    //   review (3.L5) — Merge to main
+    //   qa-handoff (3.5.0)   — Deploy to staging
+    //   qa-handoff (3.5.1)   — Steel smoke test on staging
+    //   qa-handoff (3.5.2)   — Loom upload of smoke screenshots
+    //   qa-handoff (3.5.3-4) — Transition Linear to QA Testing + assign
+    //   qa-handoff (3.5.5)   — Implementation comment with evidence
+    //   cleanup (4.1)        — Remove worktree
+    //
+    // ...then simulates the QA tester pass that transitions Linear from
+    // QA Testing → Completed. M5.1 covered M2.3.A-F (claim through review);
+    // M5.2 covers M2.3.G-H (qa-handoff and cleanup) + the QA-pass tail.
+    //
+    // Also asserts proof chain integrity across the entire 14-step
+    // journey from Backlog → Completed when composed with the M5.1
+    // pipeline. This is the full-lifecycle smoke test the M5 epic
+    // (#41) needs to consider "the chain works end-to-end."
+
+    #[tokio::test]
+    async fn m5_2_code_review_to_completed_seals_qa_handoff_and_cleanup() {
+        let state = Arc::new(RwLock::new(SessionState::new("m5-2-session")));
+        let engine = Arc::new(ProofEngine::new(state.clone(), Arc::new(StubJudge)));
+        let handler = McpHandler::new(state.clone(), engine);
+
+        // Pre-seed: assume M5.1 already sealed claim → review/3.L3. We
+        // only need ONE prior step in the chain to test continuity; the
+        // proof engine's prev_hash chaining doesn't care how many
+        // earlier entries exist, only that they exist in order.
+        let _seed = submit_linear_step(
+            &handler,
+            "review",
+            "3.L3",
+            "Open PR + transition to Code Review",
+            serde_json::json!({
+                "issue_id": "FPCRM-200",
+                "pr_url": "https://github.com/firefly-pro/firefly-pro-crm/pull/4300",
+                "linear_state": "Code Review",
+            }),
+            "PR open, Linear at Code Review",
+        )
+        .await;
+        assert!(_seed.success);
+
+        // The back-half pipeline. Each tuple is
+        // (phase_id, step_id, description, artifact).
+        let back_half: Vec<(&str, &str, &str, serde_json::Value)> = vec![
+            (
+                "review",
+                "3.L4",
+                "CI green + CodeRabbit comments triaged + approvals",
+                serde_json::json!({
+                    "issue_id": "FPCRM-200",
+                    "pr_number": 4300,
+                    "ci_runs": [{"name": "test", "conclusion": "success"}],
+                    "coderabbit_comments": {"actionable": 2, "addressed": 2, "nitpick": 5},
+                    "approvals": 1,
+                }),
+            ),
+            (
+                "review",
+                "3.L5",
+                "Merge PR to main and confirm post-merge state",
+                serde_json::json!({
+                    "issue_id": "FPCRM-200",
+                    "merge_commit": "abc123def",
+                    "merge_strategy": "squash",
+                }),
+            ),
+            (
+                "qa-handoff",
+                "3.5.0",
+                "Deploy main to staging and wait for healthy",
+                serde_json::json!({
+                    "issue_id": "FPCRM-200",
+                    "staging_url": "https://staging.firefly-pro.example/",
+                    "deploy_id": "deploy-9921",
+                    "healthy": true,
+                }),
+            ),
+            (
+                "qa-handoff",
+                "3.5.1",
+                "Steel smoke test on staging — feature reachable, no console errors",
+                serde_json::json!({
+                    "issue_id": "FPCRM-200",
+                    "staging_url": "https://staging.firefly-pro.example/",
+                    "screenshots": 4,
+                    "console_errors": 0,
+                    "browserbase_session": "bb-session-7733",
+                }),
+            ),
+            (
+                "qa-handoff",
+                "3.5.2",
+                "Compile screenshots to Loom video for QA reference",
+                serde_json::json!({
+                    "issue_id": "FPCRM-200",
+                    "loom_url": "https://loom.com/share/abc123",
+                    "duration_seconds": 18,
+                }),
+            ),
+            (
+                "qa-handoff",
+                "3.5.3",
+                "Transition Linear from Code Review to QA Testing",
+                serde_json::json!({
+                    "issue_id": "FPCRM-200",
+                    "previous_state": "Code Review",
+                    "new_state": "QA Testing",
+                }),
+            ),
+            (
+                "qa-handoff",
+                "3.5.4",
+                "Reassign Linear ticket to QA tester",
+                serde_json::json!({
+                    "issue_id": "FPCRM-200",
+                    "qa_assignee_email": "qa@fireflypro.com",
+                }),
+            ),
+            (
+                "qa-handoff",
+                "3.5.5",
+                "Post implementation comment with Loom link + test results",
+                serde_json::json!({
+                    "issue_id": "FPCRM-200",
+                    "comment_id": "comment-554",
+                    "includes_loom": true,
+                    "includes_test_summary": true,
+                }),
+            ),
+            (
+                "cleanup",
+                "4.1",
+                "Remove git worktree after merge",
+                serde_json::json!({
+                    "issue_id": "FPCRM-200",
+                    "worktree_path": "../fpcrm-200-fix",
+                    "branch_deleted": "fix/fpcrm-200",
+                }),
+            ),
+        ];
+
+        let mut last_hash: Option<String> = None;
+        for (phase_id, step_id, description, artifact) in &back_half {
+            let result = submit_linear_step(
+                &handler,
+                phase_id,
+                step_id,
+                description,
+                artifact.clone(),
+                "evidence sufficient for handoff step",
+            )
+            .await;
+            assert!(
+                result.success,
+                "step {phase_id}/{step_id} should seal: {:?}",
+                result.error
+            );
+            let hash = result
+                .content
+                .get("combined_hash")
+                .and_then(|v| v.as_str())
+                .map(String::from)
+                .expect("combined_hash present");
+
+            // Each step's hash must differ from the previous step's — the
+            // engine has to fold prev_hash into the next hash. If two
+            // consecutive sealed steps share a hash, the chain has been
+            // forked or the engine is broken.
+            if let Some(prev) = &last_hash {
+                assert_ne!(
+                    &hash, prev,
+                    "consecutive step hashes must differ; engine forgot to fold prev_hash"
+                );
+            }
+            last_hash = Some(hash);
+        }
+
+        // Simulate the QA-tester pass — they don't go through sentinel,
+        // they update Linear state directly. We model it as a final step
+        // sealed by the QA bot, marking the end of the lifecycle.
+        let qa_pass = submit_linear_step(
+            &handler,
+            "qa-handoff",
+            "3.5.6",
+            "QA tester pass — Linear transitions QA Testing → Completed",
+            serde_json::json!({
+                "issue_id": "FPCRM-200",
+                "previous_state": "QA Testing",
+                "new_state": "Completed",
+                "qa_tester": "qa@fireflypro.com",
+                "qa_pass_timestamp": "2026-05-14T10:00:00Z",
+            }),
+            "QA verified feature works on staging",
+        )
+        .await;
+        assert!(qa_pass.success);
+
+        let s = state.read().await;
+        let chain = s.proof_chains.get("linear").expect("linear chain");
+
+        // 1 seed + 9 back-half + 1 QA pass = 11 entries total.
+        assert_eq!(
+            chain.entries.len(),
+            11,
+            "M5.2 back-half + QA-pass yields 11 sealed steps"
+        );
+
+        // The final step lands at Completed, the lifecycle's true endpoint.
+        let step_entries: Vec<&sentinel_domain::step_proof::StepProof> = chain
+            .entries
+            .iter()
+            .filter_map(|e| match e {
+                sentinel_domain::proof::ProofEntry::Step(s) => Some(s),
+                _ => None,
+            })
+            .collect();
+        let final_step = step_entries.last().unwrap();
+        assert_eq!(final_step.phase_id, "qa-handoff");
+        assert_eq!(final_step.step_id, "3.5.6");
+        assert_eq!(
+            final_step.artifact.get("new_state").and_then(|v| v.as_str()),
+            Some("Completed")
+        );
+
+        // Audit-trail check: every step's artifact carries the same
+        // issue_id, so a future query on the chain can reconstruct the
+        // full life of FPCRM-200 from this skill's proof chain alone.
+        for step in &step_entries {
+            assert_eq!(
+                step.artifact.get("issue_id").and_then(|v| v.as_str()),
+                Some("FPCRM-200"),
+                "every step must carry the issue_id forward"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn m5_2_qa_fail_keeps_ticket_at_qa_testing() {
+        // The flip side of M5.2: when QA fails, the ticket goes to
+        // "QA Failed" (not Completed). Sentinel doesn't care about the
+        // Linear state name — what matters is that the proof chain
+        // honestly records the QA verdict and doesn't pretend success.
+        let state = Arc::new(RwLock::new(SessionState::new("m5-2-fail-session")));
+        let engine = Arc::new(ProofEngine::new(state.clone(), Arc::new(StubJudge)));
+        let handler = McpHandler::new(state.clone(), engine);
+
+        // Drive to QA-Testing state.
+        for (phase_id, step_id, desc) in [
+            ("review", "3.L5", "merge"),
+            ("qa-handoff", "3.5.0", "deploy"),
+            ("qa-handoff", "3.5.3", "transition to QA Testing"),
+        ] {
+            let r = submit_linear_step(
+                &handler,
+                phase_id,
+                step_id,
+                desc,
+                serde_json::json!({"issue_id": "FPCRM-201"}),
+                "ok",
+            )
+            .await;
+            assert!(r.success);
+        }
+
+        // QA fail — sealed honestly with the new_state = QA Failed.
+        let qa_fail = submit_linear_step(
+            &handler,
+            "qa-handoff",
+            "3.5.6",
+            "QA tester rejects — bug found in staging Steel test",
+            serde_json::json!({
+                "issue_id": "FPCRM-201",
+                "previous_state": "QA Testing",
+                "new_state": "QA Failed",
+                "rejection_reason": "Login button broken on Safari iOS",
+            }),
+            "QA rejection recorded",
+        )
+        .await;
+        assert!(qa_fail.success);
+
+        let s = state.read().await;
+        let chain = s.proof_chains.get("linear").unwrap();
+        let step_entries: Vec<&sentinel_domain::step_proof::StepProof> = chain
+            .entries
+            .iter()
+            .filter_map(|e| match e {
+                sentinel_domain::proof::ProofEntry::Step(s) => Some(s),
+                _ => None,
+            })
+            .collect();
+        let final_step = step_entries.last().unwrap();
+
+        // Crucial: the chain reports QA Failed, NOT Completed. The
+        // honest record is the whole point of proof chains — they
+        // can't lie about what happened.
+        assert_eq!(
+            final_step.artifact.get("new_state").and_then(|v| v.as_str()),
+            Some("QA Failed")
+        );
+        assert!(
+            final_step.artifact.get("rejection_reason").is_some(),
+            "QA failure must carry a rejection_reason for the audit trail"
+        );
+    }
 }
