@@ -1,0 +1,131 @@
+# Browserbase Skill — Step Definitions
+# Federated skill subgraph for cloud browser automation (sentinel #72)
+#
+# Browserbase is sentinel's UI-verification federation member. Any
+# other skill that needs to verify a UI flow (linear's qa-handoff,
+# deploy's preview check, browserbase-tester's bug crawl) can route
+# through these steps via federation directives, getting a
+# step-gated Browserbase session that lands a verified evidence
+# receipt in the proof chain.
+#
+# Architecture choice: the actual Browserbase HTTP calls live in
+# the browserbase-mcp-rust server (Doppler-managed credentials,
+# Steel session lifecycle). Skills-mcp's build.rs codegens
+# ExecutionPlan stubs that route to those MCP tools via
+# `suggested_tools`. The proof chain seals each step; the
+# Browserbase evidence adapter (sentinel #70) folds session
+# metadata into the proof's `Evidence.custom.evidence_receipt`;
+# the step_verifier gate (sentinel #71) blocks downstream steps
+# until the receipt verifies.
+#
+# Phases:
+#   1. session    — bring up a Steel session
+#   2. interact   — drive the page (navigate, fill, click)
+#   3. observe    — capture screenshots + console errors
+#   4. verify     — adapter-sealed receipt for downstream consumers
+#   5. cleanup    — release the session
+
+# ============================================================================
+# Phase 1: Session — Create + configure Steel session
+# ============================================================================
+
+[[phases]]
+id = "session"
+
+[[phases.steps]]
+id = "1.1"
+description = "Create Steel browser session"
+suggested_tools = ["mcp__browserbase__create_session"]
+artifact_schema = { session_id = "string — Browserbase session id, threaded through every later step" }
+blocker = true
+
+[[phases.steps]]
+id = "1.2"
+description = "Configure viewport, user agent, optional extension"
+suggested_tools = ["mcp__browserbase__set_viewport", "mcp__browserbase__set_user_agent"]
+artifact_schema = { session_id = "string (from 1.1)", viewport = "object | null", user_agent = "string | null" }
+
+# ============================================================================
+# Phase 2: Interact — Drive the page
+# ============================================================================
+
+[[phases]]
+id = "interact"
+
+[[phases.steps]]
+id = "2.1"
+description = "Navigate to target URL (localhost via cloudflared, staging, or production)"
+suggested_tools = ["mcp__browserbase__navigate"]
+artifact_schema = { session_id = "string (from 1.1)", target_url = "string", navigated_to = "string — final URL after redirects" }
+blocker = true
+
+[[phases.steps]]
+id = "2.2"
+description = "Inject test credentials from Doppler personal branch (if login required)"
+suggested_tools = ["mcp__doppler__get_secret", "mcp__browserbase__fill", "mcp__browserbase__click"]
+artifact_schema = { session_id = "string (from 1.1)", credentials_used = "string — 'doppler_personal' | 'none'", auth_path = "string — '/login' | '/auth/callback' | other" }
+
+[[phases.steps]]
+id = "2.3"
+description = "Execute interaction sequence (clicks, form fills, navigation)"
+suggested_tools = ["mcp__browserbase__click", "mcp__browserbase__fill", "mcp__browserbase__navigate", "mcp__browserbase__wait_for_selector"]
+artifact_schema = { session_id = "string (from 1.1)", actions_taken = "array of {action, selector, succeeded}" }
+
+# ============================================================================
+# Phase 3: Observe — Capture evidence
+# ============================================================================
+
+[[phases]]
+id = "observe"
+
+[[phases.steps]]
+id = "3.1"
+description = "Capture screenshots at key checkpoints"
+suggested_tools = ["mcp__browserbase__screenshot"]
+artifact_schema = { session_id = "string (from 1.1)", screenshot_count = "u64 — number captured", screenshot_urls = "array of strings | null" }
+blocker = true
+
+[[phases.steps]]
+id = "3.2"
+description = "Inspect console for errors and warnings"
+suggested_tools = ["mcp__browserbase__get_session_logs", "mcp__browserbase__evaluate"]
+artifact_schema = { session_id = "string (from 1.1)", console_errors = "u64", console_warnings = "u64", first_error_message = "string | null" }
+blocker = true
+
+[[phases.steps]]
+id = "3.3"
+description = "Capture session recording URL for later replay"
+suggested_tools = ["mcp__browserbase__get_session_recording"]
+artifact_schema = { session_id = "string (from 1.1)", recording_url = "string — Browserbase replay URL" }
+
+# ============================================================================
+# Phase 4: Verify — Seal a sentinel evidence receipt
+# ============================================================================
+# This is where browserbase steps become FIRST-CLASS federation members of
+# the skill subgraph. Downstream skills (linear's qa-handoff, deploy's
+# preview check) reference these steps via `provides` directives in their
+# own step configs, and the step_verifier gate (sentinel #71) blocks the
+# downstream step until the receipt landed here is verified.
+
+[[phases]]
+id = "verify"
+
+[[phases.steps]]
+id = "4.1"
+description = "Submit Browserbase evidence claim to sentinel — adapter seals the receipt with provenance binding"
+suggested_tools = ["mcp__sentinel__submit_step_complete"]
+artifact_schema = { session_id = "string (from 1.1)", claim_type = "string — 'browserbase.session_observed' | 'browserbase.smoke_test_passed'", receipt_combined_hash = "string — the sealed proof's combined_hash, useful for downstream skills that reference this receipt" }
+blocker = true
+
+# ============================================================================
+# Phase 5: Cleanup — Release session
+# ============================================================================
+
+[[phases]]
+id = "cleanup"
+
+[[phases.steps]]
+id = "5.1"
+description = "Release the Browserbase session (update_session status=REQUEST_RELEASE)"
+suggested_tools = ["mcp__browserbase__update_session"]
+artifact_schema = { session_id = "string (from 1.1)", released = "bool" }
