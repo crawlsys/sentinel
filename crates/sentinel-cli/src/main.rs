@@ -20,6 +20,7 @@ mod config_cmd;
 mod cost_per_point_cmd;
 mod daemon_cmd;
 mod federation_cmd;
+mod manifest_cmd;
 mod hook_cmd;
 mod init_cmd;
 mod mcp_cmd;
@@ -95,6 +96,15 @@ enum Commands {
     Federation {
         #[command(subcommand)]
         action: FederationAction,
+    },
+
+    /// Signed step-config manifests (M2.13). Write or verify a
+    /// `manifest.toml` alongside `<config_dir>/steps/*.toml`. Supports
+    /// hash-only mode (bit-rot protection) and Ed25519-signed mode
+    /// (cryptographic authenticity).
+    Manifest {
+        #[command(subcommand)]
+        action: ManifestAction,
     },
 
     /// Start the MCP server over stdio (Claude Code connects here)
@@ -304,6 +314,63 @@ enum FederationAction {
     },
 }
 
+/// `sentinel manifest` subcommands (M2.13, sentinel #26).
+#[derive(Subcommand)]
+enum ManifestAction {
+    /// Write `<config_dir>/steps/manifest.toml` covering every step
+    /// TOML in the directory. With `--key-env` signs each entry with
+    /// an Ed25519 key whose 32-byte hex seed lives in the named env
+    /// var; without it, writes a hash-only manifest (bit-rot protection
+    /// without cryptographic authenticity).
+    Write {
+        /// Override the config directory (default: `~/.claude/sentinel/config/`).
+        #[arg(long)]
+        config_dir: Option<String>,
+        /// Name of an env var holding a 32-byte (64 hex char) Ed25519
+        /// seed. When set, signs every entry.
+        #[arg(long)]
+        key_env: Option<String>,
+        /// Preview only — print what would be written without touching
+        /// the file.
+        #[arg(long)]
+        dry_run: bool,
+    },
+
+    /// Verify `<config_dir>/steps/manifest.toml` against the current
+    /// step TOML files. Re-canonicalizes each source, recomputes hashes,
+    /// and (in strict mode) verifies Ed25519 signatures. Exit 1 on
+    /// failure.
+    Verify {
+        /// Override the config directory (default: `~/.claude/sentinel/config/`).
+        #[arg(long)]
+        config_dir: Option<String>,
+        /// Hex-encoded 32-byte Ed25519 public key. Overrides any
+        /// `public_key` header inside the manifest itself.
+        #[arg(long)]
+        pubkey: Option<String>,
+        /// Force strict mode (require all signatures to verify) even
+        /// when the manifest looks hash-only. By default, strict is
+        /// auto-enabled when the manifest contains any signed entry
+        /// AND a public key is resolvable.
+        #[arg(long)]
+        strict: bool,
+        /// Force hash-only mode (ignore signatures). Mutually exclusive
+        /// with `--strict`; takes precedence if both are passed (errors
+        /// loudly).
+        #[arg(long)]
+        hash_only: bool,
+    },
+
+    /// Pretty-print a summary of `<config_dir>/steps/manifest.toml`:
+    /// entry count, signed-vs-unsigned breakdown, public key hint,
+    /// per-entry hash prefix.
+    Show {
+        /// Override the config directory (default: `~/.claude/sentinel/config/`).
+        #[arg(long)]
+        config_dir: Option<String>,
+    },
+}
+
 /// `sentinel project` subcommands.
 #[derive(Subcommand)]
 enum ProjectAction {
@@ -506,6 +573,7 @@ async fn main() -> anyhow::Result<()> {
             FederationAction::Compose { json, config_dir } => federation_cmd::run(json, config_dir),
             FederationAction::Check { config_dir } => federation_cmd::run_check(config_dir),
         },
+        Commands::Manifest { action } => run_manifest(action),
         Commands::Mcp => mcp_cmd::run().await,
         Commands::Scan {
             counts_only,
@@ -612,6 +680,79 @@ async fn main() -> anyhow::Result<()> {
                 reason, duration, workflow, status, cancel, history, list, session, json,
             )
             .await
+        }
+    }
+}
+
+/// Resolve a config dir from a CLI flag or the sentinel default.
+fn resolve_config_dir(override_str: Option<String>) -> std::path::PathBuf {
+    match override_str {
+        Some(s) => std::path::PathBuf::from(s),
+        None => sentinel_infrastructure::config::config_dir(),
+    }
+}
+
+/// Dispatch `sentinel manifest` subcommands. Returns a process exit code:
+/// 0 on success, 1 on any failure or verify mismatch.
+fn run_manifest(action: ManifestAction) -> anyhow::Result<()> {
+    match action {
+        ManifestAction::Write {
+            config_dir,
+            key_env,
+            dry_run,
+        } => {
+            let cd = resolve_config_dir(config_dir);
+            manifest_cmd::run_write(manifest_cmd::WriteOptions {
+                config_dir: cd,
+                key_env,
+                dry_run,
+            })
+        }
+        ManifestAction::Verify {
+            config_dir,
+            pubkey,
+            strict,
+            hash_only,
+        } => {
+            if strict && hash_only {
+                anyhow::bail!("--strict and --hash-only are mutually exclusive");
+            }
+            let strict_override = if strict {
+                Some(true)
+            } else if hash_only {
+                Some(false)
+            } else {
+                None
+            };
+            let cd = resolve_config_dir(config_dir);
+            let report = manifest_cmd::run_verify(manifest_cmd::VerifyOptions {
+                config_dir: cd,
+                pubkey_hex: pubkey,
+                strict: strict_override,
+            })?;
+            use sentinel_domain::step_manifest::ManifestCheck;
+            for entry in &report.entries {
+                let tag = match &entry.result {
+                    Ok(ManifestCheck::SignedOk) => "OK (signed)".to_string(),
+                    Ok(ManifestCheck::HashOnlyOk) => "OK (hash)".to_string(),
+                    Err(e) => format!("FAIL: {e}"),
+                };
+                println!("  {} {tag}", entry.name);
+            }
+            println!(
+                "summary: {} signed-ok, {} hash-ok, {} failures",
+                report.signed_ok,
+                report.hash_only_ok,
+                report.failures.len()
+            );
+            if !report.ok() {
+                anyhow::bail!("manifest verify failed for {} entries", report.failures.len());
+            }
+            Ok(())
+        }
+        ManifestAction::Show { config_dir } => {
+            let cd = resolve_config_dir(config_dir);
+            manifest_cmd::run_show(&cd)
         }
     }
 }
