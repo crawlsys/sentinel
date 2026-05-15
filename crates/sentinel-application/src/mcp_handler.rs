@@ -517,10 +517,35 @@ impl McpHandler {
             .cloned()
             .unwrap_or(serde_json::Value::Null);
 
-        let account_context = args
-            .get("account_context")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
+        // Account context: caller-provided wins; otherwise inherit from
+        // the previous step in this skill's chain (M7.9 header/context
+        // propagation, sentinel #58). Three cases for the arg:
+        //
+        //   * key absent             → inherit from prior step
+        //   * key present, null      → explicit clear (no inheritance)
+        //   * key present, string    → use that value
+        //
+        // This mirrors request-header semantics: missing header inherits
+        // from upstream; explicitly empty header clears it.
+        let account_context = match args.get("account_context") {
+            None => {
+                // Key absent → inherit from the most recent StepProof
+                // in this skill's chain. Phase-only entries are skipped
+                // (they don't carry the account dimension). If the
+                // chain has no step entries yet, account_context = None.
+                let s = self.state.read().await;
+                s.proof_chains.get(skill).and_then(|chain| {
+                    chain.entries.iter().rev().find_map(|e| match e {
+                        sentinel_domain::proof::ProofEntry::Step(prev) => {
+                            prev.account_context.clone()
+                        }
+                        _ => None,
+                    })
+                })
+            }
+            Some(v) if v.is_null() => None, // Explicit clear.
+            Some(v) => v.as_str().map(|s| s.to_string()),
+        };
 
         // started_at — accept RFC3339 string, fall back to now-1ms so
         // started_at < completed_at (set inside the engine = now).
@@ -2314,6 +2339,195 @@ mod step_tools_tests {
             err.contains("evidence_claim") && err.contains("no evidence-adapter registry"),
             "error must explain the misconfiguration: {err}"
         );
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // #58 / M7.9: Header/context propagation through StepProofs
+    // ─────────────────────────────────────────────────────────────────
+    //
+    // account_context inherits forward through a skill's chain when not
+    // explicitly supplied. Same as request headers in HTTP middleware:
+    // the value flows along until something overrides it.
+    //
+    // Behaviors:
+    //   1. Explicit account_context on first step → seal carries it.
+    //   2. Omitted on follow-up step → inherits from previous step.
+    //   3. Explicit override on follow-up step → seal carries override.
+    //   4. Explicit null on follow-up step → seal carries None (clears).
+    //   5. First step with no context and no prior chain → None.
+
+    #[tokio::test]
+    async fn context_propagation_explicit_then_inherited() {
+        let state = Arc::new(RwLock::new(SessionState::new("ctx-inherit")));
+        let engine = Arc::new(ProofEngine::new(state.clone(), Arc::new(StubJudge)));
+        let handler = McpHandler::new(state.clone(), engine);
+
+        // Step 1: explicit account_context.
+        let r1 = handler
+            .handle(McpToolCall {
+                name: "sentinel__submit_step_complete".into(),
+                arguments: serde_json::json!({
+                    "skill": "linear",
+                    "phase_id": "claim",
+                    "step_id": "1",
+                    "step_description": "claim",
+                    "verdict": {"sufficient": true, "confidence": 0.9, "reasoning": "ok"},
+                    "account_context": "firefly-pro",
+                }),
+            })
+            .await;
+        assert!(r1.success);
+        assert_eq!(
+            r1.content.get("account_context").and_then(|v| v.as_str()),
+            Some("firefly-pro")
+        );
+
+        // Step 2: NO account_context arg → must inherit "firefly-pro".
+        let r2 = handler
+            .handle(McpToolCall {
+                name: "sentinel__submit_step_complete".into(),
+                arguments: serde_json::json!({
+                    "skill": "linear",
+                    "phase_id": "fetch",
+                    "step_id": "1.1",
+                    "step_description": "fetch",
+                    "verdict": {"sufficient": true, "confidence": 0.9, "reasoning": "ok"},
+                }),
+            })
+            .await;
+        assert!(r2.success);
+        assert_eq!(
+            r2.content.get("account_context").and_then(|v| v.as_str()),
+            Some("firefly-pro"),
+            "step 2 must inherit account_context from step 1"
+        );
+    }
+
+    #[tokio::test]
+    async fn context_propagation_explicit_override_wins() {
+        let state = Arc::new(RwLock::new(SessionState::new("ctx-override")));
+        let engine = Arc::new(ProofEngine::new(state.clone(), Arc::new(StubJudge)));
+        let handler = McpHandler::new(state.clone(), engine);
+
+        let _r1 = handler
+            .handle(McpToolCall {
+                name: "sentinel__submit_step_complete".into(),
+                arguments: serde_json::json!({
+                    "skill": "linear",
+                    "phase_id": "claim",
+                    "step_id": "1",
+                    "step_description": "claim",
+                    "verdict": {"sufficient": true, "confidence": 0.9, "reasoning": "ok"},
+                    "account_context": "firefly-pro",
+                }),
+            })
+            .await;
+
+        // Step 2: explicit different context — must use the override.
+        let r2 = handler
+            .handle(McpToolCall {
+                name: "sentinel__submit_step_complete".into(),
+                arguments: serde_json::json!({
+                    "skill": "linear",
+                    "phase_id": "fetch",
+                    "step_id": "1.1",
+                    "step_description": "fetch",
+                    "verdict": {"sufficient": true, "confidence": 0.9, "reasoning": "ok"},
+                    "account_context": "tenant-x",
+                }),
+            })
+            .await;
+        assert!(r2.success);
+        assert_eq!(
+            r2.content.get("account_context").and_then(|v| v.as_str()),
+            Some("tenant-x"),
+            "explicit override must beat inheritance"
+        );
+    }
+
+    #[tokio::test]
+    async fn context_propagation_explicit_null_clears_inherited() {
+        let state = Arc::new(RwLock::new(SessionState::new("ctx-clear")));
+        let engine = Arc::new(ProofEngine::new(state.clone(), Arc::new(StubJudge)));
+        let handler = McpHandler::new(state.clone(), engine);
+
+        let _r1 = handler
+            .handle(McpToolCall {
+                name: "sentinel__submit_step_complete".into(),
+                arguments: serde_json::json!({
+                    "skill": "linear",
+                    "phase_id": "claim",
+                    "step_id": "1",
+                    "step_description": "claim",
+                    "verdict": {"sufficient": true, "confidence": 0.9, "reasoning": "ok"},
+                    "account_context": "firefly-pro",
+                }),
+            })
+            .await;
+
+        // Step 2: explicit null — clears the inherited context.
+        let r2 = handler
+            .handle(McpToolCall {
+                name: "sentinel__submit_step_complete".into(),
+                arguments: serde_json::json!({
+                    "skill": "linear",
+                    "phase_id": "fetch",
+                    "step_id": "1.1",
+                    "step_description": "fetch",
+                    "verdict": {"sufficient": true, "confidence": 0.9, "reasoning": "ok"},
+                    "account_context": null,
+                }),
+            })
+            .await;
+        assert!(r2.success);
+        // Sealed proof has account_context = None when explicitly cleared.
+        let s = state.read().await;
+        let chain = s.proof_chains.get("linear").unwrap();
+        let last_step = chain
+            .entries
+            .iter()
+            .filter_map(|e| match e {
+                sentinel_domain::proof::ProofEntry::Step(s) => Some(s),
+                _ => None,
+            })
+            .last()
+            .unwrap();
+        assert_eq!(last_step.account_context, None);
+    }
+
+    #[tokio::test]
+    async fn context_propagation_no_prior_chain_stays_none() {
+        // First step ever, no account_context supplied → None (no inheritance source).
+        let state = Arc::new(RwLock::new(SessionState::new("ctx-empty")));
+        let engine = Arc::new(ProofEngine::new(state.clone(), Arc::new(StubJudge)));
+        let handler = McpHandler::new(state.clone(), engine);
+
+        let r1 = handler
+            .handle(McpToolCall {
+                name: "sentinel__submit_step_complete".into(),
+                arguments: serde_json::json!({
+                    "skill": "linear",
+                    "phase_id": "claim",
+                    "step_id": "1",
+                    "step_description": "claim",
+                    "verdict": {"sufficient": true, "confidence": 0.9, "reasoning": "ok"},
+                }),
+            })
+            .await;
+        assert!(r1.success);
+        // No account_context in the result because no source to inherit from.
+        let s = state.read().await;
+        let chain = s.proof_chains.get("linear").unwrap();
+        let first_step = chain
+            .entries
+            .iter()
+            .filter_map(|e| match e {
+                sentinel_domain::proof::ProofEntry::Step(s) => Some(s),
+                _ => None,
+            })
+            .next()
+            .unwrap();
+        assert_eq!(first_step.account_context, None);
     }
 
     // ─────────────────────────────────────────────────────────────────
