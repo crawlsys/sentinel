@@ -18,6 +18,7 @@ pub mod hooks;
 pub mod interceptor;
 pub mod judge_service;
 pub mod mcp_handler;
+pub mod sandboxed_judge;
 pub mod pr_review;
 pub mod project_init;
 pub mod proof_archive;
