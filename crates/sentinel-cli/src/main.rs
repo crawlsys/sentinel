@@ -33,6 +33,7 @@ mod roi_cmd;
 mod rotate_key_cmd;
 mod scan_cmd;
 mod schema_validator;
+mod sla_cmd;
 mod stage_cmd;
 mod stats_cmd;
 mod browser_test_cmd;
@@ -183,6 +184,14 @@ enum Commands {
     DeployFreq {
         #[command(subcommand)]
         action: DeployFreqAction,
+    },
+
+    /// SLA breach detection engine (SEN-12). Applies rules from
+    /// `~/.claude/sentinel/config/slas.toml` against a subjects JSONL,
+    /// records breaches, and aggregates rolling counts.
+    Sla {
+        #[command(subcommand)]
+        action: SlaAction,
     },
 
     /// ROI vs human-team baseline — joins SEN-7 + SEN-13 to compute
@@ -564,6 +573,26 @@ enum RoiAction {
 }
 
 #[derive(Subcommand)]
+enum SlaAction {
+    /// Apply rules against a subjects JSONL; record breaches.
+    Check {
+        /// Path to slas.toml (default: ~/.claude/sentinel/config/slas.toml)
+        #[arg(long)]
+        config: Option<std::path::PathBuf>,
+        /// JSONL file of Subject records to check.
+        #[arg(long)]
+        subjects: std::path::PathBuf,
+        /// Print matches but don't append to sla-breaches.jsonl.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Roll up sla-breaches.jsonl into 24h/7d/30d counts per SLA.
+    Aggregate,
+    /// Print a starter slas.toml to stdout.
+    Template,
+}
+
+#[derive(Subcommand)]
 enum DeployFreqAction {
     /// Read deploys.jsonl, write deploys-summary.json, print summary.
     Aggregate,
@@ -673,6 +702,30 @@ async fn main() -> anyhow::Result<()> {
                 duration_s,
                 timestamp,
             } => deploy_freq_cmd::run_record(repo, env, commit, duration_s, timestamp),
+        },
+        Commands::Sla { action } => match action {
+            SlaAction::Check {
+                config,
+                subjects,
+                dry_run,
+            } => {
+                let cfg = config.unwrap_or_else(|| {
+                    dirs::home_dir()
+                        .map(|h| {
+                            h.join(".claude")
+                                .join("sentinel")
+                                .join("config")
+                                .join("slas.toml")
+                        })
+                        .unwrap_or_else(|| std::path::PathBuf::from("slas.toml"))
+                });
+                sla_cmd::run_check(cfg, subjects, dry_run)
+            }
+            SlaAction::Aggregate => sla_cmd::run_aggregate(),
+            SlaAction::Template => {
+                sla_cmd::run_template();
+                Ok(())
+            }
         },
         Commands::BrowserTest { action } => match action {
             BrowserTestAction::Record { session } => browser_test_cmd::record(session),

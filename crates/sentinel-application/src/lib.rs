@@ -26,6 +26,7 @@ pub mod proof_archive;
 pub mod proof_engine;
 pub mod roi;
 pub mod scanner;
+pub mod sla;
 pub mod tokens;
 pub mod tracing_service;
 pub mod trust;
