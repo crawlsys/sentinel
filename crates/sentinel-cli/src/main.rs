@@ -19,6 +19,7 @@ mod cleanup_cmd;
 mod config_cmd;
 mod cost_per_point_cmd;
 mod daemon_cmd;
+mod deploy_freq_cmd;
 mod federation_cmd;
 mod manifest_cmd;
 mod policy_cmd;
@@ -174,6 +175,14 @@ enum Commands {
     Cache {
         #[command(subcommand)]
         action: CacheAction,
+    },
+
+    /// Deploy frequency tracker (DORA core metric #2, SEN-9). Aggregates
+    /// `~/.claude/sentinel/metrics/deploys.jsonl` into 7d/30d rolling
+    /// per-repo per-env counts with DORA tier classification.
+    DeployFreq {
+        #[command(subcommand)]
+        action: DeployFreqAction,
     },
 
     /// ROI vs human-team baseline — joins SEN-7 + SEN-13 to compute
@@ -555,6 +564,31 @@ enum RoiAction {
 }
 
 #[derive(Subcommand)]
+enum DeployFreqAction {
+    /// Read deploys.jsonl, write deploys-summary.json, print summary.
+    Aggregate,
+    /// Manually append a deploy record (testing + backfill path before
+    /// Hookdeck `deployment.success` ingest lands).
+    Record {
+        /// Repository identifier (e.g. firefly-pro-crm).
+        #[arg(long)]
+        repo: String,
+        /// Environment (prod / staging / preview).
+        #[arg(long)]
+        env: String,
+        /// Git commit SHA the deploy shipped.
+        #[arg(long)]
+        commit: String,
+        /// Pipeline duration in seconds (optional).
+        #[arg(long)]
+        duration_s: Option<u64>,
+        /// RFC3339 timestamp; defaults to now() when omitted.
+        #[arg(long)]
+        timestamp: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
 enum BrowserTestAction {
     /// Record a passing browser test for the current session
     Record {
@@ -629,6 +663,16 @@ async fn main() -> anyhow::Result<()> {
         },
         Commands::Roi { action } => match action {
             RoiAction::Scan => roi_cmd::run(),
+        },
+        Commands::DeployFreq { action } => match action {
+            DeployFreqAction::Aggregate => deploy_freq_cmd::run_aggregate(),
+            DeployFreqAction::Record {
+                repo,
+                env,
+                commit,
+                duration_s,
+                timestamp,
+            } => deploy_freq_cmd::run_record(repo, env, commit, duration_s, timestamp),
         },
         Commands::BrowserTest { action } => match action {
             BrowserTestAction::Record { session } => browser_test_cmd::record(session),
