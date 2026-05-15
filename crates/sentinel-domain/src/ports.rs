@@ -147,6 +147,25 @@ pub trait FileSystemPort: Send + Sync {
     /// Get the user's home directory.
     fn home_dir(&self) -> Option<PathBuf>;
 
+    /// Resolve the Claude Code config/state directory.
+    ///
+    /// All sentinel state (metrics, sessions, persistent tasks, plans,
+    /// extracted memories, telemetry, etc.) lives under this directory.
+    /// By default this is `$HOME/.claude`, but adapters MAY override —
+    /// the real filesystem adapter honors `SENTINEL_CLAUDE_DIR` to
+    /// support fully-isolated sandbox profiles (running sentinel
+    /// alongside an existing Claude Code installation without
+    /// clobbering its state).
+    ///
+    /// Test stubs that mock `home_dir()` inherit the default join
+    /// behavior automatically — no need to override unless they want
+    /// to assert different resolution.
+    fn claude_dir(&self) -> PathBuf {
+        self.home_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(".claude")
+    }
+
     /// Read a file's contents as a string.
     fn read_to_string(&self, path: &Path) -> anyhow::Result<String>;
 
