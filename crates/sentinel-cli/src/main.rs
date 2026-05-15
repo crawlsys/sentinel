@@ -21,6 +21,7 @@ mod cost_per_point_cmd;
 mod daemon_cmd;
 mod federation_cmd;
 mod manifest_cmd;
+mod policy_cmd;
 mod hook_cmd;
 mod init_cmd;
 mod mcp_cmd;
@@ -105,6 +106,13 @@ enum Commands {
     Manifest {
         #[command(subcommand)]
         action: ManifestAction,
+    },
+
+    /// Translate plain-English policy statements into sentinel config
+    /// TOML fragments (M7.10 / sentinel #59 — AEGIS pattern).
+    Policy {
+        #[command(subcommand)]
+        action: PolicyAction,
     },
 
     /// Start the MCP server over stdio (Claude Code connects here)
@@ -371,6 +379,25 @@ enum ManifestAction {
     },
 }
 
+/// `sentinel policy` subcommands (M7.10, sentinel #59).
+#[derive(Subcommand)]
+enum PolicyAction {
+    /// Parse a one-line policy statement and emit a ready-to-paste
+    /// TOML fragment for a `step_verifiers` entry.
+    ///
+    /// Grammar:
+    ///   `<skill>/<phase>/<step> requires <adapter> [verified|provenance]`
+    ///
+    /// Examples:
+    ///   `linear/qa-handoff/3.5.5 requires browserbase`
+    ///   `linear/qa-handoff/3.5.5 requires browserbase provenance`
+    Suggest {
+        /// The policy statement to translate. Quote it if it contains
+        /// spaces (which it almost certainly does).
+        policy: String,
+    },
+}
+
 /// `sentinel project` subcommands.
 #[derive(Subcommand)]
 enum ProjectAction {
@@ -574,6 +601,7 @@ async fn main() -> anyhow::Result<()> {
             FederationAction::Check { config_dir } => federation_cmd::run_check(config_dir),
         },
         Commands::Manifest { action } => run_manifest(action),
+        Commands::Policy { action } => run_policy(action),
         Commands::Mcp => mcp_cmd::run().await,
         Commands::Scan {
             counts_only,
@@ -754,5 +782,12 @@ fn run_manifest(action: ManifestAction) -> anyhow::Result<()> {
             let cd = resolve_config_dir(config_dir);
             manifest_cmd::run_show(&cd)
         }
+    }
+}
+
+/// Dispatch `sentinel policy` subcommands (M7.10, sentinel #59).
+fn run_policy(action: PolicyAction) -> anyhow::Result<()> {
+    match action {
+        PolicyAction::Suggest { policy } => policy_cmd::run_suggest(&policy),
     }
 }
