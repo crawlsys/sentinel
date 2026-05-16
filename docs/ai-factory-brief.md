@@ -369,6 +369,76 @@ The general AI-factory adoption list (A1–A15) is correct and necessary. The BA
 
 ---
 
+## Consul integration map — every BA primitive lands somewhere concrete
+
+A late addition based on a deep-dive of `legatus-consul-agent` (Phase 0.5). **Consul is not contradicting the AI-factory plan; it is waiting for it.** The cryptographic + port-based foundation is solid; the external-management surface is absent but cleanly extensible. Every BA-vertical primitive in the brief maps to a specific *additive* extension on consul — zero breaking changes required.
+
+### What consul has now (Phase 0.5)
+
+- **Cryptographic envelope** (`consul-protocol/src/envelope.rs`): HMAC-SHA256 over canonical bytes, CBOR inner payload, constant-time MAC compare, replay defense via sequence + nonce + freshness window, max 1 MiB.
+- **Identity primitives** (`consul-domain/src/identity/`): `SessionId` (UUIDv7, routing — not secret), `KeyEpoch`/`ConnectionEpoch` (forward-secrecy boundaries rotated per reconnect), `SessionMasterKey` (32 bytes, never logged, zeroized on drop).
+- **HKDF per-direction key derivation** (`consul-protocol/src/keys.rs`): direction asymmetry prevents reflection attacks.
+- **6 port traits defined** (`consul-domain/src/ports/`): `SessionTransport`, `SessionStore`, `AuditSink`, `Clock`, `LlmProvider`, `NotificationChannel`. ADR-007 dispatch via `#[trait_variant::make]`.
+- **17 wire messages** spanning protocol negotiation, registration, heartbeat, instruction relay, subprocess lifecycle, escalation.
+- **WebSocket transport adapter** working; gRPC/stdio/MCP feature-flagged stubs.
+- **AuditSink event taxonomy** with 8 event classes (append-only, query_since interface).
+
+### What consul does *not* have — and why that's our opportunity
+
+- **No `SupervisorPort`/`FleetPort`/`ExternalDispatcherPort`** for external systems to call into. The current shape is one-way (external → consulate via protocol messages). The AI factory's BA-dispatcher needs an inbound port — we get to design it cleanly.
+- **No MCP server exposed yet.** `consul-transport/mcp-extension` is a feature-flagged stub.
+- **No PASETO v4.local capability tokens** (planned for Phase 2). Until then, external-dispatcher integration runs in a sandboxed channel.
+- **No artifact metadata on `RelayInstruction`.** `content: String` is free-text — biggest single extension point for BA-factory artifact carriage.
+
+### Three rules (now durable memory)
+
+1. **Never change `SessionId` wire format, `SessionMasterKey` structure, or HKDF salt/info labels.** Invalidates all existing connections + derived keys.
+2. **Additive over new.** The existing message types accept `Option<T>` fields cleanly. The protocol is versioned (`Capabilities` flags) — net-new messages slot in via feature flags.
+3. **Honor hexagonal/DDD.** New ports in `consul-domain/src/ports/`, adapters outside the domain, in-memory mocks for tests.
+
+### Mapping: each AI-factory item → consul extension
+
+| Brief item | Consul gap | Extension shape | Touches |
+|---|---|---|---|
+| **A1** Magentic-One dual-ledger | (new — consul has no ledger yet) | Add `Ledger` aggregate to `consul-domain`; expose via new `LedgerPort` + new wire messages `LedgerUpdate`/`LedgerQuery` | `consul-domain`, `consul-protocol` |
+| **A3** Dry-run-then-commit with separate-family auditor | Gap 1 (briefing) + Gap 6 (capability tokens) | New `RequestBriefing(session_id)` → `BriefingResponse` for the auditor to score the dry-run; PASETO token for separate-family auditor identity | `consul-protocol/src/messages/`, `consul-domain/src/ports/` |
+| **A6** Reversibility-graded tripwires | (consul has no current tripwire layer) | New `ReversibilityClass` value object in `consul-domain`; `RelayInstruction` gains `reversibility: Option<ReversibilityClass>` | `consul-domain`, `consul-protocol` |
+| **A7** Honeypot canaries | Audit extension | New `AuditEvent::HoneypotInteraction` variant; canary configuration in `consul-domain/src/policy/` | `consul-domain/src/ports/audit.rs` |
+| **A13** Spec-challenge before execute | Gap 1 (briefing) + Gap 3 (refinement loop) | `RequestBriefing` for the challenge step; new `SpecChallenge`/`ChallengeResponse` message pair | `consul-protocol/src/messages/` |
+| **BA1** Citation-locked decision artifacts | **Gap 2** | Add `artifacts: Option<Vec<ArtifactReference>>` to `RelayInstruction` and `InstructionResult`; `ArtifactReference` value object in `consul-domain` | `consul-domain`, `consul-protocol` |
+| **BA2** Two-mode discovery (automated + interrogated) | New | New `DiscoveryRequest`/`DiscoveryEvidence` message pair; new `DiscoveryLedger` aggregate (shares ledger machinery from A1) | `consul-domain`, `consul-protocol` |
+| **BA3** Requirements traceability matrix | **Gap 4 + Gap 5** | Add `fulfilled_requirements: Option<Vec<RequirementRef>>` to `InstructionResult`; add `orchestration_id: Option<String>` to `RelayInstruction`; new `RequirementMatrix` aggregate | `consul-domain`, `consul-protocol` |
+| **BA4** Stakeholder interrogation protocol | New | New `InterrogationRound`/`InterrogationResponse` message pair; new `InterrogationPort` for batched stakeholder Q&A | `consul-domain/src/ports/`, `consul-protocol/src/messages/` |
+| **BA5** Adversarial deck critique | **Gap 1 + Gap 3** | `RequestBriefing` + `RequestRefinement(session_id, completed_task_id)` → `RefineInstruction(original_session_id, revised_content, critique_metadata)` | `consul-protocol/src/messages/` |
+| **BA6** Documentation-surface connector layer | (orthogonal — runs outside consul) | No consul change; connectors are MCP servers the BA-dispatcher consumes. Audit hook into consulate via `AuditEvent::ExternalApiCall` | external MCP servers; `consul-domain/src/ports/audit.rs` |
+| **BA7** Outcome attribution | **Gap 4 + Gap 8** | `fulfilled_requirements` (shared with BA3); new `AttestationProvider` port; `RequestAttestation`/`ExecutionAttestation` message pair for signed proof | `consul-domain/src/ports/`, `consul-protocol/src/messages/` |
+| **All BA primitives — auth foundation** | **Gap 6** | New flow `RegisterExternalDispatcher(public_key, capabilities[])` → `DispatcherToken(paseto)`; PASETO v4.local encode/decode in `consul-protocol/src/tokens/` | `consul-protocol`, `consulate` binary |
+
+### The cleanest single-PR extension that unlocks the most
+
+If we had to pick *one* PR to land first against consul to unlock the AI-factory work, it would be:
+
+1. Define `ExternalDispatcherPort` in `consul-domain/src/ports/external_dispatcher.rs` — pure trait with `relay_from_dispatcher(identity, EnhancedInstruction) → Result<...>` and `get_briefing(session_id) → BriefingData`.
+2. Extend `RelayInstruction` with three optional fields: `artifacts`, `orchestration_id`, `preferred_channel`. All `Option<T>` for backward compat.
+3. Add `AuditEvent::ExternalDispatcherAction` variant.
+4. Add `EnhancedInstruction` value object in `consul-domain` (wraps `RelayInstruction` plus dispatcher-identity context).
+
+This is **~300 lines of pure-domain Rust + Option fields**, no breaking changes. Test with in-memory adapters. Once landed, every BA-primitive has a concrete landing site.
+
+### Stubbed pieces blocking integration
+
+Production deployment of this extension needs at least:
+
+- `SessionStore` adapter (SQLite or PostgreSQL — neither implemented yet).
+- One `LlmProvider` adapter filled in (anthropic/openai/google/xai/ollama — all stubbed).
+- PASETO encode/decode logic (currently a stub newtype).
+- `consul-app` binary actually runnable (currently exits with "Phase 0.5 scaffold").
+- `consulate` binary protocol dispatch wired (TCP accept loop exists; message routing not connected).
+
+The brief's earlier "what's blocking shipping" framing under-counted these. Worth being explicit with Gary that the AI factory's consul-side critical path runs through Phase 0.5 → Phase 1 of consul itself.
+
+---
+
 ## Impact ranking of all 37 recommendations
 
 Each item scored on four dimensions, rolled into a tier:
