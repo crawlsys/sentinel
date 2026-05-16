@@ -478,9 +478,65 @@ fn atomic_write(fs: &dyn FileSystemPort, path: &Path, content: &str) -> anyhow::
     Ok(())
 }
 
+/// Minimum task count in an existing block before the shrink guard engages.
+/// Smaller blocks can shrink freely — false-alarming on the first-few-tasks
+/// case (where a brand-new project legitimately drops from 5 to 3 tasks) is
+/// worse than the marginal protection it provides.
+const SHRINK_GUARD_MIN_EXISTING: usize = 10;
+
+/// Ratio threshold: if the new render has fewer than this fraction of the
+/// existing block's task count, treat it as suspicious and refuse to write.
+/// 0.5 means "new must be at least half of existing"; a small session that
+/// hadn't rehydrated prior state would typically have 1-5 tasks vs. an
+/// accumulated block of 80+, which sits far below this floor.
+const SHRINK_GUARD_RATIO: f64 = 0.5;
+
+/// Env var that bypasses [`SHRINK_GUARD_RATIO`] for the cases where the user
+/// genuinely intends to shrink the list (bulk cleanup, project pivot).
+/// Setting it to any non-empty value force-writes the new (smaller) block.
+const SHRINK_GUARD_FORCE_ENV: &str = "SENTINEL_FORCE_TASKS_MD_WRITE";
+
+/// Count rendered tasks inside an auto-block body. Incomplete tasks render
+/// as `### [<mark>] <N>.` headers; completed tasks render as
+/// `- [x] **<N>.` lines. The sum is the block's total task count.
+///
+/// Used by the shrink guard in [`write_project_tasks_md`] to decide whether
+/// the new render is a routine update or a suspicious wipe.
+fn count_block_tasks(body: &str) -> usize {
+    let open_count = body
+        .lines()
+        .filter(|l| l.starts_with("### [") && l.contains("] ") && l.contains(". "))
+        .count();
+    let completed_count = body
+        .lines()
+        .filter(|l| l.starts_with("- [x] **") && l.contains(". "))
+        .count();
+    open_count + completed_count
+}
+
+/// Extract the marker block body from existing tasks.md content. Returns
+/// `None` when the markers are absent (no prior auto-block to compare to).
+fn extract_existing_block(content: &str) -> Option<&str> {
+    let start = content.find(MARKER_START)?;
+    let end = content.find(MARKER_END)?;
+    if end <= start {
+        return None;
+    }
+    Some(&content[start + MARKER_START.len()..end])
+}
+
 /// Write `<repo_root>/tasks.md` with the auto block merged into existing content.
 ///
-/// Returns `true` if the file was actually changed, `false` if skipped (no diff).
+/// **Shrink guard (2026-05-16)**: when the new render would replace an
+/// existing block that has >= [`SHRINK_GUARD_MIN_EXISTING`] tasks with one
+/// that has fewer than half as many, the write is refused and a `tracing::warn`
+/// is logged. This prevents the failure mode where a brand-new session with
+/// a small `TaskList` overwrites a `tasks.md` block accumulated across many
+/// prior sessions (the user's tasks visibly vanish from the auto-block).
+/// Set `SENTINEL_FORCE_TASKS_MD_WRITE=1` to override.
+///
+/// Returns `true` if the file was actually changed, `false` if skipped
+/// (no diff, or shrink guard engaged).
 fn write_project_tasks_md(
     fs: &dyn FileSystemPort,
     repo_root: &Path,
@@ -488,6 +544,40 @@ fn write_project_tasks_md(
 ) -> anyhow::Result<bool> {
     let path = repo_root.join("tasks.md");
     let existing = fs.read_to_string(&path).ok();
+
+    // Shrink guard: compare current block size to new render size.
+    if let Some(prev) = &existing {
+        if let Some(existing_block) = extract_existing_block(prev) {
+            let existing_count = count_block_tasks(existing_block);
+            let new_count = count_block_tasks(body);
+            let force = std::env::var(SHRINK_GUARD_FORCE_ENV)
+                .map(|v| !v.is_empty())
+                .unwrap_or(false);
+            #[allow(
+                clippy::cast_precision_loss,
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss
+            )]
+            let allowed_min = (existing_count as f64 * SHRINK_GUARD_RATIO).ceil() as usize;
+            if !force
+                && existing_count >= SHRINK_GUARD_MIN_EXISTING
+                && new_count < allowed_min
+            {
+                tracing::warn!(
+                    repo_root = %repo_root.display(),
+                    existing_count,
+                    new_count,
+                    allowed_min,
+                    env_override = SHRINK_GUARD_FORCE_ENV,
+                    "task_persist: shrink guard engaged — refusing to wipe tasks.md \
+                     (new render has {new_count} tasks vs. existing {existing_count}). \
+                     Set {SHRINK_GUARD_FORCE_ENV}=1 to force the write."
+                );
+                return Ok(false);
+            }
+        }
+    }
+
     let merged = merge_with_existing(existing.as_deref(), body);
 
     // Skip if no change.
@@ -1364,5 +1454,180 @@ mod tests {
         assert!(written.contains("# My Roadmap"));
         assert!(written.contains("Hand-written stuff."));
         assert!(written.contains("auto body"));
+    }
+
+    /// Tests in this module touch the process-global env var
+    /// `SHRINK_GUARD_FORCE_ENV`. Rust runs tests in parallel within a
+    /// single process, so they MUST serialize their env-var access via
+    /// this mutex or one test's mutation will race another test's read.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Render a synthetic auto-block body with `n_open` open + `n_done`
+    /// completed tasks, matching the format `render_auto_block_body` emits.
+    fn synth_body(n_open: usize, n_done: usize) -> String {
+        let mut s = String::from("\n# Tasks — testproj\n\n");
+        if n_open > 0 {
+            s.push_str("## Open\n\n");
+            for i in 1..=n_open {
+                s.push_str(&format!("### [ ] {i}. Task {i}\n- **Status:** pending\n\n"));
+            }
+        }
+        if n_done > 0 {
+            s.push_str("## Completed\n\n");
+            for i in (n_open + 1)..=(n_open + n_done) {
+                s.push_str(&format!("- [x] **{i}. Done task {i}**\n"));
+            }
+            s.push('\n');
+        }
+        s
+    }
+
+    #[test]
+    fn test_count_block_tasks_counts_open_and_completed() {
+        let body = synth_body(3, 2);
+        assert_eq!(count_block_tasks(&body), 5);
+    }
+
+    #[test]
+    fn test_count_block_tasks_empty_body() {
+        assert_eq!(count_block_tasks(""), 0);
+        assert_eq!(count_block_tasks("# Tasks\n\nNo entries.\n"), 0);
+    }
+
+    #[test]
+    fn test_extract_existing_block_returns_inner_body() {
+        let content = format!(
+            "# Roadmap\n\n{MARKER_START}\n# Tasks\n## Open\n### [ ] 1. X\n{MARKER_END}\nTail.\n"
+        );
+        let block = extract_existing_block(&content).expect("must extract");
+        assert!(block.contains("# Tasks"));
+        assert!(block.contains("### [ ] 1. X"));
+        assert!(!block.contains("Tail."));
+    }
+
+    #[test]
+    fn test_extract_existing_block_none_when_no_markers() {
+        let content = "# Roadmap\n\nNo markers here.\n";
+        assert!(extract_existing_block(content).is_none());
+    }
+
+    #[test]
+    fn test_shrink_guard_refuses_to_wipe_large_existing() {
+        let _g = ENV_LOCK.lock().unwrap();
+        std::env::remove_var(SHRINK_GUARD_FORCE_ENV);
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let fs = TestFs;
+
+        // Seed tasks.md with a large block (80 tasks).
+        let big_body = synth_body(60, 20);
+        write_project_tasks_md(&fs, root, &big_body).unwrap();
+        let before = std::fs::read_to_string(root.join("tasks.md")).unwrap();
+        assert_eq!(count_block_tasks(&before), 80);
+
+        // Attempt to replace with a 5-task block — should be refused.
+        let tiny_body = synth_body(5, 0);
+        let wrote = write_project_tasks_md(&fs, root, &tiny_body).unwrap();
+        assert!(!wrote, "shrink guard must refuse the wipe");
+
+        // Original block preserved.
+        let after = std::fs::read_to_string(root.join("tasks.md")).unwrap();
+        assert_eq!(count_block_tasks(&after), 80);
+    }
+
+    #[test]
+    fn test_shrink_guard_allows_routine_churn() {
+        let _g = ENV_LOCK.lock().unwrap();
+        std::env::remove_var(SHRINK_GUARD_FORCE_ENV);
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let fs = TestFs;
+
+        // Seed with 20 tasks; replace with 15 — that's 75%, above the
+        // 50% guard floor → must write.
+        let initial = synth_body(15, 5);
+        write_project_tasks_md(&fs, root, &initial).unwrap();
+        let updated = synth_body(10, 5);
+        let wrote = write_project_tasks_md(&fs, root, &updated).unwrap();
+        assert!(wrote, "75% retention must not trip the guard");
+
+        let after = std::fs::read_to_string(root.join("tasks.md")).unwrap();
+        assert_eq!(count_block_tasks(&after), 15);
+    }
+
+    #[test]
+    fn test_shrink_guard_off_for_small_existing() {
+        let _g = ENV_LOCK.lock().unwrap();
+        std::env::remove_var(SHRINK_GUARD_FORCE_ENV);
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let fs = TestFs;
+
+        // 8 tasks → 2 tasks. 8 is below SHRINK_GUARD_MIN_EXISTING (10),
+        // so the guard never fires. Small projects can shrink freely.
+        let initial = synth_body(8, 0);
+        write_project_tasks_md(&fs, root, &initial).unwrap();
+        let shrunk = synth_body(2, 0);
+        let wrote = write_project_tasks_md(&fs, root, &shrunk).unwrap();
+        assert!(wrote, "shrink guard must not fire for small existing blocks");
+
+        let after = std::fs::read_to_string(root.join("tasks.md")).unwrap();
+        assert_eq!(count_block_tasks(&after), 2);
+    }
+
+    #[test]
+    fn test_shrink_guard_force_env_overrides() {
+        let _g = ENV_LOCK.lock().unwrap();
+        std::env::remove_var(SHRINK_GUARD_FORCE_ENV);
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let fs = TestFs;
+
+        let big = synth_body(50, 10);
+        write_project_tasks_md(&fs, root, &big).unwrap();
+
+        // Set the force env and confirm the wipe goes through.
+        std::env::set_var(SHRINK_GUARD_FORCE_ENV, "1");
+        let tiny = synth_body(2, 0);
+        let wrote = write_project_tasks_md(&fs, root, &tiny).unwrap();
+        std::env::remove_var(SHRINK_GUARD_FORCE_ENV);
+        assert!(wrote, "force env var must override the guard");
+
+        let after = std::fs::read_to_string(root.join("tasks.md")).unwrap();
+        assert_eq!(count_block_tasks(&after), 2);
+    }
+
+    #[test]
+    fn test_shrink_guard_allows_initial_write() {
+        let _g = ENV_LOCK.lock().unwrap();
+        std::env::remove_var(SHRINK_GUARD_FORCE_ENV);
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let fs = TestFs;
+
+        // No existing tasks.md → the guard has no prior block to compare
+        // to; first-time writes always succeed regardless of size.
+        let body = synth_body(2, 0);
+        let wrote = write_project_tasks_md(&fs, root, &body).unwrap();
+        assert!(wrote);
+        let after = std::fs::read_to_string(root.join("tasks.md")).unwrap();
+        assert_eq!(count_block_tasks(&after), 2);
+    }
+
+    #[test]
+    fn test_shrink_guard_allows_growth() {
+        let _g = ENV_LOCK.lock().unwrap();
+        std::env::remove_var(SHRINK_GUARD_FORCE_ENV);
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let fs = TestFs;
+
+        let initial = synth_body(20, 0);
+        write_project_tasks_md(&fs, root, &initial).unwrap();
+        let grown = synth_body(25, 5);
+        let wrote = write_project_tasks_md(&fs, root, &grown).unwrap();
+        assert!(wrote, "growth must always write through");
+        let after = std::fs::read_to_string(root.join("tasks.md")).unwrap();
+        assert_eq!(count_block_tasks(&after), 30);
     }
 }
