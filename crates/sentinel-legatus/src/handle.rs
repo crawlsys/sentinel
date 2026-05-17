@@ -22,20 +22,37 @@
 
 use std::sync::Arc;
 
-use consul_protocol::messages::{BlockReason, RelayInstruction};
+use consul_domain::identity::InstructionId;
+use consul_protocol::messages::{BlockReason, InstructionOutcome, RelayInstruction};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, Mutex};
 
-/// The escalation event a caller asks the legatus to send.
+/// Any event the legatus wants to send to its consul over the
+/// post-handshake WS. Covers session-lifecycle escalations
+/// (`Blocked` / `Completed` / `Failed`) **and** per-instruction
+/// accounting (`InstructionAck` / `InstructionResult`) — the
+/// connect loop drains one channel and matches on the variant to
+/// produce the right Consular Protocol envelope.
 ///
-/// `Serialize`/`Deserialize` are derived with `#[serde(tag = "kind",
-/// rename_all = "snake_case")]` so the daemon's HTTP route can
-/// take the JSON body directly. Hook clients construct one of:
+/// Name kept as `EscalationKind` for backwards compatibility with
+/// the in-tree callers shipped in commits A-C of the
+/// sentinel-legatus series; "escalation" is a slight misnomer for
+/// `InstructionAck` (which is routine) but not worth a workspace-
+/// wide rename today.
+///
+/// `Serialize`/`Deserialize` are derived with `#[serde(tag =
+/// "kind", rename_all = "snake_case")]` so the daemon's HTTP
+/// routes can take the JSON body directly. Hook clients construct
+/// one of:
 ///
 /// ```json
-/// {"kind": "completed", "summary": "deployed staging"}
-/// {"kind": "failed",    "error":   "tool x crashed"}
-/// {"kind": "blocked",   "reason":  {"kind": "permission_denied", "tool": "Bash"}}
+/// {"kind": "completed",          "summary": "deployed staging"}
+/// {"kind": "failed",             "error":   "tool x crashed"}
+/// {"kind": "blocked",            "reason":  {"kind": "permission_denied", "tool": "Bash"}}
+/// {"kind": "instruction_ack",    "instruction_id": "<uuid>"}
+/// {"kind": "instruction_result", "instruction_id": "<uuid>",
+///                                "outcome": {"kind": "success"},
+///                                "summary": "applied migration"}
 /// ```
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -58,6 +75,27 @@ pub enum EscalationKind {
     Failed {
         /// One-line error description.
         error: String,
+    },
+    /// Per-instruction: acknowledge receipt of a previously-
+    /// dispatched `RelayInstruction`. Sentinel's `consul_inbox`
+    /// hook emits this when draining each instruction so the
+    /// operator's chat surface gets an "is on it" line.
+    InstructionAck {
+        /// The instruction being acknowledged.
+        instruction_id: InstructionId,
+    },
+    /// Per-instruction: report outcome of a previously-
+    /// acknowledged `RelayInstruction`. Sentinel's `Stop` hook
+    /// emits this for each pending instruction tracked in the
+    /// per-session inbox file. MVP: outcome is always `Success`
+    /// (we don't classify mid-run failures yet).
+    InstructionResult {
+        /// The instruction this result corresponds to.
+        instruction_id: InstructionId,
+        /// Outcome classification.
+        outcome: InstructionOutcome,
+        /// Optional one-line summary for the operator.
+        summary: Option<String>,
     },
 }
 

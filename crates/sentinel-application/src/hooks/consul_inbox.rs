@@ -26,13 +26,25 @@
 use sentinel_domain::events::{HookEvent, HookInput, HookOutput};
 use sentinel_legatus::RelayInstruction;
 
-use crate::legatus_client::drain_inbox;
+use crate::legatus_client::{ack_fire_and_forget, drain_inbox, note_pending_instruction};
 
 /// `UserPromptSubmit` hook entry point.
-pub fn process(_input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
+pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
     let pending = drain_inbox();
     if pending.is_empty() {
         return HookOutput::allow();
+    }
+    let session_id = input.session_id.as_deref();
+    for instr in &pending {
+        // Per-instruction Ack ping — operator gets "firefly is on
+        // it (id ...)." routed back via consul → SurfaceRouting.
+        ack_fire_and_forget(instr.instruction_id);
+        // Record the id so the next Stop hook fire can emit a
+        // matching Result. Skip if no session id (defensive — in
+        // practice every UserPromptSubmit carries one).
+        if let Some(sid) = session_id {
+            note_pending_instruction(sid, instr.instruction_id);
+        }
     }
     let context = format_pending(&pending);
     tracing::info!(
