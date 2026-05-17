@@ -244,6 +244,7 @@ pub const HOOK_NAMES: &[&str] = &[
     "doc_cleanup",
     "doc_drift",
     "doppler_auth0_gate",
+    "dry_run_then_commit",
     "error_reporter",
     "evidence_collector",
     "execution_log",

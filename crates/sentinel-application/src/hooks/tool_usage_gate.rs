@@ -345,25 +345,27 @@ fn recent_pending_task_hint(fs: &dyn FileSystemPort, _session_id: &str) -> Optio
 ///
 /// - `TriviallyReversible` → allow silently (memory writes, plan files,
 ///   read-only ops, list/get MCP tools per the shipped TOML).
-/// - `ReversibleWithEffort` / `Irreversible` / `Catastrophic` → run the
-///   four-check stack (sequential-thinking marker + task created + plan
-///   mode + active task in_progress).
-///
-/// When A3 (dry-run-then-commit) ships, the `Irreversible`/`Catastrophic`
-/// branch will short-circuit to `allow()` so A3's separate-model-family
-/// auditor handles the gating instead.
+/// - `ReversibleWithEffort` → run the four-check stack (sequential-thinking
+///   marker + task created + plan mode + active task in_progress).
+/// - `Irreversible` / `Catastrophic` → when `a3_enabled` is `true`,
+///   short-circuit to `allow()` so the A3 `dry_run_then_commit` hook
+///   handles the gating via its separate-model-family auditor. When
+///   `a3_enabled` is `false` (no `OPENROUTER_API_KEY` configured at
+///   session start), fall through to the four-check stack as the
+///   strongest available gate.
 pub fn process(
     input: &HookInput,
     fs: &dyn FileSystemPort,
     env: &dyn EnvPort,
     classifier: &dyn ReversibilityClassifierPort,
+    a3_enabled: bool,
 ) -> HookOutput {
     let tool = match &input.tool_name {
         Some(t) => t.as_str(),
         None => return HookOutput::allow(),
     };
 
-    // A6 Phase 4b — full class-based dispatch.
+    // A6 Phase 4b + A3 Phase 4 — class-based dispatch with A3 hand-off.
     //
     // The shared reversibility classifier (per docs/a6-reversibility-graded-tripwires.md)
     // decides whether this call enters the four-check stack:
@@ -372,22 +374,27 @@ pub fn process(
     //   read-only ops, list/get MCP tools per the shipped TOML).
     // - ReversibleWithEffort → run the four-check stack (Edit/Write/local
     //   mutations).
-    // - Irreversible / Catastrophic → ALSO run the four-check stack for now,
-    //   the strongest gate available pre-A3. Once A3 (dry-run-then-commit)
-    //   ships, this branch will short-circuit to allow() so A3's separate-
-    //   model-family auditor handles the gating instead.
+    // - Irreversible / Catastrophic:
+    //     * `a3_enabled` (the production caller in hook_cmd.rs sets this
+    //       when `RigAuditor::from_env()` succeeded) → allow silently;
+    //       the A3 `dry_run_then_commit` hook owns these classes via its
+    //       separate-model-family auditor.
+    //     * Otherwise → fall through to the four-check stack so the
+    //       pre-A3 gate is still the strongest available defence.
     //
-    // This replaces the previous binary in_scope match + bash_command_is_mutating
-    // / is_mutating_mcp_tool heuristic helpers (deleted in Phase 4b). The
-    // shipped reversibility-defaults.toml is the substrate; operator
-    // overrides extend it.
+    // The shipped reversibility-defaults.toml is the substrate;
+    // operator overrides extend it.
     let null_input = serde_json::Value::Null;
     let tool_input_ref = input.tool_input.as_ref().unwrap_or(&null_input);
     match classifier.classify(tool, tool_input_ref) {
         ReversibilityClass::TriviallyReversible => return HookOutput::allow(),
-        ReversibilityClass::ReversibleWithEffort
-        | ReversibilityClass::Irreversible
-        | ReversibilityClass::Catastrophic => {
+        ReversibilityClass::ReversibleWithEffort => {
+            // Fall through to the four-check stack below.
+        }
+        ReversibilityClass::Irreversible | ReversibilityClass::Catastrophic => {
+            if a3_enabled {
+                return HookOutput::allow();
+            }
             // Fall through to the four-check stack below.
         }
     }
@@ -702,6 +709,7 @@ mod tests {
             &fs,
             &crate::hooks::test_support::StubEnv::new(),
             &permissive_classifier(),
+            false,
         );
         assert_eq!(
             output.blocked,
@@ -725,6 +733,7 @@ mod tests {
             &fs,
             &crate::hooks::test_support::StubEnv::new(),
             &permissive_classifier(),
+            false,
         );
         assert_eq!(
             output.blocked,
@@ -747,6 +756,7 @@ mod tests {
             &fs,
             &crate::hooks::test_support::StubEnv::new(),
             &permissive_classifier(),
+            false,
         )
                 .blocked
                 .is_none()
@@ -761,6 +771,7 @@ mod tests {
             &fs,
             &crate::hooks::test_support::StubEnv::new(),
             &permissive_classifier(),
+            false,
         );
         assert_eq!(output.blocked, Some(true));
     }
@@ -773,6 +784,7 @@ mod tests {
             &fs,
             &crate::hooks::test_support::StubEnv::new(),
             &permissive_classifier(),
+            false,
         );
         assert_eq!(output.blocked, Some(true));
     }
@@ -785,6 +797,7 @@ mod tests {
             &fs,
             &crate::hooks::test_support::StubEnv::new(),
             &permissive_classifier(),
+            false,
         );
         assert_eq!(output.blocked, Some(true));
     }
@@ -800,6 +813,7 @@ mod tests {
             &fs,
             &crate::hooks::test_support::StubEnv::new(),
             &permissive_classifier(),
+            false,
         );
         assert_eq!(output.blocked, Some(true));
         let reason = output
@@ -842,6 +856,7 @@ mod tests {
             &fs,
             &crate::hooks::test_support::StubEnv::new(),
             &permissive_classifier(),
+            false,
         );
         let reason = output
             .hook_specific_output
@@ -873,6 +888,7 @@ mod tests {
             &fs,
             &crate::hooks::test_support::StubEnv::new(),
             &permissive_classifier(),
+            false,
         );
         assert_eq!(output.blocked, Some(true));
         let reason = output
@@ -894,6 +910,7 @@ mod tests {
             &fs,
             &crate::hooks::test_support::StubEnv::new(),
             &permissive_classifier(),
+            false,
         );
         assert!(output.blocked.is_none());
     }
@@ -906,6 +923,7 @@ mod tests {
             &fs,
             &crate::hooks::test_support::StubEnv::new(),
             &permissive_classifier(),
+            false,
         );
         assert!(output.blocked.is_none());
     }
@@ -1034,6 +1052,7 @@ mod tests {
             &fs,
             &crate::hooks::test_support::StubEnv::new(),
             &permissive_classifier(),
+            false,
         );
         assert_eq!(output.blocked, Some(true));
     }
@@ -1115,6 +1134,7 @@ mod tests {
             &fs_port,
             &crate::hooks::test_support::StubEnv::new(),
             &permissive_classifier(),
+            false,
         );
         assert!(
             output.blocked.is_none(),
@@ -1146,6 +1166,7 @@ mod tests {
             &fs,
             &autopilot_env(),
             &permissive_classifier(),
+            false,
         );
         assert!(
             output.blocked.is_none(),
@@ -1178,6 +1199,7 @@ mod tests {
             &fs,
             &autopilot_env(),
             &permissive_classifier(),
+            false,
         );
         assert_eq!(
             output.blocked,
@@ -1198,6 +1220,7 @@ mod tests {
             &fs,
             &autopilot_env(),
             &permissive_classifier(),
+            false,
         );
         // Plan check skipped, but task-active still blocks.
         assert_eq!(output.blocked, Some(true));
@@ -1500,6 +1523,7 @@ mod tests {
             &fs,
             &crate::hooks::test_support::StubEnv::new(),
             &permissive_classifier(),
+            false,
         );
         assert!(
             output.blocked.is_none(),
@@ -1530,6 +1554,7 @@ mod tests {
             &fs,
             &crate::hooks::test_support::StubEnv::new(),
             &permissive_classifier(),
+            false,
         );
         assert_eq!(
             output.blocked,
@@ -1615,6 +1640,7 @@ mod tests {
             &fs_port,
             &crate::hooks::test_support::StubEnv::new(),
             &permissive_classifier(),
+            false,
         );
         assert!(
             output.blocked.is_none(),
@@ -1798,6 +1824,7 @@ mod tests {
             &fs,
             &crate::hooks::test_support::StubEnv::new(),
             &classifier,
+            false,
         );
         assert!(
             output.blocked.is_none(),
@@ -1825,6 +1852,7 @@ mod tests {
             &fs,
             &crate::hooks::test_support::StubEnv::new(),
             &classifier,
+            false,
         );
         assert!(
             output.blocked.is_none(),
@@ -1844,6 +1872,7 @@ mod tests {
             &fs,
             &crate::hooks::test_support::StubEnv::new(),
             &permissive_classifier(),
+            false,
         );
         assert_eq!(
             output.blocked,
@@ -1871,6 +1900,7 @@ mod tests {
                 &fs,
                 &crate::hooks::test_support::StubEnv::new(),
                 &classifier,
+                false,
             );
             assert_eq!(
                 output.blocked,
@@ -1878,6 +1908,59 @@ mod tests {
                 "class {class:?} must NOT short-circuit; existing gate stack should block"
             );
         }
+    }
+
+    #[test]
+    fn a3_enabled_defers_irreversible_to_a3() {
+        // A3 Phase 4 — when `a3_enabled = true`, Irreversible and
+        // Catastrophic classes short-circuit to allow() so the
+        // dry_run_then_commit hook owns those classes. The four-check
+        // stack is bypassed for these classes (it still runs for
+        // ReversibleWithEffort).
+        let fs = MockFs::new();
+        for class in [
+            ReversibilityClass::Irreversible,
+            ReversibilityClass::Catastrophic,
+        ] {
+            let classifier =
+                crate::reversibility_classifier::StaticReversibilityClassifier::empty()
+                    .with("Edit", class);
+            let output = process(
+                &edit_input("test-session"),
+                &fs,
+                &crate::hooks::test_support::StubEnv::new(),
+                &classifier,
+                true,
+            );
+            assert!(
+                output.blocked.is_none(),
+                "class {class:?} must short-circuit when a3_enabled; \
+                 dry_run_then_commit owns it"
+            );
+        }
+    }
+
+    #[test]
+    fn a3_enabled_still_gates_reversible_with_effort() {
+        // A3 Phase 4 — `a3_enabled = true` only affects Irreversible/
+        // Catastrophic. ReversibleWithEffort (the bulk of edits) keeps
+        // running the four-check stack regardless.
+        let fs = MockFs::new();
+        let classifier =
+            crate::reversibility_classifier::StaticReversibilityClassifier::empty()
+                .with("Edit", ReversibilityClass::ReversibleWithEffort);
+        let output = process(
+            &edit_input("test-session"),
+            &fs,
+            &crate::hooks::test_support::StubEnv::new(),
+            &classifier,
+            true,
+        );
+        assert_eq!(
+            output.blocked,
+            Some(true),
+            "ReversibleWithEffort still runs the four-check stack even with a3_enabled"
+        );
     }
 
     #[test]
@@ -1900,6 +1983,7 @@ mod tests {
             &fs,
             &crate::hooks::test_support::StubEnv::new(),
             &classifier,
+            false,
         );
         assert!(output.blocked.is_none());
     }
