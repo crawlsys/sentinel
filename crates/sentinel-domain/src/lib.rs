@@ -8,6 +8,7 @@ pub mod config;
 pub mod constants;
 pub mod dependency;
 pub mod disagreement;
+pub mod dry_run;
 pub mod error_classifier;
 pub mod events;
 pub mod evidence;
@@ -52,6 +53,9 @@ pub use judge::JudgeVerdict;
 pub use pricing::{cost_for, short_model_label, tier_for_model, PricingTier, TokenUsage};
 pub use proof::{PhaseProof, ProofChain};
 pub use request_limits::{CallWindow, LimitError, RequestLimits};
+pub use dry_run::{
+    AuditorAxes, AuditorDecision, AuditorError, AuditorVerdict, DryRunRequest,
+};
 pub use reversibility::{ParseReversibilityClassError, ReversibilityClass};
 pub use step_proof::StepProof;
 pub use routing::RegexRouter;

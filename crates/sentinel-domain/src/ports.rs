@@ -377,3 +377,38 @@ pub trait ReversibilityClassifierPort: Send + Sync {
         tool_input: &serde_json::Value,
     ) -> crate::ReversibilityClass;
 }
+
+// ---------------------------------------------------------------------------
+// Auditor port (A3)
+// ---------------------------------------------------------------------------
+
+/// Port for scoring a dry-run artifact via a separate-model-family auditor.
+///
+/// A3 design (`docs/a3-dry-run-then-commit.md`): the hook constructs a
+/// [`DryRunRequest`](crate::dry_run::DryRunRequest) when an action's
+/// reversibility class is `Irreversible` or `Catastrophic`, routes it
+/// through this port, and uses the returned
+/// [`AuditorVerdict`](crate::dry_run::AuditorVerdict) to decide whether
+/// to commit, block, or escalate to human review.
+///
+/// The vendor-class separation contract — auditor must be different model
+/// family than the acting agent — is the responsibility of the *adapter
+/// selector* (per A2's `CapabilityRouterPort`), not this trait. Adapter
+/// implementations focus on a single vendor; the selector picks the
+/// appropriate one for each call.
+///
+/// Implementations must be **deterministic at the configuration level**
+/// (same configured model + temperature + prompts → reproducible verdicts
+/// for the same dry-run, modulo LLM-side variation) so proof-chain
+/// re-verification reads cleanly.
+pub trait AuditorPort: Send + Sync {
+    /// Score a dry-run artifact. On success returns a structured
+    /// [`AuditorVerdict`](crate::dry_run::AuditorVerdict). On failure
+    /// returns an [`AuditorError`](crate::dry_run::AuditorError); the
+    /// hook treats every error per the catastrophic-vs-irreversible
+    /// policy in the `AuditorError` doc comment.
+    fn score(
+        &self,
+        dry_run: &crate::dry_run::DryRunRequest,
+    ) -> Result<crate::dry_run::AuditorVerdict, crate::dry_run::AuditorError>;
+}
