@@ -1,0 +1,246 @@
+# Sentinel reversibility classification — shipped defaults.
+#
+# Read by `sentinel_infrastructure::reversibility::LayeredReversibilityClassifier`
+# at sentinel startup. Operators add per-workflow refinements in a sibling
+# `config/reversibility.toml` (Layer 4 overrides); the loader merges the two
+# files per the rules in the adapter's module docstring.
+#
+# Per the A6 design (`docs/a6-reversibility-graded-tripwires.md`), every
+# blast-radius gate in sentinel consults the resulting class. Conservative
+# defaults are load-bearing: unknown MCP server/tool falls back to
+# Irreversible; unmatched Bash command falls back to ReversibleWithEffort.
+# These TOML entries make those fallbacks more specific.
+#
+# Editing this file is OK; the schema is the same as operator overrides.
+# Tests in `sentinel-infrastructure/src/reversibility.rs` exercise the
+# shipped contents via `include_str!` — TOML edits that break the schema
+# or change a smoke-test-asserted classification will fail CI.
+#
+# Class values: TriviallyReversible | ReversibleWithEffort | Irreversible | Catastrophic.
+
+# ---------------------------------------------------------------------------
+# Layer 2: per-MCP-tool defaults
+# ---------------------------------------------------------------------------
+
+# Linear — issue tracker. Read tools trivial; mutations are recoverable
+# via Linear's own undo / status-change flow; delete is rarely undone.
+[mcp.linear]
+list_issues = "TriviallyReversible"
+get_issue = "TriviallyReversible"
+list_projects = "TriviallyReversible"
+get_project = "TriviallyReversible"
+search = "TriviallyReversible"
+create_issue = "ReversibleWithEffort"
+update_issue = "ReversibleWithEffort"
+add_comment = "ReversibleWithEffort"
+delete_issue = "Irreversible"
+
+# Confluence — org documentation. Pages are visible to others as soon as
+# they're published; recovery requires the wiki's version-history UX.
+[mcp.confluence]
+get_page = "TriviallyReversible"
+search = "TriviallyReversible"
+list_spaces = "TriviallyReversible"
+create_page = "Irreversible"
+update_page = "Irreversible"
+delete_page = "Irreversible"
+
+# Notion — org documentation, peer of Confluence.
+[mcp.notion]
+get_page = "TriviallyReversible"
+get_database = "TriviallyReversible"
+query_database = "TriviallyReversible"
+search = "TriviallyReversible"
+create_page = "Irreversible"
+update_page = "Irreversible"
+delete_page = "Irreversible"
+create_database_row = "Irreversible"
+update_database_row = "Irreversible"
+
+# Google Drive — unstructured docs. Reads trivial; uploads visible to
+# anyone with share access (Irreversible from the operator's standpoint
+# even if the file is technically recoverable from Drive's trash).
+[mcp.drive]
+list_files = "TriviallyReversible"
+get_file_metadata = "TriviallyReversible"
+read_file_content = "TriviallyReversible"
+search_files = "TriviallyReversible"
+upload_file = "Irreversible"
+update_file = "Irreversible"
+delete_file = "Irreversible"
+
+# Gmail — once sent, cannot be unsent. Recall windows are best-effort and
+# vendor-specific; for sentinel purposes, send is catastrophic.
+[mcp.gmail]
+list_messages = "TriviallyReversible"
+get_message = "TriviallyReversible"
+search = "TriviallyReversible"
+list_labels = "TriviallyReversible"
+send_message = "Catastrophic"
+delete_message = "Irreversible"
+
+# Slack — messages visible immediately. Edits possible but the message
+# was already seen / notified / mirrored; treat as Irreversible.
+[mcp.slack]
+list_channels = "TriviallyReversible"
+get_channel_history = "TriviallyReversible"
+get_thread = "TriviallyReversible"
+search_messages = "TriviallyReversible"
+post_message = "Irreversible"
+update_message = "Irreversible"
+delete_message = "Irreversible"
+
+# Sentinel's own MCP surface — almost entirely read/observability.
+# Workflow-mutating tools (submit_phase_complete, update_step) are
+# reversible with effort via the proof chain.
+[mcp.sentinel]
+get_proof_chain = "TriviallyReversible"
+get_workflow_status = "TriviallyReversible"
+verify_chain = "TriviallyReversible"
+get_session_stats = "TriviallyReversible"
+get_phase_steps = "TriviallyReversible"
+get_workflow_progress = "TriviallyReversible"
+submit_phase_complete = "ReversibleWithEffort"
+update_step = "ReversibleWithEffort"
+regenerate_claude_md = "ReversibleWithEffort"
+edit_claude_md_template = "ReversibleWithEffort"
+restart_all_mcps = "ReversibleWithEffort"
+
+# ---------------------------------------------------------------------------
+# Layer 3: Bash command patterns
+# ---------------------------------------------------------------------------
+#
+# First-match wins. Order matters: put the most-specific catastrophic
+# patterns FIRST so they classify before more-general patterns demote
+# them.
+#
+# Regex syntax is the `regex` crate's flavor — no look-around. Patterns
+# match anywhere in the command string unless anchored with `^`/`$`.
+#
+# When NO pattern matches, the adapter falls back to ReversibleWithEffort
+# (the conservative Bash default — assume any unrecognized command
+# is mutating).
+
+# --- Catastrophic: irrecoverable + high blast radius -----------------------
+
+[[bash.pattern]]
+match = "^rm[[:space:]]+-rf[[:space:]]+/[[:space:]]*$"
+class = "Catastrophic"
+# rm -rf / — root-deletion.
+
+[[bash.pattern]]
+match = "^rm[[:space:]]+-rf[[:space:]]+[^./]"
+class = "Catastrophic"
+# rm -rf <abs-or-bare-name> — non-relative deletion.
+
+[[bash.pattern]]
+match = "(?i)DROP[[:space:]]+(DATABASE|TABLE|SCHEMA)"
+class = "Catastrophic"
+# SQL drop statements.
+
+[[bash.pattern]]
+match = "(?i)TRUNCATE[[:space:]]+TABLE"
+class = "Catastrophic"
+# SQL truncate.
+
+[[bash.pattern]]
+match = "git[[:space:]]+push[[:space:]]+(--force|-f)[[:space:]]+.*[[:space:]]+(main|master)"
+class = "Catastrophic"
+# Force-push to a protected branch.
+
+[[bash.pattern]]
+match = "terraform[[:space:]]+destroy.*(prod|production)"
+class = "Catastrophic"
+# Terraform destroy on prod.
+
+[[bash.pattern]]
+match = "kubectl[[:space:]]+delete.*(prod|production)"
+class = "Catastrophic"
+# Kubectl delete against prod.
+
+[[bash.pattern]]
+match = "(?i)DELETE[[:space:]]+FROM[[:space:]]+[a-zA-Z_]+[[:space:]]*;"
+class = "Catastrophic"
+# DELETE FROM <table>; without WHERE — full-table wipe.
+
+# --- Irreversible: visible outside operator control ------------------------
+
+[[bash.pattern]]
+match = "git[[:space:]]+push[[:space:]]+--force-with-lease"
+class = "ReversibleWithEffort"
+# --force-with-lease is the safer flag; demoted from the generic
+# force-push catastrophic above only when explicitly used.
+
+[[bash.pattern]]
+match = "^git[[:space:]]+push([[:space:]]|$)"
+class = "Irreversible"
+# Plain git push — visible in shared history; recovery requires force-push.
+
+[[bash.pattern]]
+match = "^terraform[[:space:]]+apply"
+class = "Irreversible"
+# Terraform apply (non-prod variant captured above for catastrophic).
+
+[[bash.pattern]]
+match = "^(npm|pnpm|yarn|bun)[[:space:]]+publish"
+class = "Irreversible"
+# Package publish — visible to the registry; unpublish has tight time windows.
+
+[[bash.pattern]]
+match = "^cargo[[:space:]]+publish"
+class = "Irreversible"
+# Crates.io publish — irrevocable per crates.io policy.
+
+[[bash.pattern]]
+match = "^(gh|hub)[[:space:]]+pr[[:space:]]+create"
+class = "Irreversible"
+# Public PR creation — visible to reviewers / CI / external audiences.
+
+[[bash.pattern]]
+match = "^(gh|hub)[[:space:]]+release[[:space:]]+create"
+class = "Irreversible"
+# GitHub release.
+
+[[bash.pattern]]
+match = "^docker[[:space:]]+push"
+class = "Irreversible"
+# Docker image push.
+
+# --- ReversibleWithEffort: local + recoverable ----------------------------
+
+[[bash.pattern]]
+match = "^git[[:space:]]+(commit|reset|checkout|stash|branch|merge|rebase)([[:space:]]|$)"
+class = "ReversibleWithEffort"
+# Git operations confined to the local working tree (until push).
+
+[[bash.pattern]]
+match = "^(cargo|npm|pnpm|yarn|bun)[[:space:]]+(build|test|check|fmt|clippy|run)"
+class = "ReversibleWithEffort"
+# Local build / test commands — produce artifacts in target/ etc.
+
+# --- TriviallyReversible: read-only observation ---------------------------
+
+[[bash.pattern]]
+match = "^(ls|cat|head|tail|grep|find|file|wc|stat|du|df|ps|top|env|which|whoami|pwd)([[:space:]]|$)"
+class = "TriviallyReversible"
+# Plain read-only Unix commands.
+
+[[bash.pattern]]
+match = "^git[[:space:]]+(status|log|diff|show|branch[[:space:]]+--list|remote[[:space:]]+(-v|show)|worktree[[:space:]]+list|reflog)"
+class = "TriviallyReversible"
+# Read-only git introspection.
+
+[[bash.pattern]]
+match = "^(echo|printf|true|false|exit|history|date)([[:space:]]|$)"
+class = "TriviallyReversible"
+# Built-in / shell-internal commands that don't touch state.
+
+# ---------------------------------------------------------------------------
+# Layer 4: operator overrides (empty in the shipped defaults file —
+# operators add their own in a sibling config/reversibility.toml)
+# ---------------------------------------------------------------------------
+
+[overrides]
+# Example (commented out — operators uncomment + add their own):
+# "mcp__custom__safe_tool" = "TriviallyReversible"
+# "mcp__ba_orchestrator__publish_exec_deck" = "Catastrophic"

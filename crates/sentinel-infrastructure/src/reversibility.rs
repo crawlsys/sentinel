@@ -720,4 +720,247 @@ mod tests {
             ReversibilityClass::Irreversible
         );
     }
+
+    // ---- Shipped defaults smoke tests ----
+    //
+    // These tests load the `config/reversibility-defaults.toml` shipped with
+    // sentinel via `include_str!`. The point is to catch (a) syntax breaks
+    // in the shipped TOML and (b) classification regressions on
+    // well-known tools. If you intentionally change a classification in
+    // the shipped defaults, update the corresponding assertion here.
+
+    const SHIPPED_DEFAULTS: &str =
+        include_str!("../../../config/reversibility-defaults.toml");
+
+    fn shipped() -> LayeredReversibilityClassifier {
+        LayeredReversibilityClassifier::from_str(SHIPPED_DEFAULTS, None)
+            .expect("shipped reversibility-defaults.toml should parse cleanly")
+    }
+
+    #[test]
+    fn shipped_defaults_parse() {
+        // Just constructing exercises the TOML parser + regex compiler.
+        let _ = shipped();
+    }
+
+    #[test]
+    fn shipped_defaults_layer1_builtins_still_apply() {
+        let c = shipped();
+        assert_eq!(
+            c.classify("Read", &no_input()),
+            ReversibilityClass::TriviallyReversible
+        );
+        assert_eq!(
+            c.classify("Edit", &no_input()),
+            ReversibilityClass::ReversibleWithEffort
+        );
+    }
+
+    #[test]
+    fn shipped_defaults_linear_mcp_classifications() {
+        let c = shipped();
+        assert_eq!(
+            c.classify("mcp__linear__list_issues", &no_input()),
+            ReversibilityClass::TriviallyReversible
+        );
+        assert_eq!(
+            c.classify("mcp__linear__create_issue", &no_input()),
+            ReversibilityClass::ReversibleWithEffort
+        );
+        assert_eq!(
+            c.classify("mcp__linear__delete_issue", &no_input()),
+            ReversibilityClass::Irreversible
+        );
+    }
+
+    #[test]
+    fn shipped_defaults_gmail_send_is_catastrophic() {
+        let c = shipped();
+        assert_eq!(
+            c.classify("mcp__gmail__send_message", &no_input()),
+            ReversibilityClass::Catastrophic
+        );
+        assert_eq!(
+            c.classify("mcp__gmail__list_messages", &no_input()),
+            ReversibilityClass::TriviallyReversible
+        );
+    }
+
+    #[test]
+    fn shipped_defaults_slack_post_is_irreversible() {
+        let c = shipped();
+        assert_eq!(
+            c.classify("mcp__slack__post_message", &no_input()),
+            ReversibilityClass::Irreversible
+        );
+        assert_eq!(
+            c.classify("mcp__slack__list_channels", &no_input()),
+            ReversibilityClass::TriviallyReversible
+        );
+    }
+
+    #[test]
+    fn shipped_defaults_doc_systems_create_is_irreversible() {
+        let c = shipped();
+        assert_eq!(
+            c.classify("mcp__confluence__create_page", &no_input()),
+            ReversibilityClass::Irreversible
+        );
+        assert_eq!(
+            c.classify("mcp__notion__create_page", &no_input()),
+            ReversibilityClass::Irreversible
+        );
+        assert_eq!(
+            c.classify("mcp__drive__upload_file", &no_input()),
+            ReversibilityClass::Irreversible
+        );
+    }
+
+    #[test]
+    fn shipped_defaults_unknown_mcp_falls_back_to_irreversible() {
+        let c = shipped();
+        // Conservative default holds even with full defaults loaded.
+        assert_eq!(
+            c.classify("mcp__unknown_server__anything", &no_input()),
+            ReversibilityClass::Irreversible
+        );
+    }
+
+    #[test]
+    fn shipped_defaults_bash_rm_rf_root_is_catastrophic() {
+        let c = shipped();
+        assert_eq!(
+            c.classify("Bash", &bash_cmd("rm -rf /")),
+            ReversibilityClass::Catastrophic
+        );
+    }
+
+    #[test]
+    fn shipped_defaults_bash_drop_table_is_catastrophic() {
+        let c = shipped();
+        assert_eq!(
+            c.classify("Bash", &bash_cmd("psql -c 'DROP TABLE users'")),
+            ReversibilityClass::Catastrophic
+        );
+        // case-insensitive match
+        assert_eq!(
+            c.classify("Bash", &bash_cmd("psql -c 'drop database production'")),
+            ReversibilityClass::Catastrophic
+        );
+    }
+
+    #[test]
+    fn shipped_defaults_bash_force_push_to_main_is_catastrophic() {
+        let c = shipped();
+        assert_eq!(
+            c.classify("Bash", &bash_cmd("git push --force origin main")),
+            ReversibilityClass::Catastrophic
+        );
+        assert_eq!(
+            c.classify("Bash", &bash_cmd("git push -f origin master")),
+            ReversibilityClass::Catastrophic
+        );
+    }
+
+    #[test]
+    fn shipped_defaults_bash_force_with_lease_is_demoted() {
+        let c = shipped();
+        // --force-with-lease is matched by its specific rule BEFORE the
+        // plain `git push` rule.
+        assert_eq!(
+            c.classify(
+                "Bash",
+                &bash_cmd("git push --force-with-lease origin feat/x")
+            ),
+            ReversibilityClass::ReversibleWithEffort
+        );
+    }
+
+    #[test]
+    fn shipped_defaults_bash_plain_push_is_irreversible() {
+        let c = shipped();
+        assert_eq!(
+            c.classify("Bash", &bash_cmd("git push origin main")),
+            ReversibilityClass::Irreversible
+        );
+    }
+
+    #[test]
+    fn shipped_defaults_bash_publish_commands_are_irreversible() {
+        let c = shipped();
+        for cmd in [
+            "npm publish",
+            "pnpm publish --access public",
+            "cargo publish",
+        ] {
+            assert_eq!(
+                c.classify("Bash", &bash_cmd(cmd)),
+                ReversibilityClass::Irreversible,
+                "{cmd} should be Irreversible"
+            );
+        }
+    }
+
+    #[test]
+    fn shipped_defaults_bash_local_git_ops_are_reversible_with_effort() {
+        let c = shipped();
+        for cmd in [
+            "git commit -m foo",
+            "git reset --hard HEAD~1",
+            "git checkout feat/x",
+            "git rebase main",
+        ] {
+            assert_eq!(
+                c.classify("Bash", &bash_cmd(cmd)),
+                ReversibilityClass::ReversibleWithEffort,
+                "{cmd} should be ReversibleWithEffort"
+            );
+        }
+    }
+
+    #[test]
+    fn shipped_defaults_bash_read_only_ops_are_trivially_reversible() {
+        let c = shipped();
+        for cmd in [
+            "ls -la",
+            "cat README.md",
+            "grep -r foo src/",
+            "git status",
+            "git log --oneline -10",
+            "echo hello",
+        ] {
+            assert_eq!(
+                c.classify("Bash", &bash_cmd(cmd)),
+                ReversibilityClass::TriviallyReversible,
+                "{cmd} should be TriviallyReversible"
+            );
+        }
+    }
+
+    #[test]
+    fn shipped_defaults_bash_unmatched_command_falls_back_to_reversible_with_effort() {
+        let c = shipped();
+        // Conservative default for Bash when nothing matches.
+        assert_eq!(
+            c.classify("Bash", &bash_cmd("./some_custom_script.sh")),
+            ReversibilityClass::ReversibleWithEffort
+        );
+    }
+
+    #[test]
+    fn shipped_defaults_compose_with_operator_overrides() {
+        // Confirm operator overrides win even with the full shipped
+        // defaults loaded — the Layer 4 short-circuit holds.
+        let operator_overrides = r#"
+            [overrides]
+            "mcp__linear__list_issues" = "Catastrophic"
+        "#;
+        let c =
+            LayeredReversibilityClassifier::from_str(SHIPPED_DEFAULTS, Some(operator_overrides))
+                .unwrap();
+        assert_eq!(
+            c.classify("mcp__linear__list_issues", &no_input()),
+            ReversibilityClass::Catastrophic
+        );
+    }
 }
