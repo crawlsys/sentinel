@@ -45,5 +45,5 @@ pub use persistent_inbox::{default_inbox_path, PersistentInbox};
 pub use consul_domain::identity::{InstructionId, SessionId};
 pub use consul_protocol::keys::BOOTSTRAP_SECRET_LEN;
 pub use consul_protocol::messages::{
-    BlockReason, InstructionOutcome, RelayInstruction, RuntimeKind,
+    BlockReason, CancelInstruction, InstructionOutcome, RelayInstruction, RuntimeKind,
 };

@@ -448,6 +448,41 @@ fn handle_inbound(msg: &ConsularMessage, session_id: SessionId, runtime: &Legatu
                 debug!(%session_id, "no persistent inbox; instruction is log-only");
             }
         }
+        ConsularMessage::CancelInstruction(cancel) => {
+            // Operator-driven undo. If the instruction is still
+            // queued in the persistent inbox we drop it; if it's
+            // already drained into the model's context window the
+            // cancel is too late and we just log. Definitive vs
+            // advisory split per the ~90-95% reliability target.
+            //
+            // No InstructionResult emission here: when removed-from-
+            // inbox, no execution-log Stop will ever fire for the
+            // cancelled id (it's gone before draining), so consul
+            // won't see a Result either. The cancel arrival itself
+            // is the operator's confirmation. (A future improvement
+            // could emit InstructionResult { Declined { reason } }
+            // explicitly for the cancelled id; deferred until the
+            // sentinel ↔ daemon Result path is wired here.)
+            let removed = runtime
+                .inbox
+                .as_ref()
+                .is_some_and(|inbox| inbox.remove_by_id(cancel.instruction_id));
+            if removed {
+                info!(
+                    %session_id,
+                    instruction_id = %cancel.instruction_id,
+                    reason = ?cancel.reason,
+                    "CancelInstruction removed queued instruction",
+                );
+            } else {
+                info!(
+                    %session_id,
+                    instruction_id = %cancel.instruction_id,
+                    reason = ?cancel.reason,
+                    "CancelInstruction arrived too late (instruction already drained or never queued)",
+                );
+            }
+        }
         ConsularMessage::RequestContextSync(_) => {
             debug!(%session_id, "received RequestContextSync (no context store yet)");
         }

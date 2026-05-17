@@ -36,6 +36,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
+use consul_domain::identity::InstructionId;
 use consul_protocol::messages::RelayInstruction;
 use fs2::FileExt;
 use tracing::warn;
@@ -186,6 +187,39 @@ impl PersistentInbox {
         out
     }
 
+    /// Remove the queued instruction with the given id, if present.
+    /// Returns `true` if a match was found and removed, `false`
+    /// otherwise (queue empty, file missing, or no matching id).
+    ///
+    /// Used by the cancel path: when consul sends a
+    /// `CancelInstruction`, legatus calls this to drop the
+    /// still-queued instruction. The cancel is definitive in the
+    /// `true` case; if `false`, either the instruction was already
+    /// drained into the model's context window (too late) or never
+    /// arrived (rare protocol race).
+    ///
+    /// Same atomic-rewrite + advisory-lock discipline as
+    /// [`Self::try_pop`]: read all lines under exclusive lock,
+    /// filter out the matching id, rewrite the remainder.
+    /// Concurrent appends serialize on the lock.
+    pub fn remove_by_id(&self, instruction_id: InstructionId) -> bool {
+        let file = match OpenOptions::new().read(true).write(true).open(&self.path) {
+            Ok(f) => f,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return false,
+            Err(err) => {
+                warn!(?err, path = ?self.path, "persistent_inbox: open(rw) failed");
+                return false;
+            },
+        };
+        if let Err(err) = file.lock_exclusive() {
+            warn!(?err, "persistent_inbox: lock_exclusive failed");
+            return false;
+        }
+        let removed = remove_by_id_under_lock(&file, instruction_id);
+        let _ = file.unlock();
+        removed
+    }
+
     /// Number of queued instructions (counts only lines that parse
     /// successfully). Diagnostic helper.
     #[must_use]
@@ -204,6 +238,53 @@ impl PersistentInbox {
 /// Single-shot read-skip-rewrite, run with the file already
 /// exclusively locked. Returns the popped instruction (or `None`
 /// if the file is empty / all lines are malformed).
+/// Single-shot read-filter-rewrite for [`PersistentInbox::remove_by_id`],
+/// run with the file already exclusively locked. Returns true if a
+/// matching id was found and removed. Mirrors `pop_first_under_lock`'s
+/// rewrite discipline (`seek(0)` + `set_len(0)` + `writeln` remainder).
+fn remove_by_id_under_lock(mut file: &File, instruction_id: InstructionId) -> bool {
+    let lines: Vec<String> = BufReader::new(file).lines().map_while(Result::ok).collect();
+
+    let mut removed = false;
+    let mut remainder: Vec<String> = Vec::with_capacity(lines.len());
+
+    for line in lines {
+        if line.trim().is_empty() {
+            continue; // skip blank lines silently
+        }
+        match serde_json::from_str::<RelayInstruction>(&line) {
+            Ok(instr) if !removed && instr.instruction_id == instruction_id => {
+                // Found the cancellation target — skip it on rewrite.
+                removed = true;
+            },
+            Ok(_) => {
+                remainder.push(line);
+            },
+            Err(err) => {
+                warn!(?err, "persistent_inbox: dropping malformed line during cancel");
+                // Don't put malformed lines back — they'd just
+                // re-trigger the same failure forever.
+            },
+        }
+    }
+
+    if let Err(err) = file.seek(SeekFrom::Start(0)) {
+        warn!(?err, "persistent_inbox: seek(0) failed during cancel");
+        return removed;
+    }
+    if let Err(err) = file.set_len(0) {
+        warn!(?err, "persistent_inbox: set_len(0) failed during cancel");
+        return removed;
+    }
+    for line in &remainder {
+        if let Err(err) = writeln!(file, "{line}") {
+            warn!(?err, "persistent_inbox: remainder writeln failed during cancel");
+            return removed;
+        }
+    }
+    removed
+}
+
 fn pop_first_under_lock(mut file: &File) -> Option<RelayInstruction> {
     let lines: Vec<String> = BufReader::new(file).lines().map_while(Result::ok).collect();
 
@@ -399,5 +480,69 @@ mod tests {
         assert!(p.ends_with("legatus-inbox.jsonl"));
         assert!(p.to_string_lossy().contains(".claude"));
         assert!(p.to_string_lossy().contains("sentinel"));
+    }
+
+    #[test]
+    fn remove_by_id_on_missing_file_returns_false() {
+        let dir = tempdir().unwrap();
+        let inbox = inbox_at(&dir);
+        let any_id = InstructionId::new();
+        assert!(!inbox.remove_by_id(any_id));
+    }
+
+    #[test]
+    fn remove_by_id_removes_matching_queued_instruction() {
+        let dir = tempdir().unwrap();
+        let inbox = inbox_at(&dir);
+        let a = instr("first");
+        let b = instr("second");
+        let c = instr("third");
+        inbox.append(&a);
+        inbox.append(&b);
+        inbox.append(&c);
+
+        assert!(inbox.remove_by_id(b.instruction_id));
+        // Order of remaining is preserved.
+        assert_eq!(inbox.try_pop().unwrap().instruction_id, a.instruction_id);
+        assert_eq!(inbox.try_pop().unwrap().instruction_id, c.instruction_id);
+        assert!(inbox.try_pop().is_none());
+    }
+
+    #[test]
+    fn remove_by_id_returns_false_when_id_not_queued() {
+        let dir = tempdir().unwrap();
+        let inbox = inbox_at(&dir);
+        let a = instr("first");
+        inbox.append(&a);
+
+        let unknown = InstructionId::new();
+        assert!(!inbox.remove_by_id(unknown));
+        // Queue should be untouched.
+        assert_eq!(inbox.len(), 1);
+        assert_eq!(inbox.try_pop().unwrap().instruction_id, a.instruction_id);
+    }
+
+    #[test]
+    fn remove_by_id_only_removes_first_match() {
+        // Defensive: instruction ids are unique by construction
+        // (uuid::new), but if a duplicate ever lands on disk
+        // (replayed envelope, dev seeding, etc.) the remove path
+        // should drop one occurrence rather than all, matching
+        // the operator's intent of "cancel this one queued copy."
+        let dir = tempdir().unwrap();
+        let inbox = inbox_at(&dir);
+        let a = instr("only");
+        let id = a.instruction_id;
+        inbox.append(&a);
+        // Hand-write a duplicate line via append — same id, same content.
+        inbox.append(&a);
+        assert_eq!(inbox.len(), 2);
+
+        assert!(inbox.remove_by_id(id));
+        // Exactly one copy remains.
+        assert_eq!(inbox.len(), 1);
+        let remaining = inbox.try_pop().unwrap();
+        assert_eq!(remaining.instruction_id, id);
+        assert!(inbox.try_pop().is_none());
     }
 }
