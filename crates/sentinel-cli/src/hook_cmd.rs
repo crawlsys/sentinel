@@ -11,7 +11,8 @@ use sentinel_domain::events::{HookEvent, HookOutput, HookSpecificOutput};
 use sentinel_domain::state::SessionState;
 use sentinel_domain::workflow::{SkillSteps, SkillWorkflow};
 
-use sentinel_domain::ports::{LlmPort, VectorStorePort};
+use sentinel_domain::ports::{AuditorPort, LlmPort, VectorStorePort};
+use sentinel_infrastructure::dry_run_auditor::RigAuditor;
 use sentinel_infrastructure::git::RealGit;
 use sentinel_infrastructure::memory_mcp_client::MemoryMcpClient;
 use sentinel_infrastructure::reversibility::LayeredReversibilityClassifier;
@@ -175,6 +176,26 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
             );
             LayeredReversibilityClassifier::empty()
         });
+
+    // A3 Phase 4: construct the dry-run auditor. RigAuditor reads
+    // OPENROUTER_API_KEY + SENTINEL_AUDITOR_MODEL + SENTINEL_AUDITOR_TIMEOUT_SECS
+    // from env (per crates/sentinel-infrastructure/src/dry_run_auditor.rs).
+    // When the key is absent the auditor is `None`, A3 is inert, and
+    // `tool_usage_gate` falls back to its four-check stack for
+    // Irreversible/Catastrophic (the strongest pre-A3 gate). When the
+    // key is present, dry_run_then_commit owns Irreversible/Catastrophic
+    // and tool_usage_gate short-circuits those classes.
+    let auditor: Option<Arc<dyn AuditorPort>> = match RigAuditor::from_env() {
+        Ok(a) => Some(Arc::new(a) as Arc<dyn AuditorPort>),
+        Err(err) => {
+            tracing::info!(
+                ?err,
+                "dry-run auditor unavailable (RigAuditor::from_env failed); A3 inert, tool_usage_gate four-check stack handles Irreversible/Catastrophic"
+            );
+            None
+        }
+    };
+    let a3_enabled = auditor.is_some();
 
     // Bundle all ports into HookContext
     let ctx = hooks::HookContext {
@@ -446,6 +467,24 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
                 state.record_blocked();
             }
 
+            // A3 dry-run-then-commit gate — fires for ALL tools (the hook
+            // itself short-circuits to allow() for class < Irreversible).
+            // Only runs when the auditor is available; otherwise A3 is inert
+            // and tool_usage_gate's four-check stack handles the upper
+            // classes for Edit/Write.
+            if let Some(ref auditor_arc) = auditor {
+                let dry_run_output =
+                    time_and_record(ctx.fs, &mk_ctx("dry_run_then_commit"), || {
+                        hooks::dry_run_then_commit::process(
+                            &input,
+                            ctx.fs,
+                            &reversibility_classifier,
+                            auditor_arc.as_ref(),
+                        )
+                    });
+                output.merge(&dry_run_output);
+            }
+
             // Git hygiene — block on protected branch without worktree + uncommitted file limit
             if matches!(input.tool_name.as_deref(), Some("Edit" | "Write")) {
                 let hygiene_output = time_and_record(ctx.fs, &mk_ctx("git_hygiene"), || {
@@ -461,13 +500,17 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
                     });
                 output.merge(&tasks_guard_output);
 
-                // Tool usage gate — require sequential thinking + task creation
+                // Tool usage gate — require sequential thinking + task creation.
+                // When `a3_enabled`, Irreversible/Catastrophic short-circuit to
+                // allow() inside the gate so A3's dry_run_then_commit hook (run
+                // above) owns those classes via its separate-model-family auditor.
                 let usage_output = time_and_record(ctx.fs, &mk_ctx("tool_usage_gate"), || {
                     hooks::tool_usage_gate::process(
                         &input,
                         ctx.fs,
                         ctx.env,
                         &reversibility_classifier,
+                        a3_enabled,
                     )
                 });
                 output.merge(&usage_output);
