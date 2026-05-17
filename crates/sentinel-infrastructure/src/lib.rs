@@ -6,6 +6,7 @@
 pub mod activity_log;
 pub mod anthropic;
 pub mod config;
+pub mod dry_run_auditor;
 pub mod env;
 pub mod error_log;
 pub mod evidence_browserbase;

@@ -39,7 +39,7 @@
 use std::path::PathBuf;
 
 use sentinel_domain::dry_run::{
-    AuditorAxes, AuditorDecision, AuditorError, AuditorVerdict, DryRunRequest,
+    AuditorDecision, AuditorError, AuditorVerdict, DryRunRequest,
 };
 use sentinel_domain::events::{HookInput, HookOutput};
 use sentinel_domain::ports::{AuditorPort, ReversibilityClassifierPort};
