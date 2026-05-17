@@ -865,4 +865,50 @@ mod tests {
         let auditor = RigAuditor::openrouter_from_env_with(env).unwrap();
         assert_eq!(auditor.timeout, Duration::from_secs(7));
     }
+
+    // ---- Live smoke tests (--ignored; require real credentials + network) ----
+    //
+    // These do NOT run in the default suite. Operators verify connectivity +
+    // model availability with:
+    //
+    //   OLLAMA_API_KEY=... SENTINEL_AUDITOR_PROVIDER=ollama \
+    //   SENTINEL_AUDITOR_MODEL=kimi-k2.6 \
+    //   cargo test -p sentinel-infrastructure --lib \
+    //     dry_run_auditor::tests::live_ollama -- --ignored --nocapture
+    //
+    // The `--nocapture` flag surfaces the verdict + auditor_model string so
+    // the operator can confirm the attribution prefix is what they expect
+    // (`ollama-cloud:kimi-k2.6` for OLLAMA_API_KEY-configured runs).
+
+    /// Live smoke test against Ollama Cloud (or local Ollama). Requires
+    /// `OLLAMA_API_KEY` (Cloud) or just a running local daemon (Local),
+    /// plus `SENTINEL_AUDITOR_MODEL` set to a model the operator has
+    /// access to. Hard-fails the test if `RigAuditor::ollama_from_env()`
+    /// errors before the call, or if `score()` returns an
+    /// `AuditorError`. Verdict shape is printed but not asserted —
+    /// model judgment varies and this is a connectivity check, not a
+    /// behaviour pin.
+    #[test]
+    #[ignore = "requires OLLAMA_API_KEY (Cloud) or running local Ollama + network — opt-in via --ignored"]
+    fn live_ollama_smoke() {
+        let auditor = RigAuditor::ollama_from_env()
+            .expect("ollama_from_env failed — set OLLAMA_API_KEY and SENTINEL_AUDITOR_MODEL");
+        eprintln!(
+            "  ollama auditor: provider_prefix={} model_id={} timeout={:?}",
+            auditor.provider_prefix, auditor.model_id, auditor.timeout
+        );
+        let dry_run = fixture_dry_run();
+        let verdict = auditor.score(&dry_run).expect("score returned AuditorError");
+        eprintln!(
+            "  verdict: decision={:?} confidence={:.2} auditor_model={}",
+            verdict.decision, verdict.confidence, verdict.auditor_model
+        );
+        eprintln!("  axes: {:?}", verdict.axes);
+        eprintln!("  reasoning: {}", verdict.reasoning);
+        assert!(
+            verdict.auditor_model.starts_with("ollama-"),
+            "auditor_model should carry the ollama-cloud or ollama-local prefix; got {:?}",
+            verdict.auditor_model
+        );
+    }
 }
