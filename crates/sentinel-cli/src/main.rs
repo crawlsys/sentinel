@@ -56,6 +56,33 @@ enum Commands {
         /// Dashboard API port
         #[arg(long, default_value = "3001")]
         port: u16,
+
+        /// Optional consulate URL — when set, the daemon hosts a
+        /// long-running legatus WS connection alongside the
+        /// dashboard API, and exposes `POST /legatus/escalate` +
+        /// `GET /legatus/inbox/next` for hook clients to use.
+        /// Without it, daemon runs with no legatus (pre-B
+        /// behavior).
+        #[arg(long, value_name = "URL")]
+        legatus_consulate_url: Option<String>,
+
+        /// 32-byte bootstrap secret as 64 hex chars. Required
+        /// when `--legatus-consulate-url` is set.
+        #[arg(long, value_name = "HEX64", env = "CONSULATE_BOOTSTRAP_SECRET", hide_env_values = true)]
+        legatus_bootstrap_secret: Option<String>,
+
+        /// Session-name hint sent in the legatus registration.
+        #[arg(long, default_value = "sentinel")]
+        legatus_suggested_name: String,
+
+        /// Working directory the legatus's session is anchored
+        /// to (default: daemon's cwd).
+        #[arg(long)]
+        legatus_working_dir: Option<String>,
+
+        /// Heartbeat interval in seconds for the hosted legatus.
+        #[arg(long, default_value_t = 20)]
+        legatus_heartbeat_secs: u64,
     },
 
     /// Process a hook event (thin client → daemon, or standalone)
@@ -690,7 +717,26 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Daemon { port } => daemon_cmd::run(port).await,
+        Commands::Daemon {
+            port,
+            legatus_consulate_url,
+            legatus_bootstrap_secret,
+            legatus_suggested_name,
+            legatus_working_dir,
+            legatus_heartbeat_secs,
+        } => {
+            daemon_cmd::run(
+                port,
+                daemon_cmd::LegatusOptions {
+                    consulate_url: legatus_consulate_url,
+                    bootstrap_secret_hex: legatus_bootstrap_secret,
+                    suggested_name: legatus_suggested_name,
+                    working_dir: legatus_working_dir,
+                    heartbeat_secs: legatus_heartbeat_secs,
+                },
+            )
+            .await
+        },
         Commands::Hook {
             event,
             matcher,

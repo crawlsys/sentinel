@@ -6,15 +6,40 @@
 //! - Per-instance bearer token auth (Attack #daemon-auth)
 
 use std::sync::Arc;
+use std::time::Duration;
 
-use anyhow::Result;
-use axum::extract::Request;
+use anyhow::{Context, Result};
+use axum::extract::{Request, State};
+use axum::http::StatusCode;
 use axum::middleware::Next;
-use axum::response::Response;
-use tokio::sync::RwLock;
-use tracing::info;
-
+use axum::response::{IntoResponse, Response};
+use axum::routing::{get, post};
+use axum::{Json, Router};
 use sentinel_domain::state::SessionState;
+use sentinel_legatus::{
+    make_pair, run_connect_hosted, ConnectConfig, EscalationKind, LegatusHandle,
+    BOOTSTRAP_SECRET_LEN, RuntimeKind,
+};
+use tokio::sync::{Notify, RwLock};
+use tracing::{info, warn};
+
+/// Optional legatus configuration the daemon hosts alongside the
+/// dashboard API. Constructed from the `--legatus-*` CLI flags;
+/// when [`Self::consulate_url`] is `None`, the daemon runs with no
+/// legatus (pre-commit-B behavior).
+#[derive(Clone, Debug)]
+pub struct LegatusOptions {
+    /// `--legatus-consulate-url`.
+    pub consulate_url: Option<String>,
+    /// `--legatus-bootstrap-secret` / `CONSULATE_BOOTSTRAP_SECRET`.
+    pub bootstrap_secret_hex: Option<String>,
+    /// `--legatus-suggested-name`.
+    pub suggested_name: String,
+    /// `--legatus-working-dir` (default: daemon's cwd).
+    pub working_dir: Option<String>,
+    /// `--legatus-heartbeat-secs`.
+    pub heartbeat_secs: u64,
+}
 
 /// Generate a random bearer token for this daemon instance.
 fn generate_bearer_token() -> String {
@@ -121,7 +146,7 @@ async fn bearer_auth(req: Request, next: Next) -> Result<Response, axum::http::S
 #[derive(Clone)]
 struct BearerToken(String);
 
-pub async fn run(port: u16) -> Result<()> {
+pub async fn run(port: u16, legatus: LegatusOptions) -> Result<()> {
     info!("Sentinel daemon starting on port {port}");
 
     // Generate per-instance bearer token for API auth
@@ -131,6 +156,11 @@ pub async fn run(port: u16) -> Result<()> {
 
     let state = Arc::new(RwLock::new(SessionState::new("daemon")));
     let app_state = crate::api::AppState { session: state };
+
+    // Optionally host a legatus connection alongside the dashboard
+    // API. When configured, expose POST /legatus/escalate +
+    // GET /legatus/inbox/next for hook clients.
+    let legatus_handle = start_legatus_if_configured(legatus).await?;
 
     // **Attack #130 fix**: Restrict CORS to localhost origins only.
     // The previous `Any` CORS policy allowed JavaScript from any origin to access
@@ -159,10 +189,15 @@ pub async fn run(port: u16) -> Result<()> {
         }
     });
 
-    let app = crate::api::router(app_state)
-        .layer(axum::middleware::from_fn(bearer_auth))
-        .layer(inject_token)
-        .layer(cors);
+    let api_app = crate::api::router(app_state);
+    let app = if let Some(handle) = &legatus_handle {
+        api_app.merge(legatus_routes(handle.clone()))
+    } else {
+        api_app
+    }
+    .layer(axum::middleware::from_fn(bearer_auth))
+    .layer(inject_token)
+    .layer(cors);
 
     // CRITICAL: Always bind to localhost only. Never 0.0.0.0.
     let bind_addr = format!("127.0.0.1:{port}");
@@ -176,4 +211,84 @@ pub async fn run(port: u16) -> Result<()> {
     let _ = std::fs::remove_file(&token_path);
 
     Ok(())
+}
+
+async fn start_legatus_if_configured(
+    options: LegatusOptions,
+) -> Result<Option<LegatusHandle>> {
+    let Some(consulate_url) = options.consulate_url else {
+        return Ok(None);
+    };
+    let secret_hex = options.bootstrap_secret_hex.ok_or_else(|| {
+        anyhow::anyhow!(
+            "--legatus-consulate-url requires --legatus-bootstrap-secret (or CONSULATE_BOOTSTRAP_SECRET)",
+        )
+    })?;
+    let secret_bytes = hex::decode(secret_hex.trim())
+        .with_context(|| "--legatus-bootstrap-secret must be hex-encoded bytes")?;
+    let bootstrap_secret: [u8; BOOTSTRAP_SECRET_LEN] =
+        secret_bytes.as_slice().try_into().map_err(|_| {
+            anyhow::anyhow!(
+                "--legatus-bootstrap-secret must decode to exactly {BOOTSTRAP_SECRET_LEN} bytes; got {}",
+                secret_bytes.len(),
+            )
+        })?;
+    let working_dir = match options.working_dir {
+        Some(d) => d,
+        None => std::env::current_dir()
+            .context("failed to read current working directory")?
+            .to_string_lossy()
+            .into_owned(),
+    };
+    let config = ConnectConfig {
+        consulate_url: consulate_url.clone(),
+        bootstrap_secret,
+        suggested_name: options.suggested_name,
+        working_dir,
+        branch: None,
+        task_description: None,
+        runtime: RuntimeKind::ClaudeCode,
+        heartbeat_interval: Duration::from_secs(options.heartbeat_secs.max(1)),
+    };
+
+    let (handle, runtime) = make_pair();
+    let cancel = Arc::new(Notify::new());
+    info!(url = %consulate_url, "daemon hosting legatus");
+    tokio::spawn(async move {
+        if let Err(err) = run_connect_hosted(config, cancel, runtime).await {
+            warn!(?err, "hosted legatus exited with error");
+        }
+    });
+    Ok(Some(handle))
+}
+
+fn legatus_routes(handle: LegatusHandle) -> Router {
+    Router::new()
+        .route("/legatus/escalate", post(handle_legatus_escalate))
+        .route("/legatus/inbox/next", get(handle_legatus_inbox_next))
+        .with_state(handle)
+}
+
+async fn handle_legatus_escalate(
+    State(handle): State<LegatusHandle>,
+    Json(event): Json<EscalationKind>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    handle
+        .escalate(event)
+        .map_err(|err| (StatusCode::SERVICE_UNAVAILABLE, err.to_string()))?;
+    Ok(StatusCode::ACCEPTED)
+}
+
+async fn handle_legatus_inbox_next(State(handle): State<LegatusHandle>) -> Response {
+    match handle.try_pop_inbox().await {
+        Some(instr) => match serde_json::to_value(&instr) {
+            Ok(v) => (StatusCode::OK, Json(v)).into_response(),
+            Err(err) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("instruction serialize: {err}"),
+            )
+                .into_response(),
+        },
+        None => StatusCode::NO_CONTENT.into_response(),
+    }
 }
