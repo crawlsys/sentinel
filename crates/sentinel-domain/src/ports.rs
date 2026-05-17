@@ -412,3 +412,114 @@ pub trait AuditorPort: Send + Sync {
         dry_run: &crate::dry_run::DryRunRequest,
     ) -> Result<crate::dry_run::AuditorVerdict, crate::dry_run::AuditorError>;
 }
+
+// ---------------------------------------------------------------------------
+// CapabilityRouterPort + AppraisalStorePort (A2)
+// ---------------------------------------------------------------------------
+
+/// Why the router couldn't pick an agent.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum RoutingError {
+    /// No registered agent satisfies the `required` capabilities (or
+    /// every candidate matched a `forbidden` capability). Carries the
+    /// nearest-miss diagnostics so the operator can fix profiles or
+    /// relax the requirement.
+    NoAgentSatisfies(Vec<crate::agent_routing::UnsatisfiedRequirement>),
+    /// Operator-side misconfiguration — malformed profile, contradictory
+    /// tie-breaker policy, etc. Surfaced at startup; sentinel refuses
+    /// to dispatch until corrected.
+    Configuration(String),
+}
+
+impl std::fmt::Display for RoutingError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoAgentSatisfies(reqs) => {
+                write!(
+                    f,
+                    "no registered agent satisfies the requirement ({} unsatisfied capability/agent pairs)",
+                    reqs.len()
+                )
+            }
+            Self::Configuration(msg) => {
+                write!(f, "router configuration error: {msg}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for RoutingError {}
+
+/// A2 — substrate dispatch primitive.
+///
+/// Every "which agent / which model for this work?" decision in sentinel
+/// goes through [`Self::route`]. Replaces hardcoded vendor pairings
+/// (A3's `select_auditor_for(acting_agent)`) and per-hook static config
+/// (R1's retired role-persona pipelines) with a single capability-graph
+/// substrate.
+///
+/// The router is **deterministic at the configuration level**: same
+/// requirement + same registered profiles + same appraisal data
+/// produces the same `chosen` agent. Tie-breakers are explicit
+/// ([`crate::agent_routing::TieBreaker`]) so the operator can reason
+/// about choices.
+///
+/// Implementations must be `Send + Sync` because the router is shared
+/// across hook invocations within a session and is consulted from the
+/// hook engine (synchronous, single-thread) plus the daemon (async,
+/// multi-thread).
+pub trait CapabilityRouterPort: Send + Sync {
+    /// Pick the best-fit agent for the requirement. Returns
+    /// [`RoutingError::NoAgentSatisfies`] when no candidate clears the
+    /// `required` + `forbidden` filters.
+    fn route(
+        &self,
+        requirement: &crate::capability::CapabilityRequirement,
+    ) -> Result<crate::capability::AgentId, RoutingError>;
+
+    /// Return every agent that satisfies the `required` + `forbidden`
+    /// filters, *before* tie-breakers run. Used by `routing explain`
+    /// and by callers that want to fan out across all candidates
+    /// (debate-style audits, multi-vote critiques).
+    fn candidates(
+        &self,
+        requirement: &crate::capability::CapabilityRequirement,
+    ) -> Vec<crate::capability::AgentId>;
+
+    /// Return the full decision tree — what was considered, what was
+    /// eliminated and why, which tie-breakers fired. Operator-facing
+    /// tooling renders this for "why did the router pick X instead
+    /// of Y?" questions.
+    fn explain(
+        &self,
+        requirement: &crate::capability::CapabilityRequirement,
+    ) -> crate::agent_routing::RoutingExplanation;
+}
+
+/// A2 — appraisal store.
+///
+/// Per-agent / per-requirement outcome history. The router reads
+/// aggregates from this port (tie-breaker step 3); hooks record new
+/// outcomes after work completes.
+///
+/// **R5 quarantine boundary**: appraisal data is *dispatch input* only.
+/// It must never reach the agents themselves as training feedback. The
+/// distinction is load-bearing — using past success as a reward signal
+/// is exactly the deception-amplifier loop R5 prohibits.
+pub trait AppraisalStorePort: Send + Sync {
+    /// Persist a single outcome record. Implementations are expected
+    /// to be best-effort — failures should not block the dispatching
+    /// hook, but should be logged at warn level.
+    fn record(&self, record: crate::agent_routing::AppraisalRecord);
+
+    /// Aggregate stats for `(agent, requirement_signature)` over the
+    /// given window. Returns [`crate::agent_routing::AggregateStats::empty`]
+    /// when no records exist for the bucket (so the router falls through
+    /// to the next tie-breaker rather than erroring).
+    fn aggregate(
+        &self,
+        agent_id: &crate::capability::AgentId,
+        signature: &crate::agent_routing::RequirementSignature,
+        window: crate::agent_routing::AppraisalWindow,
+    ) -> crate::agent_routing::AggregateStats;
+}
