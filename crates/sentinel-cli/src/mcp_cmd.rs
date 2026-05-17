@@ -475,6 +475,26 @@ fn tool_definitions() -> serde_json::Value {
                     "properties": {},
                     "required": []
                 }
+            },
+            {
+                "name": "sentinel__route_capability",
+                "description": "Consult the A2 capability router (per docs/a2-capability-aware-routing.md) to pick the best-fit agent for a unit of work, given its capability requirements. Loads agent profiles from the shipped agents-defaults.toml + optional operator overrides at ~/.claude/sentinel/config/agents.toml. Returns the full RoutingExplanation: chosen AgentId (or null when no agent satisfies), candidate set, eliminated agents with reasons, fired tie-breakers, and the requirement signature. Used by consul peers (per consul ADR-016) and any external orchestrator that needs to make the same dispatch decision sentinel's hooks make internally — keeps the routing substrate single-source-of-truth across the AI-factory.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "requirement": {
+                            "type": "object",
+                            "description": "CapabilityRequirement JSON per crates/sentinel-domain/src/capability.rs. Shape: {\"required\": [<Capability>...], \"preferred\": [<Capability>...], \"forbidden\": [<Capability>...]}. Capability variants are externally-tagged: {\"Reasoning\": \"deep\"} | {\"DifferentVendorFrom\": \"Anthropic\"} | {\"StructuredOutput\": \"AuditorVerdict\"} | {\"CostBudget\": 0.05} | etc. See docs/a2-capability-aware-routing.md §2 for the full vocabulary.",
+                            "properties": {
+                                "required": {"type": "array"},
+                                "preferred": {"type": "array"},
+                                "forbidden": {"type": "array"}
+                            },
+                            "required": ["required"]
+                        }
+                    },
+                    "required": ["requirement"]
+                }
             }
         ]
     })
@@ -678,6 +698,10 @@ async fn handle_request(
 
             // SEN-8: WIP-by-stage snapshot read. The poller is a separate
             // task; this only surfaces whatever the file contains right now.
+            if tool_name == "sentinel__route_capability" {
+                return handle_route_capability(request, &arguments);
+            }
+
             if tool_name == "sentinel__get_wip_snapshot" {
                 return match sentinel_application::wip_snapshot::read() {
                     Ok(Some(snap)) => JsonRpcResponse::success(
@@ -754,6 +778,93 @@ async fn handle_request(
             format!("Method not found: {method}"),
         ),
     }
+}
+
+/// Handle `sentinel__route_capability` — A2 capability router exposure.
+///
+/// Loads the shipped agent profiles + optional operator overrides
+/// (`~/.claude/sentinel/config/agents.toml`), runs the requirement
+/// through the pure routing algorithm, and returns the full
+/// [`sentinel_domain::agent_routing::RoutingExplanation`].
+///
+/// Synchronous: no async I/O on the hot path (TOML load + in-memory
+/// pick). The MCP dispatcher's overall arm is `async fn`; this helper
+/// borrows that context but doesn't await.
+fn handle_route_capability(
+    request: &JsonRpcRequest,
+    args: &serde_json::Value,
+) -> JsonRpcResponse {
+    use sentinel_domain::capability::CapabilityRequirement;
+    use sentinel_domain::ports::CapabilityRouterPort;
+    use sentinel_infrastructure::capability_router::TomlCapabilityRouter;
+
+    let requirement: CapabilityRequirement = match args.get("requirement") {
+        Some(v) => match serde_json::from_value(v.clone()) {
+            Ok(r) => r,
+            Err(err) => {
+                return JsonRpcResponse::success(
+                    request.id.clone(),
+                    mcp_tool_result(
+                        false,
+                        serde_json::json!({
+                            "error": format!(
+                                "could not parse `requirement` field as CapabilityRequirement: {err}. \
+                                 Shape: {{\"required\": [<Capability>...], \"preferred\": [], \"forbidden\": []}}. \
+                                 See docs/a2-capability-aware-routing.md §2."
+                            )
+                        }),
+                    ),
+                );
+            }
+        },
+        None => {
+            return JsonRpcResponse::success(
+                request.id.clone(),
+                mcp_tool_result(
+                    false,
+                    serde_json::json!({
+                        "error": "missing required argument: `requirement` (CapabilityRequirement JSON)"
+                    }),
+                ),
+            );
+        }
+    };
+
+    let overrides_path = dirs::home_dir().map(|h| {
+        h.join(".claude")
+            .join("sentinel")
+            .join("config")
+            .join("agents.toml")
+    });
+    let router = match TomlCapabilityRouter::with_shipped_and_overrides(
+        overrides_path.as_deref(),
+    ) {
+        Ok(r) => r,
+        Err(err) => {
+            return JsonRpcResponse::success(
+                request.id.clone(),
+                mcp_tool_result(
+                    false,
+                    serde_json::json!({
+                        "error": format!("failed to load agent profiles: {err}")
+                    }),
+                ),
+            );
+        }
+    };
+
+    let explanation = router.explain(&requirement);
+    JsonRpcResponse::success(
+        request.id.clone(),
+        mcp_tool_result(
+            true,
+            serde_json::to_value(&explanation).unwrap_or_else(|err| {
+                serde_json::json!({
+                    "serialization_error": err.to_string(),
+                })
+            }),
+        ),
+    )
 }
 
 /// Handle `sentinel__submit_phase_complete`
@@ -1650,4 +1761,151 @@ mod tests {
     /// Tests mutate process env (`HOME/USERPROFILE/SENTINEL_STATE_DIR`) and
     /// must serialize — cargo test runs in parallel by default.
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    // ---- A2 Phase 5: route_capability MCP tool ----
+
+    fn route_capability_request(requirement: serde_json::Value) -> JsonRpcRequest {
+        JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(serde_json::json!(1)),
+            method: "tools/call".to_string(),
+            params: serde_json::json!({
+                "name": "sentinel__route_capability",
+                "arguments": { "requirement": requirement },
+            }),
+        }
+    }
+
+    fn extract_result(response: &JsonRpcResponse) -> &serde_json::Value {
+        response
+            .result
+            .as_ref()
+            .expect("expected success response")
+    }
+
+    /// Extract the inner data JSON from the wrapped `mcp_tool_result`
+    /// response. `mcp_tool_result(success, data)` wraps `data` as the
+    /// stringified contents of `content[0].text` and sets `isError =
+    /// !success` on the outer object. Tests assert against the outer
+    /// `isError` flag and the parsed inner data.
+    fn extract_data_and_is_error(response: &JsonRpcResponse) -> (serde_json::Value, bool) {
+        let result = extract_result(response);
+        let is_error = result.get("isError").and_then(|v| v.as_bool()).unwrap_or(false);
+        let text = result
+            .get("content")
+            .and_then(|c| c.as_array())
+            .and_then(|a| a.first())
+            .and_then(|c| c.get("text"))
+            .and_then(|t| t.as_str())
+            .unwrap_or("");
+        let data: serde_json::Value =
+            serde_json::from_str(text).unwrap_or(serde_json::Value::Null);
+        (data, is_error)
+    }
+
+    #[test]
+    fn route_capability_handles_missing_requirement() {
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(serde_json::json!(1)),
+            method: "tools/call".to_string(),
+            params: serde_json::json!({
+                "name": "sentinel__route_capability",
+                "arguments": {},
+            }),
+        };
+        let args = req.params.get("arguments").cloned().unwrap_or_default();
+        let resp = handle_route_capability(&req, &args);
+        let (data, is_error) = extract_data_and_is_error(&resp);
+        assert!(is_error, "missing requirement should flag isError=true");
+        let err = data.get("error").and_then(|e| e.as_str()).unwrap_or("");
+        assert!(
+            err.contains("requirement"),
+            "error should name the missing field; got: {err}"
+        );
+    }
+
+    #[test]
+    fn route_capability_handles_malformed_requirement() {
+        let req = route_capability_request(serde_json::json!({
+            "required": "not-an-array",
+        }));
+        let args = req.params.get("arguments").cloned().unwrap_or_default();
+        let resp = handle_route_capability(&req, &args);
+        let (data, is_error) = extract_data_and_is_error(&resp);
+        assert!(is_error, "malformed requirement should flag isError=true");
+        let err = data.get("error").and_then(|e| e.as_str()).unwrap_or("");
+        assert!(
+            err.contains("CapabilityRequirement") || err.contains("parse"),
+            "error should mention CapabilityRequirement / parse: {err}"
+        );
+    }
+
+    #[test]
+    fn route_capability_returns_routing_explanation_for_valid_requirement() {
+        // Shipped agents-defaults.toml includes a Standard-reasoning
+        // non-Anthropic profile (kimi-k2-6-ollama-cloud), so this
+        // requirement should resolve to a chosen agent.
+        let req = route_capability_request(serde_json::json!({
+            "required": [
+                { "Reasoning": "standard" },
+                { "DifferentVendorFrom": "Anthropic" },
+                { "StructuredOutput": "AuditorVerdict" },
+            ],
+            "preferred": [],
+            "forbidden": [],
+        }));
+        let args = req.params.get("arguments").cloned().unwrap_or_default();
+        let resp = handle_route_capability(&req, &args);
+        let (data, is_error) = extract_data_and_is_error(&resp);
+        assert!(!is_error, "valid requirement should succeed; data: {data}");
+        // RoutingExplanation shape: { chosen, candidates, eliminated,
+        // tie_breakers_applied, requirement_signature }.
+        assert!(data.get("chosen").is_some(), "RoutingExplanation must have chosen field");
+        assert!(data.get("candidates").is_some());
+        assert!(data.get("requirement_signature").is_some());
+        let candidates = data.get("candidates").unwrap().as_array().unwrap();
+        assert!(
+            !candidates.is_empty(),
+            "shipped defaults should provide at least one non-Anthropic Standard candidate"
+        );
+    }
+
+    #[test]
+    fn route_capability_returns_chosen_null_when_no_agent_satisfies() {
+        // Require capabilities no shipped profile satisfies:
+        // OpenWeights + Catastrophic-class qualification AND a custom
+        // schema none of the shipped profiles declare.
+        let req = route_capability_request(serde_json::json!({
+            "required": [
+                "OpenWeights",
+                { "ReversibilityClass": "Catastrophic" },
+                { "StructuredOutput": { "Named": "TotallyMadeUp" } },
+            ],
+            "preferred": [],
+            "forbidden": [],
+        }));
+        let args = req.params.get("arguments").cloned().unwrap_or_default();
+        let resp = handle_route_capability(&req, &args);
+        let (data, is_error) = extract_data_and_is_error(&resp);
+        assert!(!is_error, "explain() always succeeds (even when chosen=null)");
+        assert!(
+            data.get("chosen").is_some_and(serde_json::Value::is_null),
+            "no agent should satisfy contrived requirement; data: {data}"
+        );
+    }
+
+    #[test]
+    fn route_capability_is_listed_in_tool_definitions() {
+        let defs = tool_definitions();
+        let tools = defs.get("tools").unwrap().as_array().unwrap();
+        let names: Vec<&str> = tools
+            .iter()
+            .filter_map(|t| t.get("name").and_then(|n| n.as_str()))
+            .collect();
+        assert!(
+            names.contains(&"sentinel__route_capability"),
+            "route_capability must appear in tool_definitions; got: {names:?}"
+        );
+    }
 }
