@@ -263,6 +263,36 @@ pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
 
     tracing::warn!(error, error_details, "Turn ended with API error");
 
+    // Per-instruction Result reporting on the API-error path: any
+    // operator-relayed instructions still pending at the moment of
+    // failure get an `InstructionResult { Failure { error } }` so
+    // the operator sees a failed ping instead of waiting on a
+    // never-arriving Result. `take_pending_instructions` clears the
+    // file; `take_turn_signals` clears the signals file too so a
+    // subsequent normal Stop doesn't double-fire on stale state.
+    // Error string carries enough detail (`<error>: <error_details>`)
+    // for the operator to understand what broke without sentinel
+    // having to classify the failure further.
+    if let Some(session_id) = input.session_id.as_deref() {
+        let pending = crate::legatus_client::take_pending_instructions(session_id);
+        if !pending.is_empty() {
+            let _ = crate::legatus_client::take_turn_signals(session_id);
+            let combined = if error_details.is_empty() {
+                error.to_owned()
+            } else {
+                format!("{error}: {error_details}")
+            };
+            let outcome = crate::legatus_client::classify_outcome(&[], Some(&combined));
+            for instruction_id in pending {
+                crate::legatus_client::report_result_fire_and_forget(
+                    instruction_id,
+                    outcome.clone(),
+                    None,
+                );
+            }
+        }
+    }
+
     // Log to errors.jsonl for diagnostics
     if let Some(home) = ctx.fs.home_dir() {
         let metrics_dir = super::metrics_dir(&home);
@@ -887,6 +917,76 @@ mod tests {
         // turn-aborted ntfy push and HookOutput::allow().
         assert!(output.system_message.is_none());
         assert!(output.continue_.is_none() || output.continue_ == Some(true));
+    }
+
+    /// When the API-error Stop fires for a session with pending
+    /// operator-relayed instructions, the hook clears the pending
+    /// file so a subsequent normal Stop doesn't double-fire on
+    /// stale state. The actual InstructionResult report happens
+    /// via `report_result_fire_and_forget` (spawned thread, no
+    /// daemon in tests → silent no-op), so this test only pins
+    /// the side-effect we can observe: `take_pending_instructions`
+    /// returns empty after `process` runs.
+    #[test]
+    fn test_stop_failure_clears_pending_instructions() {
+        use sentinel_legatus::InstructionId;
+
+        let session_id = format!("stop-failure-test-{}", uuid::Uuid::new_v4());
+        // Seed a pending instruction.
+        crate::legatus_client::note_pending_instruction(&session_id, InstructionId::new());
+        crate::legatus_client::note_pending_instruction(&session_id, InstructionId::new());
+
+        let mut input = HookInput::default();
+        input.session_id = Some(session_id.clone());
+        input
+            .extra
+            .insert("error".to_string(), serde_json::json!("invalid_request"));
+        input.extra.insert(
+            "error_details".to_string(),
+            serde_json::json!("400 prompt is too long"),
+        );
+
+        let ctx = crate::hooks::test_support::stub_ctx();
+        let _ = process(&input, &ctx);
+
+        // Pending file should be drained.
+        let remaining = crate::legatus_client::take_pending_instructions(&session_id);
+        assert!(
+            remaining.is_empty(),
+            "stop_failure should have drained pending instructions"
+        );
+    }
+
+    /// stop_failure also clears any turn signals so they don't
+    /// linger and influence the next turn's normal-Stop
+    /// classification.
+    #[test]
+    fn test_stop_failure_clears_turn_signals() {
+        use sentinel_legatus::InstructionId;
+
+        use crate::legatus_client::{note_turn_signal, take_turn_signals, TurnSignal};
+
+        let session_id = format!("stop-failure-signals-test-{}", uuid::Uuid::new_v4());
+        // Seed both a pending instruction and a turn signal — the
+        // clear path only fires when there's at least one pending.
+        crate::legatus_client::note_pending_instruction(&session_id, InstructionId::new());
+        note_turn_signal(
+            &session_id,
+            &TurnSignal::PermissionDenied {
+                tool: "Bash".into(),
+            },
+        );
+
+        let mut input = HookInput::default();
+        input.session_id = Some(session_id.clone());
+        input
+            .extra
+            .insert("error".to_string(), serde_json::json!("invalid_request"));
+
+        let ctx = crate::hooks::test_support::stub_ctx();
+        let _ = process(&input, &ctx);
+
+        assert!(take_turn_signals(&session_id).is_empty());
     }
 
     /// 401 error_details payloads (the form Claude Code reports when

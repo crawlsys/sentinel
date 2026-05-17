@@ -151,6 +151,137 @@ pub fn take_pending_instructions(session_id: &str) -> Vec<InstructionId> {
         .collect()
 }
 
+/// Per-turn observations that bias how the Stop hook classifies
+/// pending operator-relayed instructions. Lives in a sibling file
+/// to the pending-instructions file:
+/// `~/.claude/sentinel/state/<session_id>.legatus-turn-signals.jsonl`,
+/// one JSON-encoded variant per line.
+///
+/// Recorded by hooks that fire mid-turn (e.g. `permission_denied`)
+/// and consumed by the Stop hook (`execution_log`) when it converts
+/// pending instructions into [`sentinel_legatus::InstructionOutcome`]
+/// values. Best-effort plumbing — file I/O errors are logged at
+/// debug and dropped; the worst case is "operator's Result ping
+/// is the default `Success` when it could have been `Declined`",
+/// which is the pre-classification behavior.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TurnSignal {
+    /// A tool call was denied during the turn (auto-mode denial,
+    /// policy gate, etc.). Carries the tool name for the
+    /// `Declined { reason }` summary.
+    PermissionDenied {
+        /// Tool that was denied (e.g. `"Bash"`).
+        tool: String,
+    },
+}
+
+/// Per-session turn-signals file path. Uses the same sanitization
+/// + base path as [`pending_file_path`].
+fn turn_signals_path(session_id: &str) -> Option<PathBuf> {
+    if session_id.is_empty() || session_id.contains(['/', '\\', '\0']) || session_id.contains("..")
+    {
+        return None;
+    }
+    Some(
+        dirs::home_dir()?
+            .join(".claude")
+            .join("sentinel")
+            .join("state")
+            .join(format!("{session_id}.legatus-turn-signals.jsonl")),
+    )
+}
+
+/// Append a [`TurnSignal`] to the per-session turn-signals file.
+/// Best-effort; errors logged at debug and dropped.
+pub fn note_turn_signal(session_id: &str, signal: &TurnSignal) {
+    let Some(path) = turn_signals_path(session_id) else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let Ok(line) = serde_json::to_string(signal) else {
+        tracing::debug!("legatus_client: turn signal serialize failed");
+        return;
+    };
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        use std::io::Write;
+        let _ = writeln!(file, "{line}");
+    } else {
+        tracing::debug!(?path, "legatus_client: failed to record turn signal");
+    }
+}
+
+/// Read and clear the per-session turn-signals file. Returns the
+/// list of signals observed during this turn (possibly empty).
+/// Lines that fail to parse as [`TurnSignal`] are dropped silently.
+pub fn take_turn_signals(session_id: &str) -> Vec<TurnSignal> {
+    let Some(path) = turn_signals_path(session_id) else {
+        return Vec::new();
+    };
+    let content = match std::fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+        Err(err) => {
+            tracing::debug!(?err, ?path, "legatus_client: turn signals read failed");
+            return Vec::new();
+        },
+    };
+    let _ = std::fs::remove_file(&path);
+    content
+        .lines()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .filter_map(|s| serde_json::from_str::<TurnSignal>(s).ok())
+        .collect()
+}
+
+/// Classify pending instructions for this turn given the observed
+/// [`TurnSignal`]s. Used by both the `Stop` (`execution_log`) and
+/// `StopFailure` (`stop_failure`) hooks to bias the
+/// [`sentinel_legatus::InstructionOutcome`] they fire for every
+/// pending instruction.
+///
+/// Rules (MVP — coarse classification, the ~90-95% reliability target
+/// per the project's reliability philosophy):
+/// 1. If the caller supplies an `api_error` (StopFailure path), all
+///    pending instructions are `Failure { error }`.
+/// 2. Otherwise, if any [`TurnSignal::PermissionDenied`] was observed
+///    this turn, all pending instructions are `Declined { reason }`
+///    naming the tool(s) that were denied. Note: this classifies
+///    every pending instruction the same way, since we don't track
+///    which instruction prompted which tool call.
+/// 3. Otherwise `Success`.
+#[must_use]
+pub fn classify_outcome(
+    signals: &[TurnSignal],
+    api_error: Option<&str>,
+) -> sentinel_legatus::InstructionOutcome {
+    if let Some(err) = api_error {
+        return sentinel_legatus::InstructionOutcome::Failure {
+            error: err.to_owned(),
+        };
+    }
+    let denied_tools: Vec<&str> = signals
+        .iter()
+        .filter_map(|s| match s {
+            TurnSignal::PermissionDenied { tool } => Some(tool.as_str()),
+        })
+        .collect();
+    if !denied_tools.is_empty() {
+        let joined: Vec<String> = denied_tools.iter().map(|s| (*s).to_owned()).collect();
+        return sentinel_legatus::InstructionOutcome::Declined {
+            reason: format!("permission denied for tool(s): {}", joined.join(", ")),
+        };
+    }
+    sentinel_legatus::InstructionOutcome::Success
+}
+
 /// Spawn a background OS thread that POSTs `event` to the daemon's
 /// `/legatus/escalate` endpoint. Returns immediately. If the
 /// daemon isn't running (no token file) or the POST fails, logs
@@ -303,5 +434,90 @@ mod tests {
     fn take_pending_for_missing_session_returns_empty() {
         let session = format!("legatus-client-test-{}", uuid::Uuid::new_v4());
         assert!(take_pending_instructions(&session).is_empty());
+    }
+
+    #[test]
+    fn turn_signals_path_rejects_traversal() {
+        assert!(turn_signals_path("../malicious").is_none());
+        assert!(turn_signals_path("with/slash").is_none());
+        assert!(turn_signals_path("").is_none());
+    }
+
+    #[test]
+    fn note_then_take_roundtrips_turn_signals() {
+        let session = format!("legatus-client-test-{}", uuid::Uuid::new_v4());
+        let signal = TurnSignal::PermissionDenied {
+            tool: "Bash".to_owned(),
+        };
+        note_turn_signal(&session, &signal);
+        let taken = take_turn_signals(&session);
+        assert_eq!(taken.len(), 1);
+        assert_eq!(taken[0], signal);
+        // Second take returns empty — file was cleared.
+        let second = take_turn_signals(&session);
+        assert!(second.is_empty(), "second take should be empty");
+    }
+
+    #[test]
+    fn classify_outcome_api_error_wins_over_signals() {
+        // StopFailure path: even if PermissionDenied happened during
+        // the turn, the API error is the more informative signal.
+        let signals = vec![TurnSignal::PermissionDenied {
+            tool: "Bash".to_owned(),
+        }];
+        let outcome = classify_outcome(&signals, Some("rate_limit: backoff 300s"));
+        match outcome {
+            sentinel_legatus::InstructionOutcome::Failure { error } => {
+                assert_eq!(error, "rate_limit: backoff 300s");
+            }
+            other => panic!("expected Failure, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_outcome_permission_denied_yields_declined() {
+        let signals = vec![TurnSignal::PermissionDenied {
+            tool: "Bash".to_owned(),
+        }];
+        let outcome = classify_outcome(&signals, None);
+        match outcome {
+            sentinel_legatus::InstructionOutcome::Declined { reason } => {
+                assert!(reason.contains("Bash"), "reason should name the tool: {reason}");
+                assert!(reason.contains("permission denied"), "reason: {reason}");
+            }
+            other => panic!("expected Declined, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_outcome_multiple_denied_tools_joined_in_reason() {
+        let signals = vec![
+            TurnSignal::PermissionDenied {
+                tool: "Bash".to_owned(),
+            },
+            TurnSignal::PermissionDenied {
+                tool: "Write".to_owned(),
+            },
+        ];
+        let outcome = classify_outcome(&signals, None);
+        match outcome {
+            sentinel_legatus::InstructionOutcome::Declined { reason } => {
+                assert!(reason.contains("Bash"), "reason: {reason}");
+                assert!(reason.contains("Write"), "reason: {reason}");
+            }
+            other => panic!("expected Declined, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_outcome_no_signals_yields_success() {
+        let outcome = classify_outcome(&[], None);
+        assert!(matches!(outcome, sentinel_legatus::InstructionOutcome::Success));
+    }
+
+    #[test]
+    fn take_turn_signals_for_missing_session_returns_empty() {
+        let session = format!("legatus-client-test-{}", uuid::Uuid::new_v4());
+        assert!(take_turn_signals(&session).is_empty());
     }
 }

@@ -197,16 +197,19 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     // Per-instruction Result reporting: for every operator-relayed
     // instruction the consul_inbox hook drained during this
     // session, fire an InstructionResult tied to its
-    // instruction_id. MVP: outcome is always Success — we don't
-    // classify mid-run failures yet (a Stop firing means Claude
-    // Code finished its turn, not that the relayed instruction
-    // succeeded specifically, but for the ~90-95% reliability
-    // target this is close enough).
+    // instruction_id. Outcome is classified from observed turn
+    // signals via `classify_outcome` — currently:
+    //   - PermissionDenied during the turn → Declined { tool(s) }
+    //   - otherwise → Success
+    // This is the Stop path (API error → StopFailure handles its own
+    // Failure classification), so no api_error is passed.
     let pending = crate::legatus_client::take_pending_instructions(session_id);
+    let signals = crate::legatus_client::take_turn_signals(session_id);
     for instruction_id in pending {
+        let outcome = crate::legatus_client::classify_outcome(&signals, None);
         crate::legatus_client::report_result_fire_and_forget(
             instruction_id,
-            sentinel_legatus::InstructionOutcome::Success,
+            outcome,
             summary.clone(),
         );
     }
