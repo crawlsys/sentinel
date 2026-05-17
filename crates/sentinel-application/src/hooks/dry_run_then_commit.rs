@@ -296,6 +296,7 @@ mod tests {
     use sentinel_domain::events::HookInput;
 
     use super::*;
+    use crate::auditor::StaticAuditor;
     use crate::reversibility_classifier::StaticReversibilityClassifier;
 
     /// In-memory FS for tests — only the methods `dry_run_then_commit`
@@ -341,54 +342,6 @@ mod tests {
         }
         fn metadata(&self, _path: &Path) -> anyhow::Result<std::fs::Metadata> {
             anyhow::bail!("not implemented")
-        }
-    }
-
-    /// Static auditor for tests: returns a pre-configured verdict.
-    struct StaticAuditor {
-        verdict: Result<AuditorVerdict, AuditorError>,
-    }
-
-    impl StaticAuditor {
-        fn pass(confidence: f32) -> Self {
-            Self {
-                verdict: Ok(AuditorVerdict {
-                    decision: AuditorDecision::Pass,
-                    confidence,
-                    axes: AuditorAxes::new(0.9, 0.9, 0.9, 0.9),
-                    reasoning: "looks good".into(),
-                    auditor_model: "test:auditor".into(),
-                }),
-            }
-        }
-        fn block(reason: &str) -> Self {
-            Self {
-                verdict: Ok(AuditorVerdict {
-                    decision: AuditorDecision::Block {
-                        reason: reason.into(),
-                    },
-                    confidence: 0.95,
-                    axes: AuditorAxes::new(0.5, 0.5, 0.2, 0.5),
-                    reasoning: "concerns".into(),
-                    auditor_model: "test:auditor".into(),
-                }),
-            }
-        }
-        fn err(err: AuditorError) -> Self {
-            Self { verdict: Err(err) }
-        }
-    }
-
-    impl AuditorPort for StaticAuditor {
-        fn score(
-            &self,
-            _dry_run: &DryRunRequest,
-        ) -> Result<AuditorVerdict, AuditorError> {
-            // Clone the canned response.
-            match &self.verdict {
-                Ok(v) => Ok(v.clone()),
-                Err(e) => Err(e.clone()),
-            }
         }
     }
 
