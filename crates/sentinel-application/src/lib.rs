@@ -4,8 +4,10 @@
 //! infrastructure ports for hook execution, proof management,
 //! AI judging, and MCP tool handling.
 
+pub mod appraisal_store;
 pub mod auditor;
 pub mod cache_efficiency;
+pub mod capability_router;
 pub mod channel_events;
 pub mod classifier;
 pub mod cost_per_point;
