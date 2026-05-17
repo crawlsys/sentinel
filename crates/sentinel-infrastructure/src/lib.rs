@@ -20,6 +20,7 @@ pub mod process;
 pub mod proof_store;
 pub mod qdrant;
 pub mod rate_limit;
+pub mod reversibility;
 pub mod rig_classifier;
 pub mod rig_judge;
 pub mod security_log;
