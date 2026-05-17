@@ -33,6 +33,8 @@ tracing = { workspace = true }
 chrono = { workspace = true }
 hex = { workspace = true }
 uuid = { workspace = true }
+dirs = { workspace = true }
+fs2 = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }

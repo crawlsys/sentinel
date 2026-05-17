@@ -431,12 +431,21 @@ fn handle_inbound(msg: &ConsularMessage, session_id: SessionId, runtime: &Legatu
                 destructive = instr.destructive,
                 "received RelayInstruction",
             );
-            // Best-effort push onto the host's inbox queue. When
-            // run_connect (the standalone path) drops its handle
-            // immediately, this send errors and we just continue
-            // logging — same as the pre-commit-B behavior.
-            if runtime.inbox_tx.send(instr.clone()).is_err() {
-                debug!(%session_id, "inbox host has shut down; instruction is log-only");
+            // Persistence: write to the file-backed inbox before
+            // looping back to the WS, so the instruction survives a
+            // daemon crash between "received over WS" and "drained
+            // by the consul_inbox hook". `append` is synchronous +
+            // fs2-locked; it's called inside the tokio select arm,
+            // but the lock window is microseconds (open + writeln +
+            // close) so we don't stall the runtime.
+            //
+            // Standalone `run_connect` builds a runtime with
+            // `inbox = None` — in that path the instruction stays
+            // log-only, matching pre-persistence behavior.
+            if let Some(inbox) = runtime.inbox.as_ref() {
+                inbox.append(instr);
+            } else {
+                debug!(%session_id, "no persistent inbox; instruction is log-only");
             }
         }
         ConsularMessage::RequestContextSync(_) => {

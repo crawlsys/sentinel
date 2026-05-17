@@ -28,12 +28,15 @@
 pub mod client;
 pub mod error;
 pub mod handle;
+pub mod persistent_inbox;
 
 pub use client::{run_connect, run_connect_hosted, ConnectConfig};
 pub use error::LegatusError;
 pub use handle::{
-    make_pair, EscalationKind, EscalationSendError, LegatusHandle, LegatusRuntime,
+    make_pair, make_pair_with_inbox, EscalationKind, EscalationSendError, LegatusHandle,
+    LegatusRuntime,
 };
+pub use persistent_inbox::{default_inbox_path, PersistentInbox};
 
 // Convenience re-exports so dependents (e.g. sentinel-cli,
 // sentinel-application) can configure a legatus / build a

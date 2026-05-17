@@ -17,8 +17,8 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use sentinel_domain::state::SessionState;
 use sentinel_legatus::{
-    make_pair, run_connect_hosted, ConnectConfig, EscalationKind, LegatusHandle,
-    BOOTSTRAP_SECRET_LEN, RuntimeKind,
+    default_inbox_path, make_pair, make_pair_with_inbox, run_connect_hosted, ConnectConfig,
+    EscalationKind, LegatusHandle, PersistentInbox, RuntimeKind, BOOTSTRAP_SECRET_LEN,
 };
 use tokio::sync::{Notify, RwLock};
 use tracing::{info, warn};
@@ -213,9 +213,7 @@ pub async fn run(port: u16, legatus: LegatusOptions) -> Result<()> {
     Ok(())
 }
 
-async fn start_legatus_if_configured(
-    options: LegatusOptions,
-) -> Result<Option<LegatusHandle>> {
+async fn start_legatus_if_configured(options: LegatusOptions) -> Result<Option<LegatusHandle>> {
     let Some(consulate_url) = options.consulate_url else {
         return Ok(None);
     };
@@ -251,7 +249,26 @@ async fn start_legatus_if_configured(
         heartbeat_interval: Duration::from_secs(options.heartbeat_secs.max(1)),
     };
 
-    let (handle, runtime) = make_pair();
+    // Persistent inbox at ~/.claude/sentinel/state/legatus-inbox.jsonl.
+    // If we can't resolve $HOME (degenerate, but possible in chroots /
+    // some CI containers), fall back to an in-memory pair so the
+    // daemon still runs — operator-relayed instructions just don't
+    // survive a daemon crash in that mode.
+    let (handle, runtime) = if let Some(path) = default_inbox_path() {
+        let inbox = PersistentInbox::new(path);
+        let prior = inbox.len();
+        if prior > 0 {
+            info!(
+                queued = prior,
+                path = ?inbox.path(),
+                "rehydrated persistent inbox at startup",
+            );
+        }
+        make_pair_with_inbox(inbox)
+    } else {
+        warn!("no resolvable home dir; legatus inbox is in-memory only");
+        make_pair()
+    };
     let cancel = Arc::new(Notify::new());
     info!(url = %consulate_url, "daemon hosting legatus");
     tokio::spawn(async move {

@@ -4,28 +4,39 @@
 //! need to push escalations onto it / pop received instructions
 //! from it.
 //!
-//! Two channels:
+//! Two pieces of plumbing:
 //!
-//! - **escalation** (`mpsc::UnboundedSender<EscalationKind>`) —
-//!   handle holds the sender; the connect-loop's runtime holds the
+//! - **escalation channel** (`mpsc::UnboundedSender<EscalationKind>`)
+//!   — handle holds the sender; the connect-loop's runtime holds the
 //!   receiver. Calling [`LegatusHandle::escalate`] queues an
 //!   escalation that the loop converts to a signed
-//!   `SessionBlocked` / `SessionCompleted` / `SessionFailed`
-//!   envelope and writes to the WS.
-//! - **inbox** (`mpsc::UnboundedSender<RelayInstruction>`) — loop
-//!   holds the sender; handle holds the receiver. The loop pushes
-//!   every received `RelayInstruction` onto it; callers drain via
-//!   [`LegatusHandle::try_pop_inbox`].
+//!   `SessionBlocked` / `SessionCompleted` / `SessionFailed` /
+//!   `InstructionAcknowledged` / `InstructionResult` envelope and
+//!   writes to the WS.
+//! - **persistent inbox** ([`PersistentInbox`]) — both halves share
+//!   the same file-backed FIFO. The connect loop appends every
+//!   received `RelayInstruction`; HTTP route consumers (sentinel's
+//!   `consul_inbox` hook via the daemon's
+//!   `GET /legatus/inbox/next`) pop via
+//!   [`LegatusHandle::try_pop_inbox`]. Replacing the pre-persistence
+//!   `mpsc` channel makes the queue survive daemon restart — the
+//!   instruction is on disk *before* consul gets an
+//!   `InstructionAck`, and the hook pops it whenever it's next
+//!   ready.
 //!
-//! Both channels are unbounded — slow consumers should never apply
-//! backpressure to a session loop reading from a live WS.
-
-use std::sync::Arc;
+//! Escalations remain in-memory because they are produced by hooks
+//! that have already returned to the operator's chat surface — if
+//! the daemon crashes between `escalate()` and the WS send, the
+//! event is "lost" only in the sense that the operator will see
+//! the next Stop hook fire instead. Persisting escalations is a
+//! future improvement (separate file, same lock discipline).
 
 use consul_domain::identity::InstructionId;
 use consul_protocol::messages::{BlockReason, InstructionOutcome, RelayInstruction};
 use serde::{Deserialize, Serialize};
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::mpsc;
+
+use crate::persistent_inbox::PersistentInbox;
 
 /// Any event the legatus wants to send to its consul over the
 /// post-handshake WS. Covers session-lifecycle escalations
@@ -101,36 +112,56 @@ pub enum EscalationKind {
 
 /// Runtime control surface for an in-flight legatus connection.
 ///
-/// Cheap to clone — all state is `Arc`/channel-based. Hand a clone
+/// Cheap to clone — escalation channel is internally `Arc`'d and
+/// [`PersistentInbox`] is also `Clone` (just a path). Hand a clone
 /// to every IPC route or hook that needs to push escalations or
 /// pop the inbox.
 #[derive(Clone)]
 pub struct LegatusHandle {
     escalation_tx: mpsc::UnboundedSender<EscalationKind>,
-    inbox_rx: Arc<Mutex<mpsc::UnboundedReceiver<RelayInstruction>>>,
+    inbox: Option<PersistentInbox>,
 }
 
 /// Receiver-side of the channels — owned by the connect loop and
 /// drained inside its main `tokio::select!`.
 pub struct LegatusRuntime {
     pub(crate) escalation_rx: mpsc::UnboundedReceiver<EscalationKind>,
-    pub(crate) inbox_tx: mpsc::UnboundedSender<RelayInstruction>,
+    pub(crate) inbox: Option<PersistentInbox>,
 }
 
-/// Construct a paired `(handle, runtime)`. The handle goes to the
-/// caller (e.g. the sentinel daemon's HTTP routes); the runtime
-/// goes to [`crate::client::run_connect_hosted`].
+/// Construct a paired `(handle, runtime)` with no persistent inbox.
+/// Used by the standalone `sentinel legatus connect` path, where
+/// received instructions are log-only (no daemon to drain them).
 #[must_use]
 pub fn make_pair() -> (LegatusHandle, LegatusRuntime) {
     let (escalation_tx, escalation_rx) = mpsc::unbounded_channel();
-    let (inbox_tx, inbox_rx) = mpsc::unbounded_channel();
     let handle = LegatusHandle {
         escalation_tx,
-        inbox_rx: Arc::new(Mutex::new(inbox_rx)),
+        inbox: None,
     };
     let runtime = LegatusRuntime {
         escalation_rx,
-        inbox_tx,
+        inbox: None,
+    };
+    (handle, runtime)
+}
+
+/// Construct a paired `(handle, runtime)` backed by the given
+/// [`PersistentInbox`].
+///
+/// Both halves share the same file path; the inbox is cheap to
+/// clone (path only). Used by the sentinel daemon path so
+/// received instructions survive daemon restart.
+#[must_use]
+pub fn make_pair_with_inbox(inbox: PersistentInbox) -> (LegatusHandle, LegatusRuntime) {
+    let (escalation_tx, escalation_rx) = mpsc::unbounded_channel();
+    let handle = LegatusHandle {
+        escalation_tx,
+        inbox: Some(inbox.clone()),
+    };
+    let runtime = LegatusRuntime {
+        escalation_rx,
+        inbox: Some(inbox),
     };
     (handle, runtime)
 }
@@ -151,17 +182,26 @@ impl LegatusHandle {
     }
 
     /// Non-blocking pop of the next received `RelayInstruction`.
-    /// Returns `None` if the inbox is empty.
+    ///
+    /// Returns `None` if the inbox is empty, the queue file is
+    /// missing, or this handle was built without a persistent
+    /// inbox (the standalone path). File I/O is wrapped in
+    /// `tokio::task::spawn_blocking` so the executor never stalls
+    /// on the advisory lock.
     pub async fn try_pop_inbox(&self) -> Option<RelayInstruction> {
-        let mut rx = self.inbox_rx.lock().await;
-        rx.try_recv().ok()
+        let inbox = self.inbox.clone()?;
+        tokio::task::spawn_blocking(move || inbox.try_pop())
+            .await
+            .ok()
+            .flatten()
     }
 
-    /// Blocking variant — waits until a `RelayInstruction` arrives
-    /// or the runtime drops the sender (returns `None`).
-    pub async fn pop_inbox(&self) -> Option<RelayInstruction> {
-        let mut rx = self.inbox_rx.lock().await;
-        rx.recv().await
+    /// Diagnostic: borrow the underlying `PersistentInbox`, if any.
+    /// Exposed for tests + `sentinel legatus daemon-status`.
+    #[must_use]
+    #[allow(clippy::missing_const_for_fn)] // Option::as_ref is not const.
+    pub fn persistent_inbox(&self) -> Option<&PersistentInbox> {
+        self.inbox.as_ref()
     }
 }
 
@@ -180,14 +220,15 @@ pub enum EscalationSendError {
 mod tests {
     use consul_domain::identity::{InstructionId, SessionId};
     use consul_protocol::messages::RelayInstruction;
+    use tempfile::tempdir;
 
     use super::*;
 
-    fn fake_instruction() -> RelayInstruction {
+    fn fake_instruction(content: &str) -> RelayInstruction {
         RelayInstruction {
             instruction_id: InstructionId::new(),
             target_session_id: SessionId::new_v7(),
-            content: "test".into(),
+            content: content.into(),
             destructive: false,
         }
     }
@@ -220,16 +261,41 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pop_inbox_returns_pushed_instruction() {
-        let (handle, runtime) = make_pair();
-        runtime.inbox_tx.send(fake_instruction()).unwrap();
-        let instr = handle.try_pop_inbox().await.unwrap();
-        assert_eq!(instr.content, "test");
+    async fn try_pop_inbox_returns_none_for_standalone_pair() {
+        // make_pair() builds an inbox-less pair; pop is always None.
+        let (handle, _runtime) = make_pair();
+        assert!(handle.try_pop_inbox().await.is_none());
     }
 
     #[tokio::test]
-    async fn try_pop_inbox_returns_none_when_empty() {
-        let (handle, _runtime) = make_pair();
+    async fn try_pop_inbox_drains_persistent_inbox() {
+        let dir = tempdir().unwrap();
+        let inbox = PersistentInbox::new(dir.path().join("legatus-inbox.jsonl"));
+        // Pre-seed as if the runtime had received an instruction.
+        let instr = fake_instruction("hello");
+        inbox.append(&instr);
+
+        let (handle, _runtime) = make_pair_with_inbox(inbox);
+        let popped = handle.try_pop_inbox().await.unwrap();
+        assert_eq!(popped.content, "hello");
+        // Second pop returns None — single-item queue.
         assert!(handle.try_pop_inbox().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn handle_and_runtime_share_persistent_inbox() {
+        // Appends made via runtime.inbox are visible to handle.
+        let dir = tempdir().unwrap();
+        let inbox = PersistentInbox::new(dir.path().join("legatus-inbox.jsonl"));
+        let (handle, runtime) = make_pair_with_inbox(inbox);
+        let runtime_inbox = runtime.inbox.as_ref().unwrap();
+
+        runtime_inbox.append(&fake_instruction("a"));
+        runtime_inbox.append(&fake_instruction("b"));
+
+        let first = handle.try_pop_inbox().await.unwrap();
+        let second = handle.try_pop_inbox().await.unwrap();
+        assert_eq!(first.content, "a");
+        assert_eq!(second.content, "b");
     }
 }

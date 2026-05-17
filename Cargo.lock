@@ -2429,6 +2429,8 @@ dependencies = [
  "chrono",
  "consul-domain",
  "consul-protocol",
+ "dirs",
+ "fs2",
  "futures-util",
  "hex",
  "serde",
