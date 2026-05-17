@@ -27,12 +27,16 @@
 
 pub mod client;
 pub mod error;
+pub mod handle;
 
-pub use client::{run_connect, ConnectConfig};
+pub use client::{run_connect, run_connect_hosted, ConnectConfig};
 pub use error::LegatusError;
+pub use handle::{
+    make_pair, EscalationKind, EscalationSendError, LegatusHandle, LegatusRuntime,
+};
 
 // Convenience re-exports so dependents (e.g. sentinel-cli) can
 // configure a legatus without a direct path-dep on
 // consul-protocol / consul-domain.
 pub use consul_protocol::keys::BOOTSTRAP_SECRET_LEN;
-pub use consul_protocol::messages::RuntimeKind;
+pub use consul_protocol::messages::{BlockReason, RelayInstruction, RuntimeKind};

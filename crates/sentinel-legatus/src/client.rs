@@ -23,8 +23,8 @@ use consul_protocol::keys::{
     derive_handshake_key, derive_mac_key_pair, MacKey, BOOTSTRAP_SECRET_LEN,
 };
 use consul_protocol::messages::{
-    Capabilities, ConsularMessage, Hello, RegisterSession, RuntimeKind, SessionCompleted,
-    SessionHeartbeat, SessionStatus,
+    Capabilities, ConsularMessage, Hello, RegisterSession, RuntimeKind, SessionBlocked,
+    SessionCompleted, SessionFailed, SessionHeartbeat, SessionStatus,
 };
 use consul_protocol::version::PROTOCOL_VERSION;
 use futures_util::{SinkExt, StreamExt};
@@ -34,6 +34,7 @@ use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 use tracing::{debug, info, warn};
 
 use crate::error::LegatusError;
+use crate::handle::{EscalationKind, LegatusRuntime};
 
 /// Default heartbeat interval. Consulate marks a session dead
 /// after ~60s without a heartbeat (per
@@ -102,6 +103,28 @@ impl ConnectConfig {
 pub async fn run_connect(
     config: ConnectConfig,
     cancel: std::sync::Arc<Notify>,
+) -> Result<(), LegatusError> {
+    // Standalone path — give the loop a runtime whose handle is
+    // dropped immediately. Received instructions are still logged;
+    // pushes to inbox_tx and pulls from escalation_rx silently
+    // no-op (the channel ends are gone).
+    let (_handle, runtime) = crate::handle::make_pair();
+    run_connect_hosted(config, cancel, runtime).await
+}
+
+/// Hosted variant: caller supplies the [`LegatusRuntime`] half of a
+/// pair from [`crate::handle::make_pair`]. The matching
+/// [`crate::handle::LegatusHandle`] gives the caller (e.g. the
+/// sentinel daemon's HTTP routes) the ability to push escalations
+/// onto the WS and pop inbound `RelayInstruction`s as they arrive.
+///
+/// # Errors
+///
+/// Same shape as [`run_connect`].
+pub async fn run_connect_hosted(
+    config: ConnectConfig,
+    cancel: std::sync::Arc<Notify>,
+    mut runtime: LegatusRuntime,
 ) -> Result<(), LegatusError> {
     info!(url = %config.consulate_url, "legatus connecting");
     let (ws, _) = tokio_tungstenite::connect_async(&config.consulate_url)
@@ -200,6 +223,48 @@ pub async fn run_connect(
                 info!(%session_id, "legatus cancelled; sending SessionCompleted");
                 break Some("cancelled");
             },
+            escalation = runtime.escalation_rx.recv() => {
+                let Some(kind) = escalation else {
+                    // All escalation senders dropped — host went
+                    // away. Stay alive; the loop continues serving
+                    // the WS until cancel or the consulate closes.
+                    continue;
+                };
+                let msg = match kind {
+                    EscalationKind::Blocked { reason } => {
+                        ConsularMessage::SessionBlocked(SessionBlocked {
+                            session_id,
+                            reason,
+                            detected_at_ms: now_ms(),
+                        })
+                    },
+                    EscalationKind::Completed { summary } => {
+                        ConsularMessage::SessionCompleted(SessionCompleted {
+                            session_id,
+                            completed_at_ms: now_ms(),
+                            summary,
+                        })
+                    },
+                    EscalationKind::Failed { error } => {
+                        ConsularMessage::SessionFailed(SessionFailed {
+                            session_id,
+                            failed_at_ms: now_ms(),
+                            error,
+                        })
+                    },
+                };
+                if let Err(err) = send_signed(
+                    &mut sink,
+                    &outbound_key,
+                    session_id,
+                    local_seq,
+                    &msg,
+                ).await {
+                    warn!(?err, "escalation send failed; closing");
+                    break None;
+                }
+                local_seq += 1;
+            },
             _ = heartbeat.tick() => {
                 let msg = ConsularMessage::SessionHeartbeat(SessionHeartbeat {
                     session_id,
@@ -229,7 +294,7 @@ pub async fn run_connect(
                                 continue;
                             },
                         };
-                        handle_inbound(&msg, session_id);
+                        handle_inbound(&msg, session_id, &runtime);
                     },
                     Some(Ok(WsMessage::Close(frame))) => {
                         debug!(?frame, "consulate sent close");
@@ -336,19 +401,23 @@ fn decode_envelope(bytes: &[u8], key: &MacKey) -> Result<ConsularMessage, Legatu
     decode_payload(payload).map_err(|err| LegatusError::Decode(format!("payload: {err}")))
 }
 
-fn handle_inbound(msg: &ConsularMessage, session_id: SessionId) {
+fn handle_inbound(msg: &ConsularMessage, session_id: SessionId, runtime: &LegatusRuntime) {
     match msg {
         ConsularMessage::RelayInstruction(instr) => {
-            // Commit A: just log. Commit B/C will pop these onto
-            // a per-session inbox for the Claude Code injection
-            // path.
             info!(
                 %session_id,
                 instruction_id = %instr.instruction_id,
                 content = %instr.content,
                 destructive = instr.destructive,
-                "received RelayInstruction (no Claude Code wiring yet)",
+                "received RelayInstruction",
             );
+            // Best-effort push onto the host's inbox queue. When
+            // run_connect (the standalone path) drops its handle
+            // immediately, this send errors and we just continue
+            // logging — same as the pre-commit-B behavior.
+            if runtime.inbox_tx.send(instr.clone()).is_err() {
+                debug!(%session_id, "inbox host has shut down; instruction is log-only");
+            }
         }
         ConsularMessage::RequestContextSync(_) => {
             debug!(%session_id, "received RequestContextSync (no context store yet)");
