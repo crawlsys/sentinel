@@ -11,7 +11,9 @@ use sentinel_domain::events::{HookEvent, HookOutput, HookSpecificOutput};
 use sentinel_domain::state::SessionState;
 use sentinel_domain::workflow::{SkillSteps, SkillWorkflow};
 
+use sentinel_domain::capability::VendorClass;
 use sentinel_domain::ports::{AuditorPort, LlmPort, VectorStorePort};
+use sentinel_infrastructure::capability_router::TomlCapabilityRouter;
 use sentinel_infrastructure::dry_run_auditor::RigAuditor;
 use sentinel_infrastructure::git::RealGit;
 use sentinel_infrastructure::memory_mcp_client::MemoryMcpClient;
@@ -177,24 +179,79 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
             LayeredReversibilityClassifier::empty()
         });
 
-    // A3 Phase 4: construct the dry-run auditor. RigAuditor reads
-    // OPENROUTER_API_KEY + SENTINEL_AUDITOR_MODEL + SENTINEL_AUDITOR_TIMEOUT_SECS
-    // from env (per crates/sentinel-infrastructure/src/dry_run_auditor.rs).
-    // When the key is absent the auditor is `None`, A3 is inert, and
-    // `tool_usage_gate` falls back to its four-check stack for
-    // Irreversible/Catastrophic (the strongest pre-A3 gate). When the
-    // key is present, dry_run_then_commit owns Irreversible/Catastrophic
-    // and tool_usage_gate short-circuits those classes.
-    let auditor: Option<Arc<dyn AuditorPort>> = match RigAuditor::from_env() {
-        Ok(a) => Some(Arc::new(a) as Arc<dyn AuditorPort>),
+    // A2 Phase 4: construct the capability router from shipped
+    // defaults + optional operator overrides at
+    // `~/.claude/sentinel/config/agents.toml`. Load failures degrade
+    // to an empty router (A2 substrate inert, env-driven auditor
+    // selection still works).
+    let agents_overrides_path = dirs::home_dir().map(|h| {
+        h.join(".claude")
+            .join("sentinel")
+            .join("config")
+            .join("agents.toml")
+    });
+    let capability_router = match TomlCapabilityRouter::with_shipped_and_overrides(
+        agents_overrides_path.as_deref(),
+    ) {
+        Ok(r) => r,
         Err(err) => {
-            tracing::info!(
+            tracing::warn!(
                 ?err,
-                "dry-run auditor unavailable (RigAuditor::from_env failed); A3 inert, tool_usage_gate four-check stack handles Irreversible/Catastrophic"
+                "failed to load agents.toml; capability router empty, A2 substrate inert"
             );
-            None
+            TomlCapabilityRouter::from_profiles(Vec::new())
         }
     };
+
+    // A3 Phase 4 + A2 Phase 4: construct the dry-run auditor. Two
+    // paths in priority order:
+    //   1. **Router-based** — consult the A2 router for an agent
+    //      matching the A3 separate-vendor + AuditorVerdict-schema
+    //      requirement (acting vendor hardcoded to Anthropic since
+    //      Claude Code is Anthropic). The router picks per the
+    //      operator's `agents.toml`; we build a RigAuditor for the
+    //      chosen profile.
+    //   2. **Env-only fallback** — if the router has no candidates
+    //      (e.g. operator hasn't customized agents.toml and the
+    //      shipped defaults don't match the operator's API keys), or
+    //      if the chosen profile's API key isn't configured, fall
+    //      back to `RigAuditor::from_env()` (legacy Phase 4 path,
+    //      driven by SENTINEL_AUDITOR_PROVIDER + SENTINEL_AUDITOR_MODEL).
+    //
+    // Either path returning `Err` keeps A3 inert and
+    // `tool_usage_gate` falls back to the four-check stack.
+    let auditor: Option<Arc<dyn AuditorPort>> = (|| -> Option<Arc<dyn AuditorPort>> {
+        if !capability_router.profiles().is_empty() {
+            match RigAuditor::via_router(
+                &capability_router,
+                capability_router.profiles(),
+                VendorClass::Anthropic,
+            ) {
+                Ok(a) => {
+                    tracing::info!(
+                        "A3 auditor selected via A2 capability router (acting vendor: Anthropic)"
+                    );
+                    return Some(Arc::new(a) as Arc<dyn AuditorPort>);
+                }
+                Err(err) => {
+                    tracing::info!(
+                        ?err,
+                        "router-based auditor selection failed; falling back to env-only"
+                    );
+                }
+            }
+        }
+        match RigAuditor::from_env() {
+            Ok(a) => Some(Arc::new(a) as Arc<dyn AuditorPort>),
+            Err(err) => {
+                tracing::info!(
+                    ?err,
+                    "dry-run auditor unavailable (env-only fallback also failed); A3 inert"
+                );
+                None
+            }
+        }
+    })();
     let a3_enabled = auditor.is_some();
 
     // Bundle all ports into HookContext

@@ -58,10 +58,14 @@ use rig_core::providers::{openai, openrouter};
 use serde::Deserialize;
 use tracing::{debug, warn};
 
+use sentinel_domain::capability::{
+    AgentCapabilityProfile, Capability, CapabilityRequirement, ReasoningLevel, SchemaRef,
+    VendorClass,
+};
 use sentinel_domain::dry_run::{
     AuditorAxes, AuditorDecision, AuditorError, AuditorVerdict, DryRunRequest,
 };
-use sentinel_domain::ports::AuditorPort;
+use sentinel_domain::ports::{AuditorPort, CapabilityRouterPort};
 
 /// Default auditor model for the `openrouter` provider.
 ///
@@ -305,6 +309,201 @@ impl RigAuditor {
             provider_prefix,
             timeout,
         })
+    }
+
+    // ---- A2 router-driven construction ----
+
+    /// Construct a `RigAuditor` for a specific
+    /// [`AgentCapabilityProfile`] (as picked by the A2 router).
+    ///
+    /// Maps the profile's [`VendorClass::true_vendor`] to the
+    /// appropriate rig-core provider:
+    ///
+    /// - `Anthropic | Openai | Google | Xai | Meta | Mistral |
+    ///   Openrouter | Other(..) | Unknown` → `OpenRouter` provider
+    ///   (single auth surface `OPENROUTER_API_KEY`; `OpenRouter`
+    ///   fronts all of these vendors' catalogs).
+    /// - `Ollama` → Ollama provider (auto-detects local vs cloud via
+    ///   `OLLAMA_API_KEY` presence per the Phase 5 wiring).
+    ///
+    /// Uses `profile.model_id` instead of `SENTINEL_AUDITOR_MODEL` so
+    /// the router's pick determines the model. The relevant env vars
+    /// (`OPENROUTER_API_KEY`, `OLLAMA_API_KEY`/`OLLAMA_HOST`,
+    /// `SENTINEL_AUDITOR_TIMEOUT_SECS`) are still consulted via the
+    /// supplied resolver.
+    pub fn for_profile(profile: &AgentCapabilityProfile) -> Result<Self> {
+        Self::for_profile_with(profile, real_env)
+    }
+
+    /// [`Self::for_profile`] with an injected env resolver — same test
+    /// seam as the rest of the `*_from_env_with` variants.
+    pub fn for_profile_with<F>(profile: &AgentCapabilityProfile, env: F) -> Result<Self>
+    where
+        F: Fn(&str) -> Option<String>,
+    {
+        let timeout = read_timeout(&env);
+        let model_id = profile.model_id.clone();
+
+        // Exhaustive match (no wildcard) so a new VendorClass variant
+        // forces a compile-time decision about how to route it.
+        match profile.vendor.true_vendor() {
+            VendorClass::Ollama => {
+                let (base_url, api_key, provider_prefix) =
+                    env("OLLAMA_API_KEY").map_or_else(
+                        || {
+                            let host = env("OLLAMA_HOST")
+                                .unwrap_or_else(|| "http://localhost:11434".to_string());
+                            let base = format!("{}/v1", host.trim_end_matches('/'));
+                            (
+                                base,
+                                OLLAMA_LOCAL_DUMMY_KEY.to_string(),
+                                "ollama-local".to_string(),
+                            )
+                        },
+                        |key| {
+                            let base = env("OLLAMA_BASE_URL")
+                                .unwrap_or_else(|| DEFAULT_OLLAMA_CLOUD_BASE_URL.to_string());
+                            (base, key, "ollama-cloud".to_string())
+                        },
+                    );
+                let client = Arc::new(
+                    openai::Client::builder()
+                        .api_key(&api_key)
+                        .base_url(&base_url)
+                        .build()
+                        .map_err(|e| {
+                            anyhow::anyhow!(
+                                "failed to build ollama client for profile {} (base_url={base_url}): {e}",
+                                profile.agent_id
+                            )
+                        })?,
+                );
+                let prompt_fn_provider = provider_prefix.clone();
+                let prompt_fn: PromptFn = Arc::new(move |model_id, system, user_msg| {
+                    let client = client.clone();
+                    let provider = prompt_fn_provider.clone();
+                    Box::pin(async move {
+                        let agent = AgentBuilder::new(client.completion_model(&model_id))
+                            .preamble(&system)
+                            .build();
+                        let result: anyhow::Result<String, _> = agent.prompt(user_msg).await;
+                        result.map_err(|e| {
+                            anyhow::anyhow!("{provider} auditor ({model_id}): {e}")
+                        })
+                    })
+                });
+                Ok(Self {
+                    prompt_fn,
+                    model_id,
+                    provider_prefix,
+                    timeout,
+                })
+            }
+            VendorClass::Anthropic
+            | VendorClass::Openai
+            | VendorClass::Google
+            | VendorClass::Xai
+            | VendorClass::Meta
+            | VendorClass::Mistral
+            | VendorClass::Openrouter
+            | VendorClass::Other { .. }
+            | VendorClass::Unknown => {
+                // OpenRouter is the catch-all gateway for every other
+                // vendor — single API key fronts the multi-vendor
+                // catalog. Operator-configured profiles with
+                // `vendor = "Anthropic"` or similar route here.
+                let key = env("OPENROUTER_API_KEY").with_context(|| {
+                    format!(
+                        "OPENROUTER_API_KEY not set; required to route profile {} ({:?}) via OpenRouter",
+                        profile.agent_id, profile.vendor
+                    )
+                })?;
+                let client = Arc::new(openrouter::Client::new(&key).map_err(|e| {
+                    anyhow::anyhow!(
+                        "failed to build OpenRouter client for profile {}: {e}",
+                        profile.agent_id
+                    )
+                })?);
+                let prompt_fn: PromptFn = Arc::new(move |model_id, system, user_msg| {
+                    let client = client.clone();
+                    Box::pin(async move {
+                        let agent = AgentBuilder::new(client.completion_model(&model_id))
+                            .preamble(&system)
+                            .build();
+                        let result: anyhow::Result<String, _> = agent.prompt(user_msg).await;
+                        result.map_err(|e| {
+                            anyhow::anyhow!("openrouter auditor ({model_id}): {e}")
+                        })
+                    })
+                });
+                Ok(Self {
+                    prompt_fn,
+                    model_id,
+                    provider_prefix: "openrouter".to_string(),
+                    timeout,
+                })
+            }
+        }
+    }
+
+    /// Consult the A2 capability router to pick a suitable auditor
+    /// for an Irreversible/Catastrophic action whose acting agent is
+    /// `acting_vendor`, then construct a [`RigAuditor`] for the
+    /// chosen profile via [`Self::for_profile`].
+    ///
+    /// The A3 requirement is:
+    /// - `Reasoning(Standard)` (minimum — auditor needs enough rigor
+    ///   to evaluate dry-run prose).
+    /// - `DifferentVendorFrom(acting_vendor)` (separate-vendor rule
+    ///   per A3 spec §5.1).
+    /// - `StructuredOutput(AuditorVerdict)` (auditor must reliably
+    ///   emit the JSON schema this adapter parses).
+    /// - Preferred: `Reasoning(Deep)` (stronger if the operator has
+    ///   registered one).
+    ///
+    /// Returns `RoutingError::NoAgentSatisfies` when no registered
+    /// profile clears the requirement; the production caller in
+    /// `hook_cmd.rs` falls back to env-driven [`Self::from_env`] in
+    /// that case so legacy operators without `agents.toml` still get
+    /// an auditor.
+    pub fn via_router(
+        router: &dyn CapabilityRouterPort,
+        profiles: &[AgentCapabilityProfile],
+        acting_vendor: VendorClass,
+    ) -> Result<Self> {
+        Self::via_router_with(router, profiles, acting_vendor, real_env)
+    }
+
+    /// [`Self::via_router`] with an injected env resolver — same test
+    /// seam as the rest of the `*_with` variants.
+    pub fn via_router_with<F>(
+        router: &dyn CapabilityRouterPort,
+        profiles: &[AgentCapabilityProfile],
+        acting_vendor: VendorClass,
+        env: F,
+    ) -> Result<Self>
+    where
+        F: Fn(&str) -> Option<String>,
+    {
+        let req = CapabilityRequirement::new(vec![
+            Capability::Reasoning(ReasoningLevel::Standard),
+            Capability::DifferentVendorFrom(acting_vendor),
+            Capability::StructuredOutput(SchemaRef::AuditorVerdict),
+        ])
+        .with_preferred(Capability::Reasoning(ReasoningLevel::Deep));
+        let agent_id = router
+            .route(&req)
+            .map_err(|e| anyhow::anyhow!("router could not pick A3 auditor: {e}"))?;
+        let profile = profiles
+            .iter()
+            .find(|p| p.agent_id == agent_id)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "router returned AgentId {agent_id} but profile not found in the supplied \
+                     catalog (caller must pass the same profiles list the router uses)"
+                )
+            })?;
+        Self::for_profile_with(profile, env)
     }
 }
 
@@ -864,6 +1063,224 @@ mod tests {
         ]);
         let auditor = RigAuditor::openrouter_from_env_with(env).unwrap();
         assert_eq!(auditor.timeout, Duration::from_secs(7));
+    }
+
+    // ---- Phase 4: for_profile + via_router ----
+
+    use sentinel_domain::agent_routing::{RequirementSignature, RoutingExplanation};
+    use sentinel_domain::capability::{AgentId, DataZone};
+    use sentinel_domain::ports::RoutingError;
+
+    fn ollama_kimi_profile() -> AgentCapabilityProfile {
+        AgentCapabilityProfile {
+            agent_id: AgentId::new("kimi-k2-6-ollama-cloud").unwrap(),
+            display_name: "Kimi K2.6 (Ollama Cloud)".into(),
+            vendor: VendorClass::Ollama,
+            model_id: "kimi-k2.6".into(),
+            declared: vec![
+                Capability::Reasoning(ReasoningLevel::Standard),
+                Capability::StructuredOutput(SchemaRef::AuditorVerdict),
+            ],
+            cost_per_input_token: 0.000_001,
+            cost_per_output_token: 0.000_005,
+            typical_latency_ms: 15000,
+            max_context_tokens: 128_000,
+            data_zones: vec![],
+        }
+    }
+
+    fn openrouter_opus_profile() -> AgentCapabilityProfile {
+        AgentCapabilityProfile {
+            agent_id: AgentId::new("claude-opus-4-7").unwrap(),
+            display_name: "Claude Opus 4.7".into(),
+            vendor: VendorClass::Anthropic,
+            model_id: "claude-opus-4-7".into(),
+            declared: vec![
+                Capability::Reasoning(ReasoningLevel::Deep),
+                Capability::StructuredOutput(SchemaRef::AuditorVerdict),
+            ],
+            cost_per_input_token: 0.000_015,
+            cost_per_output_token: 0.000_075,
+            typical_latency_ms: 6000,
+            max_context_tokens: 200_000,
+            data_zones: vec![DataZone::UsEast],
+        }
+    }
+
+    #[test]
+    fn for_profile_ollama_local_when_no_api_key() {
+        let env = env_map(&[]);
+        let auditor =
+            RigAuditor::for_profile_with(&ollama_kimi_profile(), env).unwrap();
+        assert_eq!(auditor.provider_prefix, "ollama-local");
+        assert_eq!(auditor.model_id, "kimi-k2.6");
+    }
+
+    #[test]
+    fn for_profile_ollama_cloud_when_api_key_present() {
+        let env = env_map(&[("OLLAMA_API_KEY", "fake-cloud-key")]);
+        let auditor =
+            RigAuditor::for_profile_with(&ollama_kimi_profile(), env).unwrap();
+        assert_eq!(auditor.provider_prefix, "ollama-cloud");
+        assert_eq!(auditor.model_id, "kimi-k2.6");
+    }
+
+    #[test]
+    fn for_profile_openrouter_path_for_anthropic_vendor() {
+        let env = env_map(&[("OPENROUTER_API_KEY", "sk-fake")]);
+        let auditor =
+            RigAuditor::for_profile_with(&openrouter_opus_profile(), env).unwrap();
+        assert_eq!(auditor.provider_prefix, "openrouter");
+        assert_eq!(auditor.model_id, "claude-opus-4-7");
+    }
+
+    #[test]
+    fn for_profile_openrouter_errors_when_key_missing() {
+        let env = env_map(&[]);
+        let err =
+            RigAuditor::for_profile_with(&openrouter_opus_profile(), env).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("OPENROUTER_API_KEY"), "error should name the missing key: {msg}");
+    }
+
+    #[test]
+    fn for_profile_ignores_sentinel_auditor_model_env() {
+        // Phase 4 contract: when a profile is supplied, profile.model_id
+        // wins over SENTINEL_AUDITOR_MODEL — the router has decided.
+        let env = env_map(&[
+            ("OLLAMA_API_KEY", "fake"),
+            ("SENTINEL_AUDITOR_MODEL", "something-else"),
+        ]);
+        let auditor =
+            RigAuditor::for_profile_with(&ollama_kimi_profile(), env).unwrap();
+        assert_eq!(
+            auditor.model_id, "kimi-k2.6",
+            "router-chosen profile model_id must override env"
+        );
+    }
+
+    /// Stub router that returns a canned `AgentId` from `route()` and
+    /// records that the requirement carries the A3 separate-vendor
+    /// constraint. Used to test `via_router` without spinning up a
+    /// real `TomlCapabilityRouter`.
+    struct StubRouter {
+        chosen: AgentId,
+    }
+
+    impl CapabilityRouterPort for StubRouter {
+        fn route(
+            &self,
+            requirement: &CapabilityRequirement,
+        ) -> std::result::Result<AgentId, RoutingError> {
+            // Assert the A3 requirement shape — fail loudly if the
+            // caller forgot any of the required capabilities.
+            let has_different_vendor = requirement.required.iter().any(|c| {
+                matches!(c, Capability::DifferentVendorFrom(_))
+            });
+            assert!(
+                has_different_vendor,
+                "via_router must include DifferentVendorFrom in the A3 requirement"
+            );
+            let has_auditor_schema = requirement.required.iter().any(|c| {
+                matches!(
+                    c,
+                    Capability::StructuredOutput(SchemaRef::AuditorVerdict)
+                )
+            });
+            assert!(
+                has_auditor_schema,
+                "via_router must require AuditorVerdict StructuredOutput"
+            );
+            Ok(self.chosen.clone())
+        }
+
+        fn candidates(&self, _r: &CapabilityRequirement) -> Vec<AgentId> {
+            vec![self.chosen.clone()]
+        }
+
+        fn explain(&self, r: &CapabilityRequirement) -> RoutingExplanation {
+            RoutingExplanation {
+                chosen: Some(self.chosen.clone()),
+                candidates: vec![self.chosen.clone()],
+                eliminated: vec![],
+                tie_breakers_applied: vec![],
+                requirement_signature: RequirementSignature::of(r),
+            }
+        }
+    }
+
+    #[test]
+    fn via_router_picks_chosen_agent_and_constructs_for_it() {
+        let profiles = vec![openrouter_opus_profile(), ollama_kimi_profile()];
+        let router = StubRouter {
+            chosen: AgentId::new("kimi-k2-6-ollama-cloud").unwrap(),
+        };
+        let env = env_map(&[("OLLAMA_API_KEY", "fake-cloud-key")]);
+        let result = RigAuditor::via_router_with(
+            &router,
+            &profiles,
+            VendorClass::Anthropic,
+            env,
+        )
+        .unwrap();
+        assert_eq!(result.provider_prefix, "ollama-cloud");
+        assert_eq!(result.model_id, "kimi-k2.6");
+    }
+
+    #[test]
+    fn via_router_errors_when_chosen_agent_id_not_in_catalog() {
+        let profiles = vec![openrouter_opus_profile()];
+        let router = StubRouter {
+            chosen: AgentId::new("ghost-agent").unwrap(),
+        };
+        let env = env_map(&[("OPENROUTER_API_KEY", "sk-fake")]);
+        let err = RigAuditor::via_router_with(
+            &router,
+            &profiles,
+            VendorClass::Anthropic,
+            env,
+        )
+        .unwrap_err();
+        assert!(
+            format!("{err}").contains("ghost-agent"),
+            "error should name the orphaned AgentId: {err}"
+        );
+    }
+
+    struct EmptyRouter;
+    impl CapabilityRouterPort for EmptyRouter {
+        fn route(
+            &self,
+            _r: &CapabilityRequirement,
+        ) -> std::result::Result<AgentId, RoutingError> {
+            Err(RoutingError::NoAgentSatisfies(vec![]))
+        }
+        fn candidates(&self, _r: &CapabilityRequirement) -> Vec<AgentId> {
+            vec![]
+        }
+        fn explain(&self, r: &CapabilityRequirement) -> RoutingExplanation {
+            RoutingExplanation {
+                chosen: None,
+                candidates: vec![],
+                eliminated: vec![],
+                tie_breakers_applied: vec![],
+                requirement_signature: RequirementSignature::of(r),
+            }
+        }
+    }
+
+    #[test]
+    fn via_router_errors_when_router_returns_no_agent_satisfies() {
+        let profiles: Vec<AgentCapabilityProfile> = vec![];
+        let env = env_map(&[]);
+        let err = RigAuditor::via_router_with(
+            &EmptyRouter,
+            &profiles,
+            VendorClass::Anthropic,
+            env,
+        )
+        .unwrap_err();
+        assert!(format!("{err}").contains("router could not pick"));
     }
 
     // ---- Live smoke tests (--ignored; require real credentials + network) ----
