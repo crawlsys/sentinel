@@ -5,6 +5,7 @@
 
 pub mod activity_log;
 pub mod anthropic;
+pub mod capability_router;
 pub mod config;
 pub mod dry_run_auditor;
 pub mod env;
