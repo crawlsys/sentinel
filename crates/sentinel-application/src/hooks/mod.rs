@@ -20,6 +20,7 @@ pub mod dep_check;
 pub mod doc_cleanup;
 pub mod doc_drift;
 pub mod doppler_auth0_gate;
+pub mod dry_run_then_commit;
 pub mod error_reporter;
 pub mod evidence_collector;
 pub mod execution_log;
