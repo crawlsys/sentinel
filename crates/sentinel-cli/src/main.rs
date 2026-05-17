@@ -25,6 +25,7 @@ mod manifest_cmd;
 mod policy_cmd;
 mod hook_cmd;
 mod init_cmd;
+mod legatus_cmd;
 mod mcp_cmd;
 mod pr_review_cmd;
 mod project_cmd;
@@ -119,6 +120,13 @@ enum Commands {
 
     /// Start the MCP server over stdio (Claude Code connects here)
     Mcp,
+
+    /// Legatus — connect this sentinel as an agent-side endpoint
+    /// to a consul supervisor (Consular Protocol WebSocket).
+    Legatus {
+        #[command(subcommand)]
+        action: LegatusAction,
+    },
 
     /// Scan marketplace and output snapshot as JSON
     Scan {
@@ -416,6 +424,41 @@ enum PolicyAction {
     },
 }
 
+/// `sentinel legatus` subcommands.
+#[derive(Subcommand)]
+enum LegatusAction {
+    /// Connect to a consul supervisor and run a legatus session
+    /// loop. Opens the Consular Protocol WebSocket, registers
+    /// this sentinel as a session, sends heartbeats, logs any
+    /// inbound RelayInstructions, and emits SessionCompleted on
+    /// Ctrl-C. No Claude Code injection yet — that's the next
+    /// commit in this series.
+    Connect {
+        /// Consulate WebSocket URL.
+        #[arg(long, default_value = "ws://127.0.0.1:9000")]
+        consulate_url: String,
+        /// 32-byte bootstrap secret as 64 hex chars.
+        #[arg(long, value_name = "HEX64", env = "CONSULATE_BOOTSTRAP_SECRET", hide_env_values = true)]
+        bootstrap_secret: String,
+        /// Operator-chosen session name hint.
+        #[arg(long, default_value = "sentinel")]
+        suggested_name: String,
+        /// Working directory absolute path (default: current).
+        #[arg(long)]
+        working_dir: Option<String>,
+        /// Optional branch name for collision-suffix
+        /// disambiguation.
+        #[arg(long)]
+        branch: Option<String>,
+        /// Optional initial task description.
+        #[arg(long)]
+        task_description: Option<String>,
+        /// Heartbeat interval in seconds.
+        #[arg(long, default_value_t = 20)]
+        heartbeat_secs: u64,
+    },
+}
+
 /// `sentinel project` subcommands.
 #[derive(Subcommand)]
 enum ProjectAction {
@@ -666,6 +709,28 @@ async fn main() -> anyhow::Result<()> {
         Commands::Manifest { action } => run_manifest(action),
         Commands::Policy { action } => run_policy(action),
         Commands::Mcp => mcp_cmd::run().await,
+        Commands::Legatus { action } => match action {
+            LegatusAction::Connect {
+                consulate_url,
+                bootstrap_secret,
+                suggested_name,
+                working_dir,
+                branch,
+                task_description,
+                heartbeat_secs,
+            } => {
+                legatus_cmd::run_connect(
+                    &consulate_url,
+                    &bootstrap_secret,
+                    &suggested_name,
+                    working_dir.as_deref(),
+                    branch,
+                    task_description,
+                    heartbeat_secs,
+                )
+                .await
+            },
+        },
         Commands::Scan {
             counts_only,
             validate,

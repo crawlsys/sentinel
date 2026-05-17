@@ -20,6 +20,7 @@ path = "src/launcher.rs"
 sentinel-domain = { workspace = true }
 sentinel-application = { workspace = true }
 sentinel-infrastructure = { workspace = true }
+sentinel-legatus = { path = "../sentinel-legatus" }
 tokio = { workspace = true }
 clap = { workspace = true }
 serde = { workspace = true }
