@@ -252,6 +252,26 @@ pub async fn run_connect_hosted(
                             error,
                         })
                     },
+                    EscalationKind::InstructionAck { instruction_id } => {
+                        ConsularMessage::InstructionAcknowledged(
+                            consul_protocol::messages::InstructionAcknowledged {
+                                instruction_id,
+                                session_id,
+                            },
+                        )
+                    },
+                    EscalationKind::InstructionResult {
+                        instruction_id,
+                        outcome,
+                        summary,
+                    } => ConsularMessage::InstructionResult(
+                        consul_protocol::messages::InstructionResult {
+                            instruction_id,
+                            session_id,
+                            outcome,
+                            summary,
+                        },
+                    ),
                 };
                 if let Err(err) = send_signed(
                     &mut sink,

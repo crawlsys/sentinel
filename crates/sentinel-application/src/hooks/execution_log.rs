@@ -189,8 +189,27 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     // session most recently surfaced as visible work.
     let summary = log_lines.last().map(|s| truncate_summary(s, 140));
     crate::legatus_client::escalate_fire_and_forget(
-        sentinel_legatus::EscalationKind::Completed { summary },
+        sentinel_legatus::EscalationKind::Completed {
+            summary: summary.clone(),
+        },
     );
+
+    // Per-instruction Result reporting: for every operator-relayed
+    // instruction the consul_inbox hook drained during this
+    // session, fire an InstructionResult tied to its
+    // instruction_id. MVP: outcome is always Success — we don't
+    // classify mid-run failures yet (a Stop firing means Claude
+    // Code finished its turn, not that the relayed instruction
+    // succeeded specifically, but for the ~90-95% reliability
+    // target this is close enough).
+    let pending = crate::legatus_client::take_pending_instructions(session_id);
+    for instruction_id in pending {
+        crate::legatus_client::report_result_fire_and_forget(
+            instruction_id,
+            sentinel_legatus::InstructionOutcome::Success,
+            summary.clone(),
+        );
+    }
 
     HookOutput::allow()
 }

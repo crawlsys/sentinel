@@ -41,4 +41,6 @@ pub use handle::{
 // / consul-domain.
 pub use consul_domain::identity::{InstructionId, SessionId};
 pub use consul_protocol::keys::BOOTSTRAP_SECRET_LEN;
-pub use consul_protocol::messages::{BlockReason, RelayInstruction, RuntimeKind};
+pub use consul_protocol::messages::{
+    BlockReason, InstructionOutcome, RelayInstruction, RuntimeKind,
+};

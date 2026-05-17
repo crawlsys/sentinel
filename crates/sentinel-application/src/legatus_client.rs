@@ -23,7 +23,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use sentinel_legatus::{EscalationKind, RelayInstruction};
+use sentinel_legatus::{EscalationKind, InstructionId, RelayInstruction};
 
 /// Read the daemon token + port from
 /// `~/.claude/sentinel/daemon-token`. Returns `None` if the file
@@ -44,6 +44,111 @@ fn token_path() -> Option<PathBuf> {
             .join("sentinel")
             .join("daemon-token"),
     )
+}
+
+/// Convenience: fire-and-forget an `InstructionAck` for the
+/// given instruction id. Same shape as
+/// [`escalate_fire_and_forget`] but constructs the
+/// [`EscalationKind::InstructionAck`] variant inline.
+pub fn ack_fire_and_forget(instruction_id: InstructionId) {
+    escalate_fire_and_forget(EscalationKind::InstructionAck { instruction_id });
+}
+
+/// Convenience: fire-and-forget an `InstructionResult` for the
+/// given instruction id. `outcome` is `Success` for the common
+/// MVP path; sentinel doesn't yet classify mid-run failures.
+pub fn report_result_fire_and_forget(
+    instruction_id: InstructionId,
+    outcome: sentinel_legatus::InstructionOutcome,
+    summary: Option<String>,
+) {
+    escalate_fire_and_forget(EscalationKind::InstructionResult {
+        instruction_id,
+        outcome,
+        summary,
+    });
+}
+
+/// Per-session file that records `InstructionId`s
+/// `consul_inbox` has drained but `execution_log`'s Stop hook
+/// has not yet reported a result for. Lives at
+/// `~/.claude/sentinel/state/<session_id>.legatus-pending.txt`,
+/// one id per line.
+///
+/// File ops are deliberately simple: append-on-drain, read-and-
+/// remove on Stop. Race window between consul_inbox appending
+/// and execution_log clearing is small (hooks for the same
+/// session don't usually overlap) and the failure mode is
+/// "operator misses one Result ping" — non-fatal.
+fn pending_file_path(session_id: &str) -> Option<PathBuf> {
+    if session_id.is_empty() || session_id.contains(['/', '\\', '\0']) || session_id.contains("..")
+    {
+        // SessionId validation should never produce these, but
+        // defense-in-depth before we touch the filesystem.
+        return None;
+    }
+    Some(
+        dirs::home_dir()?
+            .join(".claude")
+            .join("sentinel")
+            .join("state")
+            .join(format!("{session_id}.legatus-pending.txt")),
+    )
+}
+
+/// Append `instruction_id` to the per-session pending file.
+/// Creates the parent dir + file if needed. Errors logged at
+/// debug; never propagated (the operator still got an Ack via
+/// the WS; only the Stop hook's per-instruction Result depends
+/// on this file).
+pub fn note_pending_instruction(session_id: &str, instruction_id: InstructionId) {
+    let Some(path) = pending_file_path(session_id) else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let line = format!("{instruction_id}\n");
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        use std::io::Write;
+        let _ = file.write_all(line.as_bytes());
+    } else {
+        tracing::debug!(?path, "legatus_client: failed to record pending instruction");
+    }
+}
+
+/// Read and clear the per-session pending file. Returns the
+/// list of instruction ids that were buffered (possibly empty if
+/// the file doesn't exist or is empty). Concurrent appends
+/// between read + remove may be lost; treated as acceptable per
+/// the module's MVP race tolerance.
+pub fn take_pending_instructions(session_id: &str) -> Vec<InstructionId> {
+    let Some(path) = pending_file_path(session_id) else {
+        return Vec::new();
+    };
+    let content = match std::fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+        Err(err) => {
+            tracing::debug!(?err, ?path, "legatus_client: pending file read failed");
+            return Vec::new();
+        },
+    };
+    // Remove the file before parsing so concurrent appends start
+    // a fresh file. (Race window: an append after the read but
+    // before the remove will be lost. Non-fatal — operator just
+    // misses one Result ping.)
+    let _ = std::fs::remove_file(&path);
+    content
+        .lines()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .filter_map(|s| uuid::Uuid::parse_str(s).ok().map(InstructionId::from_uuid))
+        .collect()
 }
 
 /// Spawn a background OS thread that POSTs `event` to the daemon's
@@ -170,5 +275,33 @@ mod tests {
         escalate_fire_and_forget(EscalationKind::Completed {
             summary: Some("unit-test ping".into()),
         });
+    }
+
+    #[test]
+    fn pending_file_path_rejects_traversal() {
+        assert!(pending_file_path("../malicious").is_none());
+        assert!(pending_file_path("with/slash").is_none());
+        assert!(pending_file_path("").is_none());
+    }
+
+    #[test]
+    fn note_then_take_roundtrips_instruction_ids() {
+        let session = format!("legatus-client-test-{}", uuid::Uuid::new_v4());
+        let a = InstructionId::new();
+        let b = InstructionId::new();
+        note_pending_instruction(&session, a);
+        note_pending_instruction(&session, b);
+        let taken = take_pending_instructions(&session);
+        assert_eq!(taken.len(), 2);
+        assert!(taken.contains(&a));
+        assert!(taken.contains(&b));
+        let second = take_pending_instructions(&session);
+        assert!(second.is_empty(), "second take should be empty");
+    }
+
+    #[test]
+    fn take_pending_for_missing_session_returns_empty() {
+        let session = format!("legatus-client-test-{}", uuid::Uuid::new_v4());
+        assert!(take_pending_instructions(&session).is_empty());
     }
 }
