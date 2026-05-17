@@ -324,6 +324,14 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
             });
             output.merge(&worktree_output);
 
+            // Consul inbox — drain any operator-relayed instructions
+            // the daemon-hosted legatus has buffered for this
+            // session and inject them with PRIMARY-ASK framing.
+            let inbox_output = time_and_record(ctx.fs, &mk_ctx("consul_inbox"), || {
+                hooks::consul_inbox::process(&input, &ctx)
+            });
+            output.merge(&inbox_output);
+
             // Orchestration nudge — suggest agent teams / Explore subagents /
             // skill invocation based on prompt heuristics.
             let orchestration_output =

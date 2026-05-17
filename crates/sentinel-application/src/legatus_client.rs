@@ -23,7 +23,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use sentinel_legatus::EscalationKind;
+use sentinel_legatus::{EscalationKind, RelayInstruction};
 
 /// Read the daemon token + port from
 /// `~/.claude/sentinel/daemon-token`. Returns `None` if the file
@@ -68,6 +68,63 @@ enum LegatusClientError {
     Status(u16),
     #[error("serialize event: {0}")]
     Serialize(serde_json::Error),
+}
+
+/// Synchronously drain the daemon's inbox by repeatedly GETting
+/// `/legatus/inbox/next` until the daemon returns 204 No Content
+/// (queue empty). Returns whatever instructions were buffered
+/// (possibly empty). Used by the `UserPromptSubmit` hook to pull
+/// operator-relayed instructions into Claude Code's next turn.
+///
+/// Hard cap of 32 instructions per call to bound latency and
+/// memory in degenerate cases — if a backlog grows beyond that,
+/// the remainder waits for the next prompt.
+pub fn drain_inbox() -> Vec<RelayInstruction> {
+    let mut out = Vec::new();
+    const HARD_CAP: usize = 32;
+    let Some((port, token)) = read_daemon_token() else {
+        return out;
+    };
+    let url = format!("http://127.0.0.1:{port}/legatus/inbox/next");
+    let client = match reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(2))
+        .build()
+    {
+        Ok(c) => c,
+        Err(err) => {
+            tracing::debug!(?err, "legatus_client: cannot build reqwest client");
+            return out;
+        },
+    };
+    while out.len() < HARD_CAP {
+        let resp = match client
+            .get(&url)
+            .header("Authorization", format!("Bearer {token}"))
+            .send()
+        {
+            Ok(r) => r,
+            Err(err) => {
+                tracing::debug!(?err, "legatus_client: inbox GET failed");
+                break;
+            },
+        };
+        let status = resp.status();
+        if status == reqwest::StatusCode::NO_CONTENT {
+            break;
+        }
+        if !status.is_success() {
+            tracing::debug!(status = %status.as_u16(), "legatus_client: inbox returned non-2xx");
+            break;
+        }
+        match resp.json::<RelayInstruction>() {
+            Ok(instr) => out.push(instr),
+            Err(err) => {
+                tracing::debug!(?err, "legatus_client: inbox payload decode failed");
+                break;
+            },
+        }
+    }
+    out
 }
 
 fn post_escalation(event: EscalationKind) -> Result<(), LegatusClientError> {

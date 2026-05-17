@@ -35,8 +35,10 @@ pub use handle::{
     make_pair, EscalationKind, EscalationSendError, LegatusHandle, LegatusRuntime,
 };
 
-// Convenience re-exports so dependents (e.g. sentinel-cli) can
-// configure a legatus without a direct path-dep on
-// consul-protocol / consul-domain.
+// Convenience re-exports so dependents (e.g. sentinel-cli,
+// sentinel-application) can configure a legatus / build a
+// RelayInstruction without a direct path-dep on consul-protocol
+// / consul-domain.
+pub use consul_domain::identity::{InstructionId, SessionId};
 pub use consul_protocol::keys::BOOTSTRAP_SECRET_LEN;
 pub use consul_protocol::messages::{BlockReason, RelayInstruction, RuntimeKind};
