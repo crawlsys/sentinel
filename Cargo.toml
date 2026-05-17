@@ -55,8 +55,9 @@ ed25519-dalek = { version = "2", features = ["rand_core", "serde"] }
 rand_core = { version = "0.6", features = ["std"] }
 hex = "0.4"
 
-# HTTP client (Anthropic API)
-reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
+# HTTP client (Anthropic API + the sync legatus_client that hooks
+# use to POST escalations to the local sentinel daemon).
+reqwest = { version = "0.12", features = ["json", "rustls-tls", "blocking"] }
 
 # LLM framework (adversarial Codex judge + Opus skill router)
 rig-core = { version = "0.35", package = "rig-core" }

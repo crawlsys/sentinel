@@ -19,6 +19,7 @@ pub mod hook_metrics;
 pub mod hooks;
 pub mod interceptor;
 pub mod judge_service;
+pub mod legatus_client;
 pub mod mcp_handler;
 pub mod sandboxed_judge;
 pub mod pr_review;
