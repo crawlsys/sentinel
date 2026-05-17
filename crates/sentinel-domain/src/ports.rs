@@ -335,3 +335,45 @@ pub trait MemoryMcpPort: Send + Sync {
         arguments: serde_json::Map<String, serde_json::Value>,
     ) -> anyhow::Result<serde_json::Value>;
 }
+
+// ---------------------------------------------------------------------------
+// Reversibility classifier port (A6)
+// ---------------------------------------------------------------------------
+
+/// Port for classifying a tool call by its reversibility class (A6 design,
+/// `docs/a6-reversibility-graded-tripwires.md`). The single shared
+/// blast-radius axis every gate in sentinel consults.
+///
+/// Consumers (specified across the A-tier design docs):
+/// - `tool_usage_gate` — replaces the binary `in_scope` decision with the
+///   class so trivially-reversible writes (memory notes, plan files) skip
+///   the four-check stack.
+/// - `dry_run_then_commit` (A3) — fires only when class is at least
+///   `Irreversible`; the auditor-seat selection (A2) gains stricter
+///   reasoning requirements for `Catastrophic`.
+/// - `ba_critique` (BA5) — derives BA artifact-class (Routine / Substantial
+///   / Catastrophic) from the publish-tool class.
+/// - `provenance_validate` (BA1+BA3) — tightens citation freshness window
+///   (1h vs 24h) for `Catastrophic` outputs.
+/// - `requirements_traceability_gate` (BA1+BA3) — requires coverage for
+///   outputs at class `Irreversible` or above.
+///
+/// The Phase 3 adapter (in `sentinel-infrastructure`) evaluates four
+/// layers in order: built-in tool defaults → per-MCP-tool defaults →
+/// per-input contextual rules (Bash patterns) → operator overrides
+/// (`config/reversibility.toml`). The trait itself is layer-agnostic; the
+/// adapter is free to use whatever evaluation scheme satisfies the
+/// contract.
+pub trait ReversibilityClassifierPort: Send + Sync {
+    /// Classify a tool call by reversibility. Implementations must be
+    /// deterministic for the same `(tool_name, tool_input)` pair given the
+    /// same configuration — the router relies on this for explainable
+    /// decisions. Unknown tools should default conservatively to
+    /// `ReversibilityClass::Irreversible` so the system fails toward
+    /// safety.
+    fn classify(
+        &self,
+        tool_name: &str,
+        tool_input: &serde_json::Value,
+    ) -> crate::ReversibilityClass;
+}
