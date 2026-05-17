@@ -3,6 +3,7 @@
 //! Pure business logic with no IO dependencies.
 //! Defines proof chains, workflows, evidence, hooks, and routing.
 
+pub mod capability;
 pub mod commit;
 pub mod config;
 pub mod constants;
