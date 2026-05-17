@@ -1,0 +1,39 @@
+[package]
+name = "sentinel-legatus"
+description = "Sentinel's legatus implementation — connects to a consul (via the Consular Protocol) on behalf of a Claude Code session, receives operator instructions, and reports lifecycle events back."
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "sentinel_legatus"
+path = "src/lib.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+# Path-deps on the sister repo — exposes the Consular Protocol
+# wire types + the SessionId / SessionMasterKey / MacKey
+# infrastructure.
+consul-protocol = { workspace = true }
+consul-domain = { workspace = true }
+
+tokio = { workspace = true }
+tokio-tungstenite = { workspace = true }
+futures-util = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+hex = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+tempfile = { workspace = true }

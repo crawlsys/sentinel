@@ -7,6 +7,7 @@ members = [
     "crates/sentinel-cli",
     "crates/sentinel-git-interceptor",
     "crates/sentinel-npx-interceptor",
+    "crates/sentinel-legatus",
 ]
 
 [workspace.package]
@@ -27,6 +28,13 @@ sentinel-infrastructure = { path = "crates/sentinel-infrastructure" }
 tokio = { version = "1", features = ["full"] }
 async-trait = "0.1"
 futures = "0.3"
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+
+# WebSocket client — used by sentinel-legatus to connect to a
+# consulate via the Consular Protocol (path-dep on the sibling
+# repo legatus-consul-agent). 0.24 matches the version pinned
+# in legatus-consul-agent's workspace.
+tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "handshake", "rustls-tls-webpki-roots"] }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
@@ -72,11 +80,18 @@ iana-time-zone = "0.1"
 dirs = "6"
 regex = "1"
 petgraph = "0.6"
-uuid = { version = "1", features = ["v4", "serde"] }
+uuid = { version = "1", features = ["v4", "v7", "serde"] }
 colored = "3"
 glob = "0.3"
 fs2 = "0.4"
 getrandom = "0.2"
+
+# Path deps on the sister repo legatus-consul-agent (used by
+# sentinel-legatus only). Sentinel and legatus-consul-agent live
+# side-by-side in ~/firefly/gitrepos/ on dev machines; if the
+# layout ever changes, only these two paths need to update.
+consul-protocol = { path = "../legatus-consul-agent/crates/consul-protocol" }
+consul-domain = { path = "../legatus-consul-agent/crates/consul-domain" }
 
 # Dev
 tempfile = "3"

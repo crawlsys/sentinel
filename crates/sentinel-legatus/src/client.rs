@@ -1,0 +1,390 @@
+//! `sentinel legatus connect` — the standalone WS client.
+//!
+//! Connects to a consulate via the Consular Protocol, runs the
+//! registration handshake, sends periodic heartbeats, logs any
+//! `RelayInstruction` it receives, and emits a `SessionCompleted`
+//! on graceful shutdown.
+//!
+//! This is the smallest viable legatus — no Claude Code
+//! injection, no daemon integration, no hook plumbing. Useful for
+//! verifying the wire end-to-end and as the substrate the next
+//! two commits in the series will build on.
+
+use std::time::Duration;
+
+use chrono::Utc;
+use consul_domain::identity::{
+    ConnectionEpoch, KeyEpoch, SessionId, SessionMasterKey, SESSION_MASTER_KEY_LEN,
+};
+use consul_protocol::envelope::{
+    decode_payload, encode_payload, AuthenticatedMessage, Nonce, Sequence, VerifyError,
+};
+use consul_protocol::keys::{
+    derive_handshake_key, derive_mac_key_pair, MacKey, BOOTSTRAP_SECRET_LEN,
+};
+use consul_protocol::messages::{
+    Capabilities, ConsularMessage, Hello, RegisterSession, RuntimeKind, SessionCompleted,
+    SessionHeartbeat, SessionStatus,
+};
+use consul_protocol::version::PROTOCOL_VERSION;
+use futures_util::{SinkExt, StreamExt};
+use tokio::sync::Notify;
+use tokio_tungstenite::tungstenite::Message as WsMessage;
+use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
+use tracing::{debug, info, warn};
+
+use crate::error::LegatusError;
+
+/// Default heartbeat interval. Consulate marks a session dead
+/// after ~60s without a heartbeat (per
+/// `consul_protocol::messages::heartbeat` docs); 20s gives us
+/// three chances before dead-detection.
+pub const DEFAULT_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(20);
+
+/// Configuration for one `legatus connect` invocation.
+#[derive(Clone, Debug)]
+pub struct ConnectConfig {
+    /// Consulate WebSocket URL (e.g. `ws://127.0.0.1:9000`).
+    pub consulate_url: String,
+    /// 32-byte bootstrap secret shared with consulate.
+    pub bootstrap_secret: [u8; BOOTSTRAP_SECRET_LEN],
+    /// Operator-chosen suggestion for the human-readable session
+    /// name (consulate may add a suffix on collision).
+    pub suggested_name: String,
+    /// Working directory the session is anchored to.
+    pub working_dir: String,
+    /// Optional branch the session is on (for collision-suffix
+    /// disambiguation).
+    pub branch: Option<String>,
+    /// Optional one-line task description sent in
+    /// `RegisterSession`.
+    pub task_description: Option<String>,
+    /// Runtime kind. Sentinel-driven sessions are always
+    /// [`RuntimeKind::ClaudeCode`] for now.
+    pub runtime: RuntimeKind,
+    /// How often to send `SessionHeartbeat`.
+    pub heartbeat_interval: Duration,
+}
+
+impl ConnectConfig {
+    /// Build a config with [`DEFAULT_HEARTBEAT_INTERVAL`] and
+    /// [`RuntimeKind::ClaudeCode`].
+    #[must_use]
+    pub fn new(
+        consulate_url: impl Into<String>,
+        bootstrap_secret: [u8; BOOTSTRAP_SECRET_LEN],
+        suggested_name: impl Into<String>,
+        working_dir: impl Into<String>,
+    ) -> Self {
+        Self {
+            consulate_url: consulate_url.into(),
+            bootstrap_secret,
+            suggested_name: suggested_name.into(),
+            working_dir: working_dir.into(),
+            branch: None,
+            task_description: None,
+            runtime: RuntimeKind::ClaudeCode,
+            heartbeat_interval: DEFAULT_HEARTBEAT_INTERVAL,
+        }
+    }
+}
+
+/// Connect, register, run the heartbeat loop until `cancel` fires
+/// (or the consulate closes the connection), then send
+/// `SessionCompleted` and return cleanly.
+///
+/// # Errors
+///
+/// Returns [`LegatusError`] on handshake or transport failure.
+/// Clean shutdown via `cancel.notify_one()` returns `Ok(())` —
+/// the `SessionCompleted` send is best-effort (errors logged at
+/// warn).
+pub async fn run_connect(
+    config: ConnectConfig,
+    cancel: std::sync::Arc<Notify>,
+) -> Result<(), LegatusError> {
+    info!(url = %config.consulate_url, "legatus connecting");
+    let (ws, _) = tokio_tungstenite::connect_async(&config.consulate_url)
+        .await
+        .map_err(|err| {
+            LegatusError::Transport(format!("connect {}: {err}", config.consulate_url))
+        })?;
+    let (mut sink, mut source) = ws.split();
+
+    // --- Handshake ------------------------------------------------
+    let handshake_session_id = SessionId::new_v7();
+    let handshake_key = derive_handshake_key(&config.bootstrap_secret, handshake_session_id);
+    let mut hs_seq: u64 = 1;
+
+    send_signed(
+        &mut sink,
+        &handshake_key,
+        handshake_session_id,
+        hs_seq,
+        &ConsularMessage::Hello(Hello {
+            protocol_version: PROTOCOL_VERSION,
+            runtime: config.runtime.clone(),
+        }),
+    )
+    .await?;
+    hs_seq += 1;
+
+    let caps = recv_signed(&mut source, &handshake_key).await?;
+    match caps {
+        ConsularMessage::Capabilities(Capabilities { .. }) => {
+            debug!("consulate accepted protocol version; sending RegisterSession");
+        }
+        ConsularMessage::VersionMismatch(vm) => {
+            return Err(LegatusError::VersionMismatch {
+                accepted_min: Some(format!("{:?}", vm)),
+                accepted_max: None,
+            });
+        }
+        other => {
+            return Err(LegatusError::Handshake(format!(
+                "expected Capabilities, got {other:?}",
+            )));
+        }
+    }
+
+    send_signed(
+        &mut sink,
+        &handshake_key,
+        handshake_session_id,
+        hs_seq,
+        &ConsularMessage::RegisterSession(RegisterSession {
+            suggested_name: config.suggested_name.clone().into(),
+            runtime: config.runtime.clone(),
+            working_dir: config.working_dir.clone(),
+            branch: config.branch.clone(),
+            task_description: config.task_description.clone(),
+        }),
+    )
+    .await?;
+
+    let registered = match recv_signed(&mut source, &handshake_key).await? {
+        ConsularMessage::SessionRegistered(r) => r,
+        other => {
+            return Err(LegatusError::Handshake(format!(
+                "expected SessionRegistered, got {other:?}",
+            )));
+        }
+    };
+    let session_id = registered.session_id;
+    let display_name = registered.display_name.clone();
+    let master_key_bytes: [u8; SESSION_MASTER_KEY_LEN] = registered.master_key_bytes;
+    let master_key = SessionMasterKey::from_bytes(master_key_bytes);
+    let pair = derive_mac_key_pair(
+        &master_key,
+        session_id,
+        ConnectionEpoch::INITIAL,
+        KeyEpoch::INITIAL,
+    );
+    info!(%session_id, %display_name, "legatus registered");
+
+    // --- Post-handshake loop --------------------------------------
+    // Per the session_loop convention in consulate: our outbound
+    // direction signs with `pair.outbound` and consulate verifies
+    // with `pair.outbound`; consulate signs its pushed messages
+    // with `pair.inbound` and we verify with `pair.inbound`.
+    let outbound_key = pair.outbound;
+    let inbound_key = pair.inbound;
+
+    let mut local_seq: u64 = 1;
+    let mut heartbeat = tokio::time::interval(config.heartbeat_interval);
+    heartbeat.tick().await; // skip immediate first tick
+
+    let exit_reason: Option<&'static str> = loop {
+        tokio::select! {
+            () = cancel.notified() => {
+                info!(%session_id, "legatus cancelled; sending SessionCompleted");
+                break Some("cancelled");
+            },
+            _ = heartbeat.tick() => {
+                let msg = ConsularMessage::SessionHeartbeat(SessionHeartbeat {
+                    session_id,
+                    status: SessionStatus::Active,
+                    current_task: config.task_description.clone(),
+                    last_tool: None,
+                });
+                if let Err(err) = send_signed(
+                    &mut sink,
+                    &outbound_key,
+                    session_id,
+                    local_seq,
+                    &msg,
+                ).await {
+                    warn!(?err, "heartbeat send failed; closing");
+                    break None;
+                }
+                local_seq += 1;
+            },
+            frame = source.next() => {
+                match frame {
+                    Some(Ok(WsMessage::Binary(bytes))) => {
+                        let msg = match decode_envelope(&bytes, &inbound_key) {
+                            Ok(m) => m,
+                            Err(err) => {
+                                warn!(?err, "dropped inbound envelope");
+                                continue;
+                            },
+                        };
+                        handle_inbound(&msg, session_id);
+                    },
+                    Some(Ok(WsMessage::Close(frame))) => {
+                        debug!(?frame, "consulate sent close");
+                        break None;
+                    },
+                    Some(Ok(WsMessage::Ping(_) | WsMessage::Pong(_))) => {
+                        // tokio-tungstenite auto-handles pings.
+                    },
+                    Some(Ok(WsMessage::Text(text))) => {
+                        debug!(text = %text, "unexpected text frame; ignored");
+                    },
+                    Some(Ok(WsMessage::Frame(_))) => {},
+                    Some(Err(err)) => {
+                        warn!(?err, "websocket recv error; closing");
+                        break None;
+                    },
+                    None => {
+                        debug!("websocket stream ended");
+                        break None;
+                    },
+                }
+            },
+        }
+    };
+
+    if exit_reason.is_some() {
+        let completed = ConsularMessage::SessionCompleted(SessionCompleted {
+            session_id,
+            completed_at_ms: now_ms(),
+            summary: Some("legatus cancelled".to_owned()),
+        });
+        if let Err(err) =
+            send_signed(&mut sink, &outbound_key, session_id, local_seq, &completed).await
+        {
+            warn!(?err, "SessionCompleted send failed");
+        }
+    }
+    Ok(())
+}
+
+fn now_ms() -> u64 {
+    u64::try_from(Utc::now().timestamp_millis().max(0)).unwrap_or(0)
+}
+
+type WsSink = futures_util::stream::SplitSink<
+    WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>,
+    WsMessage,
+>;
+type WsSource =
+    futures_util::stream::SplitStream<WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>>;
+
+async fn send_signed(
+    sink: &mut WsSink,
+    key: &MacKey,
+    session_id: SessionId,
+    sequence: u64,
+    msg: &ConsularMessage,
+) -> Result<(), LegatusError> {
+    let payload = encode_payload(msg).map_err(|err| LegatusError::Encode(err.to_string()))?;
+    let nonce = Nonce::generate().map_err(|err| LegatusError::Encode(err.to_string()))?;
+    let envelope = AuthenticatedMessage::sign(
+        key,
+        session_id,
+        Sequence::from_u64(sequence),
+        now_ms(),
+        nonce,
+        payload,
+    );
+    let bytes = envelope
+        .encode_cbor()
+        .map_err(|err| LegatusError::Encode(err.to_string()))?;
+    sink.send(WsMessage::Binary(bytes.into()))
+        .await
+        .map_err(|err| LegatusError::Transport(format!("send: {err}")))
+}
+
+async fn recv_signed(source: &mut WsSource, key: &MacKey) -> Result<ConsularMessage, LegatusError> {
+    loop {
+        let frame = source
+            .next()
+            .await
+            .ok_or_else(|| LegatusError::Handshake("connection closed before reply".into()))?
+            .map_err(|err| LegatusError::Transport(format!("recv: {err}")))?;
+        match frame {
+            WsMessage::Binary(bytes) => {
+                return decode_envelope(&bytes, key);
+            }
+            WsMessage::Close(_) => {
+                return Err(LegatusError::Handshake(
+                    "consulate sent close mid-handshake".into(),
+                ));
+            }
+            _ => continue,
+        }
+    }
+}
+
+fn decode_envelope(bytes: &[u8], key: &MacKey) -> Result<ConsularMessage, LegatusError> {
+    let env = AuthenticatedMessage::decode_cbor(bytes)
+        .map_err(|err| LegatusError::Decode(format!("envelope: {err}")))?;
+    let payload = env.verify(key).map_err(|err| match err {
+        VerifyError::MacMismatch => LegatusError::MacMismatch,
+    })?;
+    decode_payload(payload).map_err(|err| LegatusError::Decode(format!("payload: {err}")))
+}
+
+fn handle_inbound(msg: &ConsularMessage, session_id: SessionId) {
+    match msg {
+        ConsularMessage::RelayInstruction(instr) => {
+            // Commit A: just log. Commit B/C will pop these onto
+            // a per-session inbox for the Claude Code injection
+            // path.
+            info!(
+                %session_id,
+                instruction_id = %instr.instruction_id,
+                content = %instr.content,
+                destructive = instr.destructive,
+                "received RelayInstruction (no Claude Code wiring yet)",
+            );
+        }
+        ConsularMessage::RequestContextSync(_) => {
+            debug!(%session_id, "received RequestContextSync (no context store yet)");
+        }
+        other => {
+            debug!(%session_id, ?other, "unhandled inbound message");
+        }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn connect_config_new_sets_documented_defaults() {
+        let cfg = ConnectConfig::new(
+            "ws://127.0.0.1:9000",
+            [0xAB; BOOTSTRAP_SECRET_LEN],
+            "firefly",
+            "/tmp/firefly",
+        );
+        assert_eq!(cfg.consulate_url, "ws://127.0.0.1:9000");
+        assert_eq!(cfg.bootstrap_secret, [0xAB; BOOTSTRAP_SECRET_LEN]);
+        assert_eq!(cfg.suggested_name, "firefly");
+        assert!(cfg.branch.is_none());
+        assert!(cfg.task_description.is_none());
+        assert!(matches!(cfg.runtime, RuntimeKind::ClaudeCode));
+        assert_eq!(cfg.heartbeat_interval, DEFAULT_HEARTBEAT_INTERVAL);
+    }
+
+    #[test]
+    fn now_ms_is_positive_and_recent() {
+        let t = now_ms();
+        // After Jan 1 2024 (sanity).
+        assert!(t > 1_700_000_000_000);
+    }
+}
