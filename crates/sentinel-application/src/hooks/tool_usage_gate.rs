@@ -41,6 +41,8 @@
 //!   - cwd is a nested subdirectory   → walks up checking each level
 
 use sentinel_domain::events::{HookInput, HookOutput};
+use sentinel_domain::ports::ReversibilityClassifierPort;
+use sentinel_domain::ReversibilityClass;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
@@ -617,11 +619,35 @@ fn is_mutating_mcp_tool(tool: &str) -> bool {
 /// Read-only Bash (`git status`, `ls`, `cargo check`, …) and read-only MCP
 /// tools (`*_get_*`, `*_list_*`, …) are still allowed without a task so the
 /// gate doesn't block exploration.
-pub fn process(input: &HookInput, fs: &dyn FileSystemPort, env: &dyn EnvPort) -> HookOutput {
+pub fn process(
+    input: &HookInput,
+    fs: &dyn FileSystemPort,
+    env: &dyn EnvPort,
+    classifier: &dyn ReversibilityClassifierPort,
+) -> HookOutput {
     let tool = match &input.tool_name {
         Some(t) => t.as_str(),
         None => return HookOutput::allow(),
     };
+
+    // A6 Phase 4a — Trivially short-circuit.
+    //
+    // Skip the four-check stack entirely for actions whose reversibility
+    // class is TriviallyReversible (memory writes, plan files, read-only
+    // ops, etc.). This closes hook-quality Issue 2 (the gate previously
+    // treated every Edit/Write uniformly regardless of target risk) by
+    // routing through the proper A6 substrate rather than a path-based
+    // exemption list.
+    //
+    // The existing in_scope logic below still runs for everything else.
+    // Phase 4b will replace that block with full class-based dispatch
+    // once A3 ships and the shipped TOML's heuristic coverage is proven
+    // against production usage.
+    let null_input = serde_json::Value::Null;
+    let tool_input_ref = input.tool_input.as_ref().unwrap_or(&null_input);
+    if classifier.classify(tool, tool_input_ref) == ReversibilityClass::TriviallyReversible {
+        return HookOutput::allow();
+    }
 
     // Decide whether this specific tool call is in scope.
     let in_scope = match tool {
@@ -911,6 +937,22 @@ mod tests {
         }
     }
 
+    /// Test classifier that defaults every tool to `ReversibleWithEffort`.
+    ///
+    /// This preserves the pre-Phase-4a gate behavior in tests that haven't
+    /// been updated to opt into specific class-based semantics: the
+    /// Trivially short-circuit at the top of `process()` never fires
+    /// (nothing classifies as `TriviallyReversible`), so existing tests
+    /// run the same in_scope match + four-check stack they always have.
+    ///
+    /// Tests that specifically exercise the Trivially short-circuit (new
+    /// in Phase 4a) construct their own [`StaticReversibilityClassifier`]
+    /// with `.with(tool, ReversibilityClass::TriviallyReversible)` entries.
+    fn permissive_classifier() -> crate::reversibility_classifier::StaticReversibilityClassifier {
+        crate::reversibility_classifier::StaticReversibilityClassifier::empty()
+            .with_default(ReversibilityClass::ReversibleWithEffort)
+    }
+
     #[test]
     fn test_allows_bash_without_command_field() {
         // Bash with no `command` in tool_input — bash_command_is_mutating
@@ -922,7 +964,12 @@ mod tests {
             ..Default::default()
         };
         assert!(
-            process(&input, &fs, &crate::hooks::test_support::StubEnv::new())
+            process(
+            &input,
+            &fs,
+            &crate::hooks::test_support::StubEnv::new(),
+            &permissive_classifier(),
+        )
                 .blocked
                 .is_none()
         );
@@ -940,7 +987,12 @@ mod tests {
             ..Default::default()
         };
         assert!(
-            process(&input, &fs, &crate::hooks::test_support::StubEnv::new())
+            process(
+            &input,
+            &fs,
+            &crate::hooks::test_support::StubEnv::new(),
+            &permissive_classifier(),
+        )
                 .blocked
                 .is_none()
         );
@@ -957,7 +1009,12 @@ mod tests {
             session_id: Some("test-session".to_string()),
             ..Default::default()
         };
-        let output = process(&input, &fs, &crate::hooks::test_support::StubEnv::new());
+        let output = process(
+            &input,
+            &fs,
+            &crate::hooks::test_support::StubEnv::new(),
+            &permissive_classifier(),
+        );
         assert_eq!(
             output.blocked,
             Some(true),
@@ -975,7 +1032,12 @@ mod tests {
             ..Default::default()
         };
         assert!(
-            process(&input, &fs, &crate::hooks::test_support::StubEnv::new())
+            process(
+            &input,
+            &fs,
+            &crate::hooks::test_support::StubEnv::new(),
+            &permissive_classifier(),
+        )
                 .blocked
                 .is_none()
         );
@@ -990,7 +1052,12 @@ mod tests {
             session_id: Some("test-session".to_string()),
             ..Default::default()
         };
-        let output = process(&input, &fs, &crate::hooks::test_support::StubEnv::new());
+        let output = process(
+            &input,
+            &fs,
+            &crate::hooks::test_support::StubEnv::new(),
+            &permissive_classifier(),
+        );
         assert_eq!(
             output.blocked,
             Some(true),
@@ -1052,7 +1119,12 @@ mod tests {
             ..Default::default()
         };
         assert!(
-            process(&input, &fs, &crate::hooks::test_support::StubEnv::new())
+            process(
+            &input,
+            &fs,
+            &crate::hooks::test_support::StubEnv::new(),
+            &permissive_classifier(),
+        )
                 .blocked
                 .is_none()
         );
@@ -1065,6 +1137,7 @@ mod tests {
             &edit_input("test-session"),
             &fs,
             &crate::hooks::test_support::StubEnv::new(),
+            &permissive_classifier(),
         );
         assert_eq!(output.blocked, Some(true));
     }
@@ -1076,6 +1149,7 @@ mod tests {
             &write_input("test-session"),
             &fs,
             &crate::hooks::test_support::StubEnv::new(),
+            &permissive_classifier(),
         );
         assert_eq!(output.blocked, Some(true));
     }
@@ -1087,6 +1161,7 @@ mod tests {
             &edit_input("test-session"),
             &fs,
             &crate::hooks::test_support::StubEnv::new(),
+            &permissive_classifier(),
         );
         assert_eq!(output.blocked, Some(true));
     }
@@ -1101,6 +1176,7 @@ mod tests {
             &edit_input("test-session"),
             &fs,
             &crate::hooks::test_support::StubEnv::new(),
+            &permissive_classifier(),
         );
         assert_eq!(output.blocked, Some(true));
         let reason = output
@@ -1142,6 +1218,7 @@ mod tests {
             &edit_input("test-session"),
             &fs,
             &crate::hooks::test_support::StubEnv::new(),
+            &permissive_classifier(),
         );
         let reason = output
             .hook_specific_output
@@ -1172,6 +1249,7 @@ mod tests {
             &edit_input("test-session"),
             &fs,
             &crate::hooks::test_support::StubEnv::new(),
+            &permissive_classifier(),
         );
         assert_eq!(output.blocked, Some(true));
         let reason = output
@@ -1192,6 +1270,7 @@ mod tests {
             &edit_input("test-session"),
             &fs,
             &crate::hooks::test_support::StubEnv::new(),
+            &permissive_classifier(),
         );
         assert!(output.blocked.is_none());
     }
@@ -1203,6 +1282,7 @@ mod tests {
             &write_input("test-session"),
             &fs,
             &crate::hooks::test_support::StubEnv::new(),
+            &permissive_classifier(),
         );
         assert!(output.blocked.is_none());
     }
@@ -1330,6 +1410,7 @@ mod tests {
             &edit_input("session-b"),
             &fs,
             &crate::hooks::test_support::StubEnv::new(),
+            &permissive_classifier(),
         );
         assert_eq!(output.blocked, Some(true));
     }
@@ -1410,6 +1491,7 @@ mod tests {
             &input,
             &fs_port,
             &crate::hooks::test_support::StubEnv::new(),
+            &permissive_classifier(),
         );
         assert!(
             output.blocked.is_none(),
@@ -1436,7 +1518,12 @@ mod tests {
         );
         // `edit_input` omits transcript_path, so the None-branch fallback
         // kicks in and honours SENTINEL_AUTOPILOT.
-        let output = process(&edit_input("test-session"), &fs, &autopilot_env());
+        let output = process(
+            &edit_input("test-session"),
+            &fs,
+            &autopilot_env(),
+            &permissive_classifier(),
+        );
         assert!(
             output.blocked.is_none(),
             "autopilot env var must still work when no transcript is available"
@@ -1463,7 +1550,12 @@ mod tests {
             transcript_path: Some(t.path().to_string_lossy().into_owned()),
             ..Default::default()
         };
-        let output = process(&input, &fs, &autopilot_env());
+        let output = process(
+            &input,
+            &fs,
+            &autopilot_env(),
+            &permissive_classifier(),
+        );
         assert_eq!(
             output.blocked,
             Some(true),
@@ -1478,7 +1570,12 @@ mod tests {
             "test-session",
             &[SEQUENTIAL_MARKER_PREFIX, TASK_MARKER_PREFIX],
         );
-        let output = process(&edit_input("test-session"), &fs, &autopilot_env());
+        let output = process(
+            &edit_input("test-session"),
+            &fs,
+            &autopilot_env(),
+            &permissive_classifier(),
+        );
         // Plan check skipped, but task-active still blocks.
         assert_eq!(output.blocked, Some(true));
         let reason = output
@@ -1775,7 +1872,12 @@ mod tests {
             transcript_path: Some(t.path().to_string_lossy().into_owned()),
             ..Default::default()
         };
-        let output = process(&input, &fs, &crate::hooks::test_support::StubEnv::new());
+        let output = process(
+            &input,
+            &fs,
+            &crate::hooks::test_support::StubEnv::new(),
+            &permissive_classifier(),
+        );
         assert!(
             output.blocked.is_none(),
             "transcript EnterPlanMode signal must satisfy plan check #3"
@@ -1800,7 +1902,12 @@ mod tests {
             transcript_path: Some(t.path().to_string_lossy().into_owned()),
             ..Default::default()
         };
-        let output = process(&input, &fs, &crate::hooks::test_support::StubEnv::new());
+        let output = process(
+            &input,
+            &fs,
+            &crate::hooks::test_support::StubEnv::new(),
+            &permissive_classifier(),
+        );
         assert_eq!(
             output.blocked,
             Some(true),
@@ -1884,6 +1991,7 @@ mod tests {
             &input,
             &fs_port,
             &crate::hooks::test_support::StubEnv::new(),
+            &permissive_classifier(),
         );
         assert!(
             output.blocked.is_none(),
@@ -2042,5 +2150,134 @@ mod tests {
             !detect_plan_mode_from_transcript(&RealTestFs, f.path()),
             "last line is ExitPlanMode so result must be false (last signal wins)"
         );
+    }
+
+    // ---- A6 Phase 4a: Trivially short-circuit ----
+    //
+    // These tests exercise the new class-based short-circuit at the top of
+    // `process()`. They construct classifiers that explicitly mark the
+    // tool under test as `TriviallyReversible` and assert the gate
+    // short-circuits to `allow()` regardless of session state (no markers,
+    // no plan, no task — all the preconditions the four-check stack would
+    // otherwise demand are skipped).
+
+    #[test]
+    fn a6_trivially_classified_edit_short_circuits_to_allow() {
+        // Edit normally requires all four preconditions; here we mark it
+        // trivially-reversible (as if writing to a memory file or plan
+        // file under the proper substrate) — must skip the gate stack.
+        let fs = MockFs::new();
+        let classifier =
+            crate::reversibility_classifier::StaticReversibilityClassifier::empty()
+                .with("Edit", ReversibilityClass::TriviallyReversible);
+        let output = process(
+            &edit_input("test-session"),
+            &fs,
+            &crate::hooks::test_support::StubEnv::new(),
+            &classifier,
+        );
+        assert!(
+            output.blocked.is_none(),
+            "Trivially classification must short-circuit before any precondition check"
+        );
+    }
+
+    #[test]
+    fn a6_trivially_classified_bash_short_circuits_regardless_of_command() {
+        // Bash with a normally-mutating command (rm -rf .) classifies as
+        // Trivially via the test classifier — short-circuit fires before
+        // the in_scope logic ever runs.
+        let fs = MockFs::new();
+        let input = HookInput {
+            tool_name: Some("Bash".to_string()),
+            session_id: Some("test-session".to_string()),
+            tool_input: Some(serde_json::json!({ "command": "rm -rf ." })),
+            ..Default::default()
+        };
+        let classifier =
+            crate::reversibility_classifier::StaticReversibilityClassifier::empty()
+                .with("Bash", ReversibilityClass::TriviallyReversible);
+        let output = process(
+            &input,
+            &fs,
+            &crate::hooks::test_support::StubEnv::new(),
+            &classifier,
+        );
+        assert!(
+            output.blocked.is_none(),
+            "Bash classified Trivially short-circuits before in_scope mutation check"
+        );
+    }
+
+    #[test]
+    fn a6_non_trivially_classified_still_runs_existing_in_scope_logic() {
+        // The opposite case: classifier returns ReversibleWithEffort
+        // (the default in `permissive_classifier()`) — the short-circuit
+        // does NOT fire, and the four-check stack runs as before.
+        // Edit without preconditions blocks per existing behavior.
+        let fs = MockFs::new();
+        let output = process(
+            &edit_input("test-session"),
+            &fs,
+            &crate::hooks::test_support::StubEnv::new(),
+            &permissive_classifier(),
+        );
+        assert_eq!(
+            output.blocked,
+            Some(true),
+            "non-Trivially class preserves existing gate-stack behavior"
+        );
+    }
+
+    #[test]
+    fn a6_short_circuit_only_fires_for_trivially_class() {
+        // Confirm the comparison is exact-equality to TriviallyReversible,
+        // not >= or any other relation. RWE / Irreversible / Catastrophic
+        // all fall through to the in_scope logic.
+        let fs = MockFs::new();
+        for class in [
+            ReversibilityClass::ReversibleWithEffort,
+            ReversibilityClass::Irreversible,
+            ReversibilityClass::Catastrophic,
+        ] {
+            let classifier =
+                crate::reversibility_classifier::StaticReversibilityClassifier::empty()
+                    .with("Edit", class);
+            let output = process(
+                &edit_input("test-session"),
+                &fs,
+                &crate::hooks::test_support::StubEnv::new(),
+                &classifier,
+            );
+            assert_eq!(
+                output.blocked,
+                Some(true),
+                "class {class:?} must NOT short-circuit; existing gate stack should block"
+            );
+        }
+    }
+
+    #[test]
+    fn a6_short_circuit_works_with_no_tool_input() {
+        // The Trivially short-circuit handles `tool_input: None` by
+        // passing `Value::Null` to the classifier. Confirm no panic
+        // and the short-circuit still fires.
+        let fs = MockFs::new();
+        let input = HookInput {
+            tool_name: Some("Read".to_string()),
+            session_id: Some("test-session".to_string()),
+            tool_input: None,
+            ..Default::default()
+        };
+        let classifier =
+            crate::reversibility_classifier::StaticReversibilityClassifier::empty()
+                .with("Read", ReversibilityClass::TriviallyReversible);
+        let output = process(
+            &input,
+            &fs,
+            &crate::hooks::test_support::StubEnv::new(),
+            &classifier,
+        );
+        assert!(output.blocked.is_none());
     }
 }

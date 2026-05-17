@@ -14,6 +14,7 @@ use sentinel_domain::workflow::{SkillSteps, SkillWorkflow};
 use sentinel_domain::ports::{LlmPort, VectorStorePort};
 use sentinel_infrastructure::git::RealGit;
 use sentinel_infrastructure::memory_mcp_client::MemoryMcpClient;
+use sentinel_infrastructure::reversibility::LayeredReversibilityClassifier;
 use std::sync::Arc;
 
 pub async fn run(event: &str, matcher: Option<&str>, standalone: bool) -> Result<()> {
@@ -158,6 +159,22 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
     // Construct memory-mcp client (always present; reads MEMORY_MCP_CMD /
     // MEMORY_MCP_TIMEOUT_SECS from env, defaults handled by from_env).
     let memory_mcp = MemoryMcpClient::from_env();
+
+    // A6 Phase 4a: construct the layered reversibility classifier from the
+    // shipped `config/reversibility-defaults.toml`. If the shipped TOML
+    // fails to parse (build-time include_str!), we degrade gracefully to
+    // an empty classifier — the existing in_scope logic in tool_usage_gate
+    // still runs as the fallback so the gate stack continues to work.
+    // Operator overrides (~/.claude/sentinel/config/reversibility.toml)
+    // are not wired yet — follow-up phase.
+    let reversibility_classifier = LayeredReversibilityClassifier::with_shipped_defaults()
+        .unwrap_or_else(|err| {
+            tracing::warn!(
+                ?err,
+                "failed to load shipped reversibility defaults; using empty classifier (gate falls back to existing in_scope logic)"
+            );
+            LayeredReversibilityClassifier::empty()
+        });
 
     // Bundle all ports into HookContext
     let ctx = hooks::HookContext {
@@ -438,7 +455,12 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
 
                 // Tool usage gate — require sequential thinking + task creation
                 let usage_output = time_and_record(ctx.fs, &mk_ctx("tool_usage_gate"), || {
-                    hooks::tool_usage_gate::process(&input, ctx.fs, ctx.env)
+                    hooks::tool_usage_gate::process(
+                        &input,
+                        ctx.fs,
+                        ctx.env,
+                        &reversibility_classifier,
+                    )
                 });
                 output.merge(&usage_output);
             }

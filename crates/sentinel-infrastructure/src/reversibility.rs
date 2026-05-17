@@ -105,6 +105,22 @@ impl LayeredReversibilityClassifier {
         }
     }
 
+    /// Construct from the sentinel-shipped `config/reversibility-defaults.toml`
+    /// (embedded at compile time via `include_str!`). The production caller
+    /// uses this in the hook dispatcher; tests prefer
+    /// [`StaticReversibilityClassifier`](crate) or [`Self::from_str`] with
+    /// canned TOML.
+    ///
+    /// Phase 4a does not yet layer operator overrides from
+    /// `~/.claude/sentinel/config/reversibility.toml` — that wiring lands
+    /// in a follow-up phase once the operator-overrides storage location
+    /// is settled.
+    pub fn with_shipped_defaults() -> Result<Self> {
+        const SHIPPED_DEFAULTS: &str =
+            include_str!("../../../config/reversibility-defaults.toml");
+        Self::from_str(SHIPPED_DEFAULTS, None)
+    }
+
     /// Load from a defaults TOML string (shipped with sentinel) plus an
     /// optional overrides TOML string (operator-managed). The two
     /// sources are merged per the rules in the module docstring.
