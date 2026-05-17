@@ -181,7 +181,29 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
 
     let _ = ctx.fs.append(&log_file, all_lines.as_bytes());
 
+    // Notify the daemon-hosted legatus (if any) that this session
+    // wrapped a run. We only fire when there was at least one
+    // execution marker — otherwise the Stop is a non-event for the
+    // operator (e.g. background tooling, first-ever invocation).
+    // Summary is the last marker line, which is whatever the
+    // session most recently surfaced as visible work.
+    let summary = log_lines.last().map(|s| truncate_summary(s, 140));
+    crate::legatus_client::escalate_fire_and_forget(
+        sentinel_legatus::EscalationKind::Completed { summary },
+    );
+
     HookOutput::allow()
+}
+
+fn truncate_summary(s: &str, max_chars: usize) -> String {
+    let trimmed = s.trim();
+    if trimmed.chars().count() <= max_chars {
+        trimmed.to_owned()
+    } else {
+        let mut out: String = trimmed.chars().take(max_chars).collect();
+        out.push('…');
+        out
+    }
 }
 
 #[cfg(test)]
