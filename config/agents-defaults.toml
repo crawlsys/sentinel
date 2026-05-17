@@ -1,0 +1,146 @@
+# Sentinel agent capability profiles — shipped defaults.
+#
+# Read by `sentinel_infrastructure::capability_router::TomlCapabilityRouter`
+# at sentinel startup via `include_str!`. Operators add per-workflow
+# profiles or override these in `~/.claude/sentinel/config/agents.toml`;
+# the loader merges by `agent_id` (overrides replace same-id, append new-id).
+#
+# Per the A2 design (`docs/a2-capability-aware-routing.md`), every
+# "which agent for this work?" decision in sentinel — A3's auditor
+# selection, BA5's critic selection, budget-coder routing — consults
+# the router built from this table. Operator overrides are the
+# customization seam; this file is the working baseline.
+#
+# Schema: each [[agent]] block declares one routable agent.
+#   agent_id              — stable identifier (required, unique)
+#   display_name          — operator-facing label
+#   vendor                — Anthropic | Openai | Google | Xai | Meta |
+#                           Mistral | Ollama | Openrouter |
+#                           { Other = { underlying_vendor = "<vendor>" } } |
+#                           Unknown
+#   model_id              — concrete model identifier passed to the client
+#   declared              — list of satisfied capabilities; see below
+#   cost_per_input_token  — USD per input token (used by tie-breaker step 4)
+#   cost_per_output_token — USD per output token (operator visibility only)
+#   typical_latency_ms    — declared median latency (0 < ms ≤ 300_000)
+#   max_context_tokens    — context window size (must be > 0)
+#   data_zones            — geographic / regulatory zones (reserved for v2)
+#
+# Capability variants in `declared`:
+#   { Reasoning = "Shallow" | "Standard" | "Deep" }
+#   { ToolUse = ["Read", "Edit", "Bash", ...] }
+#   { StructuredOutput = "AuditorVerdict" | "BaCritique" | "AnyJson" |
+#                        { Named = "<schema_name>" } }
+#   "OpenWeights"
+#   { LatencyBudget = <ms> }
+#   { CostBudget = <usd_per_call> }
+#   { ReversibilityClass = "TriviallyReversible" | "ReversibleWithEffort" |
+#                          "Irreversible" | "Catastrophic" }
+#   { DataLocality = "UsEast" | "UsWest" | "Eu" | "OnPremise" |
+#                    { Named = "<zone>" } }
+#
+# Routes through OpenRouter: register vendor as
+# `{ Other = { underlying_vendor = "Anthropic" } }` so A3's
+# DifferentVendorFrom check sees the true vendor, not the gateway.
+
+# ---------------------------------------------------------------------------
+# Anthropic — Claude Opus 4.7 (deep-reasoning auditor / strong coder)
+# ---------------------------------------------------------------------------
+[[agent]]
+agent_id = "claude-opus-4-7"
+display_name = "Claude Opus 4.7"
+vendor = "Anthropic"
+model_id = "claude-opus-4-7"
+declared = [
+    { Reasoning = "deep" },
+    { ToolUse = ["Read", "Glob", "Grep", "Edit", "Write", "Bash", "Task", "TaskUpdate", "WebFetch", "WebSearch"] },
+    { StructuredOutput = "AuditorVerdict" },
+    { StructuredOutput = "BaCritique" },
+    { StructuredOutput = "AnyJson" },
+    { LatencyBudget = 30000 },
+    { CostBudget = 0.50 },
+    { ReversibilityClass = "Catastrophic" },
+]
+cost_per_input_token = 0.000015
+cost_per_output_token = 0.000075
+typical_latency_ms = 6000
+max_context_tokens = 200000
+data_zones = ["UsEast"]
+
+# ---------------------------------------------------------------------------
+# Anthropic — Claude Sonnet 4.6 (standard-reasoning daily driver)
+# ---------------------------------------------------------------------------
+[[agent]]
+agent_id = "claude-sonnet-4-6"
+display_name = "Claude Sonnet 4.6"
+vendor = "Anthropic"
+model_id = "claude-sonnet-4-6"
+declared = [
+    { Reasoning = "standard" },
+    { ToolUse = ["Read", "Glob", "Grep", "Edit", "Write", "Bash", "Task", "TaskUpdate", "WebFetch", "WebSearch"] },
+    { StructuredOutput = "AuditorVerdict" },
+    { StructuredOutput = "AnyJson" },
+    { LatencyBudget = 20000 },
+    { CostBudget = 0.20 },
+    { ReversibilityClass = "Irreversible" },
+]
+cost_per_input_token = 0.000003
+cost_per_output_token = 0.000015
+typical_latency_ms = 4000
+max_context_tokens = 200000
+data_zones = ["UsEast"]
+
+# ---------------------------------------------------------------------------
+# Ollama Cloud — Kimi K2.6 (budget coder + budget auditor)
+#
+# Vendor = Ollama so DifferentVendorFrom(Anthropic) qualifies for A3's
+# auditor seat. ReversibilityClass capped at Irreversible — operator
+# can lift to Catastrophic in overrides if they trust Kimi's judgment
+# for catastrophic actions.
+# ---------------------------------------------------------------------------
+[[agent]]
+agent_id = "kimi-k2-6-ollama-cloud"
+display_name = "Kimi K2.6 (Ollama Cloud)"
+vendor = "Ollama"
+model_id = "kimi-k2.6"
+declared = [
+    { Reasoning = "standard" },
+    { ToolUse = ["Read", "Glob", "Grep", "Edit", "Write", "Bash"] },
+    { StructuredOutput = "AuditorVerdict" },
+    { StructuredOutput = "AnyJson" },
+    { LatencyBudget = 30000 },
+    { CostBudget = 0.05 },
+    { ReversibilityClass = "Irreversible" },
+]
+cost_per_input_token = 0.000001
+cost_per_output_token = 0.000005
+typical_latency_ms = 15000
+max_context_tokens = 128000
+data_zones = []
+
+# ---------------------------------------------------------------------------
+# OpenAI — GPT 5.5 (deep-reasoning alt-vendor)
+#
+# Useful as A3 auditor when acting agent is Claude (DifferentVendorFrom
+# Anthropic qualifies). Lower cost than Opus, faster.
+# ---------------------------------------------------------------------------
+[[agent]]
+agent_id = "openai-gpt-5-5"
+display_name = "GPT 5.5"
+vendor = "Openai"
+model_id = "gpt-5.5"
+declared = [
+    { Reasoning = "deep" },
+    { ToolUse = ["Read", "Glob", "Grep", "Edit", "Write", "Bash"] },
+    { StructuredOutput = "AuditorVerdict" },
+    { StructuredOutput = "BaCritique" },
+    { StructuredOutput = "AnyJson" },
+    { LatencyBudget = 20000 },
+    { CostBudget = 0.30 },
+    { ReversibilityClass = "Catastrophic" },
+]
+cost_per_input_token = 0.000005
+cost_per_output_token = 0.000020
+typical_latency_ms = 4000
+max_context_tokens = 256000
+data_zones = ["UsEast"]
