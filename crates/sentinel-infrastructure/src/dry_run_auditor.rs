@@ -1,16 +1,37 @@
-//! A3 — OpenRouter-backed Auditor adapter (Phase 3b).
+//! A3 — Auditor adapter with pluggable provider backends (Phase 3b + 5).
 //!
 //! Implements [`AuditorPort`](sentinel_domain::ports::AuditorPort) by
-//! routing each [`DryRunRequest`] through an LLM via the `OpenRouter`
-//! gateway, parsing a structured-JSON verdict back into
-//! [`AuditorVerdict`]. Mirrors the existing `rig_judge.rs` pattern so
-//! sentinel has a single auth surface (`OPENROUTER_API_KEY`) for every
-//! LLM-backed verdict — the auditor is a sibling of the judge.
+//! routing each [`DryRunRequest`] through an LLM, parsing a structured-
+//! JSON verdict back into [`AuditorVerdict`]. Mirrors the existing
+//! `rig_judge.rs` pattern so sentinel has a unified seam for every
+//! LLM-backed verdict.
+//!
+//! ## Supported providers
+//!
+//! Selected by `SENTINEL_AUDITOR_PROVIDER` (default `openrouter`):
+//!
+//! - **`openrouter`** — hosted, single auth surface, broad model
+//!   catalog. Reads `OPENROUTER_API_KEY`. Default model
+//!   `anthropic/claude-opus-4.7`.
+//! - **`ollama`** — auto-detects local vs cloud at construction time:
+//!     - If `OLLAMA_API_KEY` is set → **Ollama Cloud** mode. Reads
+//!       `OLLAMA_API_KEY` + `OLLAMA_BASE_URL` (default
+//!       `https://ollama.com/v1`). Uses the OpenAI-compatible endpoint
+//!       with bearer auth via rig-core's `openai` provider client.
+//!     - Otherwise → **local Ollama** mode. Reads `OLLAMA_HOST`
+//!       (default `http://localhost:11434`); appends `/v1` for the
+//!       OpenAI-compatible path; passes a dummy bearer token (Ollama's
+//!       OpenAI-compat endpoint ignores it). Same `openai` provider
+//!       client.
+//!
+//!   In both Ollama modes, `SENTINEL_AUDITOR_MODEL` is **required**
+//!   (no sensible default — operators choose what they've pulled,
+//!   e.g. `moonshotai/kimi-k2`, `qwen3:8b`).
 //!
 //! Vendor-class separation (the A3 spec's "auditor must be a different
 //! model family than the acting agent" contract) is the operator's
-//! responsibility today: configure `SENTINEL_AUDITOR_MODEL` to a model
-//! that differs from the acting model's vendor. A2's
+//! responsibility today: choose a `SENTINEL_AUDITOR_MODEL` that
+//! differs from the acting model's vendor. A2's
 //! `CapabilityRouterPort` will take over selection once it ships.
 //!
 //! ## Sync ↔ async bridging
@@ -33,7 +54,7 @@ use futures::future::BoxFuture;
 use rig_core::agent::AgentBuilder;
 use rig_core::completion::Prompt;
 use rig_core::prelude::CompletionClient;
-use rig_core::providers::openrouter;
+use rig_core::providers::{openai, openrouter};
 use serde::Deserialize;
 use tracing::{debug, warn};
 
@@ -42,14 +63,36 @@ use sentinel_domain::dry_run::{
 };
 use sentinel_domain::ports::AuditorPort;
 
-/// Default auditor model when `SENTINEL_AUDITOR_MODEL` is unset.
-/// Anthropic — chosen as a sensible default different-vendor pick when
-/// the acting agent is `OpenAI` / Google. Operator overrides per workflow.
-pub const DEFAULT_AUDITOR_MODEL: &str = "anthropic/claude-opus-4.7";
+/// Default auditor model for the `openrouter` provider.
+///
+/// Used when `SENTINEL_AUDITOR_MODEL` is unset. Anthropic is chosen as
+/// a sensible default different-vendor pick when the acting agent is
+/// `OpenAI` / Google. Operator overrides per workflow.
+pub const DEFAULT_OPENROUTER_MODEL: &str = "anthropic/claude-opus-4.7";
+
+/// Legacy alias for back-compat with Phase 3b callers.
+#[deprecated(note = "use DEFAULT_OPENROUTER_MODEL — name disambiguates per-provider defaults")]
+pub const DEFAULT_AUDITOR_MODEL: &str = DEFAULT_OPENROUTER_MODEL;
+
+/// Default base URL for local Ollama's OpenAI-compatible endpoint.
+/// Local Ollama exposes `/v1/chat/completions` on the standard daemon port.
+pub const DEFAULT_OLLAMA_LOCAL_BASE_URL: &str = "http://localhost:11434/v1";
+
+/// Default base URL for Ollama Cloud's OpenAI-compatible endpoint.
+/// Override with `OLLAMA_BASE_URL` if Ollama relocates the endpoint.
+pub const DEFAULT_OLLAMA_CLOUD_BASE_URL: &str = "https://ollama.com/v1";
+
+/// Dummy bearer token sent to local Ollama (which ignores the value on
+/// its OpenAI-compat endpoint). Documented so operators searching for
+/// `"ollama-local"` in logs find this constant.
+const OLLAMA_LOCAL_DUMMY_KEY: &str = "ollama-local";
 
 /// Default timeout for an auditor call. 30s is comfortable for frontier
 /// reasoning models; operator can override via `SENTINEL_AUDITOR_TIMEOUT_SECS`.
 pub const DEFAULT_AUDITOR_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Default provider when `SENTINEL_AUDITOR_PROVIDER` is unset.
+pub const DEFAULT_AUDITOR_PROVIDER: &str = "openrouter";
 
 /// Type-erased prompt function: `(model_id, system, user_msg) -> response_text`.
 /// Matches the `rig_judge` [`PromptFn`] shape — single seam every adapter
@@ -60,13 +103,21 @@ type PromptFn = Arc<
         + Sync,
 >;
 
-/// OpenRouter-backed [`AuditorPort`] implementation.
+/// Rig-backed [`AuditorPort`] implementation.
+///
+/// Wraps a provider-specific rig-core client behind a uniform
+/// `PromptFn` seam so the score-call, JSON-parsing, and sidecar-runtime
+/// logic is identical regardless of which provider is in use.
 pub struct RigAuditor {
     prompt_fn: PromptFn,
-    /// Model identifier passed to `OpenRouter` (e.g. `"anthropic/claude-opus-4.7"`).
-    /// Recorded into [`AuditorVerdict::auditor_model`] with the
-    /// `"openrouter:"` prefix for proof-chain attribution.
+    /// Model identifier passed to the provider client (e.g.
+    /// `"anthropic/claude-opus-4.7"` for openrouter; `"moonshotai/kimi-k2"`
+    /// or `"qwen3:8b"` for ollama).
     model_id: String,
+    /// Provider-attribution prefix recorded into
+    /// [`AuditorVerdict::auditor_model`] as `"{provider_prefix}:{model_id}"`.
+    /// `"openrouter"`, `"ollama-cloud"`, `"ollama-local"`.
+    provider_prefix: String,
     /// Per-call timeout. Auditor calls exceeding this surface as
     /// [`AuditorError::TimedOut`].
     timeout: Duration,
@@ -76,6 +127,7 @@ impl std::fmt::Debug for RigAuditor {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RigAuditor")
             .field("model_id", &self.model_id)
+            .field("provider_prefix", &self.provider_prefix)
             .field("timeout", &self.timeout)
             .finish_non_exhaustive()
     }
@@ -84,14 +136,25 @@ impl std::fmt::Debug for RigAuditor {
 impl RigAuditor {
     /// Construct from a custom prompt function — primarily for tests
     /// (lets the test inject a stub `PromptFn` instead of hitting the
-    /// network).
+    /// network). Defaults `provider_prefix` to `"openrouter"` so the
+    /// pre-Phase-5 test fixtures keep working unchanged.
     #[must_use]
     pub fn with_prompt_fn(prompt_fn: PromptFn, model_id: impl Into<String>) -> Self {
         Self {
             prompt_fn,
             model_id: model_id.into(),
+            provider_prefix: "openrouter".to_string(),
             timeout: DEFAULT_AUDITOR_TIMEOUT,
         }
+    }
+
+    /// Override the provider-attribution prefix. Used by tests that
+    /// want to assert on `"ollama-local"` / `"ollama-cloud"` in the
+    /// emitted verdicts.
+    #[must_use]
+    pub fn with_provider_prefix(mut self, prefix: impl Into<String>) -> Self {
+        self.provider_prefix = prefix.into();
+        self
     }
 
     /// Override the call timeout.
@@ -101,21 +164,69 @@ impl RigAuditor {
         self
     }
 
-    /// Construct from environment:
-    /// - `OPENROUTER_API_KEY` — required.
-    /// - `SENTINEL_AUDITOR_MODEL` — optional; defaults to
-    ///   [`DEFAULT_AUDITOR_MODEL`].
-    /// - `SENTINEL_AUDITOR_TIMEOUT_SECS` — optional; defaults to
-    ///   [`DEFAULT_AUDITOR_TIMEOUT`].
+    /// Construct from environment, dispatching on
+    /// `SENTINEL_AUDITOR_PROVIDER`:
+    ///
+    /// - `openrouter` (default) → [`Self::openrouter_from_env`]
+    /// - `ollama` → [`Self::ollama_from_env`] (auto-detects local vs
+    ///   cloud by `OLLAMA_API_KEY` presence)
+    ///
+    /// Any other value is an unrecoverable configuration error.
     pub fn from_env() -> Result<Self> {
-        let key = std::env::var("OPENROUTER_API_KEY")
-            .context("OPENROUTER_API_KEY not set (required for RigAuditor)")?;
-        let model_id = std::env::var("SENTINEL_AUDITOR_MODEL")
-            .unwrap_or_else(|_| DEFAULT_AUDITOR_MODEL.to_string());
-        let timeout = std::env::var("SENTINEL_AUDITOR_TIMEOUT_SECS")
-            .ok()
-            .and_then(|s| s.parse::<u64>().ok())
-            .map_or(DEFAULT_AUDITOR_TIMEOUT, Duration::from_secs);
+        Self::from_env_with(real_env)
+    }
+
+    /// Construct an OpenRouter-backed auditor from environment.
+    /// See [`Self::from_env`] for the variables consulted.
+    pub fn openrouter_from_env() -> Result<Self> {
+        Self::openrouter_from_env_with(real_env)
+    }
+
+    /// Construct an Ollama-backed auditor from environment. Auto-detects
+    /// local vs cloud:
+    ///
+    /// - If `OLLAMA_API_KEY` is set → **Ollama Cloud**. Uses
+    ///   `OLLAMA_BASE_URL` (default [`DEFAULT_OLLAMA_CLOUD_BASE_URL`])
+    ///   with bearer auth via rig-core's `openai` provider (Ollama
+    ///   Cloud exposes an OpenAI-compatible endpoint).
+    /// - Otherwise → **local Ollama**. Uses `OLLAMA_HOST` (default
+    ///   `http://localhost:11434`) — `/v1` is appended for the `OpenAI`-
+    ///   compatible path; a dummy bearer token is sent because local
+    ///   Ollama's `OpenAI`-compat endpoint ignores it.
+    ///
+    /// `SENTINEL_AUDITOR_MODEL` is **required** for Ollama (no sensible
+    /// default — operators choose what they've pulled).
+    pub fn ollama_from_env() -> Result<Self> {
+        Self::ollama_from_env_with(real_env)
+    }
+
+    // ---- env-resolver-injected variants (test seam) ----
+
+    fn from_env_with<F>(env: F) -> Result<Self>
+    where
+        F: Fn(&str) -> Option<String>,
+    {
+        let provider = env("SENTINEL_AUDITOR_PROVIDER")
+            .unwrap_or_else(|| DEFAULT_AUDITOR_PROVIDER.to_string())
+            .to_lowercase();
+        match provider.as_str() {
+            "openrouter" => Self::openrouter_from_env_with(env),
+            "ollama" => Self::ollama_from_env_with(env),
+            other => Err(anyhow::anyhow!(
+                "unknown SENTINEL_AUDITOR_PROVIDER={other:?}; expected one of: openrouter, ollama"
+            )),
+        }
+    }
+
+    fn openrouter_from_env_with<F>(env: F) -> Result<Self>
+    where
+        F: Fn(&str) -> Option<String>,
+    {
+        let key = env("OPENROUTER_API_KEY")
+            .context("OPENROUTER_API_KEY not set (required for openrouter auditor)")?;
+        let model_id = env("SENTINEL_AUDITOR_MODEL")
+            .unwrap_or_else(|| DEFAULT_OPENROUTER_MODEL.to_string());
+        let timeout = read_timeout(&env);
 
         let client = Arc::new(
             openrouter::Client::new(&key)
@@ -134,9 +245,87 @@ impl RigAuditor {
         Ok(Self {
             prompt_fn,
             model_id,
+            provider_prefix: "openrouter".to_string(),
             timeout,
         })
     }
+
+    fn ollama_from_env_with<F>(env: F) -> Result<Self>
+    where
+        F: Fn(&str) -> Option<String>,
+    {
+        let model_id = env("SENTINEL_AUDITOR_MODEL").context(
+            "SENTINEL_AUDITOR_MODEL not set (required for ollama auditor; no sensible default — \
+             pick what you've pulled, e.g. moonshotai/kimi-k2 or qwen3:8b)",
+        )?;
+        let timeout = read_timeout(&env);
+
+        let (base_url, api_key, provider_prefix) = env("OLLAMA_API_KEY").map_or_else(
+            || {
+                let host =
+                    env("OLLAMA_HOST").unwrap_or_else(|| "http://localhost:11434".to_string());
+                let base = format!("{}/v1", host.trim_end_matches('/'));
+                (
+                    base,
+                    OLLAMA_LOCAL_DUMMY_KEY.to_string(),
+                    "ollama-local".to_string(),
+                )
+            },
+            |key| {
+                let base = env("OLLAMA_BASE_URL")
+                    .unwrap_or_else(|| DEFAULT_OLLAMA_CLOUD_BASE_URL.to_string());
+                (base, key, "ollama-cloud".to_string())
+            },
+        );
+
+        let client = Arc::new(
+            openai::Client::builder()
+                .api_key(&api_key)
+                .base_url(&base_url)
+                .build()
+                .map_err(|e| {
+                    anyhow::anyhow!("failed to build ollama client (base_url={base_url}): {e}")
+                })?,
+        );
+        let prompt_fn_provider = provider_prefix.clone();
+        let prompt_fn: PromptFn = Arc::new(move |model_id, system, user_msg| {
+            let client = client.clone();
+            let provider = prompt_fn_provider.clone();
+            Box::pin(async move {
+                let agent = AgentBuilder::new(client.completion_model(&model_id))
+                    .preamble(&system)
+                    .build();
+                let result: anyhow::Result<String, _> = agent.prompt(user_msg).await;
+                result.map_err(|e| anyhow::anyhow!("{provider} auditor ({model_id}): {e}"))
+            })
+        });
+        Ok(Self {
+            prompt_fn,
+            model_id,
+            provider_prefix,
+            timeout,
+        })
+    }
+}
+
+/// Default env resolver — wraps `std::env::var` for the public
+/// `*_from_env` constructors. Tests inject HashMap-backed closures via
+/// the private `*_from_env_with` variants instead, avoiding the
+/// process-wide env mutation that Rust 2024 marks as `unsafe`.
+fn real_env(key: &str) -> Option<String> {
+    std::env::var(key).ok()
+}
+
+/// Read `SENTINEL_AUDITOR_TIMEOUT_SECS` from the supplied env resolver,
+/// falling back to [`DEFAULT_AUDITOR_TIMEOUT`] on absent or unparseable
+/// values.
+fn read_timeout<F>(env: &F) -> Duration
+where
+    F: Fn(&str) -> Option<String>,
+{
+    env("SENTINEL_AUDITOR_TIMEOUT_SECS")
+        .and_then(|s| s.parse::<u64>().ok())
+        .map_or(DEFAULT_AUDITOR_TIMEOUT, Duration::from_secs)
 }
 
 /// Lazily-built sidecar tokio runtime used to drive rig's async calls
@@ -178,12 +367,13 @@ impl AuditorPort for RigAuditor {
             }
         })?;
 
+        let auditor_model = format!("{}:{}", self.provider_prefix, self.model_id);
         debug!(
-            auditor_model = %self.model_id,
+            auditor_model = %auditor_model,
             response_len = response_text.len(),
             "auditor returned"
         );
-        parse_verdict(&response_text, &self.model_id)
+        parse_verdict(&response_text, &auditor_model)
     }
 }
 
@@ -250,9 +440,11 @@ fn build_user_prompt(dry_run: &DryRunRequest) -> String {
 }
 
 /// Parse the auditor's JSON response into a typed verdict. The
-/// model identifier is recorded with the `"openrouter:"` prefix for
-/// proof-chain attribution.
-fn parse_verdict(text: &str, model_id: &str) -> Result<AuditorVerdict, AuditorError> {
+/// `auditor_model` argument is taken verbatim and recorded into the
+/// verdict as the full attribution string (e.g.
+/// `"openrouter:anthropic/claude-opus-4.7"` or
+/// `"ollama-cloud:moonshotai/kimi-k2"`).
+fn parse_verdict(text: &str, auditor_model: &str) -> Result<AuditorVerdict, AuditorError> {
     // Strip markdown code-fence if the model wraps its JSON despite
     // instructions. Common failure mode worth absorbing.
     let cleaned = strip_code_fence(text);
@@ -274,7 +466,7 @@ fn parse_verdict(text: &str, model_id: &str) -> Result<AuditorVerdict, AuditorEr
             raw.axes.unstated_assumptions,
         ),
         reasoning: raw.reasoning,
-        auditor_model: format!("openrouter:{model_id}"),
+        auditor_model: auditor_model.to_string(),
     })
 }
 
@@ -414,7 +606,8 @@ mod tests {
 
     #[test]
     fn parses_pass_verdict() {
-        let verdict = parse_verdict(&make_pass_response(), "anthropic/claude-opus-4.7").unwrap();
+        let verdict =
+            parse_verdict(&make_pass_response(), "openrouter:anthropic/claude-opus-4.7").unwrap();
         assert!(verdict.decision.is_pass());
         assert!((verdict.confidence - 0.92).abs() < 1e-5);
         assert_eq!(verdict.auditor_model, "openrouter:anthropic/claude-opus-4.7");
@@ -422,7 +615,7 @@ mod tests {
 
     #[test]
     fn parses_block_verdict_with_reason() {
-        let verdict = parse_verdict(&make_block_response(), "openai/gpt-5.5").unwrap();
+        let verdict = parse_verdict(&make_block_response(), "openrouter:openai/gpt-5.5").unwrap();
         match &verdict.decision {
             AuditorDecision::Block { reason } => {
                 assert!(reason.contains("path traversal"));
@@ -539,5 +732,137 @@ mod tests {
         let auditor =
             RigAuditor::with_prompt_fn(stub, "test/model").with_timeout(Duration::from_secs(5));
         assert_eq!(auditor.timeout, Duration::from_secs(5));
+    }
+
+    // ---- Phase 5: provider prefix + dispatcher ----
+    //
+    // These tests exercise the env-resolver-injected variants
+    // (`*_from_env_with`) with HashMap-backed closures. The public
+    // `*_from_env` constructors call `real_env` (the std::env wrapper)
+    // and aren't worth round-tripping through process-wide env in
+    // tests — workspace forbids unsafe, and Rust 2024 marks
+    // env::set_var as unsafe due to its thread-safety hazards. The
+    // dispatcher logic is identical regardless of resolver, so testing
+    // the seam is equivalent to testing the public path.
+
+    use std::collections::HashMap;
+
+    fn env_map(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
+        let owned: HashMap<String, String> = pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect();
+        move |k: &str| owned.get(k).cloned()
+    }
+
+    #[test]
+    fn score_uses_provider_prefix_in_auditor_model_attribution() {
+        let stub = make_stub(vec![Ok(make_pass_response())]);
+        let auditor = RigAuditor::with_prompt_fn(stub, "moonshotai/kimi-k2")
+            .with_provider_prefix("ollama-cloud");
+        let verdict = auditor.score(&fixture_dry_run()).unwrap();
+        assert_eq!(verdict.auditor_model, "ollama-cloud:moonshotai/kimi-k2");
+    }
+
+    #[test]
+    fn with_provider_prefix_overrides_default() {
+        let stub = make_stub(vec![Ok(make_pass_response())]);
+        let auditor =
+            RigAuditor::with_prompt_fn(stub, "qwen3:8b").with_provider_prefix("ollama-local");
+        assert_eq!(auditor.provider_prefix, "ollama-local");
+    }
+
+    #[test]
+    fn from_env_unknown_provider_errors() {
+        let env = env_map(&[("SENTINEL_AUDITOR_PROVIDER", "claude-direct")]);
+        let err = RigAuditor::from_env_with(env).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("claude-direct"), "error should name unknown provider: {msg}");
+        assert!(
+            msg.contains("openrouter") && msg.contains("ollama"),
+            "error should list valid providers: {msg}"
+        );
+    }
+
+    #[test]
+    fn from_env_defaults_to_openrouter_when_provider_unset() {
+        // No provider env → default openrouter → missing OPENROUTER_API_KEY
+        // surfaces the openrouter-specific error message.
+        let env = env_map(&[]);
+        let err = RigAuditor::from_env_with(env).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("OPENROUTER_API_KEY"),
+            "default provider should be openrouter; error: {msg}"
+        );
+    }
+
+    #[test]
+    fn ollama_from_env_local_mode_when_api_key_absent() {
+        let env = env_map(&[("SENTINEL_AUDITOR_MODEL", "qwen3:8b")]);
+        let auditor = RigAuditor::ollama_from_env_with(env).unwrap();
+        assert_eq!(auditor.provider_prefix, "ollama-local");
+        assert_eq!(auditor.model_id, "qwen3:8b");
+    }
+
+    #[test]
+    fn ollama_from_env_cloud_mode_when_api_key_present() {
+        let env = env_map(&[
+            ("OLLAMA_API_KEY", "fake-cloud-key"),
+            ("SENTINEL_AUDITOR_MODEL", "moonshotai/kimi-k2"),
+        ]);
+        let auditor = RigAuditor::ollama_from_env_with(env).unwrap();
+        assert_eq!(auditor.provider_prefix, "ollama-cloud");
+        assert_eq!(auditor.model_id, "moonshotai/kimi-k2");
+    }
+
+    #[test]
+    fn ollama_from_env_requires_model_id() {
+        let env = env_map(&[]);
+        let err = RigAuditor::ollama_from_env_with(env).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("SENTINEL_AUDITOR_MODEL"),
+            "ollama requires explicit model id; error: {msg}"
+        );
+    }
+
+    #[test]
+    fn from_env_dispatches_to_ollama_when_provider_ollama() {
+        let env = env_map(&[
+            ("SENTINEL_AUDITOR_PROVIDER", "ollama"),
+            ("SENTINEL_AUDITOR_MODEL", "qwen3:8b"),
+        ]);
+        let auditor = RigAuditor::from_env_with(env).unwrap();
+        assert_eq!(auditor.provider_prefix, "ollama-local");
+    }
+
+    #[test]
+    fn from_env_provider_is_case_insensitive() {
+        let env = env_map(&[
+            ("SENTINEL_AUDITOR_PROVIDER", "OLLAMA"),
+            ("OLLAMA_API_KEY", "fake-key"),
+            ("SENTINEL_AUDITOR_MODEL", "moonshotai/kimi-k2"),
+        ]);
+        let auditor = RigAuditor::from_env_with(env).unwrap();
+        assert_eq!(auditor.provider_prefix, "ollama-cloud");
+    }
+
+    #[test]
+    fn openrouter_from_env_uses_default_model_when_unset() {
+        let env = env_map(&[("OPENROUTER_API_KEY", "sk-fake")]);
+        let auditor = RigAuditor::openrouter_from_env_with(env).unwrap();
+        assert_eq!(auditor.provider_prefix, "openrouter");
+        assert_eq!(auditor.model_id, DEFAULT_OPENROUTER_MODEL);
+    }
+
+    #[test]
+    fn timeout_overrides_default_via_env() {
+        let env = env_map(&[
+            ("OPENROUTER_API_KEY", "sk-fake"),
+            ("SENTINEL_AUDITOR_TIMEOUT_SECS", "7"),
+        ]);
+        let auditor = RigAuditor::openrouter_from_env_with(env).unwrap();
+        assert_eq!(auditor.timeout, Duration::from_secs(7));
     }
 }
