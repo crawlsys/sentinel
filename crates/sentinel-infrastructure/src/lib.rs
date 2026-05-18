@@ -24,6 +24,7 @@ pub mod proof_store;
 pub mod provenance_store;
 pub mod qdrant;
 pub mod rate_limit;
+pub mod requirement_matrix;
 pub mod reversibility;
 pub mod rig_classifier;
 pub mod rig_judge;
