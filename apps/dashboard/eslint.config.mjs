@@ -51,6 +51,21 @@ const ATOM_FORBIDDEN_PATTERNS = [
   "@/adapters/*",
 ];
 
+// Atomic-design boundary (SEN-28). Organisms compose molecules + atoms +
+// application result types. They MUST NOT reach into templates or directly
+// into adapters — those are the next-higher tier and the IO layer
+// respectively.
+const ORGANISM_FORBIDDEN_PATTERNS = [
+  "**/templates/*",
+  "**/templates",
+  "**/adapters/*",
+  "**/adapters",
+  "@/components/templates",
+  "@/components/templates/*",
+  "@/adapters",
+  "@/adapters/*",
+];
+
 // Atomic-design boundary (SEN-27). Molecules may compose atoms, MUI,
 // theme tokens, and pure domain types — but never import from a higher
 // tier (organisms / templates / application / adapters).
@@ -155,6 +170,21 @@ const eslintConfig = [
             group: [p],
             message:
               "Molecules must not depend on organisms/templates/application/adapters. Atomic design boundary — see src/components/molecules/index.ts.",
+          })),
+        },
+      ],
+    },
+  },
+  {
+    files: ["src/components/organisms/**/*.{ts,tsx}"],
+    rules: {
+      "no-restricted-imports": [
+        "error",
+        {
+          patterns: ORGANISM_FORBIDDEN_PATTERNS.map((p) => ({
+            group: [p],
+            message:
+              "Organisms must not depend on templates or adapters. Atomic design boundary — see src/components/organisms/index.ts.",
           })),
         },
       ],
