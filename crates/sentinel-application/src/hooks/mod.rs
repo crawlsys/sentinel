@@ -49,6 +49,7 @@ pub mod pre_commit_verification;
 pub mod pre_compact;
 pub mod pre_push_browser_test;
 pub mod provenance_validate;
+pub mod requirements_traceability_gate;
 pub mod session_end;
 pub mod session_index;
 pub mod session_init;
@@ -274,6 +275,7 @@ pub const HOOK_NAMES: &[&str] = &[
     "pre_compact",
     "pre_push_browser_test",
     "provenance_validate",
+    "requirements_traceability_gate",
     "session_end",
     "session_index",
     "session_init",
