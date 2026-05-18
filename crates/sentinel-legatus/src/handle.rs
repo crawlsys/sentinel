@@ -124,8 +124,18 @@ pub struct LegatusHandle {
 
 /// Receiver-side of the channels — owned by the connect loop and
 /// drained inside its main `tokio::select!`.
+///
+/// `escalation_loopback` is a clone of the same sender the handle
+/// holds, kept on the runtime side so the WS recv loop's inbound
+/// handler can synthesize follow-up events (e.g. emit an
+/// `InstructionResult { Declined }` after dropping a queued
+/// instruction in response to a `CancelInstruction`). The
+/// loopback feeds the same `escalation_rx` the loop already
+/// drains, so there's exactly one path from "event" to "WS
+/// send" — no duplicated sink handling, no second select arm.
 pub struct LegatusRuntime {
     pub(crate) escalation_rx: mpsc::UnboundedReceiver<EscalationKind>,
+    pub(crate) escalation_loopback: mpsc::UnboundedSender<EscalationKind>,
     pub(crate) inbox: Option<PersistentInbox>,
 }
 
@@ -136,11 +146,12 @@ pub struct LegatusRuntime {
 pub fn make_pair() -> (LegatusHandle, LegatusRuntime) {
     let (escalation_tx, escalation_rx) = mpsc::unbounded_channel();
     let handle = LegatusHandle {
-        escalation_tx,
+        escalation_tx: escalation_tx.clone(),
         inbox: None,
     };
     let runtime = LegatusRuntime {
         escalation_rx,
+        escalation_loopback: escalation_tx,
         inbox: None,
     };
     (handle, runtime)
@@ -156,11 +167,12 @@ pub fn make_pair() -> (LegatusHandle, LegatusRuntime) {
 pub fn make_pair_with_inbox(inbox: PersistentInbox) -> (LegatusHandle, LegatusRuntime) {
     let (escalation_tx, escalation_rx) = mpsc::unbounded_channel();
     let handle = LegatusHandle {
-        escalation_tx,
+        escalation_tx: escalation_tx.clone(),
         inbox: Some(inbox.clone()),
     };
     let runtime = LegatusRuntime {
         escalation_rx,
+        escalation_loopback: escalation_tx,
         inbox: Some(inbox),
     };
     (handle, runtime)

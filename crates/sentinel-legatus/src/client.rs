@@ -455,14 +455,14 @@ fn handle_inbound(msg: &ConsularMessage, session_id: SessionId, runtime: &Legatu
             // cancel is too late and we just log. Definitive vs
             // advisory split per the ~90-95% reliability target.
             //
-            // No InstructionResult emission here: when removed-from-
-            // inbox, no execution-log Stop will ever fire for the
-            // cancelled id (it's gone before draining), so consul
-            // won't see a Result either. The cancel arrival itself
-            // is the operator's confirmation. (A future improvement
-            // could emit InstructionResult { Declined { reason } }
-            // explicitly for the cancelled id; deferred until the
-            // sentinel ↔ daemon Result path is wired here.)
+            // When we DO remove from the queue, we also emit an
+            // `InstructionResult { Declined { reason } }` via the
+            // runtime's loopback sender so consul gets a closing
+            // record for the cancelled id instead of inferring
+            // cancellation from no-result-ever-arriving. The
+            // loopback feeds the same `escalation_rx` the main
+            // loop already drains, so the Result message is signed
+            // and sent over the WS via the standard escalation arm.
             let removed = runtime
                 .inbox
                 .as_ref()
@@ -474,6 +474,27 @@ fn handle_inbound(msg: &ConsularMessage, session_id: SessionId, runtime: &Legatu
                     reason = ?cancel.reason,
                     "CancelInstruction removed queued instruction",
                 );
+                let declined_reason = cancel.reason.as_deref().map_or_else(
+                    || "cancelled by operator".to_owned(),
+                    |r| format!("cancelled by operator: {r}"),
+                );
+                let event = crate::handle::EscalationKind::InstructionResult {
+                    instruction_id: cancel.instruction_id,
+                    outcome: consul_protocol::messages::InstructionOutcome::Declined {
+                        reason: declined_reason,
+                    },
+                    summary: None,
+                };
+                if runtime.escalation_loopback.send(event).is_err() {
+                    // Loopback receiver is the same as the loop's
+                    // escalation_rx — if it's gone the loop has
+                    // exited and we're shutting down. Silent skip.
+                    debug!(
+                        %session_id,
+                        instruction_id = %cancel.instruction_id,
+                        "loopback escalation channel closed; declined-result not sent",
+                    );
+                }
             } else {
                 info!(
                     %session_id,
@@ -519,5 +540,144 @@ mod tests {
         let t = now_ms();
         // After Jan 1 2024 (sanity).
         assert!(t > 1_700_000_000_000);
+    }
+
+    /// Successful cancel (instruction was queued and removed) feeds
+    /// an `InstructionResult { Declined { reason } }` into the
+    /// runtime's loopback channel. The main `run_connect_hosted`
+    /// select loop would then drain `escalation_rx` and sign+send
+    /// the message over the WS — we don't exercise that path here
+    /// (no fake consulate), just the loopback emission.
+    #[tokio::test]
+    async fn cancel_instruction_hit_pushes_declined_via_loopback() {
+        use consul_domain::identity::InstructionId;
+        use consul_protocol::messages::{
+            CancelInstruction, ConsularMessage, InstructionOutcome, RelayInstruction,
+        };
+        use tempfile::tempdir;
+
+        use crate::handle::{make_pair_with_inbox, EscalationKind};
+        use crate::persistent_inbox::PersistentInbox;
+
+        let dir = tempdir().unwrap();
+        let inbox = PersistentInbox::new(dir.path().join("inbox.jsonl"));
+        let queued = RelayInstruction {
+            instruction_id: InstructionId::new(),
+            target_session_id: consul_domain::identity::SessionId::new_v7(),
+            content: "deploy staging".into(),
+            destructive: false,
+        };
+        inbox.append(&queued);
+        let (_handle, mut runtime) = make_pair_with_inbox(inbox);
+
+        let cancel = CancelInstruction {
+            instruction_id: queued.instruction_id,
+            target_session_id: queued.target_session_id,
+            reason: Some("operator changed their mind".into()),
+        };
+        handle_inbound(
+            &ConsularMessage::CancelInstruction(cancel),
+            queued.target_session_id,
+            &runtime,
+        );
+
+        let event = runtime.escalation_rx.recv().await.expect("loopback fired");
+        match event {
+            EscalationKind::InstructionResult {
+                instruction_id,
+                outcome,
+                summary,
+            } => {
+                assert_eq!(instruction_id, queued.instruction_id);
+                assert!(summary.is_none());
+                match outcome {
+                    InstructionOutcome::Declined { reason } => {
+                        assert!(reason.contains("cancelled by operator"), "reason: {reason}");
+                        assert!(reason.contains("changed their mind"), "reason: {reason}");
+                    }
+                    other => panic!("expected Declined, got {other:?}"),
+                }
+            }
+            other => panic!("expected InstructionResult, got {other:?}"),
+        }
+    }
+
+    /// Cancel that doesn't match a queued instruction (already
+    /// drained, or never queued) does NOT feed the loopback —
+    /// nothing for consul to receive.
+    #[tokio::test]
+    async fn cancel_instruction_miss_does_not_push_anything() {
+        use consul_domain::identity::InstructionId;
+        use consul_protocol::messages::{CancelInstruction, ConsularMessage};
+        use tempfile::tempdir;
+
+        use crate::handle::make_pair_with_inbox;
+        use crate::persistent_inbox::PersistentInbox;
+
+        let dir = tempdir().unwrap();
+        let inbox = PersistentInbox::new(dir.path().join("inbox.jsonl"));
+        let (_handle, mut runtime) = make_pair_with_inbox(inbox);
+
+        let session_id = consul_domain::identity::SessionId::new_v7();
+        let cancel = CancelInstruction {
+            instruction_id: InstructionId::new(),
+            target_session_id: session_id,
+            reason: None,
+        };
+        handle_inbound(
+            &ConsularMessage::CancelInstruction(cancel),
+            session_id,
+            &runtime,
+        );
+
+        // try_recv returns Err(Empty) when nothing has been sent.
+        assert!(runtime.escalation_rx.try_recv().is_err());
+    }
+
+    /// Cancel without an explicit reason still produces a sensible
+    /// default reason string in the emitted Declined outcome.
+    #[tokio::test]
+    async fn cancel_without_reason_uses_default_declined_reason() {
+        use consul_domain::identity::InstructionId;
+        use consul_protocol::messages::{
+            CancelInstruction, ConsularMessage, InstructionOutcome, RelayInstruction,
+        };
+        use tempfile::tempdir;
+
+        use crate::handle::{make_pair_with_inbox, EscalationKind};
+        use crate::persistent_inbox::PersistentInbox;
+
+        let dir = tempdir().unwrap();
+        let inbox = PersistentInbox::new(dir.path().join("inbox.jsonl"));
+        let queued = RelayInstruction {
+            instruction_id: InstructionId::new(),
+            target_session_id: consul_domain::identity::SessionId::new_v7(),
+            content: "x".into(),
+            destructive: false,
+        };
+        inbox.append(&queued);
+        let (_handle, mut runtime) = make_pair_with_inbox(inbox);
+
+        let cancel = CancelInstruction {
+            instruction_id: queued.instruction_id,
+            target_session_id: queued.target_session_id,
+            reason: None,
+        };
+        handle_inbound(
+            &ConsularMessage::CancelInstruction(cancel),
+            queued.target_session_id,
+            &runtime,
+        );
+
+        let event = runtime.escalation_rx.recv().await.unwrap();
+        match event {
+            EscalationKind::InstructionResult { outcome, .. } => match outcome {
+                InstructionOutcome::Declined { reason } => {
+                    assert_eq!(reason, "cancelled by operator");
+                }
+                other => panic!("expected Declined, got {other:?}"),
+            },
+            other => panic!("expected InstructionResult, got {other:?}"),
+        }
     }
 }
