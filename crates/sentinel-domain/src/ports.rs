@@ -579,6 +579,34 @@ pub trait ProvenancePort: Send + Sync {
     ) -> Result<Vec<crate::ba::RetrievalRecord>, ProvenanceError>;
 }
 
+/// BA1 — citation-provenance audit chain WRITE side.
+///
+/// The `audit_extract` hook (`PostToolUse`) emits a
+/// [`RetrievalRecord`](crate::ba::RetrievalRecord) every time a
+/// documented MCP connector successfully retrieves an artifact.
+/// Phase 4's JSONL adapter will implement BOTH this trait and
+/// [`ProvenancePort`] over the same backing file — the read +
+/// write paths share storage so callers don't see a race window
+/// between "`audit_extract` emitted" and "`provenance_validate` sees
+/// the record."
+///
+/// Best-effort persistence: failures must surface as
+/// [`ProvenanceError`] but consumer hooks should NOT block on
+/// write failures — appraisal-style observability (the validate
+/// hook handles the missing-record case as a Block-class finding,
+/// which is the right behavior whether the record is missing
+/// because the connector wasn't called OR because the write
+/// failed).
+pub trait ProvenanceWritePort: Send + Sync {
+    /// Persist a single retrieval record. Idempotent: if the
+    /// `(artifact_id, content_hash, retrieved_at)` tuple already
+    /// exists, the adapter MAY skip the write but MUST still return
+    /// `Ok(())`. Implementations are free to write through (the
+    /// JSONL adapter appends every call; consumers de-dupe at
+    /// read time).
+    fn record(&self, record: crate::ba::RetrievalRecord) -> Result<(), ProvenanceError>;
+}
+
 /// Errors `RequirementMatrixPort` can surface.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum RequirementMatrixError {
