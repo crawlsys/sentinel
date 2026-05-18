@@ -523,3 +523,181 @@ pub trait AppraisalStorePort: Send + Sync {
         window: crate::agent_routing::AppraisalWindow,
     ) -> crate::agent_routing::AggregateStats;
 }
+
+// ---------------------------------------------------------------------------
+// ProvenancePort + RequirementMatrixPort (BA1 + BA3)
+// ---------------------------------------------------------------------------
+
+/// Errors `ProvenancePort` can surface.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ProvenanceError {
+    /// The audit chain backing store was unreachable (filesystem
+    /// error, locked file, etc.). Hooks treat as a soft-warn —
+    /// `provenance_validate` can't validate without history, but
+    /// the operator should see why.
+    StoreUnavailable(String),
+    /// Backing-store data was malformed (corrupt JSONL line,
+    /// schema mismatch). Carries the offending detail.
+    Malformed(String),
+}
+
+impl std::fmt::Display for ProvenanceError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::StoreUnavailable(msg) => {
+                write!(f, "provenance audit store unavailable: {msg}")
+            }
+            Self::Malformed(msg) => write!(f, "provenance record malformed: {msg}"),
+        }
+    }
+}
+
+impl std::error::Error for ProvenanceError {}
+
+/// BA1 — citation-provenance audit chain access.
+///
+/// Per `docs/ba1-ba3-sentinel-enforcement.md` §9. The
+/// `provenance_validate` hook (future phase) reads
+/// [`RetrievalRecord`](crate::ba::RetrievalRecord)s through this
+/// port to validate that each cited
+/// [`ArtifactReference`](crate::ba::ArtifactReference) in a
+/// BA-orchestrator output corresponds to a real connector retrieval.
+///
+/// Returns the full history for an `artifact_id` so the caller can
+/// pick the most-recent retrieval, scan within a freshness window,
+/// or detect repeated retrievals (some workflows pull an artifact
+/// multiple times within a session).
+pub trait ProvenancePort: Send + Sync {
+    /// Query every retrieval record for `artifact_id` across the
+    /// configured audit window (operator-set; typically last 24h).
+    /// Empty `Vec` means the artifact has never been retrieved
+    /// through any registered connector in the window — the BA1
+    /// `Existence` check fails on this signal.
+    fn query_artifact_history(
+        &self,
+        artifact_id: &str,
+    ) -> Result<Vec<crate::ba::RetrievalRecord>, ProvenanceError>;
+}
+
+/// Errors `RequirementMatrixPort` can surface.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum RequirementMatrixError {
+    /// The matrix endpoint was unreachable. Per spec §8.3 the
+    /// adapter has a `last_known_good` fallback — this error is
+    /// reserved for the case where no snapshot is available at
+    /// all (fresh install / never-fetched orchestration).
+    MatrixUnavailable(String),
+    /// The orchestration is registered but no row matches the
+    /// supplied `matrix_row_id`. Distinct from `Ok(None)`: this
+    /// error means the orchestration itself isn't tracked.
+    UnknownOrchestration(String),
+    /// Schema mismatch / corrupt response from the matrix.
+    Malformed(String),
+}
+
+impl std::fmt::Display for RequirementMatrixError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MatrixUnavailable(msg) => write!(f, "requirement matrix unavailable: {msg}"),
+            Self::UnknownOrchestration(id) => {
+                write!(f, "requirement matrix has no orchestration {id:?}")
+            }
+            Self::Malformed(msg) => write!(f, "requirement matrix payload malformed: {msg}"),
+        }
+    }
+}
+
+impl std::error::Error for RequirementMatrixError {}
+
+/// BA3 — requirements-traceability matrix access.
+///
+/// Per `docs/ba1-ba3-sentinel-enforcement.md` §9. The
+/// `requirements_traceability_gate` hook (future phase) queries
+/// individual matrix rows through this port to validate that each
+/// cited [`RequirementRef`](crate::ba::RequirementRef) corresponds
+/// to a live row in the orchestrator's matrix.
+///
+/// `Ok(None)` means the row was queried successfully but doesn't
+/// exist — that's a BA3 `Existence` failure, not a port error.
+/// `Err(UnknownOrchestration)` is reserved for the orchestrator-
+/// level missing case (a typo in the citation's `orchestration_id`).
+pub trait RequirementMatrixPort: Send + Sync {
+    /// Look up a single row by `(orchestration_id, matrix_row_id)`.
+    /// Returns the live row content so the caller can validate the
+    /// citation's `content_hash` against the current matrix state
+    /// (BA3 `Hash` finding).
+    fn query_requirement(
+        &self,
+        orchestration_id: &str,
+        matrix_row_id: &str,
+    ) -> Result<Option<crate::ba::RequirementRef>, RequirementMatrixError>;
+}
+
+// ---------------------------------------------------------------------------
+// Tests — BA1 + BA3 port surface
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod ba_port_tests {
+    use super::*;
+
+    #[test]
+    fn provenance_error_display_names_each_variant() {
+        let unavailable =
+            ProvenanceError::StoreUnavailable("disk full".to_string()).to_string();
+        assert!(unavailable.contains("unavailable"));
+        assert!(unavailable.contains("disk full"));
+
+        let malformed = ProvenanceError::Malformed("bad json".to_string()).to_string();
+        assert!(malformed.contains("malformed"));
+        assert!(malformed.contains("bad json"));
+    }
+
+    #[test]
+    fn requirement_matrix_error_display_names_each_variant() {
+        let unavailable =
+            RequirementMatrixError::MatrixUnavailable("timeout".to_string()).to_string();
+        assert!(unavailable.contains("unavailable"));
+        let unknown =
+            RequirementMatrixError::UnknownOrchestration("ghost-id".to_string()).to_string();
+        assert!(unknown.contains("ghost-id"));
+        let malformed = RequirementMatrixError::Malformed("schema".to_string()).to_string();
+        assert!(malformed.contains("malformed"));
+    }
+
+    #[test]
+    fn errors_implement_std_error_error() {
+        fn assert_error<E: std::error::Error>() {}
+        assert_error::<ProvenanceError>();
+        assert_error::<RequirementMatrixError>();
+    }
+
+    #[test]
+    fn errors_are_send_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<ProvenanceError>();
+        assert_send_sync::<RequirementMatrixError>();
+    }
+
+    #[test]
+    fn ports_can_be_used_through_trait_objects() {
+        // Sanity check: the traits can be wrapped in `Box<dyn …>` —
+        // confirms the `Send + Sync` supertrait bounds and the
+        // method signatures are object-safe.
+        fn _take_provenance(_: Box<dyn ProvenancePort>) {}
+        fn _take_matrix(_: Box<dyn RequirementMatrixPort>) {}
+    }
+
+    #[test]
+    fn errors_roundtrip_through_json() {
+        let original = ProvenanceError::StoreUnavailable("io error".to_string());
+        let json = serde_json::to_string(&original).unwrap();
+        let parsed: ProvenanceError = serde_json::from_str(&json).unwrap();
+        assert_eq!(original, parsed);
+
+        let original = RequirementMatrixError::UnknownOrchestration("xyz".to_string());
+        let json = serde_json::to_string(&original).unwrap();
+        let parsed: RequirementMatrixError = serde_json::from_str(&json).unwrap();
+        assert_eq!(original, parsed);
+    }
+}
