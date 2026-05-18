@@ -14,6 +14,7 @@ pub mod classifier;
 pub mod cost_per_point;
 pub mod cycle_time;
 pub mod cycle_time_analytics;
+pub mod cycle_time_prediction;
 pub mod dedupe;
 pub mod deploy_freq;
 pub mod engine;
