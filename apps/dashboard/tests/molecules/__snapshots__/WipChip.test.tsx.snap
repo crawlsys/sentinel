@@ -1,0 +1,26 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`WipChip > matches snapshot in light mode 1`] = `
+<div>
+  <div
+    class="MuiBox-root css-h300a0"
+    data-count="5"
+    data-stage="QA Testing"
+    data-testid="wip-chip"
+  >
+    <div
+      class="MuiBox-root css-184jxi0"
+      data-testid="status-dot"
+      data-tone="error"
+      role="presentation"
+    />
+    <span
+      class="MuiBox-root css-1typ001"
+      data-testid="tag"
+      data-tone="error"
+    >
+      QA Testing: 5
+    </span>
+  </div>
+</div>
+`;

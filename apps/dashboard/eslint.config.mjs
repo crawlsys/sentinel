@@ -51,6 +51,28 @@ const ATOM_FORBIDDEN_PATTERNS = [
   "@/adapters/*",
 ];
 
+// Atomic-design boundary (SEN-27). Molecules may compose atoms, MUI,
+// theme tokens, and pure domain types — but never import from a higher
+// tier (organisms / templates / application / adapters).
+const MOLECULE_FORBIDDEN_PATTERNS = [
+  "**/organisms/*",
+  "**/organisms",
+  "**/templates/*",
+  "**/templates",
+  "**/application/*",
+  "**/application",
+  "**/adapters/*",
+  "**/adapters",
+  "@/components/organisms",
+  "@/components/organisms/*",
+  "@/components/templates",
+  "@/components/templates/*",
+  "@/application",
+  "@/application/*",
+  "@/adapters",
+  "@/adapters/*",
+];
+
 const eslintConfig = [
   ...compat.extends("next/core-web-vitals", "next/typescript"),
   {
@@ -118,6 +140,21 @@ const eslintConfig = [
             group: [p],
             message:
               "Atoms must not depend on molecules/organisms/templates/application/adapters. Atomic design boundary — see src/components/atoms/index.ts.",
+          })),
+        },
+      ],
+    },
+  },
+  {
+    files: ["src/components/molecules/**/*.{ts,tsx}"],
+    rules: {
+      "no-restricted-imports": [
+        "error",
+        {
+          patterns: MOLECULE_FORBIDDEN_PATTERNS.map((p) => ({
+            group: [p],
+            message:
+              "Molecules must not depend on organisms/templates/application/adapters. Atomic design boundary — see src/components/molecules/index.ts.",
           })),
         },
       ],
