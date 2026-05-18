@@ -57,6 +57,21 @@ const eslintConfig = [
     ignores: [".next/**", "node_modules/**", "dist/**"],
   },
   {
+    // Honor the `_` prefix convention for intentionally-unused args/vars
+    // (e.g. placeholder port implementations whose signature must match the
+    // interface contract even when the body doesn't use every parameter).
+    rules: {
+      "@typescript-eslint/no-unused-vars": [
+        "warn",
+        {
+          argsIgnorePattern: "^_",
+          varsIgnorePattern: "^_",
+          caughtErrorsIgnorePattern: "^_",
+        },
+      ],
+    },
+  },
+  {
     files: ["src/domain/**/*.ts"],
     rules: {
       "no-restricted-imports": [
