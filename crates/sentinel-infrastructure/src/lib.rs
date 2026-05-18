@@ -21,6 +21,7 @@ pub mod mcp_transport;
 pub mod memory_mcp_client;
 pub mod process;
 pub mod proof_store;
+pub mod provenance_store;
 pub mod qdrant;
 pub mod rate_limit;
 pub mod reversibility;
