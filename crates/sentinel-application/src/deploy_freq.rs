@@ -97,6 +97,94 @@ impl DoraTier {
             Self::Low
         }
     }
+
+    /// Classify lead time for changes (DORA #1, SEN-10). Boundaries follow
+    /// the Accelerate / DORA State of DevOps report and **must** match the
+    /// dashboard's `apps/dashboard/src/domain/dora.ts::tierFor("lead_time")`
+    /// so the Rust collectors and the TS UI agree on tier labels.
+    ///
+    /// Boundaries (hours):
+    ///   * `< 24`    → Elite (less than a day)
+    ///   * `< 168`   → High  (less than a week)
+    ///   * `< 720`   → Medium (less than ~a month)
+    ///   * else      → Low
+    ///
+    /// Non-finite or negative inputs fall through to `Low` rather than
+    /// panicking — collectors can be lossy about historical data and a
+    /// bogus row shouldn't take the aggregator down.
+    #[must_use]
+    pub fn from_lead_time_hours(hours: f64) -> Self {
+        if !hours.is_finite() || hours < 0.0 {
+            return Self::Low;
+        }
+        if hours < 24.0 {
+            Self::Elite
+        } else if hours < 168.0 {
+            Self::High
+        } else if hours < 720.0 {
+            Self::Medium
+        } else {
+            Self::Low
+        }
+    }
+
+    /// Classify change failure rate (DORA #3, SEN-11). Input is a ratio in
+    /// `[0, 1]`; mirrors `tierFor("change_failure_rate")` in the dashboard.
+    ///
+    /// Boundaries (ratio):
+    ///   * `<= 0.15` → Elite
+    ///   * `<= 0.30` → High
+    ///   * `<= 0.45` → Medium
+    ///   * else      → Low
+    ///
+    /// Out-of-range / non-finite inputs clamp into `[0, 1]` first; collectors
+    /// can emit floating-point overshoot near boundary values and we'd
+    /// rather classify than refuse to report.
+    #[must_use]
+    pub fn from_change_failure_rate(rate: f64) -> Self {
+        let r = if !rate.is_finite() {
+            0.0
+        } else if rate < 0.0 {
+            0.0
+        } else if rate > 1.0 {
+            1.0
+        } else {
+            rate
+        };
+        if r <= 0.15 {
+            Self::Elite
+        } else if r <= 0.30 {
+            Self::High
+        } else if r <= 0.45 {
+            Self::Medium
+        } else {
+            Self::Low
+        }
+    }
+
+    /// Classify Mean Time To Recover (DORA #4, SEN-11). Mirrors
+    /// `tierFor("mttr")` in the dashboard.
+    ///
+    /// Boundaries (hours):
+    ///   * `< 1`    → Elite (less than an hour)
+    ///   * `< 24`   → High  (less than a day)
+    ///   * `< 168`  → Medium (less than a week)
+    ///   * else     → Low
+    #[must_use]
+    pub fn from_mttr_hours(hours: f64) -> Self {
+        if !hours.is_finite() || hours < 0.0 {
+            return Self::Low;
+        }
+        if hours < 1.0 {
+            Self::Elite
+        } else if hours < 24.0 {
+            Self::High
+        } else if hours < 168.0 {
+            Self::Medium
+        } else {
+            Self::Low
+        }
+    }
 }
 
 /// Per-(repo, env) aggregate written into the summary JSON.
@@ -557,5 +645,58 @@ mod tests {
         let s = aggregate_at(&deploys, &summary, now).unwrap();
         assert_eq!(s.records_scanned, 2);
         assert_eq!(s.aggregates[0].deploys_7d, 1);
+    }
+
+    // --- SEN-10 lead time classifier boundaries -------------------------
+
+    #[test]
+    fn from_lead_time_hours_classifies_at_boundaries() {
+        assert_eq!(DoraTier::from_lead_time_hours(0.0), DoraTier::Elite);
+        assert_eq!(DoraTier::from_lead_time_hours(23.99), DoraTier::Elite);
+        assert_eq!(DoraTier::from_lead_time_hours(24.0), DoraTier::High);
+        assert_eq!(DoraTier::from_lead_time_hours(167.99), DoraTier::High);
+        assert_eq!(DoraTier::from_lead_time_hours(168.0), DoraTier::Medium);
+        assert_eq!(DoraTier::from_lead_time_hours(719.99), DoraTier::Medium);
+        assert_eq!(DoraTier::from_lead_time_hours(720.0), DoraTier::Low);
+        assert_eq!(DoraTier::from_lead_time_hours(10_000.0), DoraTier::Low);
+    }
+
+    #[test]
+    fn from_lead_time_hours_handles_garbage_input() {
+        assert_eq!(DoraTier::from_lead_time_hours(-1.0), DoraTier::Low);
+        assert_eq!(DoraTier::from_lead_time_hours(f64::NAN), DoraTier::Low);
+        assert_eq!(DoraTier::from_lead_time_hours(f64::INFINITY), DoraTier::Low);
+    }
+
+    // --- SEN-11 CFR + MTTR classifier boundaries ------------------------
+
+    #[test]
+    fn from_change_failure_rate_classifies_at_boundaries() {
+        assert_eq!(DoraTier::from_change_failure_rate(0.0), DoraTier::Elite);
+        assert_eq!(DoraTier::from_change_failure_rate(0.15), DoraTier::Elite);
+        assert_eq!(DoraTier::from_change_failure_rate(0.150001), DoraTier::High);
+        assert_eq!(DoraTier::from_change_failure_rate(0.30), DoraTier::High);
+        assert_eq!(DoraTier::from_change_failure_rate(0.30001), DoraTier::Medium);
+        assert_eq!(DoraTier::from_change_failure_rate(0.45), DoraTier::Medium);
+        assert_eq!(DoraTier::from_change_failure_rate(0.46), DoraTier::Low);
+        assert_eq!(DoraTier::from_change_failure_rate(1.0), DoraTier::Low);
+    }
+
+    #[test]
+    fn from_change_failure_rate_clamps_garbage_input() {
+        assert_eq!(DoraTier::from_change_failure_rate(-0.5), DoraTier::Elite);
+        assert_eq!(DoraTier::from_change_failure_rate(2.5), DoraTier::Low);
+        assert_eq!(DoraTier::from_change_failure_rate(f64::NAN), DoraTier::Elite);
+    }
+
+    #[test]
+    fn from_mttr_hours_classifies_at_boundaries() {
+        assert_eq!(DoraTier::from_mttr_hours(0.0), DoraTier::Elite);
+        assert_eq!(DoraTier::from_mttr_hours(0.99), DoraTier::Elite);
+        assert_eq!(DoraTier::from_mttr_hours(1.0), DoraTier::High);
+        assert_eq!(DoraTier::from_mttr_hours(23.99), DoraTier::High);
+        assert_eq!(DoraTier::from_mttr_hours(24.0), DoraTier::Medium);
+        assert_eq!(DoraTier::from_mttr_hours(167.99), DoraTier::Medium);
+        assert_eq!(DoraTier::from_mttr_hours(168.0), DoraTier::Low);
     }
 }
