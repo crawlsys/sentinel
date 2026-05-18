@@ -13,10 +13,13 @@ use sentinel_domain::workflow::{SkillSteps, SkillWorkflow};
 
 use sentinel_domain::capability::VendorClass;
 use sentinel_domain::ports::{AuditorPort, LlmPort, VectorStorePort};
+use sentinel_infrastructure::ba_config::BaEnforcementConfig;
 use sentinel_infrastructure::capability_router::TomlCapabilityRouter;
 use sentinel_infrastructure::dry_run_auditor::RigAuditor;
 use sentinel_infrastructure::git::RealGit;
 use sentinel_infrastructure::memory_mcp_client::MemoryMcpClient;
+use sentinel_infrastructure::provenance_store::JsonlProvenanceStore;
+use sentinel_infrastructure::requirement_matrix::FilesystemRequirementMatrix;
 use sentinel_infrastructure::reversibility::LayeredReversibilityClassifier;
 use std::sync::Arc;
 
@@ -253,6 +256,58 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
         }
     })();
     let a3_enabled = auditor.is_some();
+
+    // BA1+3 Phase 4c: construct provenance store + requirement matrix
+    // adapters at session start. Both adapters degrade gracefully:
+    // - JsonlProvenanceStore writes via append-only JSONL and auto-
+    //   creates parent dirs, so missing storage isn't an error.
+    // - FilesystemRequirementMatrix reads per-orchestration JSON
+    //   snapshots; the BA-orchestrator authors them. Missing files
+    //   surface as UnknownOrchestration in the hook, mapped to BA3
+    //   Existence blocks.
+    let provenance_store: Option<Arc<JsonlProvenanceStore>> =
+        match JsonlProvenanceStore::with_default_path() {
+            Ok(s) => Some(Arc::new(s)),
+            Err(err) => {
+                tracing::info!(
+                    ?err,
+                    "JsonlProvenanceStore::with_default_path failed; BA1 audit lift + validation inert"
+                );
+                None
+            }
+        };
+    let requirement_matrix: Option<Arc<FilesystemRequirementMatrix>> =
+        match FilesystemRequirementMatrix::with_default_path() {
+            Ok(m) => Some(Arc::new(m)),
+            Err(err) => {
+                tracing::info!(
+                    ?err,
+                    "FilesystemRequirementMatrix::with_default_path failed; BA3 traceability inert"
+                );
+                None
+            }
+        };
+    // Load BA1+3 enforcement config: shipped defaults (both
+    // ObserveOnly) overridden by operator-supplied
+    // ~/.claude/sentinel/config/ba-enforcement.toml.
+    let ba_enforcement_overrides_path = dirs::home_dir().map(|h| {
+        h.join(".claude")
+            .join("sentinel")
+            .join("config")
+            .join("ba-enforcement.toml")
+    });
+    let ba_enforcement = match BaEnforcementConfig::with_shipped_and_overrides(
+        ba_enforcement_overrides_path.as_deref(),
+    ) {
+        Ok(c) => c,
+        Err(err) => {
+            tracing::warn!(
+                ?err,
+                "ba-enforcement.toml load failed; falling back to ObserveOnly for both BA hooks"
+            );
+            BaEnforcementConfig::observe_only()
+        }
+    };
 
     // Bundle all ports into HookContext
     let ctx = hooks::HookContext {
@@ -524,6 +579,40 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
                 state.record_blocked();
             }
 
+            // BA1 provenance_validate — structural enforcement for citations.
+            // Self-gates on input.extra.artifacts presence; non-BA tools
+            // pass through silently. Mode-configurable via
+            // ba-enforcement.toml; shipped default is ObserveOnly (no
+            // blocking; telemetry only).
+            if let Some(ref provenance_arc) = provenance_store {
+                let prov_output =
+                    time_and_record(ctx.fs, &mk_ctx("provenance_validate"), || {
+                        hooks::provenance_validate::process(
+                            &input,
+                            provenance_arc.as_ref(),
+                            ba_enforcement.provenance_validate_mode,
+                        )
+                    });
+                output.merge(&prov_output);
+            }
+
+            // BA3 requirements_traceability_gate — structural enforcement for
+            // recommendation→requirement traceability. Self-gates on
+            // input.extra.requirement_refs / is_recommendation; non-BA tools
+            // pass through silently. Mode-configurable via
+            // ba-enforcement.toml; shipped default is ObserveOnly.
+            if let Some(ref matrix_arc) = requirement_matrix {
+                let trace_output =
+                    time_and_record(ctx.fs, &mk_ctx("requirements_traceability_gate"), || {
+                        hooks::requirements_traceability_gate::process(
+                            &input,
+                            matrix_arc.as_ref(),
+                            ba_enforcement.requirements_traceability_mode,
+                        )
+                    });
+                output.merge(&trace_output);
+            }
+
             // A3 dry-run-then-commit gate — fires for ALL tools (the hook
             // itself short-circuits to allow() for class < Irreversible).
             // Only runs when the auditor is available; otherwise A3 is inert
@@ -615,6 +704,16 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
         }
 
         HookEvent::PostToolUse => {
+            // BA1 audit-extract — lift documented-connector retrievals into
+            // sentinel's provenance audit chain. Fires only for mcp__* tools
+            // that emit a structured `provenance_audit` field; silently
+            // skips otherwise. Observational (always allows).
+            if let Some(ref provenance_arc) = provenance_store {
+                let audit_output =
+                    hooks::audit_extract::process(&input, provenance_arc.as_ref());
+                output.merge(&audit_output);
+            }
+
             // Bug task gate — scan tool output for bug signals (cargo test
             // FAILED, error[Exxxx], panicked at) and record pending-bug
             // state. Also clears state when a TaskCreate references the bug.

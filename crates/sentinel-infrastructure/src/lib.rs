@@ -6,6 +6,7 @@
 pub mod activity_log;
 pub mod anthropic;
 pub mod appraisal_store;
+pub mod ba_config;
 pub mod capability_router;
 pub mod config;
 pub mod dry_run_auditor;
