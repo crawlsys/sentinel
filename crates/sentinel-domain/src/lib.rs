@@ -4,6 +4,7 @@
 //! Defines proof chains, workflows, evidence, hooks, and routing.
 
 pub mod agent_routing;
+pub mod ba;
 pub mod capability;
 pub mod commit;
 pub mod config;
@@ -13,6 +14,7 @@ pub mod disagreement;
 pub mod dry_run;
 pub mod error_classifier;
 pub mod events;
+pub mod eval;
 pub mod evidence;
 pub mod evidence_adapter;
 pub mod exchange;
