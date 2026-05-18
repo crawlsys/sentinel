@@ -1,0 +1,45 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`DashboardLayout > renders without crashing in light mode and matches snapshot 1`] = `
+<div>
+  <main
+    class="MuiBox-root css-1fwit6m"
+    data-testid="dashboard-layout"
+  >
+    <header
+      class="MuiBox-root css-kjldy1"
+      data-testid="dashboard-header"
+    >
+      <div
+        class="MuiBox-root css-1exqkbk"
+      >
+        SENTINEL
+      </div>
+      <div
+        class="MuiBox-root css-h300a0"
+      >
+        <span
+          class="MuiBox-root css-118cp55"
+        >
+          WINDOW
+        </span>
+        <span
+          class="MuiBox-root css-h7ckgq"
+          data-testid="tag"
+          data-tone="default"
+        >
+          LAST 7 DAYS
+        </span>
+      </div>
+    </header>
+    <div
+      class="MuiBox-root css-p04ghh"
+      data-testid="dashboard-content"
+    >
+      <div>
+        body
+      </div>
+    </div>
+  </main>
+</div>
+`;

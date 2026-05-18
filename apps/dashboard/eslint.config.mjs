@@ -51,6 +51,21 @@ const ATOM_FORBIDDEN_PATTERNS = [
   "@/adapters/*",
 ];
 
+// Atomic-design boundary (SEN-29). Templates compose organisms + molecules
+// + atoms into full page chrome. They MUST NOT pull adapters/ or
+// application/ directly — wiring those is the composition root's job
+// (the page itself).
+const TEMPLATE_FORBIDDEN_PATTERNS = [
+  "**/adapters/*",
+  "**/adapters",
+  "**/application/*",
+  "**/application",
+  "@/adapters",
+  "@/adapters/*",
+  "@/application",
+  "@/application/*",
+];
+
 // Atomic-design boundary (SEN-28). Organisms compose molecules + atoms +
 // application result types. They MUST NOT reach into templates or directly
 // into adapters — those are the next-higher tier and the IO layer
@@ -185,6 +200,21 @@ const eslintConfig = [
             group: [p],
             message:
               "Organisms must not depend on templates or adapters. Atomic design boundary — see src/components/organisms/index.ts.",
+          })),
+        },
+      ],
+    },
+  },
+  {
+    files: ["src/components/templates/**/*.{ts,tsx}"],
+    rules: {
+      "no-restricted-imports": [
+        "error",
+        {
+          patterns: TEMPLATE_FORBIDDEN_PATTERNS.map((p) => ({
+            group: [p],
+            message:
+              "Templates must not depend on adapters or application directly — that's the page-level composition root's job. Atomic design boundary — see src/components/templates/index.ts.",
           })),
         },
       ],

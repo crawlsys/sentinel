@@ -1,27 +1,12 @@
 import { describe, it, expect } from "vitest";
 
-import { SLAGrid } from "@/components/organisms/SLAGrid";
-import {
-  makeSLA,
-  makeTicketIdentifier,
-  type SLA,
-  type SLABreach,
-} from "@/domain";
+import { SLAGrid, type SLAGridEntry } from "@/components/organisms/SLAGrid";
+import { makeTicketIdentifier, type SLABreach } from "@/domain";
 import { renderWithTheme } from "../atoms/test-utils";
 
-const slas: SLA[] = [
-  makeSLA({
-    id: "review-24h",
-    name: "Code Review < 24h",
-    target_hours: 24,
-    predicate: () => true,
-  }),
-  makeSLA({
-    id: "qa-48h",
-    name: "QA < 48h",
-    target_hours: 48,
-    predicate: () => true,
-  }),
+const slas: SLAGridEntry[] = [
+  { id: "review-24h", name: "Code Review < 24h", target_hours: 24 },
+  { id: "qa-48h", name: "QA < 48h", target_hours: 48 },
 ];
 
 const breaches: SLABreach[] = [
