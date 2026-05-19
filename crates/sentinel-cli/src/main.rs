@@ -20,6 +20,7 @@ mod config_cmd;
 mod cost_per_point_cmd;
 mod daemon_cmd;
 mod deploy_freq_cmd;
+mod eval_cmd;
 mod federation_cmd;
 mod manifest_cmd;
 mod policy_cmd;
@@ -346,6 +347,36 @@ enum Commands {
         /// Output as JSON on stdout (applies to --status, --list, --history)
         #[arg(long)]
         json: bool,
+    },
+
+    /// External-benchmark eval corpus management (A12).
+    ///
+    /// Phase 2 ships the corpus loader + `list` subcommand. Future
+    /// phases add the benchmark runner that loads cases, dispatches
+    /// to agents via A2's capability router, scores against the
+    /// rubric, and emits results. See `docs/a12-external-benchmarks.md`.
+    Eval {
+        #[command(subcommand)]
+        action: EvalAction,
+    },
+}
+
+/// `sentinel eval` subcommands.
+#[derive(Subcommand)]
+enum EvalAction {
+    /// List every case registered in the BA-Eval corpus
+    /// (`~/.claude/sentinel/eval/ba-corpus/`). Includes both the
+    /// public test split and the private test split per spec §3.4,
+    /// with the `is_private_test` flag clearly marked.
+    List {
+        /// Output as JSON instead of human-readable table.
+        #[arg(long)]
+        json: bool,
+
+        /// Override the corpus base directory
+        /// (default: `~/.claude/sentinel/eval/ba-corpus/`).
+        #[arg(long, value_name = "PATH")]
+        dir: Option<String>,
     },
 }
 
@@ -755,6 +786,9 @@ async fn main() -> anyhow::Result<()> {
         Commands::Manifest { action } => run_manifest(action),
         Commands::Policy { action } => run_policy(action),
         Commands::Mcp => mcp_cmd::run().await,
+        Commands::Eval { action } => match action {
+            EvalAction::List { json, dir } => eval_cmd::list(json, dir),
+        },
         Commands::Legatus { action } => match action {
             LegatusAction::Connect {
                 consulate_url,
