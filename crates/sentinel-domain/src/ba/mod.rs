@@ -16,9 +16,13 @@
 //! later phases.
 
 pub mod provenance;
+pub mod recommendation;
 pub mod requirements;
 
 pub use provenance::{
     ArtifactReference, ProvenanceCheck, ProvenanceClass, ProvenanceFinding, RetrievalRecord,
+};
+pub use recommendation::{
+    BaDraftRequest, BaRecommendation, RecommendationId, StakeholderAudience,
 };
 pub use requirements::{RequirementCheck, RequirementFinding, RequirementRef};
