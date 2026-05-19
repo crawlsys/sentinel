@@ -7,6 +7,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 ## [Unreleased]
 
 ### Added
+- **BA-orchestrator Phase 3 — `sentinel ba draft` CLI (end-to-end LIVE)** (2026-05-19). Final phase of the MVP BA-orchestrator. The track is now end-to-end shippable: operators run `sentinel ba draft --brief "..." --audience exec` and get a structured `BaRecommendation` containing the recommendation body + citations + requirement_refs + complete A13 spec challenge. That envelope is exactly what BA1 / BA3 / A13 gates verify when the recommendation flows into a downstream tool call — closing the loop that's been open since the gates shipped without an upstream emitter.
+
+  **New `Ba` subcommand** with `BaAction::Draft { brief, audience, constraints, agent_id, json }`. Flags: `--brief <TEXT>` (required), `--audience <exec|board|customer|internal_team>` (required), `--constraint <TEXT>` (repeatable), `--agent-id <ID>` (defaults to `ba-orchestrator`), `--json` (full pretty-JSON envelope vs. human summary).
+
+  **New `crates/sentinel-cli/src/ba_cmd.rs`** (~270 lines + 8 unit tests). `draft(args)` is the production entry point — builds `AnthropicClient::from_env()` and delegates to `draft_with<L: LlmPort + ?Sized>(args, llm)` which is the generic test seam. `parse_audience` accepts canonical snake_case keys (`exec` / `board` / `customer` / `internal_team`) plus aliases (`internal-team`, `internal`) and is case-insensitive. Unknown audience strings error with operator-facing guidance naming the valid options. Human-readable `render_summary` prints recommendation id, audience, timestamps, citation/requirement counts, the structural-readiness flag, then the brief, body, and per-citation breakdown.
+
+  **`crates/sentinel-cli/src/main.rs`**: new `Ba` Commands variant routes to `ba_cmd::draft`. `crates/sentinel-cli/Cargo.toml`: added `async-trait` as a dev-dependency so the test `StubLlm` can implement `LlmPort`.
+
+  8 tests cover: well-formed args succeed in JSON mode, summary mode succeeds with constraints, unknown audience rejected with descriptive error, blank brief surfaces the orchestrator's `InvalidRequest` ("orchestrator failed"), `parse_audience` accepts all 4 canonical keys, case-insensitivity (EXEC, Board), internal-team aliases, garbage strings rejected with both the bad value and the valid set in the message. Sentinel-cli: **166 tests passing (158 prior + 8 new).** Zero new clippy warnings.
+
+  **End-to-end demo flow now works.** Set `ANTHROPIC_API_KEY` and run `sentinel ba draft --brief "scale the platform for 10x users" --audience exec`. The orchestrator emits a `BaRecommendation` with the structural readiness for sentinel's gates. Real connector pulls (real `ArtifactReference`s from Linear / Confluence) are BA6 work; for now the model emits plausible citations that BA1 will reject against the empty audit chain — which is the correct behavior and demonstrates the enforcement loop.
+
 - **Per-turn tool-call trace surfaces in `InstructionResult` summary** (2026-05-19). Item E from the Phase 2 punch list. Every `PostToolUse` during a turn now appends the tool name to a per-session trace file; the `Stop` hook drains it and prepends a `[tools: A, B, C]` tag to the per-instruction Result summary, so the operator sees which tools the legatus actually ran in response to their relayed instruction.
 
   Per-turn (not per-tool-call) granularity — when `consul_inbox` drains multiple instructions into the same model turn, every instruction's Result gets the same tool list. Honest reporting at the model-turn boundary; true per-tool-call attribution needs model-cooperative emission which is a follow-up.
