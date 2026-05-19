@@ -871,6 +871,156 @@ mod ba_port_tests {
 }
 
 // ---------------------------------------------------------------------------
+// SpecChallengeScorerPort + SpecChallengeStorePort (A13 Phase 2)
+// ---------------------------------------------------------------------------
+
+/// Per-category semantic-quality score from the
+/// [`SpecChallengeScorerPort`]. Range `[0.0, 1.0]`; clamped at
+/// construction.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct SpecChallengeScore {
+    pub assumptions: f32,
+    pub gaps: f32,
+    pub ambiguities: f32,
+    pub alternatives_considered: f32,
+    pub constraints_not_satisfied: f32,
+}
+
+impl SpecChallengeScore {
+    /// Construct, clamping every axis to `[0.0, 1.0]`.
+    #[must_use]
+    pub fn new(
+        assumptions: f32,
+        gaps: f32,
+        ambiguities: f32,
+        alternatives_considered: f32,
+        constraints_not_satisfied: f32,
+    ) -> Self {
+        Self {
+            assumptions: assumptions.clamp(0.0, 1.0),
+            gaps: gaps.clamp(0.0, 1.0),
+            ambiguities: ambiguities.clamp(0.0, 1.0),
+            alternatives_considered: alternatives_considered.clamp(0.0, 1.0),
+            constraints_not_satisfied: constraints_not_satisfied.clamp(0.0, 1.0),
+        }
+    }
+
+    /// True when **every** axis meets or exceeds `threshold`. The
+    /// Catastrophic-class gate requires this; lower classes use
+    /// the deterministic completeness check alone.
+    #[must_use]
+    pub fn all_axes_above(&self, threshold: f32) -> bool {
+        self.assumptions >= threshold
+            && self.gaps >= threshold
+            && self.ambiguities >= threshold
+            && self.alternatives_considered >= threshold
+            && self.constraints_not_satisfied >= threshold
+    }
+
+    /// Minimum axis value across all five. Useful for ranking + for
+    /// rendering "weakest axis" in operator dashboards.
+    #[must_use]
+    pub fn min_axis(&self) -> f32 {
+        [
+            self.assumptions,
+            self.gaps,
+            self.ambiguities,
+            self.alternatives_considered,
+            self.constraints_not_satisfied,
+        ]
+        .into_iter()
+        .fold(f32::INFINITY, f32::min)
+    }
+}
+
+/// Errors `SpecChallengeScorerPort` can surface.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum SpecChallengeScorerError {
+    /// Backend (LLM / sidecar) failed transiently.
+    Backend(String),
+    /// Scorer returned a response the adapter couldn't decode into
+    /// [`SpecChallengeScore`].
+    Malformed(String),
+    /// Operator-side misconfiguration (missing model handle, bad
+    /// API key). Surfaces at startup or first call.
+    Configuration(String),
+}
+
+impl std::fmt::Display for SpecChallengeScorerError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Backend(msg) => write!(f, "spec challenge scorer backend error: {msg}"),
+            Self::Malformed(msg) => write!(f, "spec challenge scorer output malformed: {msg}"),
+            Self::Configuration(msg) => {
+                write!(f, "spec challenge scorer configuration error: {msg}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for SpecChallengeScorerError {}
+
+/// A13 — semantic-quality score for a [`SpecChallenge`].
+///
+/// Per `docs/a13-spec-challenge.md` §3, **Catastrophic-class** work
+/// requires both deterministic completeness AND every axis of this
+/// scorer ≥ operator-configured threshold. Irreversible and below
+/// pass on completeness alone — this port is *not* consulted for
+/// non-Catastrophic gates, which keeps the auditor-call budget
+/// bounded.
+///
+/// Implementations are typically LLM-as-judge (a separate-model-
+/// family challenge agent per the spec). Sync trait to match
+/// [`AuditorPort`] / [`EvalScorerPort`]; adapters bridge async
+/// backends via a sidecar runtime.
+pub trait SpecChallengeScorerPort: Send + Sync {
+    fn score(
+        &self,
+        challenge: &crate::spec_challenge::SpecChallenge,
+    ) -> Result<SpecChallengeScore, SpecChallengeScorerError>;
+}
+
+/// Errors `SpecChallengeStorePort` can surface.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum SpecChallengeStoreError {
+    StoreUnavailable(String),
+    Malformed(String),
+}
+
+impl std::fmt::Display for SpecChallengeStoreError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::StoreUnavailable(msg) => {
+                write!(f, "spec challenge store unavailable: {msg}")
+            }
+            Self::Malformed(msg) => write!(f, "spec challenge record malformed: {msg}"),
+        }
+    }
+}
+
+impl std::error::Error for SpecChallengeStoreError {}
+
+/// A13 — persist + retrieve [`SpecChallenge`] artifacts.
+///
+/// The hook layer (Phase 3) saves every emitted challenge so the
+/// proof chain can re-verify "what did the agent challenge before
+/// it acted?" later. One file per [`WorkId`](crate::spec_challenge::WorkId)
+/// per spec §6; re-emissions for the same `work_id` overwrite
+/// (the typical case is "agent re-attempted after the first
+/// challenge was rejected").
+pub trait SpecChallengeStorePort: Send + Sync {
+    fn save(
+        &self,
+        challenge: &crate::spec_challenge::SpecChallenge,
+    ) -> Result<(), SpecChallengeStoreError>;
+
+    fn load(
+        &self,
+        work_id: &crate::spec_challenge::WorkId,
+    ) -> Result<Option<crate::spec_challenge::SpecChallenge>, SpecChallengeStoreError>;
+}
+
+// ---------------------------------------------------------------------------
 // Tests — A12 Phase 3b port surface
 // ---------------------------------------------------------------------------
 
@@ -931,6 +1081,99 @@ mod eval_port_tests {
         let original = EvalRunStoreError::Malformed("corrupt".to_string());
         let json = serde_json::to_string(&original).unwrap();
         let parsed: EvalRunStoreError = serde_json::from_str(&json).unwrap();
+        assert_eq!(original, parsed);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests — A13 Phase 2 port surface
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod spec_challenge_port_tests {
+    use super::*;
+
+    #[test]
+    fn spec_challenge_score_clamps_axes_to_range() {
+        let s = SpecChallengeScore::new(1.7, -0.3, 0.5, 0.5, 0.5);
+        assert!((s.assumptions - 1.0).abs() < f32::EPSILON);
+        assert!((s.gaps - 0.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn all_axes_above_true_when_uniform_at_threshold() {
+        let s = SpecChallengeScore::new(0.7, 0.7, 0.7, 0.7, 0.7);
+        assert!(s.all_axes_above(0.7));
+        assert!(s.all_axes_above(0.5));
+        assert!(!s.all_axes_above(0.8));
+    }
+
+    #[test]
+    fn all_axes_above_false_when_any_axis_below() {
+        let s = SpecChallengeScore::new(0.9, 0.9, 0.9, 0.4, 0.9);
+        assert!(!s.all_axes_above(0.5));
+    }
+
+    #[test]
+    fn min_axis_returns_smallest() {
+        let s = SpecChallengeScore::new(0.9, 0.4, 0.8, 0.7, 0.6);
+        assert!((s.min_axis() - 0.4).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn scorer_error_display_names_each_variant() {
+        assert!(SpecChallengeScorerError::Backend("timeout".to_string())
+            .to_string()
+            .contains("timeout"));
+        assert!(SpecChallengeScorerError::Malformed("bad axes".to_string())
+            .to_string()
+            .contains("malformed"));
+        assert!(SpecChallengeScorerError::Configuration("no model".to_string())
+            .to_string()
+            .contains("configuration"));
+    }
+
+    #[test]
+    fn store_error_display_names_each_variant() {
+        assert!(SpecChallengeStoreError::StoreUnavailable("disk".to_string())
+            .to_string()
+            .contains("unavailable"));
+        assert!(SpecChallengeStoreError::Malformed("schema".to_string())
+            .to_string()
+            .contains("malformed"));
+    }
+
+    #[test]
+    fn errors_implement_std_error_error() {
+        fn assert_error<E: std::error::Error>() {}
+        assert_error::<SpecChallengeScorerError>();
+        assert_error::<SpecChallengeStoreError>();
+    }
+
+    #[test]
+    fn errors_are_send_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<SpecChallengeScorerError>();
+        assert_send_sync::<SpecChallengeStoreError>();
+        assert_send_sync::<SpecChallengeScore>();
+    }
+
+    #[test]
+    fn ports_can_be_used_through_trait_objects() {
+        fn _take_scorer(_: Box<dyn SpecChallengeScorerPort>) {}
+        fn _take_store(_: Box<dyn SpecChallengeStorePort>) {}
+    }
+
+    #[test]
+    fn errors_roundtrip_through_json() {
+        let original = SpecChallengeScorerError::Backend("rate limited".to_string());
+        let json = serde_json::to_string(&original).unwrap();
+        let parsed: SpecChallengeScorerError = serde_json::from_str(&json).unwrap();
+        assert_eq!(original, parsed);
+
+        let original = SpecChallengeStoreError::Malformed("corrupt".to_string());
+        let json = serde_json::to_string(&original).unwrap();
+        let parsed: SpecChallengeStoreError = serde_json::from_str(&json).unwrap();
         assert_eq!(original, parsed);
     }
 }
