@@ -282,13 +282,21 @@ mod tests {
             issue("FPCRM-99", "completely unrelated payment processing fix", Some("FPCRM"), Some(8), Some(3), &["payments"]),
         ];
         let s = suggest_for_title("fix login session bug", Some("FPCRM"), &history, DEFAULT_K);
-        // Three login issues match; the payments one is below MIN_SIMILARITY → dropped.
-        assert_eq!(s.neighbours_considered, 3);
-        // Median of [3, 3, 5] = 3.
+        // Query tokens (after stop-word drop): {login, session, bug}.
+        // - FPCRM-1: {login, authentication, bug} → ∩=2, ∪=4 → 0.5 ✓
+        // - FPCRM-2: {login, validation, error} → ∩=1, ∪=5 → 0.2 ✓
+        // - FPCRM-3: {login, redirect, after, sso} → ∩=1, ∪=6 → 0.167 ✗
+        // - FPCRM-99: {completely, unrelated, payment, processing} → 0 ✗
+        // So FPCRM-1 + FPCRM-2 clear MIN_SIMILARITY = 0.2; the other
+        // two drop. This pins the similarity filter — the test name
+        // `suggest_picks_top_k_neighbours_by_similarity` is still
+        // accurate, the two that survive are the top-K by similarity.
+        assert_eq!(s.neighbours_considered, 2);
+        // Median of [3, 3] = 3.
         assert_eq!(s.suggested_estimate, Some(3));
-        // Mode of [2, 2, 2] = 2.
+        // Mode of [2, 2] = 2.
         assert_eq!(s.suggested_priority, Some(2));
-        // "bug" appears 3/3 → kept; "auth" 2/3 = 67% → kept (>= ceil(3/2)=2).
+        // "bug" appears 2/2 → kept; "auth" 2/2 → kept (>= ceil(2/2)=1).
         assert!(s.suggested_labels.contains(&"bug".to_string()));
         assert!(s.suggested_labels.contains(&"auth".to_string()));
         // "payments" not on any neighbour → dropped.

@@ -1641,15 +1641,20 @@ mod tests {
         let output = process(&input, &mut state, &workflows, &test_fs());
         // Read should always be allowed
         assert!(output.blocked.is_none());
-        // Should record the phase read
-        assert!(state.has_phase_been_read("linear", "claim.md"));
 
         if claim_path.exists() {
-            // File exists on disk → trusted → workflow advances
+            // File exists on disk → trusted → record happens AND
+            // workflow advances.
+            assert!(state.has_phase_been_read("linear", "claim.md"));
             let wf_state = state.workflows.get("linear").unwrap();
             assert!(wf_state.is_phase_complete("claim"));
         } else {
-            // File doesn't exist (CI/other machines) → untrusted → no advance
+            // File doesn't exist (CI/other machines) → untrusted →
+            // NO record AND no advance (production
+            // `phase_gate::process` rejects untrusted phase reads
+            // up-front to prevent phantom phase completion via
+            // crafted paths).
+            assert!(!state.has_phase_been_read("linear", "claim.md"));
             assert!(
                 state.workflows.get("linear").is_none()
                     || !state
@@ -1683,14 +1688,19 @@ mod tests {
         };
         let output = process(&input, &mut state, &workflows, &test_fs());
         assert!(output.blocked.is_none());
-        assert!(state.has_phase_been_read("linear", "claim.md"));
 
         if claim_path.exists() {
-            // File exists → trusted → should advance "linear" (from path), not "some-other-skill"
+            // File exists → trusted → recorded AND advances
+            // "linear" (from path), not "some-other-skill".
+            assert!(state.has_phase_been_read("linear", "claim.md"));
             let wf_state = state.workflows.get("linear").unwrap();
             assert!(wf_state.is_phase_complete("claim"));
+        } else {
+            // File doesn't exist → untrusted → not recorded, no
+            // advance. Pins the security hardening: untrusted
+            // reads never touch state.
+            assert!(!state.has_phase_been_read("linear", "claim.md"));
         }
-        // If file doesn't exist → untrusted → no advance (still OK, phases_read recorded)
     }
 
     #[test]
@@ -1860,42 +1870,49 @@ mod tests {
 
     #[test]
     fn test_untrusted_file_does_not_advance_workflow() {
-        // A phase file path that doesn't exist on disk should be recorded
-        // in phases_read but should NOT advance workflow state (untrusted).
+        // A phase file path that doesn't exist on disk is
+        // untrusted: it must NOT be recorded in phases_read AND
+        // must NOT advance workflow state. The early-return-on-
+        // !trusted in `process` is the security boundary that
+        // prevents crafted paths from inflating phase progress.
         let mut state = SessionState::new("sess-1");
         state.set_active_skill("linear");
         let mut workflows = HashMap::new();
         workflows.insert("linear".to_string(), test_workflow());
 
-        // Use a path with a nonexistent parent dir so the file definitely doesn't exist
-        let fake_path = dirs::home_dir()
-            .unwrap()
-            .join(".claude/skills/linear/phases/claim.md");
+        // Construct a path that definitely doesn't exist (random
+        // suffix) so we exercise the untrusted branch regardless
+        // of which dev machine runs the test.
+        let fake_path = dirs::home_dir().unwrap().join(format!(
+            ".claude/skills/linear/phases/nonexistent-{}.md",
+            uuid::Uuid::new_v4(),
+        ));
+        assert!(!fake_path.exists(), "test setup: random path should not exist");
 
-        // Only run this test if the file does NOT exist (CI environments)
-        // On dev machines where the file exists, skip this variant
-        if !fake_path.exists() {
-            let input = HookInput {
-                tool_name: Some("Read".to_string()),
-                tool_input: Some(serde_json::json!({
-                    "file_path": fake_path.to_string_lossy()
-                })),
-                ..Default::default()
-            };
-            let output = process(&input, &mut state, &workflows, &test_fs());
-            assert!(output.blocked.is_none());
-            // File recorded for tracking
-            assert!(state.has_phase_been_read("linear", "claim.md"));
-            // But workflow NOT advanced (untrusted — file doesn't exist)
-            assert!(
-                state.workflows.get("linear").is_none()
-                    || !state
-                        .workflows
-                        .get("linear")
-                        .unwrap()
-                        .is_phase_complete("claim")
-            );
-        }
+        let input = HookInput {
+            tool_name: Some("Read".to_string()),
+            tool_input: Some(serde_json::json!({
+                "file_path": fake_path.to_string_lossy()
+            })),
+            ..Default::default()
+        };
+        let output = process(&input, &mut state, &workflows, &test_fs());
+        assert!(output.blocked.is_none());
+        // Untrusted → not recorded.
+        let file_name = fake_path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap();
+        assert!(!state.has_phase_been_read("linear", file_name));
+        // Untrusted → no workflow advance.
+        assert!(
+            state.workflows.get("linear").is_none()
+                || !state
+                    .workflows
+                    .get("linear")
+                    .unwrap()
+                    .is_phase_complete("claim")
+        );
     }
 
     #[test]

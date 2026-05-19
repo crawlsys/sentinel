@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Fixed
+- **`phase_gate` + `issue_suggest` tests — 4 failures across the test suite** (2026-05-18). All four were stale test expectations, not production bugs.
+
+  **Three `phase_gate` tests** (`test_read_on_phase_file_records_and_advances`, `test_read_derives_skill_from_path`, `test_untrusted_file_does_not_advance_workflow`) asserted that `state.has_phase_been_read(...)` was `true` on the untrusted-file branch (file doesn't exist on disk, e.g. on CI / dev machines without the matching skill installed). This contradicts the security-correct production behavior: `phase_gate::process` deliberately returns early on `!info.trusted` WITHOUT calling `state.record_phase_read` so crafted paths can't inflate phase progress by recording phantom reads. Test docstrings were similarly stale ("File recorded for tracking" → untrusted files are NOT recorded). Updated all three tests to assert `!has_phase_been_read` on the untrusted branch; the `test_untrusted_file_does_not_advance_workflow` test rewritten to use a UUID-suffixed nonexistent path so it always exercises the untrusted branch regardless of dev-machine state. The tests now genuinely pin the security boundary instead of expecting it to be absent.
+
+  **One `issue_suggest` test** (`suggest_picks_top_k_neighbours_by_similarity`) expected 3 neighbours to survive the `MIN_SIMILARITY = 0.2` filter, but actually only 2 do: the third historical issue `"fix login redirect after sso"` shares only `"login"` with the query `"fix login session bug"` (token sets {login, redirect, after, sso} ∩ {login, session, bug} = 1; ∪ = 6; Jaccard = 0.167, below threshold). Updated the assertion from `3` → `2` and the comment to walk through the per-issue Jaccard math. The test still pins the documented behavior (`suggest_picks_top_k_neighbours_by_similarity`) — the surviving two ARE the top-K by similarity; the third drops because it doesn't clear the floor.
+
+  Full sentinel workspace: **1227 tests passing, 0 failed** (up from 1223 passing / 4 failed). Both touched files clippy-clean. No production code changed.
+
 ### Added
 - **A13 Phase 3 — `spec_challenge_gate` PreToolUse hook** (2026-05-18). Application-layer commit of the spec-challenge track. The hook reads `input.extra.spec_challenge` (the agent-emitted [`SpecChallenge`] JSON), runs the deterministic completeness check, persists via [`SpecChallengeStorePort`] (best-effort), and — for Catastrophic-class work — consults [`SpecChallengeScorerPort`] to verify every axis is above an operator-configured threshold. Reversibility-class-graded per spec §3 so the auditor-call budget stays bounded.
 
