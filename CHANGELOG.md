@@ -6,6 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added
+- **Sentinel handles inbound `EscalationAck` — closes the exactly-once arc on the consumer side** (2026-05-18). Third and final slice of the exactly-once escalation arc that started with the protocol message + consulate-side emission. Sentinel's WS recv loop now processes the `ConsularMessage::EscalationAck` consul sends back after forwarding each escalation to its bus; per-instruction acks (`InstructionAcknowledged` / `InstructionResult`) drop the matching entry from the persistent outbox.
+
+  **New `PersistentEscalationOutbox::remove_by_instruction_id`** (~+50 lines + 6 unit tests). Same atomic-rewrite + `fs2`-locked discipline as `remove_head`: open RW, take exclusive lock, scan all lines, remove the FIRST entry whose `EscalationKind` carries the target `instruction_id` (only `InstructionAck` and `InstructionResult` do; lifecycle variants are skipped), rewrite the remainder.
+
+  **`client.rs::handle_inbound` new arm**: `ConsularMessage::EscalationAck(ack)` iterates `ack.acks`, calls `outbox.remove_by_instruction_id` for each per-instruction key. Lifecycle keys (`SessionBlocked` / `SessionCompleted` / `SessionFailed`) are no-ops in this slice — matching them by `(session_id, *_at_ms)` requires storing the sent-time timestamp on disk, which is the next refactor in this arc.
+
+  **Delivery semantic now**: dual-track at-least-once with ack-driven cleanup. The existing post-`send_signed` `remove_head` stays as the head-of-line happy-path remover; the new ack-driven `remove_by_instruction_id` is the architectural seam for the next operator who wants true exactly-once-with-timeout-retry. Both paths converge on the same end state — whichever fires first wins; the other no-ops on empty queue.
+
+  6 new outbox tests cover non-FIFO middle removal, the `InstructionResult` headline case (cancel-loopback), no-match, missing file, lifecycle-skip, and dup-defense. Sentinel-legatus: 40 tests passing (34 prior + 6 new). Whole workspace remains green. Zero net-new clippy errors over the pre-existing baseline.
+
+  **The exactly-once arc is now end-to-end** (modulo lifecycle keys): protocol message (slice 1) + consulate emits acks (slice 2) + sentinel removes outbox entries on ack (slice 3). Operators using the cancel-roundtrip path now have ack-driven cleanup. The post-send `remove_head` stays for graceful degradation when consul peers don't emit acks.
+
+  **Out of scope (lifecycle-key support)**: storing the sent-time `*_at_ms` on each outbox entry so `remove_by_key(SessionBlocked { session_id, detected_at_ms })` can match by the full key. Currently lifecycle escalations rely on the at-least-once `remove_head` only. Acceptable — lifecycle events are self-correcting; per-instruction events are the ones that need exactly-once semantics for the operator's audit-trail correctness.
+
 ### Fixed
 - **`phase_gate` + `issue_suggest` tests — 4 failures across the test suite** (2026-05-18). All four were stale test expectations, not production bugs.
 
