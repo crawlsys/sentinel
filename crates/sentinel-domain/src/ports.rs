@@ -662,6 +662,146 @@ pub trait RequirementMatrixPort: Send + Sync {
 }
 
 // ---------------------------------------------------------------------------
+// EvalScorerPort + EvalRunStorePort (A12 Phase 3b)
+// ---------------------------------------------------------------------------
+
+/// Errors `EvalScorerPort` can surface.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum EvalScorerError {
+    /// Backend call (LLM API, sidecar process, etc.) failed —
+    /// network, timeout, rate limit, malformed upstream response.
+    /// Recorded on the [`EvalCaseResult`](crate::eval::EvalCaseResult)
+    /// `error` field; the run continues with the next case.
+    Backend(String),
+    /// Scorer produced output the adapter couldn't decode into
+    /// [`EvalAxisScore`](crate::eval::EvalAxisScore)s. Distinct from
+    /// [`Self::Backend`]: this means the LLM returned a response but
+    /// the response didn't conform to the expected schema.
+    Malformed(String),
+    /// Operator-side misconfiguration — missing model handle, bad
+    /// API key, unknown judge profile. Surfaces at startup or on
+    /// the first scoring call; not a per-case transient.
+    Configuration(String),
+}
+
+impl std::fmt::Display for EvalScorerError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Backend(msg) => write!(f, "eval scorer backend error: {msg}"),
+            Self::Malformed(msg) => write!(f, "eval scorer output malformed: {msg}"),
+            Self::Configuration(msg) => write!(f, "eval scorer configuration error: {msg}"),
+        }
+    }
+}
+
+impl std::error::Error for EvalScorerError {}
+
+/// A12 — score a candidate output against an [`EvalCase`](crate::eval::EvalCase).
+///
+/// Per `docs/a12-external-benchmarks.md` §3.5. The benchmark runner
+/// (Phase 3c) calls `score` once per `(case, candidate_output)` pair
+/// after dispatching the case through the A2 capability router. The
+/// returned [`EvalScore`](crate::eval::EvalScore) carries per-axis
+/// raw scores + the rubric-weighted composite, ready to embed in
+/// the [`EvalCaseResult`](crate::eval::EvalCaseResult).
+///
+/// Implementations are typically LLM-as-judge (Phase 3d ships a Rig-
+/// based adapter using the A2 router to pick the judge model), but
+/// nothing in this trait constrains the strategy — a deterministic
+/// regex scorer, a human-in-the-loop tool, or a hybrid would all
+/// satisfy the contract.
+///
+/// **Read the case's [`ScoringRubric`](crate::eval::ScoringRubric)**:
+/// the scorer is responsible for honoring per-case weight overrides
+/// (operators may override the BA-default rubric per archetype). The
+/// trait passes the full [`EvalCase`](crate::eval::EvalCase) so the
+/// adapter has access to the rubric, the gold artifact, gold
+/// outcomes, and the stakeholder brief without the application
+/// layer having to plumb them separately.
+///
+/// `Send + Sync` because the scorer is shared across runner
+/// iterations (one scorer instance per run); implementations that
+/// rely on internal mutex-guarded state (HTTP connection pools,
+/// rate-limit counters) are expected to manage that internally.
+pub trait EvalScorerPort: Send + Sync {
+    /// Score a single candidate output against the case's rubric.
+    /// `run_id` is echoed into the returned
+    /// [`EvalScore`](crate::eval::EvalScore) for downstream
+    /// aggregation; the scorer itself is stateless across runs.
+    fn score(
+        &self,
+        case: &crate::eval::EvalCase,
+        candidate_output: &str,
+        run_id: &crate::eval::EvalRunId,
+    ) -> Result<crate::eval::EvalScore, EvalScorerError>;
+}
+
+/// Errors `EvalRunStorePort` can surface.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum EvalRunStoreError {
+    /// Backing store (filesystem, database) unreachable. Per-run
+    /// persistence failures are surfaced to the runner so the
+    /// operator sees them; the in-memory
+    /// [`EvalRunResult`](crate::eval::EvalRunResult) is still
+    /// returned from the use case so the CLI can render the data
+    /// even when persistence fails.
+    StoreUnavailable(String),
+    /// Stored payload was malformed (corrupt file, schema drift).
+    /// Distinct from `Ok(None)` for `load`: `Malformed` means the
+    /// record exists but is unreadable.
+    Malformed(String),
+}
+
+impl std::fmt::Display for EvalRunStoreError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::StoreUnavailable(msg) => write!(f, "eval run store unavailable: {msg}"),
+            Self::Malformed(msg) => write!(f, "eval run record malformed: {msg}"),
+        }
+    }
+}
+
+impl std::error::Error for EvalRunStoreError {}
+
+/// A12 — persist + retrieve [`EvalRunResult`](crate::eval::EvalRunResult)
+/// records.
+///
+/// Per spec §3.5. Phase 3d ships the JSONL implementation under
+/// `~/.claude/sentinel/state/ba-corpus/runs/{run_id}.json` (one
+/// JSON file per run — runs are append-only, never edited). The
+/// CLI (Phase 3e) reads from this port to render `sentinel eval
+/// show <run-id>` and `sentinel eval list-runs`.
+///
+/// `save` is write-once-per-run: callers persist the run after the
+/// runner finishes all cases. There's no per-case write API on this
+/// port — the runner accumulates in memory and persists the full
+/// result at the end. This keeps the storage layer simple and the
+/// run record atomically consistent.
+pub trait EvalRunStorePort: Send + Sync {
+    /// Persist a complete run. Idempotent: if a record with the
+    /// same `run_id` already exists, the implementation MAY
+    /// overwrite (e.g., a re-run replaces the prior attempt) or
+    /// reject; the JSONL adapter overwrites since runs are
+    /// produced by an explicit operator action and the typical
+    /// case is "retry after a backend fix".
+    fn save(&self, run: &crate::eval::EvalRunResult) -> Result<(), EvalRunStoreError>;
+
+    /// Load a single run by id. Returns `Ok(None)` when the run
+    /// doesn't exist (vs. [`EvalRunStoreError::Malformed`] when it
+    /// exists but can't be parsed).
+    fn load(
+        &self,
+        run_id: &crate::eval::EvalRunId,
+    ) -> Result<Option<crate::eval::EvalRunResult>, EvalRunStoreError>;
+
+    /// Enumerate every persisted run id. Used by `sentinel eval
+    /// list-runs`. Ordering is implementation-defined — operators
+    /// rendering the list typically sort by `completed_at` after
+    /// hydrating via [`Self::load`].
+    fn list_run_ids(&self) -> Result<Vec<crate::eval::EvalRunId>, EvalRunStoreError>;
+}
+
+// ---------------------------------------------------------------------------
 // Tests — BA1 + BA3 port surface
 // ---------------------------------------------------------------------------
 
@@ -726,6 +866,71 @@ mod ba_port_tests {
         let original = RequirementMatrixError::UnknownOrchestration("xyz".to_string());
         let json = serde_json::to_string(&original).unwrap();
         let parsed: RequirementMatrixError = serde_json::from_str(&json).unwrap();
+        assert_eq!(original, parsed);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests — A12 Phase 3b port surface
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod eval_port_tests {
+    use super::*;
+
+    #[test]
+    fn scorer_error_display_names_each_variant() {
+        assert!(EvalScorerError::Backend("timeout".to_string())
+            .to_string()
+            .contains("timeout"));
+        assert!(EvalScorerError::Malformed("bad axes".to_string())
+            .to_string()
+            .contains("malformed"));
+        assert!(EvalScorerError::Configuration("no model".to_string())
+            .to_string()
+            .contains("configuration"));
+    }
+
+    #[test]
+    fn run_store_error_display_names_each_variant() {
+        assert!(EvalRunStoreError::StoreUnavailable("disk".to_string())
+            .to_string()
+            .contains("unavailable"));
+        assert!(EvalRunStoreError::Malformed("schema".to_string())
+            .to_string()
+            .contains("malformed"));
+    }
+
+    #[test]
+    fn errors_implement_std_error_error() {
+        fn assert_error<E: std::error::Error>() {}
+        assert_error::<EvalScorerError>();
+        assert_error::<EvalRunStoreError>();
+    }
+
+    #[test]
+    fn errors_are_send_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<EvalScorerError>();
+        assert_send_sync::<EvalRunStoreError>();
+    }
+
+    #[test]
+    fn ports_can_be_used_through_trait_objects() {
+        fn _take_scorer(_: Box<dyn EvalScorerPort>) {}
+        fn _take_run_store(_: Box<dyn EvalRunStorePort>) {}
+    }
+
+    #[test]
+    fn errors_roundtrip_through_json() {
+        let original = EvalScorerError::Backend("rate limited".to_string());
+        let json = serde_json::to_string(&original).unwrap();
+        let parsed: EvalScorerError = serde_json::from_str(&json).unwrap();
+        assert_eq!(original, parsed);
+
+        let original = EvalRunStoreError::Malformed("corrupt".to_string());
+        let json = serde_json::to_string(&original).unwrap();
+        let parsed: EvalRunStoreError = serde_json::from_str(&json).unwrap();
         assert_eq!(original, parsed);
     }
 }
