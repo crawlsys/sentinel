@@ -18,6 +18,7 @@ pub mod cycle_time_prediction;
 pub mod dedupe;
 pub mod deploy_freq;
 pub mod engine;
+pub mod eval_run;
 pub mod evidence_adapters;
 pub mod gate;
 pub mod hook_metrics;
