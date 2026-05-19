@@ -12,7 +12,7 @@ use sentinel_domain::state::SessionState;
 use sentinel_domain::workflow::{SkillSteps, SkillWorkflow};
 
 use sentinel_domain::capability::VendorClass;
-use sentinel_domain::ports::{AuditorPort, LlmPort, VectorStorePort};
+use sentinel_domain::ports::{AuditorPort, LlmPort, ReversibilityClassifierPort, VectorStorePort};
 use sentinel_infrastructure::ba_config::BaEnforcementConfig;
 use sentinel_infrastructure::capability_router::TomlCapabilityRouter;
 use sentinel_infrastructure::dry_run_auditor::RigAuditor;
@@ -21,6 +21,9 @@ use sentinel_infrastructure::memory_mcp_client::MemoryMcpClient;
 use sentinel_infrastructure::provenance_store::JsonlProvenanceStore;
 use sentinel_infrastructure::requirement_matrix::FilesystemRequirementMatrix;
 use sentinel_infrastructure::reversibility::LayeredReversibilityClassifier;
+use sentinel_infrastructure::spec_challenge_config::SpecChallengeConfig;
+use sentinel_infrastructure::spec_challenge_scorer::LlmSpecChallengeScorer;
+use sentinel_infrastructure::spec_challenge_store::FilesystemSpecChallengeStore;
 use std::sync::Arc;
 
 pub async fn run(event: &str, matcher: Option<&str>, standalone: bool) -> Result<()> {
@@ -306,6 +309,59 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
                 "ba-enforcement.toml load failed; falling back to ObserveOnly for both BA hooks"
             );
             BaEnforcementConfig::observe_only()
+        }
+    };
+
+    // A13 Phase 5: spec-challenge gate plumbing. Three optional
+    // adapters; the hook degrades gracefully when any are absent.
+    // - FilesystemSpecChallengeStore writes challenge artifacts to
+    //   ~/.claude/sentinel/state/spec-challenges/{work_id}.json so
+    //   the proof chain can re-verify "what did the agent challenge
+    //   before it acted?" later.
+    // - LlmSpecChallengeScorer is opt-in via SENTINEL_SPEC_CHALLENGE_SCORER_*
+    //   env vars; absent → Catastrophic-class challenges fall through
+    //   to allow() (the hook denies if mode is blocking + class needs
+    //   scoring + no scorer, surfacing operator-facing guidance).
+    // - SpecChallengeConfig loads mode + threshold from shipped
+    //   defaults overridden by ~/.claude/sentinel/config/spec-challenge.toml.
+    let spec_challenge_store: Option<Arc<FilesystemSpecChallengeStore>> =
+        match FilesystemSpecChallengeStore::with_default_path() {
+            Ok(s) => Some(Arc::new(s)),
+            Err(err) => {
+                tracing::info!(
+                    ?err,
+                    "FilesystemSpecChallengeStore::with_default_path failed; A13 audit lift inert"
+                );
+                None
+            }
+        };
+    let spec_challenge_scorer: Option<Arc<LlmSpecChallengeScorer>> =
+        match LlmSpecChallengeScorer::from_env() {
+            Ok(s) => Some(Arc::new(s)),
+            Err(err) => {
+                tracing::info!(
+                    ?err,
+                    "LlmSpecChallengeScorer::from_env failed; A13 Catastrophic-class semantic scoring inert"
+                );
+                None
+            }
+        };
+    let spec_challenge_config_overrides_path = dirs::home_dir().map(|h| {
+        h.join(".claude")
+            .join("sentinel")
+            .join("config")
+            .join("spec-challenge.toml")
+    });
+    let spec_challenge_config = match SpecChallengeConfig::with_shipped_and_overrides(
+        spec_challenge_config_overrides_path.as_deref(),
+    ) {
+        Ok(c) => c,
+        Err(err) => {
+            tracing::warn!(
+                ?err,
+                "spec-challenge.toml load failed; falling back to ObserveOnly"
+            );
+            SpecChallengeConfig::observe_only()
         }
     };
 
@@ -611,6 +667,39 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
                         )
                     });
                 output.merge(&trace_output);
+            }
+
+            // A13 spec-challenge gate — fires for ALL tools but the hook
+            // itself short-circuits to allow() for TriviallyReversible.
+            // Class is derived from the same reversibility classifier the
+            // A3 / tool_usage gates consult, so all four gates agree on the
+            // class for any given (tool_name, tool_input).
+            {
+                let tool_name = input.tool_name.as_deref().unwrap_or("");
+                let tool_input_owned = input
+                    .tool_input
+                    .clone()
+                    .unwrap_or_else(|| serde_json::json!({}));
+                let class = reversibility_classifier.classify(tool_name, &tool_input_owned);
+                let store_ref: Option<&dyn sentinel_domain::ports::SpecChallengeStorePort> =
+                    spec_challenge_store.as_deref().map(|s| s as _);
+                let scorer_ref: Option<&dyn sentinel_domain::ports::SpecChallengeScorerPort> =
+                    spec_challenge_scorer.as_deref().map(|s| s as _);
+                let challenge_output =
+                    time_and_record(ctx.fs, &mk_ctx("spec_challenge_gate"), || {
+                        hooks::spec_challenge_gate::process_with_threshold(
+                            &input,
+                            class,
+                            store_ref,
+                            scorer_ref,
+                            spec_challenge_config.mode,
+                            spec_challenge_config.catastrophic_axis_threshold,
+                        )
+                    });
+                output.merge(&challenge_output);
+                if challenge_output.blocked == Some(true) {
+                    state.record_blocked();
+                }
             }
 
             // A3 dry-run-then-commit gate — fires for ALL tools (the hook
