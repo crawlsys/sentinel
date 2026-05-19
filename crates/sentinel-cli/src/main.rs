@@ -378,6 +378,45 @@ enum EvalAction {
         #[arg(long, value_name = "PATH")]
         dir: Option<String>,
     },
+
+    /// Execute a benchmark run: load cases, replay recorded
+    /// candidate outputs through the configured `EvalScorerPort`
+    /// (LLM-as-judge by default), persist the run record under
+    /// `~/.claude/sentinel/eval/ba-corpus/runs/{run_id}.json`.
+    ///
+    /// Phase 3e is replay-only — supply candidate outputs in a JSON
+    /// file mapping `case_id -> output_text`. Live-LLM dispatch
+    /// through the A2 router is a future phase.
+    Run {
+        /// Name for this run. Persisted at
+        /// `{runs_dir}/{run_id}.json`. Same id on a re-run overwrites.
+        #[arg(long, value_name = "ID")]
+        run_id: String,
+
+        /// Path to a JSON file mapping `case_id -> candidate_output`.
+        #[arg(long, value_name = "PATH")]
+        candidates: String,
+
+        /// Restrict the run to specific `case_id`s. Repeatable.
+        /// When unset, every case in the corpus runs.
+        #[arg(long, value_name = "ID")]
+        case_id: Vec<String>,
+
+        /// Override the corpus base directory
+        /// (default: `~/.claude/sentinel/eval/ba-corpus/`).
+        #[arg(long, value_name = "PATH")]
+        corpus_dir: Option<String>,
+
+        /// Override the run-store directory
+        /// (default: `~/.claude/sentinel/eval/ba-corpus/runs/`).
+        #[arg(long, value_name = "PATH")]
+        runs_dir: Option<String>,
+
+        /// Emit the full `EvalRunResult` as JSON instead of a
+        /// human-readable summary.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// `sentinel federation` subcommands (Apollo-style federation tooling, M2.4 + M2.8).
@@ -788,6 +827,21 @@ async fn main() -> anyhow::Result<()> {
         Commands::Mcp => mcp_cmd::run().await,
         Commands::Eval { action } => match action {
             EvalAction::List { json, dir } => eval_cmd::list(json, dir),
+            EvalAction::Run {
+                run_id,
+                candidates,
+                case_id,
+                corpus_dir,
+                runs_dir,
+                json,
+            } => eval_cmd::run(eval_cmd::RunArgs {
+                run_id,
+                candidates_path: candidates,
+                case_ids: case_id,
+                corpus_dir,
+                runs_dir,
+                json,
+            }),
         },
         Commands::Legatus { action } => match action {
             LegatusAction::Connect {
