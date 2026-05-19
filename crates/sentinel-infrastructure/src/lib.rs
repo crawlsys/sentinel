@@ -13,6 +13,7 @@ pub mod dry_run_auditor;
 pub mod env;
 pub mod error_log;
 pub mod eval_corpus;
+pub mod eval_run_store;
 pub mod evidence_browserbase;
 pub mod evidence_filesystem;
 pub mod filesystem;
