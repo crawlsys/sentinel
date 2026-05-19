@@ -153,7 +153,7 @@ mod tests {
     #[test]
     fn test_process_not_git_repo() {
         let input = HookInput {
-            cwd: Some("/tmp/not-a-repo".to_string()),
+            cwd: Some("/proc/self".to_string()),
             prompt: Some("fix the code".to_string()),
             ..Default::default()
         };

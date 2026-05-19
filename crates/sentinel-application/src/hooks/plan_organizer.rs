@@ -417,7 +417,39 @@ mod tests {
     #[test]
     fn find_repo_root_returns_none_outside_a_repo() {
         let tmp = TempDir::new().unwrap();
-        let found = find_repo_root(&RealFs, tmp.path());
+
+        struct NoGitFs;
+        impl FileSystemPort for NoGitFs {
+            fn home_dir(&self) -> Option<PathBuf> {
+                None
+            }
+            fn read_to_string(&self, _: &Path) -> anyhow::Result<String> {
+                unreachable!("find_repo_root only calls exists")
+            }
+            fn write(&self, _: &Path, _: &[u8]) -> anyhow::Result<()> {
+                unreachable!("find_repo_root only calls exists")
+            }
+            fn create_dir_all(&self, _: &Path) -> anyhow::Result<()> {
+                unreachable!("find_repo_root only calls exists")
+            }
+            fn read_dir(&self, _: &Path) -> anyhow::Result<Vec<PathBuf>> {
+                unreachable!("find_repo_root only calls exists")
+            }
+            fn exists(&self, _: &Path) -> bool {
+                false
+            }
+            fn is_dir(&self, _: &Path) -> bool {
+                false
+            }
+            fn metadata(&self, _: &Path) -> anyhow::Result<std::fs::Metadata> {
+                unreachable!("find_repo_root only calls exists")
+            }
+            fn append(&self, _: &Path, _: &[u8]) -> anyhow::Result<()> {
+                unreachable!("find_repo_root only calls exists")
+            }
+        }
+
+        let found = find_repo_root(&NoGitFs, tmp.path());
         assert!(found.is_none());
     }
 
