@@ -7,6 +7,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 ## [Unreleased]
 
 ### Added
+- **Per-turn tool-call trace surfaces in `InstructionResult` summary** (2026-05-19). Item E from the Phase 2 punch list. Every `PostToolUse` during a turn now appends the tool name to a per-session trace file; the `Stop` hook drains it and prepends a `[tools: A, B, C]` tag to the per-instruction Result summary, so the operator sees which tools the legatus actually ran in response to their relayed instruction.
+
+  Per-turn (not per-tool-call) granularity — when `consul_inbox` drains multiple instructions into the same model turn, every instruction's Result gets the same tool list. Honest reporting at the model-turn boundary; true per-tool-call attribution needs model-cooperative emission which is a follow-up.
+
+  **New `legatus_client::note_tool_call` + `take_tool_calls`** mirror the disk-FIFO discipline of the existing pending-instructions + turn-signals trace files: path-traversal guard, best-effort I/O, drain-on-read. **`evidence_collector` PostToolUse hook** records every tool call into this trace. **`execution_log` Stop hook** dedups while preserving first-seen order, formats `[tools: …]` (max 6 distinct, then `…+N more`), 140-char-capped to match the existing summary ceiling. **`stop_failure`** also drains the trace so failure paths don't leak stale state.
+
+  Tests: +4 unit tests on `legatus_client` (roundtrip, blank-skip, path-traversal guard, missing-session), +4 on `enrich_summary_with_tool_calls` (no-tools-passthrough, dedup, 6-cap, blank-base). Workspace 2330 / 0 failed.
+
 - **BA-orchestrator Phase 2 — `ba_orchestrator::draft` use case** (2026-05-19). Second commit of the BA-orchestrator track. The orchestrator's job: turn a [`BaDraftRequest`] into a [`BaRecommendation`] — the envelope sentinel's BA1 / BA3 / A13 gates were designed to verify. Application-layer; consumes the existing `LlmPort` so any rig-backed adapter works as the LLM substrate.
 
   **New `crates/sentinel-application/src/ba_orchestrator.rs`** (~430 lines + 13 unit tests). `pub async fn draft<L: LlmPort + ?Sized>(request, llm, agent_id, clock) -> Result<BaRecommendation, BaOrchestratorError>` is the production entry point; `draft_with_model` lets callers override `LlmModel` + `max_tokens` (defaults: `Opus`, `4096`). One LLM call per draft — the system prompt instructs the model to emit a single JSON document with the recommendation body, citations, requirement_refs, AND a complete A13 `SpecChallenge`. The response is parsed strictly: missing or malformed fields surface as `BaOrchestratorError::Malformed` rather than silently degraded outputs.
