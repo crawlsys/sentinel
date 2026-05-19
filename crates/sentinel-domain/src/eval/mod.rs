@@ -18,10 +18,12 @@
 //! iteration.
 
 pub mod case;
+pub mod result;
 pub mod rubric;
 
 pub use case::{
     CaseProvenance, EvalCase, EvalCaseId, EvalRunId, GoldArtifact, GoldOutcomes, RedactionLevel,
     SourceCorpus,
 };
+pub use result::{EvalCaseResult, EvalRunResult};
 pub use rubric::{EvalAxis, EvalAxisScore, EvalScore, ScoringRubric};
