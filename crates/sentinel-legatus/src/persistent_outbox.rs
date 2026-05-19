@@ -37,11 +37,25 @@
 //!
 //! ## Storage shape
 //!
-//! Same as `PersistentInbox`: one JSON-encoded `EscalationKind`
-//! per line at `~/.claude/sentinel/state/legatus-escalations.jsonl`.
-//! Same fs2 advisory-lock discipline. Same atomic-rewrite strategy
+//! One JSON-encoded `OutboxItem` per line at
+//! `~/.claude/sentinel/state/legatus-escalations.jsonl`. An
+//! `OutboxItem` wraps the `EscalationKind` with the `at_ms`
+//! timestamp captured at append-time, which is reused at envelope-
+//! send time so the wire timestamp matches what the outbox stored.
+//! That stable per-entry timestamp is what makes lifecycle-key
+//! matching (`SessionBlocked { session_id, detected_at_ms }`)
+//! possible from the operator-ack side. Same fs2 advisory-lock
+//! discipline as `PersistentInbox`. Same atomic-rewrite strategy
 //! for `remove_head` (read all lines under lock, skip the first
 //! valid entry, rewrite the remainder).
+//!
+//! **Backwards compat**: pre-refactor on-disk entries are bare
+//! `EscalationKind` JSON (no wrapper). [`parse_entry`] tries the
+//! new wrapped shape first, then falls back to bare-event with
+//! `at_ms = 0`. Pre-refactor lifecycle entries therefore cannot
+//! match a fresh ack (timestamp 0 won't equal any real ack
+//! timestamp), so they fall through to the `remove_head` cleanup
+//! path. Acceptable on a per-machine upgrade.
 
 #![allow(clippy::incompatible_msrv)]
 
@@ -51,6 +65,7 @@ use std::path::{Path, PathBuf};
 
 use consul_domain::identity::InstructionId;
 use fs2::FileExt;
+use serde::{Deserialize, Serialize};
 use tracing::warn;
 
 use crate::handle::EscalationKind;
@@ -68,6 +83,48 @@ pub fn default_outbox_path() -> Option<PathBuf> {
             .join("state")
             .join("legatus-escalations.jsonl"),
     )
+}
+
+/// One queued escalation, with the timestamp that was captured at
+/// `LegatusHandle::escalate` time and is reused at envelope-send
+/// time. The match key for lifecycle-keyed `EscalationAck`s.
+///
+/// Wire format (one per line): `{"event": {...}, "at_ms": ...}`.
+/// Construction via [`OutboxItem::new`].
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct OutboxItem {
+    /// The escalation payload (variant + variant-specific fields).
+    pub event: EscalationKind,
+    /// Unix-epoch milliseconds at append time. Reused as the
+    /// envelope's `*_at_ms` for lifecycle variants and as the
+    /// outbox-side half of the `(session_id, *_at_ms)` ack key.
+    /// Defaults to `0` when deserializing legacy bare-`EscalationKind`
+    /// entries (see crate docs).
+    #[serde(default)]
+    pub at_ms: u64,
+}
+
+impl OutboxItem {
+    /// Build an item from an event + timestamp.
+    #[must_use]
+    pub const fn new(event: EscalationKind, at_ms: u64) -> Self {
+        Self { event, at_ms }
+    }
+}
+
+/// Discriminant for lifecycle-keyed removal. Mirrors the
+/// per-variant arms of `EscalationKind` that lack
+/// `instruction_id`. Used by [`PersistentEscalationOutbox::remove_lifecycle`]
+/// to authorise removal of an entry whose at-ms timestamp matches
+/// an inbound `EscalationAck` lifecycle key.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LifecycleKind {
+    /// Matches [`EscalationKind::Blocked`].
+    Blocked,
+    /// Matches [`EscalationKind::Completed`].
+    Completed,
+    /// Matches [`EscalationKind::Failed`].
+    Failed,
 }
 
 /// File-backed FIFO queue of pending escalation events.
@@ -95,25 +152,25 @@ impl PersistentEscalationOutbox {
         &self.path
     }
 
-    /// Append an `EscalationKind` to the back of the queue.
-    /// Creates the parent dir + file on demand. Best-effort:
-    /// I/O errors are logged at `warn` so the
+    /// Append an [`OutboxItem`] to the back of the queue. Creates
+    /// the parent dir + file on demand. Best-effort: I/O errors
+    /// are logged at `warn` so the
     /// [`crate::handle::LegatusHandle::escalate`] caller never
     /// blocks on a transient filesystem issue. The in-memory
     /// mpsc still gets the event regardless of disk-write outcome,
     /// so a successful escalation just degrades to non-durable
     /// rather than failing.
-    pub fn append(&self, event: &EscalationKind) {
+    pub fn append(&self, item: &OutboxItem) {
         if let Some(parent) = self.path.parent() {
             if let Err(err) = std::fs::create_dir_all(parent) {
                 warn!(?err, ?parent, "persistent_outbox: create_dir_all failed");
                 return;
             }
         }
-        let line = match serde_json::to_string(event) {
+        let line = match serde_json::to_string(item) {
             Ok(s) => s,
             Err(err) => {
-                warn!(?err, "persistent_outbox: event serialize failed");
+                warn!(?err, "persistent_outbox: item serialize failed");
                 return;
             }
         };
@@ -205,10 +262,10 @@ impl PersistentEscalationOutbox {
         removed
     }
 
-    /// Read all queued events without removing them. Called on
+    /// Read all queued items without removing them. Called on
     /// daemon startup to replay pending escalations through the
     /// mpsc channel before entering the select loop.
-    pub fn snapshot(&self) -> Vec<EscalationKind> {
+    pub fn snapshot(&self) -> Vec<OutboxItem> {
         let file = match OpenOptions::new().read(true).open(&self.path) {
             Ok(f) => f,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
@@ -221,14 +278,45 @@ impl PersistentEscalationOutbox {
             warn!(?err, "persistent_outbox: lock_shared failed");
             return Vec::new();
         }
-        let out: Vec<EscalationKind> = BufReader::new(&file)
+        let out: Vec<OutboxItem> = BufReader::new(&file)
             .lines()
             .map_while(Result::ok)
             .filter(|l| !l.trim().is_empty())
-            .filter_map(|l| serde_json::from_str::<EscalationKind>(&l).ok())
+            .filter_map(|l| parse_entry(&l))
             .collect();
         let _ = file.unlock();
         out
+    }
+
+    /// Remove the first queued entry whose `(LifecycleKind, at_ms)`
+    /// pair matches. Used by the inbound-`EscalationAck` handler
+    /// when consul confirms processing of a `SessionBlocked` /
+    /// `SessionCompleted` / `SessionFailed` event keyed by
+    /// `(session_id, *_at_ms)`.
+    ///
+    /// Per-instruction variants (`InstructionAck` /
+    /// `InstructionResult`) are NOT matched by this method — use
+    /// [`Self::remove_by_instruction_id`] for those.
+    ///
+    /// Returns `true` when a matching entry was found + removed;
+    /// `false` on empty queue / missing file / lock failure /
+    /// no match.
+    pub fn remove_lifecycle(&self, kind: LifecycleKind, at_ms: u64) -> bool {
+        let file = match OpenOptions::new().read(true).write(true).open(&self.path) {
+            Ok(f) => f,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return false,
+            Err(err) => {
+                warn!(?err, path = ?self.path, "persistent_outbox: open(rw) failed");
+                return false;
+            },
+        };
+        if let Err(err) = file.lock_exclusive() {
+            warn!(?err, "persistent_outbox: lock_exclusive failed");
+            return false;
+        }
+        let removed = remove_lifecycle_under_lock(&file, kind, at_ms);
+        let _ = file.unlock();
+        removed
     }
 
     /// Number of queued events. Counts only lines that parse
@@ -268,13 +356,13 @@ fn remove_by_instruction_id_under_lock(
             remainder.push(line);
             continue;
         }
-        match serde_json::from_str::<EscalationKind>(&line) {
-            Ok(event) if event_matches_instruction_id(&event, instruction_id) => {
+        match parse_entry(&line) {
+            Some(item) if event_matches_instruction_id(&item.event, instruction_id) => {
                 removed = true;
             },
-            Ok(_) => remainder.push(line),
-            Err(err) => {
-                warn!(?err, "persistent_outbox: dropping malformed line during remove_by_instruction_id");
+            Some(_) => remainder.push(line),
+            None => {
+                warn!(line = %line, "persistent_outbox: dropping malformed line during remove_by_instruction_id");
             },
         }
     }
@@ -306,6 +394,59 @@ fn event_matches_instruction_id(event: &EscalationKind, target: InstructionId) -
     }
 }
 
+/// Atomic-rewrite shape for lifecycle-key removal. Matches the
+/// first entry whose `(variant, at_ms)` pair equals the input.
+fn remove_lifecycle_under_lock(mut file: &File, kind: LifecycleKind, at_ms: u64) -> bool {
+    let lines: Vec<String> = BufReader::new(file).lines().map_while(Result::ok).collect();
+
+    let mut removed = false;
+    let mut remainder: Vec<String> = Vec::with_capacity(lines.len());
+
+    for line in lines {
+        if line.trim().is_empty() {
+            continue;
+        }
+        if removed {
+            remainder.push(line);
+            continue;
+        }
+        match parse_entry(&line) {
+            Some(item) if item.at_ms == at_ms && event_matches_lifecycle(&item.event, kind) => {
+                removed = true;
+            },
+            Some(_) => remainder.push(line),
+            None => {
+                warn!(line = %line, "persistent_outbox: dropping malformed line during remove_lifecycle");
+            },
+        }
+    }
+
+    if let Err(err) = file.seek(SeekFrom::Start(0)) {
+        warn!(?err, "persistent_outbox: seek(0) failed during remove_lifecycle");
+        return removed;
+    }
+    if let Err(err) = file.set_len(0) {
+        warn!(?err, "persistent_outbox: set_len(0) failed during remove_lifecycle");
+        return removed;
+    }
+    for line in &remainder {
+        if let Err(err) = writeln!(file, "{line}") {
+            warn!(?err, "persistent_outbox: remainder writeln failed during remove_lifecycle");
+            return removed;
+        }
+    }
+    removed
+}
+
+fn event_matches_lifecycle(event: &EscalationKind, kind: LifecycleKind) -> bool {
+    matches!(
+        (event, kind),
+        (EscalationKind::Blocked { .. }, LifecycleKind::Blocked)
+            | (EscalationKind::Completed { .. }, LifecycleKind::Completed)
+            | (EscalationKind::Failed { .. }, LifecycleKind::Failed)
+    )
+}
+
 fn remove_head_under_lock(mut file: &File) -> bool {
     let lines: Vec<String> = BufReader::new(file).lines().map_while(Result::ok).collect();
 
@@ -320,10 +461,10 @@ fn remove_head_under_lock(mut file: &File) -> bool {
         if line.trim().is_empty() {
             continue;
         }
-        match serde_json::from_str::<EscalationKind>(&line) {
-            Ok(_) => removed = true,
-            Err(err) => {
-                warn!(?err, "persistent_outbox: dropping malformed line");
+        match parse_entry(&line) {
+            Some(_) => removed = true,
+            None => {
+                warn!(line = %line, "persistent_outbox: dropping malformed line");
             }
         }
     }
@@ -348,6 +489,21 @@ fn remove_head_under_lock(mut file: &File) -> bool {
     removed
 }
 
+/// Parse one disk line into an `OutboxItem`. Tries the new
+/// wrapped shape first; falls back to a bare `EscalationKind`
+/// (legacy pre-refactor entry) with `at_ms = 0`. Returns `None`
+/// only when neither shape parses — the line is then logged
+/// and dropped by the caller.
+fn parse_entry(line: &str) -> Option<OutboxItem> {
+    if let Ok(item) = serde_json::from_str::<OutboxItem>(line) {
+        return Some(item);
+    }
+    if let Ok(event) = serde_json::from_str::<EscalationKind>(line) {
+        return Some(OutboxItem { event, at_ms: 0 });
+    }
+    None
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
@@ -363,18 +519,54 @@ mod tests {
         PersistentEscalationOutbox::new(dir.path().join("escalations.jsonl"))
     }
 
-    fn ack(id: InstructionId) -> EscalationKind {
-        EscalationKind::InstructionAck { instruction_id: id }
+    /// Pre-refactor tests appended bare `EscalationKind`. The
+    /// helpers now wrap with a deterministic `at_ms = 0` since
+    /// instruction-id-keyed cases don't read the timestamp.
+    /// Lifecycle tests pass an explicit `at_ms` instead.
+    fn ack(id: InstructionId) -> OutboxItem {
+        OutboxItem::new(EscalationKind::InstructionAck { instruction_id: id }, 0)
     }
 
-    fn declined(id: InstructionId, reason: &str) -> EscalationKind {
-        EscalationKind::InstructionResult {
-            instruction_id: id,
-            outcome: InstructionOutcome::Declined {
-                reason: reason.into(),
+    fn declined(id: InstructionId, reason: &str) -> OutboxItem {
+        OutboxItem::new(
+            EscalationKind::InstructionResult {
+                instruction_id: id,
+                outcome: InstructionOutcome::Declined {
+                    reason: reason.into(),
+                },
+                summary: None,
             },
-            summary: None,
-        }
+            0,
+        )
+    }
+
+    fn lifecycle_completed(summary: &str, at_ms: u64) -> OutboxItem {
+        OutboxItem::new(
+            EscalationKind::Completed {
+                summary: Some(summary.into()),
+            },
+            at_ms,
+        )
+    }
+
+    fn lifecycle_blocked(at_ms: u64) -> OutboxItem {
+        OutboxItem::new(
+            EscalationKind::Blocked {
+                reason: consul_protocol::messages::BlockReason::PermissionDenied {
+                    tool: "Bash".into(),
+                },
+            },
+            at_ms,
+        )
+    }
+
+    fn lifecycle_failed(error: &str, at_ms: u64) -> OutboxItem {
+        OutboxItem::new(
+            EscalationKind::Failed {
+                error: error.into(),
+            },
+            at_ms,
+        )
     }
 
     #[test]
@@ -394,7 +586,7 @@ mod tests {
         outbox.append(&ack(id));
         let snap = outbox.snapshot();
         assert_eq!(snap.len(), 1);
-        match &snap[0] {
+        match &snap[0].event {
             EscalationKind::InstructionAck { instruction_id } => {
                 assert_eq!(*instruction_id, id);
             }
@@ -415,7 +607,7 @@ mod tests {
         let snap = outbox.snapshot();
         assert_eq!(snap.len(), 3);
         for (i, expected) in [a, b, c].iter().enumerate() {
-            match &snap[i] {
+            match &snap[i].event {
                 EscalationKind::InstructionAck { instruction_id } => {
                     assert_eq!(instruction_id, expected);
                 }
@@ -436,7 +628,7 @@ mod tests {
         assert!(outbox.remove_head());
         let snap = outbox.snapshot();
         assert_eq!(snap.len(), 1);
-        match &snap[0] {
+        match &snap[0].event {
             EscalationKind::InstructionAck { instruction_id } => {
                 assert_eq!(*instruction_id, b);
             }
@@ -472,7 +664,7 @@ mod tests {
 
         let snap = outbox.snapshot();
         assert_eq!(snap.len(), 2);
-        match (&snap[0], &snap[1]) {
+        match (&snap[0].event, &snap[1].event) {
             (
                 EscalationKind::InstructionAck {
                     instruction_id: head,
@@ -516,7 +708,7 @@ mod tests {
         outbox.append(&declined(id, "cancelled by operator: rollback"));
         let snap = outbox.snapshot();
         assert_eq!(snap.len(), 1);
-        match &snap[0] {
+        match &snap[0].event {
             EscalationKind::InstructionResult {
                 instruction_id,
                 outcome,
@@ -547,7 +739,7 @@ mod tests {
         let second = PersistentEscalationOutbox::new(path);
         let snap = second.snapshot();
         assert_eq!(snap.len(), 1);
-        match &snap[0] {
+        match &snap[0].event {
             EscalationKind::InstructionAck { instruction_id } => {
                 assert_eq!(*instruction_id, id);
             }
@@ -597,7 +789,7 @@ mod tests {
         assert!(outbox.remove_by_instruction_id(b));
         let snap = outbox.snapshot();
         assert_eq!(snap.len(), 1);
-        match &snap[0] {
+        match &snap[0].event {
             EscalationKind::InstructionAck { instruction_id } => {
                 assert_eq!(*instruction_id, a);
             },
@@ -638,13 +830,10 @@ mod tests {
     fn remove_by_instruction_id_skips_lifecycle_variants() {
         // Lifecycle variants (Blocked/Completed/Failed) don't
         // carry instruction_id — they're not matched by this
-        // method (deferred to the next refactor that stores the
-        // sent-time timestamp on disk).
+        // method. They have their own remove_lifecycle path.
         let dir = tempdir().unwrap();
         let outbox = outbox_at(&dir);
-        outbox.append(&EscalationKind::Completed {
-            summary: Some("done".into()),
-        });
+        outbox.append(&lifecycle_completed("done", 1000));
         // Any instruction id → no match because no entry carries one.
         assert!(!outbox.remove_by_instruction_id(InstructionId::new()));
         assert_eq!(outbox.len(), 1, "lifecycle entry should not be touched");
@@ -664,5 +853,104 @@ mod tests {
         assert_eq!(outbox.len(), 1, "second copy should remain");
         assert!(outbox.remove_by_instruction_id(id));
         assert!(outbox.is_empty());
+    }
+
+    // ----- remove_lifecycle ------------------------------------------------
+
+    #[test]
+    fn remove_lifecycle_matches_blocked_by_at_ms() {
+        let dir = tempdir().unwrap();
+        let outbox = outbox_at(&dir);
+        outbox.append(&lifecycle_blocked(1_000));
+        outbox.append(&lifecycle_blocked(2_000));
+
+        // Remove the second one — verifies non-FIFO removal by key.
+        assert!(outbox.remove_lifecycle(LifecycleKind::Blocked, 2_000));
+        let snap = outbox.snapshot();
+        assert_eq!(snap.len(), 1);
+        assert_eq!(snap[0].at_ms, 1_000);
+    }
+
+    #[test]
+    fn remove_lifecycle_matches_completed() {
+        let dir = tempdir().unwrap();
+        let outbox = outbox_at(&dir);
+        outbox.append(&lifecycle_completed("done", 5_000));
+        assert!(outbox.remove_lifecycle(LifecycleKind::Completed, 5_000));
+        assert!(outbox.is_empty());
+    }
+
+    #[test]
+    fn remove_lifecycle_matches_failed() {
+        let dir = tempdir().unwrap();
+        let outbox = outbox_at(&dir);
+        outbox.append(&lifecycle_failed("boom", 7_000));
+        assert!(outbox.remove_lifecycle(LifecycleKind::Failed, 7_000));
+        assert!(outbox.is_empty());
+    }
+
+    #[test]
+    fn remove_lifecycle_no_match_returns_false() {
+        let dir = tempdir().unwrap();
+        let outbox = outbox_at(&dir);
+        outbox.append(&lifecycle_completed("done", 1_000));
+        // Wrong at_ms.
+        assert!(!outbox.remove_lifecycle(LifecycleKind::Completed, 2_000));
+        // Wrong variant.
+        assert!(!outbox.remove_lifecycle(LifecycleKind::Blocked, 1_000));
+        assert_eq!(outbox.len(), 1, "neither failed match should remove");
+    }
+
+    #[test]
+    fn remove_lifecycle_skips_per_instruction_variants() {
+        // Per-instruction entries (no lifecycle variant) must be
+        // unaffected by remove_lifecycle even when at_ms accidentally
+        // collides with the instruction's own at_ms.
+        let dir = tempdir().unwrap();
+        let outbox = outbox_at(&dir);
+        outbox.append(&OutboxItem::new(
+            EscalationKind::InstructionAck {
+                instruction_id: InstructionId::new(),
+            },
+            42,
+        ));
+        assert!(!outbox.remove_lifecycle(LifecycleKind::Completed, 42));
+        assert_eq!(outbox.len(), 1);
+    }
+
+    #[test]
+    fn remove_lifecycle_on_missing_file_returns_false() {
+        let dir = tempdir().unwrap();
+        let outbox = outbox_at(&dir);
+        assert!(!outbox.remove_lifecycle(LifecycleKind::Completed, 1_000));
+    }
+
+    // ----- legacy on-disk shape (pre-refactor entries) --------------------
+
+    #[test]
+    fn legacy_bare_escalation_kind_lines_parse_with_at_ms_zero() {
+        // Pre-refactor on-disk shape was `EscalationKind` JSON
+        // directly. parse_entry must accept those and synthesize
+        // `at_ms = 0` so a post-upgrade daemon still drains the
+        // pending queue (matching is best-effort: lifecycle entries
+        // with at_ms=0 won't match a fresh ack timestamp, so they
+        // fall through to remove_head only).
+        let dir = tempdir().unwrap();
+        let outbox = outbox_at(&dir);
+        let path = outbox.path().to_path_buf();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let legacy = EscalationKind::Completed {
+            summary: Some("legacy".into()),
+        };
+        let legacy_json = serde_json::to_string(&legacy).unwrap();
+        std::fs::write(&path, format!("{legacy_json}\n")).unwrap();
+
+        let snap = outbox.snapshot();
+        assert_eq!(snap.len(), 1);
+        assert_eq!(snap[0].at_ms, 0);
+        match &snap[0].event {
+            EscalationKind::Completed { summary } => assert_eq!(summary.as_deref(), Some("legacy")),
+            other => panic!("expected Completed, got {other:?}"),
+        }
     }
 }

@@ -231,8 +231,11 @@ pub async fn run_connect_hosted(
                 count = pending.len(),
                 "replaying pending escalations from outbox",
             );
-            for event in pending {
-                if runtime.escalation_loopback.send(event).is_err() {
+            for item in pending {
+                // Replay preserves each item's original `at_ms`
+                // (read from disk) so the envelope timestamps and
+                // ack-match keys stay consistent across restart.
+                if runtime.escalation_loopback.send(item).is_err() {
                     warn!(
                         %session_id,
                         "loopback channel closed during outbox replay",
@@ -250,31 +253,37 @@ pub async fn run_connect_hosted(
                 break Some("cancelled");
             },
             escalation = runtime.escalation_rx.recv() => {
-                let Some(kind) = escalation else {
+                let Some(item) = escalation else {
                     // All escalation senders dropped — host went
                     // away. Stay alive; the loop continues serving
                     // the WS until cancel or the consulate closes.
                     continue;
                 };
-                let msg = match kind {
+                // Lifecycle variants reuse the item's `at_ms`
+                // (stamped at-append time) so the on-disk timestamp
+                // matches what goes on the wire — that's the half
+                // of the lifecycle-key ack-match contract that
+                // lives here.
+                let at_ms = item.at_ms;
+                let msg = match item.event {
                     EscalationKind::Blocked { reason } => {
                         ConsularMessage::SessionBlocked(SessionBlocked {
                             session_id,
                             reason,
-                            detected_at_ms: now_ms(),
+                            detected_at_ms: at_ms,
                         })
                     },
                     EscalationKind::Completed { summary } => {
                         ConsularMessage::SessionCompleted(SessionCompleted {
                             session_id,
-                            completed_at_ms: now_ms(),
+                            completed_at_ms: at_ms,
                             summary,
                         })
                     },
                     EscalationKind::Failed { error } => {
                         ConsularMessage::SessionFailed(SessionFailed {
                             session_id,
-                            failed_at_ms: now_ms(),
+                            failed_at_ms: at_ms,
                             error,
                         })
                     },
@@ -522,7 +531,14 @@ fn handle_inbound(msg: &ConsularMessage, session_id: SessionId, runtime: &Legatu
                     },
                     summary: None,
                 };
-                if runtime.escalation_loopback.send(event).is_err() {
+                // Stamp at-loopback time and persist BEFORE pushing
+                // through the loopback so the in-flight envelope
+                // and the on-disk entry share the same `at_ms`.
+                let item = crate::persistent_outbox::OutboxItem::new(event, now_ms());
+                if let Some(outbox) = runtime.outbox.as_ref() {
+                    outbox.append(&item);
+                }
+                if runtime.escalation_loopback.send(item).is_err() {
                     // Loopback receiver is the same as the loop's
                     // escalation_rx — if it's gone the loop has
                     // exited and we're shutting down. Silent skip.
@@ -580,12 +596,44 @@ fn handle_inbound(msg: &ConsularMessage, session_id: SessionId, runtime: &Legatu
                             removed_count += 1;
                         }
                     },
-                    EscalationKey::SessionBlocked { .. }
-                    | EscalationKey::SessionCompleted { .. }
-                    | EscalationKey::SessionFailed { .. } => {
-                        // Lifecycle keys: deferred to the next
-                        // refactor (needs sent-time timestamp on
-                        // disk to match).
+                    EscalationKey::SessionBlocked {
+                        session_id: ack_sid,
+                        detected_at_ms,
+                    } => {
+                        if *ack_sid == session_id
+                            && outbox.remove_lifecycle(
+                                crate::persistent_outbox::LifecycleKind::Blocked,
+                                *detected_at_ms,
+                            )
+                        {
+                            removed_count += 1;
+                        }
+                    },
+                    EscalationKey::SessionCompleted {
+                        session_id: ack_sid,
+                        completed_at_ms,
+                    } => {
+                        if *ack_sid == session_id
+                            && outbox.remove_lifecycle(
+                                crate::persistent_outbox::LifecycleKind::Completed,
+                                *completed_at_ms,
+                            )
+                        {
+                            removed_count += 1;
+                        }
+                    },
+                    EscalationKey::SessionFailed {
+                        session_id: ack_sid,
+                        failed_at_ms,
+                    } => {
+                        if *ack_sid == session_id
+                            && outbox.remove_lifecycle(
+                                crate::persistent_outbox::LifecycleKind::Failed,
+                                *failed_at_ms,
+                            )
+                        {
+                            removed_count += 1;
+                        }
                     },
                 }
             }
@@ -670,8 +718,8 @@ mod tests {
             &runtime,
         );
 
-        let event = runtime.escalation_rx.recv().await.expect("loopback fired");
-        match event {
+        let item = runtime.escalation_rx.recv().await.expect("loopback fired");
+        match item.event {
             EscalationKind::InstructionResult {
                 instruction_id,
                 outcome,
@@ -758,8 +806,8 @@ mod tests {
             &runtime,
         );
 
-        let event = runtime.escalation_rx.recv().await.unwrap();
-        match event {
+        let item = runtime.escalation_rx.recv().await.unwrap();
+        match item.event {
             EscalationKind::InstructionResult { outcome, .. } => match outcome {
                 InstructionOutcome::Declined { reason } => {
                     assert_eq!(reason, "cancelled by operator");
@@ -768,5 +816,151 @@ mod tests {
             },
             other => panic!("expected InstructionResult, got {other:?}"),
         }
+    }
+
+    /// EscalationAck with a lifecycle key removes the matching
+    /// outbox entry. The headline test for the lifecycle-key arc:
+    /// seed the outbox with a `Completed { at_ms }` entry, feed an
+    /// `EscalationAck { SessionCompleted { session_id, completed_at_ms: at_ms } }`,
+    /// expect the entry gone.
+    #[tokio::test]
+    async fn escalation_ack_with_lifecycle_key_removes_outbox_entry() {
+        use consul_domain::identity::SessionId;
+        use consul_protocol::messages::{ConsularMessage, EscalationAck, EscalationKey};
+        use tempfile::tempdir;
+
+        use crate::handle::{make_pair_with_persistence, EscalationKind};
+        use crate::persistent_inbox::PersistentInbox;
+        use crate::persistent_outbox::{OutboxItem, PersistentEscalationOutbox};
+
+        let dir = tempdir().unwrap();
+        let inbox = PersistentInbox::new(dir.path().join("inbox.jsonl"));
+        let outbox = PersistentEscalationOutbox::new(dir.path().join("outbox.jsonl"));
+        // Pre-seed the outbox with a Completed entry at a specific
+        // timestamp (mimics a daemon that escalated + crashed
+        // before the ack arrived).
+        let at_ms: u64 = 1_750_000_000_000;
+        outbox.append(&OutboxItem::new(
+            EscalationKind::Completed {
+                summary: Some("staging deploy ok".into()),
+            },
+            at_ms,
+        ));
+        let session_id = SessionId::new_v7();
+        let (_handle, runtime) = make_pair_with_persistence(inbox, outbox);
+
+        // Sanity: entry is there before the ack.
+        assert_eq!(runtime.outbox.as_ref().unwrap().len(), 1);
+
+        let ack = EscalationAck {
+            acks: vec![EscalationKey::SessionCompleted {
+                session_id,
+                completed_at_ms: at_ms,
+            }],
+        };
+        handle_inbound(&ConsularMessage::EscalationAck(ack), session_id, &runtime);
+
+        assert_eq!(
+            runtime.outbox.as_ref().unwrap().len(),
+            0,
+            "lifecycle-key ack should have removed the matching entry",
+        );
+    }
+
+    /// Lifecycle ack with the WRONG session_id is rejected — we
+    /// don't remove outbox entries on behalf of a different
+    /// legatus's acks. Defense against a buggy / lying peer.
+    #[tokio::test]
+    async fn escalation_ack_with_wrong_session_id_does_not_remove() {
+        use consul_domain::identity::SessionId;
+        use consul_protocol::messages::{ConsularMessage, EscalationAck, EscalationKey};
+        use tempfile::tempdir;
+
+        use crate::handle::{make_pair_with_persistence, EscalationKind};
+        use crate::persistent_inbox::PersistentInbox;
+        use crate::persistent_outbox::{OutboxItem, PersistentEscalationOutbox};
+
+        let dir = tempdir().unwrap();
+        let inbox = PersistentInbox::new(dir.path().join("inbox.jsonl"));
+        let outbox = PersistentEscalationOutbox::new(dir.path().join("outbox.jsonl"));
+        let at_ms: u64 = 1_750_000_000_000;
+        outbox.append(&OutboxItem::new(
+            EscalationKind::Failed {
+                error: "oops".into(),
+            },
+            at_ms,
+        ));
+        let our_session = SessionId::new_v7();
+        let foreign = SessionId::new_v7();
+        let (_handle, runtime) = make_pair_with_persistence(inbox, outbox);
+
+        let ack = EscalationAck {
+            acks: vec![EscalationKey::SessionFailed {
+                session_id: foreign,
+                failed_at_ms: at_ms,
+            }],
+        };
+        handle_inbound(&ConsularMessage::EscalationAck(ack), our_session, &runtime);
+
+        assert_eq!(
+            runtime.outbox.as_ref().unwrap().len(),
+            1,
+            "foreign session_id must not authorise removal",
+        );
+    }
+
+    /// Cancel-loopback must persist BEFORE pushing the loopback —
+    /// the on-disk `at_ms` is what a future EscalationAck will
+    /// match against, and the recv loop reuses the same value in
+    /// the envelope.
+    #[tokio::test]
+    async fn cancel_loopback_persists_declined_result_with_matching_at_ms() {
+        use consul_domain::identity::InstructionId;
+        use consul_protocol::messages::{
+            CancelInstruction, ConsularMessage, InstructionOutcome, RelayInstruction,
+        };
+        use tempfile::tempdir;
+
+        use crate::handle::{make_pair_with_persistence, EscalationKind};
+        use crate::persistent_inbox::PersistentInbox;
+        use crate::persistent_outbox::PersistentEscalationOutbox;
+
+        let dir = tempdir().unwrap();
+        let inbox = PersistentInbox::new(dir.path().join("inbox.jsonl"));
+        let outbox = PersistentEscalationOutbox::new(dir.path().join("outbox.jsonl"));
+        let queued = RelayInstruction {
+            instruction_id: InstructionId::new(),
+            target_session_id: consul_domain::identity::SessionId::new_v7(),
+            content: "deploy staging".into(),
+            destructive: false,
+        };
+        inbox.append(&queued);
+        let (_handle, mut runtime) = make_pair_with_persistence(inbox, outbox);
+
+        let cancel = CancelInstruction {
+            instruction_id: queued.instruction_id,
+            target_session_id: queued.target_session_id,
+            reason: Some("rollback".into()),
+        };
+        handle_inbound(
+            &ConsularMessage::CancelInstruction(cancel),
+            queued.target_session_id,
+            &runtime,
+        );
+
+        let loopback_item = runtime.escalation_rx.recv().await.expect("loopback fired");
+        match loopback_item.event {
+            EscalationKind::InstructionResult { outcome, .. } => {
+                assert!(matches!(outcome, InstructionOutcome::Declined { .. }));
+            },
+            other => panic!("expected InstructionResult, got {other:?}"),
+        }
+
+        // The disk entry's at_ms must equal the loopback item's
+        // at_ms — they're the same OutboxItem, just routed via
+        // memory and disk in parallel.
+        let snap = runtime.outbox.as_ref().unwrap().snapshot();
+        assert_eq!(snap.len(), 1, "loopback should append to outbox");
+        assert_eq!(snap[0].at_ms, loopback_item.at_ms);
     }
 }

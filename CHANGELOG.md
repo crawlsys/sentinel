@@ -7,6 +7,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 ## [Unreleased]
 
 ### Added
+- **Lifecycle-key support for `EscalationAck` — closes the last gap in the exactly-once arc** (2026-05-19). Sentinel can now remove `SessionBlocked` / `SessionCompleted` / `SessionFailed` outbox entries when consul acks them by `(session_id, *_at_ms)` — not just `InstructionAck` / `InstructionResult` keyed by `instruction_id`.
+
+  **New `OutboxItem { event: EscalationKind, at_ms: u64 }`** wrapper struct. The `at_ms` is captured at `LegatusHandle::escalate` time (or at-loopback time for the cancel-roundtrip path) AND used in the on-disk entry AND in the envelope the recv loop sends on the wire. That single stamp is what makes ack-matching possible across the network: the consulate's `EscalationKey { session_id, *_at_ms }` references the *same* timestamp the legatus already stored, so a lookup by key is unambiguous.
+
+  **Wire shape change on the outbox jsonl file**: was bare `EscalationKind` per line; is now `{"event": {...}, "at_ms": ...}`. `parse_entry` provides backwards-compat: tries the new wrapped shape first, falls back to bare-event with `at_ms = 0`. Legacy lifecycle entries lose ack-keyed cleanup (timestamp 0 won't match a real ack) but fall through to the existing `remove_head` post-send path. Acceptable on per-machine upgrade.
+
+  **New `PersistentEscalationOutbox::remove_lifecycle(LifecycleKind, at_ms)`** with the same atomic-rewrite + fs2-locked discipline as `remove_head` / `remove_by_instruction_id`. Scans entries, matches the first `(variant, at_ms)` pair, rewrites the remainder. New `LifecycleKind { Blocked, Completed, Failed }` enum (kept here in `sentinel-legatus` — adapter concern, not a protocol type).
+
+  **mpsc channel type change**: `mpsc::UnboundedSender<EscalationKind>` → `mpsc::UnboundedSender<OutboxItem>`. `LegatusHandle::escalate(event)` keeps the same public signature; the timestamp is stamped internally. The recv loop pops `OutboxItem`, builds the envelope using `item.at_ms` instead of a fresh `now_ms()`. The cancel-loopback in `handle_inbound` now persists to the outbox AND pushes to the loopback channel with the same `at_ms`, so the disk entry and the in-flight loopback share one canonical timestamp.
+
+  **`handle_inbound` lifecycle arms wired**: `EscalationKey::SessionBlocked` / `SessionCompleted` / `SessionFailed` now verify the ack's `session_id` matches the connection's own session_id (defence: don't honour acks on behalf of foreign legati), then call `outbox.remove_lifecycle(kind, *_at_ms)`. Per-instruction arms unchanged.
+
+  **Tests**: 7 new tests in `persistent_outbox` (lifecycle removal for each variant, no-match, variant-mismatch, missing file, per-instruction-skip, legacy-shape parse with `at_ms = 0`). 3 new tests in `client` (end-to-end lifecycle ack removal via `handle_inbound`, wrong-session_id rejection, cancel-loopback persists matching `at_ms`). 1 updated `escalate_succeeds_when_runtime_is_alive` test asserts the timestamp gets stamped. **Sentinel-legatus 52 tests passing, workspace 2295 / 0 failed.**
+
+  The exactly-once arc is now end-to-end for both per-instruction AND lifecycle events.
+
 - **`GET /legatus/pending` — operator-visible queue depths** (2026-05-19). New daemon HTTP route that reports the on-disk `inbox_pending` (operator instructions queued for the next Claude Code prompt) and `outbox_pending` (outbound escalations queued for WS send) as a single JSON snapshot. Drives `consul status`-style operator surfaces and the demo dashboard.
 
   **New `LegatusHandle::persistent_outbox()` accessor** symmetric with the existing `persistent_inbox()`. File I/O wrapped in `tokio::task::spawn_blocking` so the HTTP handler never stalls on the advisory lock. Returns `0`-counts for whichever direction lacks a persistent store (standalone-CLI legati without daemon-hosted disk state). Two new unit tests cover the accessor: seeded `make_pair_with_persistence` returns `Some(&outbox)` with live `len()` tracking through `escalate()`; `make_pair` + `make_pair_with_inbox` (outbox-less variants) honestly return `None` so the route returns `0` instead of panicking. Sentinel-legatus: 42 tests passing (40 prior + 2 new).

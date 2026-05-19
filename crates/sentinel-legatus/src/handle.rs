@@ -36,13 +36,14 @@
 //! emitted from the cancel loopback in
 //! [`crate::client::handle_inbound`].
 
+use chrono::Utc;
 use consul_domain::identity::InstructionId;
 use consul_protocol::messages::{BlockReason, InstructionOutcome, RelayInstruction};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
 use crate::persistent_inbox::PersistentInbox;
-use crate::persistent_outbox::PersistentEscalationOutbox;
+use crate::persistent_outbox::{OutboxItem, PersistentEscalationOutbox};
 
 /// Any event the legatus wants to send to its consul over the
 /// post-handshake WS. Covers session-lifecycle escalations
@@ -124,7 +125,7 @@ pub enum EscalationKind {
 /// escalations or pop the inbox.
 #[derive(Clone)]
 pub struct LegatusHandle {
-    escalation_tx: mpsc::UnboundedSender<EscalationKind>,
+    escalation_tx: mpsc::UnboundedSender<OutboxItem>,
     inbox: Option<PersistentInbox>,
     outbox: Option<PersistentEscalationOutbox>,
 }
@@ -147,8 +148,8 @@ pub struct LegatusHandle {
 /// `send_signed` so the disk stays in sync with what consul has
 /// actually received.
 pub struct LegatusRuntime {
-    pub(crate) escalation_rx: mpsc::UnboundedReceiver<EscalationKind>,
-    pub(crate) escalation_loopback: mpsc::UnboundedSender<EscalationKind>,
+    pub(crate) escalation_rx: mpsc::UnboundedReceiver<OutboxItem>,
+    pub(crate) escalation_loopback: mpsc::UnboundedSender<OutboxItem>,
     pub(crate) inbox: Option<PersistentInbox>,
     pub(crate) outbox: Option<PersistentEscalationOutbox>,
 }
@@ -243,11 +244,13 @@ impl LegatusHandle {
     /// Returns [`EscalationSendError`] when the legatus runtime
     /// receiver has been dropped.
     pub fn escalate(&self, event: EscalationKind) -> Result<(), EscalationSendError> {
+        let at_ms = now_ms();
+        let item = OutboxItem::new(event, at_ms);
         if let Some(outbox) = self.outbox.as_ref() {
-            outbox.append(&event);
+            outbox.append(&item);
         }
         self.escalation_tx
-            .send(event)
+            .send(item)
             .map_err(|_| EscalationSendError::RuntimeGone)
     }
 
@@ -283,6 +286,14 @@ impl LegatusHandle {
     pub fn persistent_outbox(&self) -> Option<&PersistentEscalationOutbox> {
         self.outbox.as_ref()
     }
+}
+
+/// Unix-epoch millis. Used at-append time by
+/// [`LegatusHandle::escalate`] and at-loopback time by the cancel
+/// handler in `client.rs` so the on-disk `at_ms` matches what the
+/// envelope carries on the wire.
+fn now_ms() -> u64 {
+    u64::try_from(Utc::now().timestamp_millis().max(0)).unwrap_or(0)
 }
 
 /// Returned by [`LegatusHandle::escalate`] when the runtime has
@@ -322,10 +333,13 @@ mod tests {
             })
             .unwrap();
         let received = runtime.escalation_rx.recv().await.unwrap();
-        match received {
+        match received.event {
             EscalationKind::Completed { summary } => assert_eq!(summary.as_deref(), Some("ok")),
             other => panic!("expected Completed, got {other:?}"),
         }
+        // escalate() stamps at_ms from now_ms(); the value isn't
+        // 0 unless the system clock is genuinely at 1970.
+        assert!(received.at_ms > 0, "at_ms should be stamped, got 0");
     }
 
     #[tokio::test]
@@ -388,7 +402,7 @@ mod tests {
         let inbox = PersistentInbox::new(dir.path().join("legatus-inbox.jsonl"));
         let outbox =
             PersistentEscalationOutbox::new(dir.path().join("legatus-escalations.jsonl"));
-        let (handle, _runtime) = make_pair_with_persistence(inbox, outbox);
+        let (handle, mut runtime) = make_pair_with_persistence(inbox, outbox);
 
         let outbox_ref = handle.persistent_outbox().expect("outbox is seeded");
         assert_eq!(outbox_ref.len(), 0);
@@ -401,6 +415,10 @@ mod tests {
         // escalate() appends to the outbox synchronously before the
         // mpsc send, so the count is visible immediately.
         assert_eq!(handle.persistent_outbox().unwrap().len(), 1);
+        // Drain the item so the bounded mpsc doesn't keep
+        // `runtime` and its outbox-borrowing futures alive past the
+        // test (the underlying file lives in `dir`, dropped at end).
+        let _ = runtime.escalation_rx.recv().await;
     }
 
     #[tokio::test]

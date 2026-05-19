@@ -38,7 +38,9 @@ pub use handle::{
     EscalationSendError, LegatusHandle, LegatusRuntime,
 };
 pub use persistent_inbox::{default_inbox_path, PersistentInbox};
-pub use persistent_outbox::{default_outbox_path, PersistentEscalationOutbox};
+pub use persistent_outbox::{
+    default_outbox_path, LifecycleKind, OutboxItem, PersistentEscalationOutbox,
+};
 
 // Convenience re-exports so dependents (e.g. sentinel-cli,
 // sentinel-application) can configure a legatus / build a
