@@ -24,12 +24,17 @@
 //!   `InstructionAck`, and the hook pops it whenever it's next
 //!   ready.
 //!
-//! Escalations remain in-memory because they are produced by hooks
-//! that have already returned to the operator's chat surface — if
-//! the daemon crashes between `escalate()` and the WS send, the
-//! event is "lost" only in the sense that the operator will see
-//! the next Stop hook fire instead. Persisting escalations is a
-//! future improvement (separate file, same lock discipline).
+//! Escalations are now also durable via
+//! [`crate::persistent_outbox::PersistentEscalationOutbox`]: when
+//! the daemon builds a handle through
+//! [`make_pair_with_persistence`], every `escalate()` call appends
+//! to a file-backed FIFO before sending to the mpsc, and the WS
+//! recv loop removes from disk only after `send_signed` succeeds.
+//! Closes the consistency gap where a daemon crash between
+//! `escalate()` and the WS send would lose the event — the
+//! headline case being the `InstructionResult { Declined }`
+//! emitted from the cancel loopback in
+//! [`crate::client::handle_inbound`].
 
 use consul_domain::identity::InstructionId;
 use consul_protocol::messages::{BlockReason, InstructionOutcome, RelayInstruction};
@@ -37,6 +42,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
 use crate::persistent_inbox::PersistentInbox;
+use crate::persistent_outbox::PersistentEscalationOutbox;
 
 /// Any event the legatus wants to send to its consul over the
 /// post-handshake WS. Covers session-lifecycle escalations
@@ -113,13 +119,14 @@ pub enum EscalationKind {
 /// Runtime control surface for an in-flight legatus connection.
 ///
 /// Cheap to clone — escalation channel is internally `Arc`'d and
-/// [`PersistentInbox`] is also `Clone` (just a path). Hand a clone
-/// to every IPC route or hook that needs to push escalations or
-/// pop the inbox.
+/// both persistent file-handles are also `Clone` (just paths).
+/// Hand a clone to every IPC route or hook that needs to push
+/// escalations or pop the inbox.
 #[derive(Clone)]
 pub struct LegatusHandle {
     escalation_tx: mpsc::UnboundedSender<EscalationKind>,
     inbox: Option<PersistentInbox>,
+    outbox: Option<PersistentEscalationOutbox>,
 }
 
 /// Receiver-side of the channels — owned by the connect loop and
@@ -133,47 +140,85 @@ pub struct LegatusHandle {
 /// loopback feeds the same `escalation_rx` the loop already
 /// drains, so there's exactly one path from "event" to "WS
 /// send" — no duplicated sink handling, no second select arm.
+///
+/// `outbox` is a clone of the same file-backed escalation queue
+/// the handle uses for persistence. The WS recv loop's escalation
+/// arm calls `outbox.remove_head()` after each successful
+/// `send_signed` so the disk stays in sync with what consul has
+/// actually received.
 pub struct LegatusRuntime {
     pub(crate) escalation_rx: mpsc::UnboundedReceiver<EscalationKind>,
     pub(crate) escalation_loopback: mpsc::UnboundedSender<EscalationKind>,
     pub(crate) inbox: Option<PersistentInbox>,
+    pub(crate) outbox: Option<PersistentEscalationOutbox>,
 }
 
-/// Construct a paired `(handle, runtime)` with no persistent inbox.
+/// Construct a paired `(handle, runtime)` with no persistent inbox
+/// or outbox.
+///
 /// Used by the standalone `sentinel legatus connect` path, where
-/// received instructions are log-only (no daemon to drain them).
+/// received instructions are log-only and outbound escalations
+/// are in-memory only (no daemon to drain them / persist them).
 #[must_use]
 pub fn make_pair() -> (LegatusHandle, LegatusRuntime) {
     let (escalation_tx, escalation_rx) = mpsc::unbounded_channel();
     let handle = LegatusHandle {
         escalation_tx: escalation_tx.clone(),
         inbox: None,
+        outbox: None,
     };
     let runtime = LegatusRuntime {
         escalation_rx,
         escalation_loopback: escalation_tx,
         inbox: None,
+        outbox: None,
     };
     (handle, runtime)
 }
 
 /// Construct a paired `(handle, runtime)` backed by the given
-/// [`PersistentInbox`].
-///
-/// Both halves share the same file path; the inbox is cheap to
-/// clone (path only). Used by the sentinel daemon path so
-/// received instructions survive daemon restart.
+/// [`PersistentInbox`] (no outbox). Used by tests that exercise
+/// inbox persistence without wanting outbox file I/O.
 #[must_use]
 pub fn make_pair_with_inbox(inbox: PersistentInbox) -> (LegatusHandle, LegatusRuntime) {
     let (escalation_tx, escalation_rx) = mpsc::unbounded_channel();
     let handle = LegatusHandle {
         escalation_tx: escalation_tx.clone(),
         inbox: Some(inbox.clone()),
+        outbox: None,
     };
     let runtime = LegatusRuntime {
         escalation_rx,
         escalation_loopback: escalation_tx,
         inbox: Some(inbox),
+        outbox: None,
+    };
+    (handle, runtime)
+}
+
+/// Construct a paired `(handle, runtime)` backed by both a
+/// [`PersistentInbox`] AND a [`PersistentEscalationOutbox`].
+///
+/// Used by the sentinel daemon path where both directions need
+/// crash-recovery: received instructions survive daemon restart
+/// (inbox) AND queued escalation events survive daemon restart
+/// before they reach the WS (outbox).
+#[must_use]
+pub fn make_pair_with_persistence(
+    inbox: PersistentInbox,
+    outbox: PersistentEscalationOutbox,
+) -> (LegatusHandle, LegatusRuntime) {
+    let (escalation_tx, escalation_rx) = mpsc::unbounded_channel();
+    let handle = LegatusHandle {
+        escalation_tx: escalation_tx.clone(),
+        inbox: Some(inbox.clone()),
+        outbox: Some(outbox.clone()),
+    };
+    let runtime = LegatusRuntime {
+        escalation_rx,
+        escalation_loopback: escalation_tx,
+        inbox: Some(inbox),
+        outbox: Some(outbox),
     };
     (handle, runtime)
 }
@@ -183,11 +228,24 @@ impl LegatusHandle {
     /// runtime has been dropped (connection closed / process
     /// shutting down).
     ///
+    /// Persistence: when this handle was built with a
+    /// [`PersistentEscalationOutbox`] (via
+    /// [`make_pair_with_persistence`]), the event is appended to
+    /// disk BEFORE being sent to the mpsc. A daemon crash between
+    /// this call and the WS recv loop's `send_signed` is therefore
+    /// recoverable on next daemon start — the loop's startup
+    /// replay drains the outbox into the mpsc as if the events
+    /// had just been escalated. Best-effort: disk-write failures
+    /// are logged at `warn` and the mpsc send still proceeds.
+    ///
     /// # Errors
     ///
     /// Returns [`EscalationSendError`] when the legatus runtime
     /// receiver has been dropped.
     pub fn escalate(&self, event: EscalationKind) -> Result<(), EscalationSendError> {
+        if let Some(outbox) = self.outbox.as_ref() {
+            outbox.append(&event);
+        }
         self.escalation_tx
             .send(event)
             .map_err(|_| EscalationSendError::RuntimeGone)

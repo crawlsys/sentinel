@@ -1,0 +1,484 @@
+//! File-backed outbox for sentinel→consul escalation events.
+//!
+//! Symmetric to [`crate::persistent_inbox::PersistentInbox`] (which
+//! handles operator→agent direction). This outbox handles the
+//! agent→operator direction: every `EscalationKind` event that
+//! [`LegatusHandle::escalate`] enqueues lands on disk before the WS
+//! recv loop signs+sends it, so a daemon crash between
+//! "escalation queued" and "WS bytes written" doesn't lose the event.
+//!
+//! [`LegatusHandle::escalate`]: crate::handle::LegatusHandle::escalate
+//!
+//! ## Why escalations need persistence
+//!
+//! Most escalations are self-correcting (heartbeats fire every 20s,
+//! `SessionCompleted` re-fires on the next Stop, etc.). The
+//! exception is per-instruction `InstructionResult` — emitted ONCE
+//! per cancel via the loopback channel in
+//! [`crate::client::handle_inbound`]. If the daemon crashes after
+//! `inbox.remove_by_id` succeeds but before the loopback's
+//! `InstructionResult { Declined }` reaches consul over the WS,
+//! consul never sees the closing record. Its
+//! `DispatchedInstructionsLog` entry stays at `cancelled_at = None`
+//! forever; the resolution layer keeps surfacing the cancelled
+//! instruction as a candidate next time the operator types
+//! "cancel". Real bug, fixed by this outbox.
+//!
+//! ## Delivery semantics
+//!
+//! At-least-once. On startup the WS recv loop replays any pending
+//! disk entries through the same code path as a fresh
+//! `escalate(...)` call. If the daemon crashed between "WS send
+//! succeeded" and "disk head removed", consul receives a duplicate
+//! event on the next daemon start. Consul-side handlers must be
+//! idempotent (they already are — every escalation kind is keyed
+//! by a stable id: instruction_id for `InstructionResult` /
+//! `InstructionAcknowledged`, session_id for the lifecycle events).
+//!
+//! ## Storage shape
+//!
+//! Same as `PersistentInbox`: one JSON-encoded `EscalationKind`
+//! per line at `~/.claude/sentinel/state/legatus-escalations.jsonl`.
+//! Same fs2 advisory-lock discipline. Same atomic-rewrite strategy
+//! for `remove_head` (read all lines under lock, skip the first
+//! valid entry, rewrite the remainder).
+
+#![allow(clippy::incompatible_msrv)]
+
+use std::fs::{File, OpenOptions};
+use std::io::{BufRead, BufReader, Seek, SeekFrom, Write};
+use std::path::{Path, PathBuf};
+
+use fs2::FileExt;
+use tracing::warn;
+
+use crate::handle::EscalationKind;
+
+/// Default daemon-global path for the persistent escalation outbox.
+///
+/// Returns `None` only when `dirs::home_dir()` can't be resolved —
+/// the daemon falls back to in-memory-only behavior in that case.
+#[must_use]
+pub fn default_outbox_path() -> Option<PathBuf> {
+    Some(
+        dirs::home_dir()?
+            .join(".claude")
+            .join("sentinel")
+            .join("state")
+            .join("legatus-escalations.jsonl"),
+    )
+}
+
+/// File-backed FIFO queue of pending escalation events.
+///
+/// Cloneable — internal state is just the path; every operation
+/// re-opens the file under a fresh advisory lock. Safe to clone
+/// into spawned tasks.
+#[derive(Clone, Debug)]
+pub struct PersistentEscalationOutbox {
+    path: PathBuf,
+}
+
+impl PersistentEscalationOutbox {
+    /// Construct over an explicit path. Used by tests + custom
+    /// deployments.
+    #[must_use]
+    pub const fn new(path: PathBuf) -> Self {
+        Self { path }
+    }
+
+    /// The path this outbox writes to. Public for diagnostics.
+    #[must_use]
+    #[allow(clippy::missing_const_for_fn)] // `PathBuf::as_path` is not const.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Append an `EscalationKind` to the back of the queue.
+    /// Creates the parent dir + file on demand. Best-effort:
+    /// I/O errors are logged at `warn` so the
+    /// [`crate::handle::LegatusHandle::escalate`] caller never
+    /// blocks on a transient filesystem issue. The in-memory
+    /// mpsc still gets the event regardless of disk-write outcome,
+    /// so a successful escalation just degrades to non-durable
+    /// rather than failing.
+    pub fn append(&self, event: &EscalationKind) {
+        if let Some(parent) = self.path.parent() {
+            if let Err(err) = std::fs::create_dir_all(parent) {
+                warn!(?err, ?parent, "persistent_outbox: create_dir_all failed");
+                return;
+            }
+        }
+        let line = match serde_json::to_string(event) {
+            Ok(s) => s,
+            Err(err) => {
+                warn!(?err, "persistent_outbox: event serialize failed");
+                return;
+            }
+        };
+        let mut file = match OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)
+        {
+            Ok(f) => f,
+            Err(err) => {
+                warn!(?err, path = ?self.path, "persistent_outbox: open(append) failed");
+                return;
+            }
+        };
+        if let Err(err) = file.lock_exclusive() {
+            warn!(?err, "persistent_outbox: lock_exclusive failed");
+            return;
+        }
+        let result = writeln!(file, "{line}");
+        let _ = file.unlock();
+        if let Err(err) = result {
+            warn!(?err, "persistent_outbox: append write failed");
+        }
+    }
+
+    /// Remove the oldest queued event. Called by the WS recv loop
+    /// after a successful `send_signed` of that event. Returns
+    /// `true` if a head entry was removed, `false` on empty queue
+    /// / missing file / lock failure.
+    ///
+    /// Same atomic-rewrite discipline as `PersistentInbox::try_pop`:
+    /// open RW under exclusive lock, read all lines, drop the
+    /// first valid one, rewrite the remainder. Concurrent
+    /// `append`s serialize on the same lock.
+    pub fn remove_head(&self) -> bool {
+        let file = match OpenOptions::new().read(true).write(true).open(&self.path) {
+            Ok(f) => f,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return false,
+            Err(err) => {
+                warn!(?err, path = ?self.path, "persistent_outbox: open(rw) failed");
+                return false;
+            }
+        };
+        if let Err(err) = file.lock_exclusive() {
+            warn!(?err, "persistent_outbox: lock_exclusive failed");
+            return false;
+        }
+        let removed = remove_head_under_lock(&file);
+        let _ = file.unlock();
+        removed
+    }
+
+    /// Read all queued events without removing them. Called on
+    /// daemon startup to replay pending escalations through the
+    /// mpsc channel before entering the select loop.
+    pub fn snapshot(&self) -> Vec<EscalationKind> {
+        let file = match OpenOptions::new().read(true).open(&self.path) {
+            Ok(f) => f,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+            Err(err) => {
+                warn!(?err, path = ?self.path, "persistent_outbox: open(read) failed");
+                return Vec::new();
+            }
+        };
+        if let Err(err) = file.lock_shared() {
+            warn!(?err, "persistent_outbox: lock_shared failed");
+            return Vec::new();
+        }
+        let out: Vec<EscalationKind> = BufReader::new(&file)
+            .lines()
+            .map_while(Result::ok)
+            .filter(|l| !l.trim().is_empty())
+            .filter_map(|l| serde_json::from_str::<EscalationKind>(&l).ok())
+            .collect();
+        let _ = file.unlock();
+        out
+    }
+
+    /// Number of queued events. Counts only lines that parse
+    /// successfully. Diagnostic helper.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.snapshot().len()
+    }
+
+    /// True when the queue is empty (or the backing file doesn't
+    /// exist yet).
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+fn remove_head_under_lock(mut file: &File) -> bool {
+    let lines: Vec<String> = BufReader::new(file).lines().map_while(Result::ok).collect();
+
+    let mut removed = false;
+    let mut remainder: Vec<String> = Vec::with_capacity(lines.len());
+
+    for line in lines {
+        if removed {
+            remainder.push(line);
+            continue;
+        }
+        if line.trim().is_empty() {
+            continue;
+        }
+        match serde_json::from_str::<EscalationKind>(&line) {
+            Ok(_) => removed = true,
+            Err(err) => {
+                warn!(?err, "persistent_outbox: dropping malformed line");
+            }
+        }
+    }
+
+    if let Err(err) = file.seek(SeekFrom::Start(0)) {
+        warn!(?err, "persistent_outbox: seek(0) failed during remove_head");
+        return removed;
+    }
+    if let Err(err) = file.set_len(0) {
+        warn!(
+            ?err,
+            "persistent_outbox: set_len(0) failed during remove_head"
+        );
+        return removed;
+    }
+    for line in &remainder {
+        if let Err(err) = writeln!(file, "{line}") {
+            warn!(?err, "persistent_outbox: remainder writeln failed");
+            return removed;
+        }
+    }
+    removed
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use std::sync::Arc;
+
+    use consul_domain::identity::InstructionId;
+    use consul_protocol::messages::InstructionOutcome;
+    use tempfile::tempdir;
+
+    use super::*;
+
+    fn outbox_at(dir: &tempfile::TempDir) -> PersistentEscalationOutbox {
+        PersistentEscalationOutbox::new(dir.path().join("escalations.jsonl"))
+    }
+
+    fn ack(id: InstructionId) -> EscalationKind {
+        EscalationKind::InstructionAck { instruction_id: id }
+    }
+
+    fn declined(id: InstructionId, reason: &str) -> EscalationKind {
+        EscalationKind::InstructionResult {
+            instruction_id: id,
+            outcome: InstructionOutcome::Declined {
+                reason: reason.into(),
+            },
+            summary: None,
+        }
+    }
+
+    #[test]
+    fn empty_outbox_is_empty() {
+        let dir = tempdir().unwrap();
+        let outbox = outbox_at(&dir);
+        assert!(outbox.is_empty());
+        assert_eq!(outbox.len(), 0);
+        assert!(outbox.snapshot().is_empty());
+    }
+
+    #[test]
+    fn append_then_snapshot_returns_event() {
+        let dir = tempdir().unwrap();
+        let outbox = outbox_at(&dir);
+        let id = InstructionId::new();
+        outbox.append(&ack(id));
+        let snap = outbox.snapshot();
+        assert_eq!(snap.len(), 1);
+        match &snap[0] {
+            EscalationKind::InstructionAck { instruction_id } => {
+                assert_eq!(*instruction_id, id);
+            }
+            other => panic!("expected InstructionAck, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fifo_order_preserved_across_appends() {
+        let dir = tempdir().unwrap();
+        let outbox = outbox_at(&dir);
+        let a = InstructionId::new();
+        let b = InstructionId::new();
+        let c = InstructionId::new();
+        outbox.append(&ack(a));
+        outbox.append(&ack(b));
+        outbox.append(&ack(c));
+        let snap = outbox.snapshot();
+        assert_eq!(snap.len(), 3);
+        for (i, expected) in [a, b, c].iter().enumerate() {
+            match &snap[i] {
+                EscalationKind::InstructionAck { instruction_id } => {
+                    assert_eq!(instruction_id, expected);
+                }
+                other => panic!("expected InstructionAck at {i}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn remove_head_strips_oldest_first() {
+        let dir = tempdir().unwrap();
+        let outbox = outbox_at(&dir);
+        let a = InstructionId::new();
+        let b = InstructionId::new();
+        outbox.append(&ack(a));
+        outbox.append(&ack(b));
+
+        assert!(outbox.remove_head());
+        let snap = outbox.snapshot();
+        assert_eq!(snap.len(), 1);
+        match &snap[0] {
+            EscalationKind::InstructionAck { instruction_id } => {
+                assert_eq!(*instruction_id, b);
+            }
+            other => panic!("expected InstructionAck for b, got {other:?}"),
+        }
+
+        assert!(outbox.remove_head());
+        assert!(outbox.is_empty());
+
+        // Further remove_head on empty queue returns false.
+        assert!(!outbox.remove_head());
+    }
+
+    #[test]
+    fn remove_head_on_missing_file_returns_false() {
+        let dir = tempdir().unwrap();
+        let outbox = outbox_at(&dir);
+        assert!(!outbox.remove_head());
+    }
+
+    #[test]
+    fn append_after_remove_head_extends_remainder() {
+        // Models the loop's send-then-append pattern under load.
+        let dir = tempdir().unwrap();
+        let outbox = outbox_at(&dir);
+        let first = InstructionId::new();
+        let second = InstructionId::new();
+        let third = InstructionId::new();
+        outbox.append(&ack(first));
+        outbox.append(&ack(second));
+        assert!(outbox.remove_head()); // removes first
+        outbox.append(&ack(third));
+
+        let snap = outbox.snapshot();
+        assert_eq!(snap.len(), 2);
+        match (&snap[0], &snap[1]) {
+            (
+                EscalationKind::InstructionAck {
+                    instruction_id: head,
+                },
+                EscalationKind::InstructionAck {
+                    instruction_id: tail,
+                },
+            ) => {
+                assert_eq!(*head, second);
+                assert_eq!(*tail, third);
+            }
+            other => panic!("expected two InstructionAcks, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn malformed_lines_dropped_on_remove_head() {
+        let dir = tempdir().unwrap();
+        let outbox = outbox_at(&dir);
+        let path = outbox.path().to_path_buf();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        // Pre-seed with malformed line then valid event.
+        let id = InstructionId::new();
+        let good = ack(id);
+        let good_json = serde_json::to_string(&good).unwrap();
+        std::fs::write(&path, format!("not-valid-json\n{good_json}\n")).unwrap();
+
+        // remove_head drops the malformed line + the valid one
+        // (counts the good one as "removed").
+        assert!(outbox.remove_head());
+        assert!(outbox.is_empty());
+    }
+
+    #[test]
+    fn declined_outcome_roundtrips_through_disk() {
+        // Pin the headline use case: InstructionResult { Declined }
+        // from the cancel loopback must survive disk roundtrip.
+        let dir = tempdir().unwrap();
+        let outbox = outbox_at(&dir);
+        let id = InstructionId::new();
+        outbox.append(&declined(id, "cancelled by operator: rollback"));
+        let snap = outbox.snapshot();
+        assert_eq!(snap.len(), 1);
+        match &snap[0] {
+            EscalationKind::InstructionResult {
+                instruction_id,
+                outcome,
+                summary,
+            } => {
+                assert_eq!(*instruction_id, id);
+                assert!(summary.is_none());
+                match outcome {
+                    InstructionOutcome::Declined { reason } => {
+                        assert_eq!(reason, "cancelled by operator: rollback");
+                    }
+                    other => panic!("expected Declined, got {other:?}"),
+                }
+            }
+            other => panic!("expected InstructionResult, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn events_survive_simulated_daemon_restart() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("escalations.jsonl");
+        let id = InstructionId::new();
+        let first = PersistentEscalationOutbox::new(path.clone());
+        first.append(&ack(id));
+        drop(first);
+
+        let second = PersistentEscalationOutbox::new(path);
+        let snap = second.snapshot();
+        assert_eq!(snap.len(), 1);
+        match &snap[0] {
+            EscalationKind::InstructionAck { instruction_id } => {
+                assert_eq!(*instruction_id, id);
+            }
+            other => panic!("expected InstructionAck, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn concurrent_appends_all_persist() {
+        let dir = tempdir().unwrap();
+        let outbox = Arc::new(outbox_at(&dir));
+        let mut handles = Vec::new();
+        for _ in 0..20 {
+            let outbox = Arc::clone(&outbox);
+            handles.push(std::thread::spawn(move || {
+                outbox.append(&ack(InstructionId::new()));
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+        assert_eq!(outbox.len(), 20);
+    }
+
+    #[test]
+    fn default_outbox_path_when_home_resolvable() {
+        let Some(p) = default_outbox_path() else {
+            return;
+        };
+        assert!(p.ends_with("legatus-escalations.jsonl"));
+        assert!(p.to_string_lossy().contains(".claude"));
+        assert!(p.to_string_lossy().contains("sentinel"));
+    }
+}

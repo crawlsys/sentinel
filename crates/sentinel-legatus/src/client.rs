@@ -217,6 +217,32 @@ pub async fn run_connect_hosted(
     let mut heartbeat = tokio::time::interval(config.heartbeat_interval);
     heartbeat.tick().await; // skip immediate first tick
 
+    // Startup replay: re-enqueue any pending outbox entries from
+    // disk so they flow through the same `escalation_rx` arm as a
+    // fresh `LegatusHandle::escalate` call. This is the recovery
+    // path after a daemon crash that landed events on disk but
+    // didn't get them to the WS. Order is preserved by the
+    // outbox's FIFO snapshot + the mpsc's send-order semantics.
+    if let Some(outbox) = runtime.outbox.as_ref() {
+        let pending = outbox.snapshot();
+        if !pending.is_empty() {
+            info!(
+                %session_id,
+                count = pending.len(),
+                "replaying pending escalations from outbox",
+            );
+            for event in pending {
+                if runtime.escalation_loopback.send(event).is_err() {
+                    warn!(
+                        %session_id,
+                        "loopback channel closed during outbox replay",
+                    );
+                    break;
+                }
+            }
+        }
+    }
+
     let exit_reason: Option<&'static str> = loop {
         tokio::select! {
             () = cancel.notified() => {
@@ -282,6 +308,17 @@ pub async fn run_connect_hosted(
                 ).await {
                     warn!(?err, "escalation send failed; closing");
                     break None;
+                }
+                // Successful WS send → remove the head from the
+                // outbox (if persistent). Disk and consul-receipt
+                // are now in sync for this event. If we crash
+                // BETWEEN send_signed and remove_head, the next
+                // daemon start re-replays the event to consul —
+                // at-least-once delivery, idempotent on the consul
+                // side (every escalation kind is keyed by stable
+                // ids).
+                if let Some(outbox) = runtime.outbox.as_ref() {
+                    let _ = outbox.remove_head();
                 }
                 local_seq += 1;
             },

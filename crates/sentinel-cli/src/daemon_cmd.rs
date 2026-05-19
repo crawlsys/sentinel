@@ -17,8 +17,9 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use sentinel_domain::state::SessionState;
 use sentinel_legatus::{
-    default_inbox_path, make_pair, make_pair_with_inbox, run_connect_hosted, ConnectConfig,
-    EscalationKind, LegatusHandle, PersistentInbox, RuntimeKind, BOOTSTRAP_SECRET_LEN,
+    default_inbox_path, default_outbox_path, make_pair, make_pair_with_persistence,
+    run_connect_hosted, ConnectConfig, EscalationKind, LegatusHandle, PersistentEscalationOutbox,
+    PersistentInbox, RuntimeKind, BOOTSTRAP_SECRET_LEN,
 };
 use tokio::sync::{Notify, RwLock};
 use tracing::{info, warn};
@@ -249,24 +250,44 @@ async fn start_legatus_if_configured(options: LegatusOptions) -> Result<Option<L
         heartbeat_interval: Duration::from_secs(options.heartbeat_secs.max(1)),
     };
 
-    // Persistent inbox at ~/.claude/sentinel/state/legatus-inbox.jsonl.
-    // If we can't resolve $HOME (degenerate, but possible in chroots /
-    // some CI containers), fall back to an in-memory pair so the
-    // daemon still runs — operator-relayed instructions just don't
-    // survive a daemon crash in that mode.
-    let (handle, runtime) = if let Some(path) = default_inbox_path() {
-        let inbox = PersistentInbox::new(path);
-        let prior = inbox.len();
-        if prior > 0 {
+    // Persistent inbox + outbox at ~/.claude/sentinel/state/.
+    // - Inbox (legatus-inbox.jsonl): operator instructions
+    //   incoming from consul — survives daemon crash so the
+    //   hook still gets them on next prompt.
+    // - Outbox (legatus-escalations.jsonl): escalations outgoing
+    //   to consul — survives daemon crash so the
+    //   `InstructionResult { Declined }` emitted on cancel
+    //   (and other lifecycle events) actually reaches consul on
+    //   the next start.
+    //
+    // If we can't resolve $HOME (degenerate, but possible in
+    // chroots / some CI containers), fall back to an in-memory
+    // pair so the daemon still runs — both directions just
+    // don't survive a daemon crash in that mode.
+    let (handle, runtime) = if let (Some(inbox_path), Some(outbox_path)) =
+        (default_inbox_path(), default_outbox_path())
+    {
+        let inbox = PersistentInbox::new(inbox_path);
+        let outbox = PersistentEscalationOutbox::new(outbox_path);
+        let queued_in = inbox.len();
+        let queued_out = outbox.len();
+        if queued_in > 0 {
             info!(
-                queued = prior,
+                queued = queued_in,
                 path = ?inbox.path(),
                 "rehydrated persistent inbox at startup",
             );
         }
-        make_pair_with_inbox(inbox)
+        if queued_out > 0 {
+            info!(
+                queued = queued_out,
+                path = ?outbox.path(),
+                "rehydrated persistent outbox at startup — replaying on connect",
+            );
+        }
+        make_pair_with_persistence(inbox, outbox)
     } else {
-        warn!("no resolvable home dir; legatus inbox is in-memory only");
+        warn!("no resolvable home dir; legatus inbox + outbox are in-memory only");
         make_pair()
     };
     let cancel = Arc::new(Notify::new());
