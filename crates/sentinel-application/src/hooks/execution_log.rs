@@ -198,15 +198,20 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     // instruction the consul_inbox hook drained during this
     // session, fire an InstructionResult tied to its
     // instruction_id. Outcome is classified from observed turn
-    // signals via `classify_outcome` — currently:
+    // signals + the assistant's reply text via `classify_outcome`:
     //   - PermissionDenied during the turn → Declined { tool(s) }
+    //   - reply contains a deferral phrase → Deferred { waiting_on }
     //   - otherwise → Success
-    // This is the Stop path (API error → StopFailure handles its own
-    // Failure classification), so no api_error is passed.
+    // This is the Stop path (API error → StopFailure handles its
+    // own Failure classification), so no api_error is passed.
+    // `message` is the concatenated assistant text from this turn
+    // — captured above for execution-marker extraction; reused
+    // here as the deferral-detection corpus.
     let pending = crate::legatus_client::take_pending_instructions(session_id);
     let signals = crate::legatus_client::take_turn_signals(session_id);
     for instruction_id in pending {
-        let outcome = crate::legatus_client::classify_outcome(&signals, None);
+        let outcome =
+            crate::legatus_client::classify_outcome(&signals, None, Some(message.as_str()));
         crate::legatus_client::report_result_fire_and_forget(
             instruction_id,
             outcome,

@@ -256,11 +256,19 @@ pub fn take_turn_signals(session_id: &str) -> Vec<TurnSignal> {
 ///    naming the tool(s) that were denied. Note: this classifies
 ///    every pending instruction the same way, since we don't track
 ///    which instruction prompted which tool call.
-/// 3. Otherwise `Success`.
+/// 3. Otherwise, if `reply_text` contains a conservative deferral
+///    phrase (e.g. `"I'll get to that"`, `"queued for"`, `"noted for
+///    later"`), all pending instructions are `Deferred { waiting_on }`
+///    naming the matched phrase. Conservative on purpose — a false
+///    `Deferred` confuses the operator more than a missed one (they
+///    just see `Success` for what was actually deferred, which is
+///    the pre-deferral-detection behavior).
+/// 4. Otherwise `Success`.
 #[must_use]
 pub fn classify_outcome(
     signals: &[TurnSignal],
     api_error: Option<&str>,
+    reply_text: Option<&str>,
 ) -> sentinel_legatus::InstructionOutcome {
     if let Some(err) = api_error {
         return sentinel_legatus::InstructionOutcome::Failure {
@@ -279,7 +287,52 @@ pub fn classify_outcome(
             reason: format!("permission denied for tool(s): {}", joined.join(", ")),
         };
     }
+    if let Some(text) = reply_text {
+        if let Some(waiting_on) = detect_deferral(text) {
+            return sentinel_legatus::InstructionOutcome::Deferred { waiting_on };
+        }
+    }
     sentinel_legatus::InstructionOutcome::Success
+}
+
+/// Conservative deferral-phrase detector.
+///
+/// Scans `text` (case-insensitively) for unambiguous-deferral
+/// phrases. Returns `Some(<phrase>)` when one matches, `None`
+/// otherwise. The returned `waiting_on` is the matched phrase as
+/// it appears in the operator's UX — short, recognizable, doesn't
+/// require the operator to read the model's full reply.
+///
+/// Phrase list is deliberately small and conservative — see the
+/// rationale on [`classify_outcome`]. Edge cases that look like
+/// deferrals but aren't (sequencing within the same turn,
+/// hedging language, conditional plans) deliberately fall through
+/// to `Success` so the worst-case is a missed Deferred, not a
+/// false Deferred.
+fn detect_deferral(text: &str) -> Option<String> {
+    const DEFERRAL_PHRASES: &[&str] = &[
+        "i'll get to",
+        "i'll come back to",
+        "i'll handle that later",
+        "i'll do that later",
+        "i will get to",
+        "queued for later",
+        "queuing this for",
+        "noted for later",
+        "noted for next",
+        "deferring this",
+        "deferring that",
+        "deferred for",
+        "will handle later",
+        "will do later",
+        "skipping for now",
+        "skipping this for now",
+    ];
+    let lower = text.to_lowercase();
+    DEFERRAL_PHRASES
+        .iter()
+        .find(|phrase| lower.contains(*phrase))
+        .map(|phrase| (*phrase).to_owned())
 }
 
 /// Spawn a background OS thread that POSTs `event` to the daemon's
@@ -465,7 +518,7 @@ mod tests {
         let signals = vec![TurnSignal::PermissionDenied {
             tool: "Bash".to_owned(),
         }];
-        let outcome = classify_outcome(&signals, Some("rate_limit: backoff 300s"));
+        let outcome = classify_outcome(&signals, Some("rate_limit: backoff 300s"), None);
         match outcome {
             sentinel_legatus::InstructionOutcome::Failure { error } => {
                 assert_eq!(error, "rate_limit: backoff 300s");
@@ -479,7 +532,7 @@ mod tests {
         let signals = vec![TurnSignal::PermissionDenied {
             tool: "Bash".to_owned(),
         }];
-        let outcome = classify_outcome(&signals, None);
+        let outcome = classify_outcome(&signals, None, None);
         match outcome {
             sentinel_legatus::InstructionOutcome::Declined { reason } => {
                 assert!(reason.contains("Bash"), "reason should name the tool: {reason}");
@@ -499,7 +552,7 @@ mod tests {
                 tool: "Write".to_owned(),
             },
         ];
-        let outcome = classify_outcome(&signals, None);
+        let outcome = classify_outcome(&signals, None, None);
         match outcome {
             sentinel_legatus::InstructionOutcome::Declined { reason } => {
                 assert!(reason.contains("Bash"), "reason: {reason}");
@@ -511,7 +564,7 @@ mod tests {
 
     #[test]
     fn classify_outcome_no_signals_yields_success() {
-        let outcome = classify_outcome(&[], None);
+        let outcome = classify_outcome(&[], None, None);
         assert!(matches!(outcome, sentinel_legatus::InstructionOutcome::Success));
     }
 
@@ -519,5 +572,110 @@ mod tests {
     fn take_turn_signals_for_missing_session_returns_empty() {
         let session = format!("legatus-client-test-{}", uuid::Uuid::new_v4());
         assert!(take_turn_signals(&session).is_empty());
+    }
+
+    // ----- deferral classification ----------------------------------------
+
+    #[test]
+    fn classify_outcome_deferral_phrase_yields_deferred() {
+        let text = "I'll get to that after I finish the current task.";
+        let outcome = classify_outcome(&[], None, Some(text));
+        match outcome {
+            sentinel_legatus::InstructionOutcome::Deferred { waiting_on } => {
+                assert_eq!(waiting_on, "i'll get to");
+            },
+            other => panic!("expected Deferred, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_outcome_case_insensitive_deferral() {
+        let text = "I'LL GET TO that later";
+        let outcome = classify_outcome(&[], None, Some(text));
+        assert!(matches!(
+            outcome,
+            sentinel_legatus::InstructionOutcome::Deferred { .. }
+        ));
+    }
+
+    #[test]
+    fn classify_outcome_queued_phrase_yields_deferred() {
+        let outcome = classify_outcome(
+            &[],
+            None,
+            Some("Noted, queued for later when I'm done with this."),
+        );
+        match outcome {
+            sentinel_legatus::InstructionOutcome::Deferred { waiting_on } => {
+                assert_eq!(waiting_on, "queued for later");
+            },
+            other => panic!("expected Deferred, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_outcome_skipping_for_now_yields_deferred() {
+        let outcome =
+            classify_outcome(&[], None, Some("Skipping for now — will revisit."));
+        match outcome {
+            sentinel_legatus::InstructionOutcome::Deferred { waiting_on } => {
+                assert_eq!(waiting_on, "skipping for now");
+            },
+            other => panic!("expected Deferred, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_outcome_non_deferral_yields_success() {
+        // Active execution phrases — not deferrals.
+        for text in &[
+            "Done.",
+            "Deploying staging now.",
+            "Running the test suite.",
+            "I checked the logs first; everything looks fine.",
+        ] {
+            let outcome = classify_outcome(&[], None, Some(text));
+            assert!(
+                matches!(outcome, sentinel_legatus::InstructionOutcome::Success),
+                "expected Success for {text:?}, got other variant",
+            );
+        }
+    }
+
+    #[test]
+    fn classify_outcome_api_error_beats_deferral_phrase() {
+        // StopFailure path takes precedence even when the assistant
+        // text would otherwise look like a deferral.
+        let outcome = classify_outcome(
+            &[],
+            Some("rate_limit"),
+            Some("I'll get to that later."),
+        );
+        assert!(matches!(
+            outcome,
+            sentinel_legatus::InstructionOutcome::Failure { .. }
+        ));
+    }
+
+    #[test]
+    fn classify_outcome_permission_denied_beats_deferral_phrase() {
+        // Declined classification takes precedence over deferral —
+        // a hard "permission denied" outranks a fuzzy "I'll get to
+        // it" because the permission denial is concrete.
+        let signals = vec![TurnSignal::PermissionDenied {
+            tool: "Bash".into(),
+        }];
+        let outcome =
+            classify_outcome(&signals, None, Some("I'll get to that later."));
+        assert!(matches!(
+            outcome,
+            sentinel_legatus::InstructionOutcome::Declined { .. }
+        ));
+    }
+
+    #[test]
+    fn classify_outcome_empty_reply_text_yields_success() {
+        let outcome = classify_outcome(&[], None, Some(""));
+        assert!(matches!(outcome, sentinel_legatus::InstructionOutcome::Success));
     }
 }
