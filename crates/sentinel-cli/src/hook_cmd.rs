@@ -185,6 +185,42 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
             LayeredReversibilityClassifier::empty()
         });
 
+    // Constitution gate (Item K) — load per-project rules from
+    // `~/.claude/sentinel/config/constitution-gate.toml`. Missing
+    // file → empty rule list → gate is inert. Parse failures log
+    // at warn and degrade to inert so a typo in the config
+    // doesn't take down the daemon's PreToolUse path.
+    let constitution_rules: Vec<sentinel_application::constitution_gate_runtime::Rule> = (|| {
+        let home = dirs::home_dir()?;
+        let path = home
+            .join(".claude")
+            .join("sentinel")
+            .join("config")
+            .join("constitution-gate.toml");
+        let raw = std::fs::read_to_string(&path).ok()?;
+        match sentinel_application::constitution_gate_runtime::ConstitutionGateConfig::from_toml_str(
+            &raw,
+        ) {
+            Ok(cfg) => {
+                tracing::info!(
+                    rules = cfg.rules.len(),
+                    "constitution_gate: loaded operator rules from {}",
+                    path.display(),
+                );
+                Some(cfg.rules)
+            },
+            Err(err) => {
+                tracing::warn!(
+                    ?err,
+                    "constitution_gate: failed to parse {} — gate inert this run",
+                    path.display(),
+                );
+                None
+            },
+        }
+    })()
+    .unwrap_or_default();
+
     // A2 Phase 4: construct the capability router from shipped
     // defaults + optional operator overrides at
     // `~/.claude/sentinel/config/agents.toml`. Load failures degrade
@@ -756,6 +792,17 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
                 hooks::doppler_auth0_gate::process(&input, &ctx)
             });
             output.merge(&doppler_output);
+
+            // Constitution gate (Item K) — enforce per-project
+            // "protected path × banned pattern" rules from the
+            // operator's TOML config. Empty config = no-op; the
+            // gate ships inert by default so machines that haven't
+            // authored their own rules see no behaviour change.
+            let constitution_output =
+                time_and_record(ctx.fs, &mk_ctx("constitution_gate"), || {
+                    hooks::constitution_gate::process(&input, &constitution_rules)
+                });
+            output.merge(&constitution_output);
 
             // Pre-commit verification — block git commit/push without test evidence (Bash only)
             if matches!(input.tool_name.as_deref(), Some("Bash")) {

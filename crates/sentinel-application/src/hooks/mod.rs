@@ -14,6 +14,7 @@ pub mod build_auto_monitor;
 pub mod build_notify;
 pub mod commit_hygiene;
 pub mod commit_message_validator;
+pub mod constitution_gate;
 pub mod consul_inbox;
 pub mod context_monitor;
 pub mod cwd_changed;
@@ -244,6 +245,7 @@ pub const HOOK_NAMES: &[&str] = &[
     "build_auto_monitor",
     "commit_hygiene",
     "commit_message_validator",
+    "constitution_gate",
     "consul_inbox",
     "context_monitor",
     "cwd_changed",
