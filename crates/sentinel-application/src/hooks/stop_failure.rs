@@ -277,6 +277,10 @@ pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
         let pending = crate::legatus_client::take_pending_instructions(session_id);
         if !pending.is_empty() {
             let _ = crate::legatus_client::take_turn_signals(session_id);
+            // Drain the tool-call trace for this turn too — even
+            // on failure paths the operator wants to see which
+            // tools fired before the failure (Item E).
+            let _ = crate::legatus_client::take_tool_calls(session_id);
             let combined = if error_details.is_empty() {
                 error.to_owned()
             } else {

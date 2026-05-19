@@ -151,6 +151,92 @@ pub fn take_pending_instructions(session_id: &str) -> Vec<InstructionId> {
         .collect()
 }
 
+// ---------------------------------------------------------------------------
+// Per-turn tool-call trace (Item E groundwork)
+// ---------------------------------------------------------------------------
+//
+// Records every tool call observed during a turn. The Stop hook
+// reads + clears this file when emitting per-instruction Results
+// so the operator sees which tools the legatus ran in response.
+//
+// Storage: `~/.claude/sentinel/state/<session_id>.legatus-tool-calls.txt`,
+// one tool name per line, newline-delimited. Append-only during
+// the turn; truncated by Stop / StopFailure on drain.
+//
+// Per-turn attribution caveat: when the consul_inbox hook drains
+// MULTIPLE instructions into the same model turn, every
+// instruction gets the same tool-call list — we don't yet have a
+// model-cooperative way to attribute individual tool calls to
+// individual instructions. Future work; for now, per-turn
+// granularity is the honest reporting level.
+
+/// Per-session tool-call trace file path. Mirrors the
+/// sanitization of [`pending_file_path`].
+fn tool_calls_path(session_id: &str) -> Option<PathBuf> {
+    if session_id.is_empty() || session_id.contains(['/', '\\', '\0']) || session_id.contains("..")
+    {
+        return None;
+    }
+    Some(
+        dirs::home_dir()?
+            .join(".claude")
+            .join("sentinel")
+            .join("state")
+            .join(format!("{session_id}.legatus-tool-calls.txt")),
+    )
+}
+
+/// Append a tool name to the per-session tool-call trace.
+/// Best-effort: I/O errors are logged at debug and dropped.
+pub fn note_tool_call(session_id: &str, tool_name: &str) {
+    let Some(path) = tool_calls_path(session_id) else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let trimmed = tool_name.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    let line = format!("{trimmed}\n");
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        use std::io::Write;
+        let _ = file.write_all(line.as_bytes());
+    } else {
+        tracing::debug!(?path, "legatus_client: failed to record tool call");
+    }
+}
+
+/// Read and clear the per-session tool-call trace. Returns the
+/// list of tool names invoked during the turn, in order. Empty
+/// when the file doesn't exist (no tools called) or fails to
+/// read.
+pub fn take_tool_calls(session_id: &str) -> Vec<String> {
+    let Some(path) = tool_calls_path(session_id) else {
+        return Vec::new();
+    };
+    let content = match std::fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+        Err(err) => {
+            tracing::debug!(?err, ?path, "legatus_client: tool-calls read failed");
+            return Vec::new();
+        },
+    };
+    let _ = std::fs::remove_file(&path);
+    content
+        .lines()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
 /// Per-turn observations that bias how the Stop hook classifies
 /// pending operator-relayed instructions. Lives in a sibling file
 /// to the pending-instructions file:
@@ -509,6 +595,41 @@ mod tests {
         // Second take returns empty — file was cleared.
         let second = take_turn_signals(&session);
         assert!(second.is_empty(), "second take should be empty");
+    }
+
+    #[test]
+    fn note_then_take_roundtrips_tool_calls_in_order() {
+        let session = format!("legatus-client-test-{}", uuid::Uuid::new_v4());
+        note_tool_call(&session, "Bash");
+        note_tool_call(&session, "Edit");
+        note_tool_call(&session, "Bash");
+        let taken = take_tool_calls(&session);
+        assert_eq!(taken, vec!["Bash", "Edit", "Bash"]);
+        // Second take is empty — file cleared on drain.
+        assert!(take_tool_calls(&session).is_empty());
+    }
+
+    #[test]
+    fn note_tool_call_skips_blank_names() {
+        let session = format!("legatus-client-test-{}", uuid::Uuid::new_v4());
+        note_tool_call(&session, "");
+        note_tool_call(&session, "   ");
+        note_tool_call(&session, "Bash");
+        let taken = take_tool_calls(&session);
+        assert_eq!(taken, vec!["Bash"]);
+    }
+
+    #[test]
+    fn tool_calls_path_rejects_traversal() {
+        assert!(tool_calls_path("../malicious").is_none());
+        assert!(tool_calls_path("with/slash").is_none());
+        assert!(tool_calls_path("").is_none());
+    }
+
+    #[test]
+    fn take_tool_calls_for_missing_session_returns_empty() {
+        let session = format!("legatus-client-test-{}", uuid::Uuid::new_v4());
+        assert!(take_tool_calls(&session).is_empty());
     }
 
     #[test]

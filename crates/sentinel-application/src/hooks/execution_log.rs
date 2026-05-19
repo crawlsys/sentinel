@@ -209,17 +209,62 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     // here as the deferral-detection corpus.
     let pending = crate::legatus_client::take_pending_instructions(session_id);
     let signals = crate::legatus_client::take_turn_signals(session_id);
+    // Per-instruction tool-call attribution (Item E). One drain
+    // per turn, shared across all instructions queued by the
+    // same consul_inbox fire. Per-turn granularity until we have
+    // a model-cooperative way to split tool calls per instruction.
+    let tool_calls = crate::legatus_client::take_tool_calls(session_id);
+    let enriched_summary = enrich_summary_with_tool_calls(summary.as_deref(), &tool_calls);
     for instruction_id in pending {
         let outcome =
             crate::legatus_client::classify_outcome(&signals, None, Some(message.as_str()));
         crate::legatus_client::report_result_fire_and_forget(
             instruction_id,
             outcome,
-            summary.clone(),
+            enriched_summary.clone(),
         );
     }
 
     HookOutput::allow()
+}
+
+/// Prepend a short `[tools: A, B, C]` prefix to the existing
+/// summary when at least one tool was recorded during the turn.
+/// Per-turn (not per-instruction) granularity — see
+/// [`crate::legatus_client::take_tool_calls`] docs for the
+/// attribution caveat.
+///
+/// Duplicate tool names are deduplicated while preserving
+/// first-seen order so the operator's view stays readable
+/// (e.g. a 20× `Bash`-then-`Edit`-then-`Bash` sequence collapses
+/// to `[tools: Bash, Edit]` rather than a noisy 60-char prefix).
+/// Up to 6 distinct tools, then `…+N more`. Output capped at the
+/// same 140-char ceiling as the base summary.
+fn enrich_summary_with_tool_calls(base: Option<&str>, tool_calls: &[String]) -> Option<String> {
+    if tool_calls.is_empty() {
+        return base.map(str::to_owned);
+    }
+    let mut seen: Vec<&str> = Vec::new();
+    for name in tool_calls {
+        let s = name.as_str();
+        if !seen.iter().any(|existing| *existing == s) {
+            seen.push(s);
+        }
+    }
+    let prefix = if seen.len() <= 6 {
+        format!("[tools: {}]", seen.join(", "))
+    } else {
+        format!(
+            "[tools: {}, …+{} more]",
+            seen.iter().take(6).copied().collect::<Vec<_>>().join(", "),
+            seen.len() - 6,
+        )
+    };
+    let combined = match base {
+        Some(s) if !s.trim().is_empty() => format!("{prefix} {s}"),
+        _ => prefix,
+    };
+    Some(truncate_summary(&combined, 140))
 }
 
 fn truncate_summary(s: &str, max_chars: usize) -> String {
@@ -253,6 +298,59 @@ mod tests {
         let ctx = crate::hooks::test_support::stub_ctx();
         let output = process(&input, &ctx);
         assert!(output.blocked.is_none());
+    }
+
+    #[test]
+    fn enrich_summary_no_tools_returns_base_unchanged() {
+        assert_eq!(
+            enrich_summary_with_tool_calls(Some("ship feature X"), &[]),
+            Some("ship feature X".to_owned()),
+        );
+        assert_eq!(enrich_summary_with_tool_calls(None, &[]), None);
+    }
+
+    #[test]
+    fn enrich_summary_deduplicates_repeated_tool_names() {
+        // Bash, Edit, Bash, Edit, Bash → "[tools: Bash, Edit]"
+        let summary = enrich_summary_with_tool_calls(
+            Some("did work"),
+            &[
+                "Bash".into(),
+                "Edit".into(),
+                "Bash".into(),
+                "Edit".into(),
+                "Bash".into(),
+            ],
+        );
+        assert_eq!(summary.as_deref(), Some("[tools: Bash, Edit] did work"));
+    }
+
+    #[test]
+    fn enrich_summary_caps_at_six_distinct_tools() {
+        let tools = vec![
+            "A".into(),
+            "B".into(),
+            "C".into(),
+            "D".into(),
+            "E".into(),
+            "F".into(),
+            "G".into(),
+            "H".into(),
+        ];
+        let summary = enrich_summary_with_tool_calls(None, &tools);
+        let body = summary.expect("non-empty when tool calls present");
+        assert!(
+            body.contains("…+2 more"),
+            "expected truncated tail, got {body:?}",
+        );
+        assert!(body.contains("A, B, C, D, E, F"));
+        assert!(!body.contains(", G"));
+    }
+
+    #[test]
+    fn enrich_summary_falls_back_to_prefix_only_when_base_blank() {
+        let summary = enrich_summary_with_tool_calls(Some("   "), &["Read".into()]);
+        assert_eq!(summary.as_deref(), Some("[tools: Read]"));
     }
 
     #[test]
