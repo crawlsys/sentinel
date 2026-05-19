@@ -2309,6 +2309,7 @@ name = "sentinel"
 version = "0.4.1"
 dependencies = [
  "anyhow",
+ "async-trait",
  "axum",
  "chrono",
  "clap",

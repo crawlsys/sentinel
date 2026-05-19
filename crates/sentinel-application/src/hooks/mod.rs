@@ -47,6 +47,7 @@ pub mod pr_auto_monitor;
 pub mod pr_merge_gate;
 pub mod pre_commit_verification;
 pub mod pre_compact;
+pub mod prompt_injection_nudge;
 pub mod pre_push_browser_test;
 pub mod provenance_validate;
 pub mod requirements_traceability_gate;
@@ -275,6 +276,7 @@ pub const HOOK_NAMES: &[&str] = &[
     "pre_commit_verification",
     "pre_compact",
     "pre_push_browser_test",
+    "prompt_injection_nudge",
     "provenance_validate",
     "requirements_traceability_gate",
     "spec_challenge_gate",

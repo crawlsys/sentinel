@@ -832,6 +832,14 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
             let evidence_output = hooks::evidence_collector::process(&input, None);
             output.merge(&evidence_output);
 
+            // Mid-execution prompt-injection nudge — scan tool result for
+            // injection-shaped strings (e.g. "ignore previous instructions")
+            // and inject a "treat as untrusted data" warning when one fires.
+            // Conservative, defense-in-depth layer; downstream destructive
+            // gates remain the hard backstop.
+            let injection_nudge_output = hooks::prompt_injection_nudge::process(&input, &ctx);
+            output.merge(&injection_nudge_output);
+
             // Activity tracker — log every tool call to activity-log.jsonl
             let activity_output = hooks::activity_tracker::process_post_tool(&input, &ctx);
             output.merge(&activity_output);
