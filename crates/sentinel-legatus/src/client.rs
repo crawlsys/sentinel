@@ -544,6 +544,58 @@ fn handle_inbound(msg: &ConsularMessage, session_id: SessionId, runtime: &Legatu
         ConsularMessage::RequestContextSync(_) => {
             debug!(%session_id, "received RequestContextSync (no context store yet)");
         }
+        ConsularMessage::EscalationAck(ack) => {
+            // Consul confirms receipt + bus-forwarding of one or
+            // more previously-sent escalations. For per-instruction
+            // keys we drop the matching outbox entry — covers the
+            // case where the post-send `remove_head` somehow missed
+            // (slow disk, crash recovery, future ack-driven
+            // delivery). Lifecycle keys (Blocked/Completed/Failed)
+            // are no-ops in this slice — matching them by
+            // (session_id, *_at_ms) needs the sent-time timestamp
+            // on disk, the next refactor in this arc.
+            //
+            // No-op (returns false) when:
+            //  - Outbox is None (standalone CLI path)
+            //  - Entry was already removed by `remove_head`
+            //  - Key references an event we never sent (idempotent
+            //    duplicate ack from a peer that doesn't track
+            //    ack-already-sent state — by design, per the
+            //    `EscalationAck` doc).
+            let Some(outbox) = runtime.outbox.as_ref() else {
+                debug!(
+                    %session_id,
+                    acks = ack.acks.len(),
+                    "received EscalationAck; no persistent outbox to update",
+                );
+                return;
+            };
+            let mut removed_count = 0_usize;
+            for key in &ack.acks {
+                use consul_protocol::messages::EscalationKey;
+                match key {
+                    EscalationKey::InstructionAcknowledged { instruction_id }
+                    | EscalationKey::InstructionResult { instruction_id } => {
+                        if outbox.remove_by_instruction_id(*instruction_id) {
+                            removed_count += 1;
+                        }
+                    },
+                    EscalationKey::SessionBlocked { .. }
+                    | EscalationKey::SessionCompleted { .. }
+                    | EscalationKey::SessionFailed { .. } => {
+                        // Lifecycle keys: deferred to the next
+                        // refactor (needs sent-time timestamp on
+                        // disk to match).
+                    },
+                }
+            }
+            debug!(
+                %session_id,
+                acks_received = ack.acks.len(),
+                outbox_removed = removed_count,
+                "processed inbound EscalationAck",
+            );
+        }
         other => {
             debug!(%session_id, ?other, "unhandled inbound message");
         }

@@ -32,8 +32,8 @@
 //! succeeded" and "disk head removed", consul receives a duplicate
 //! event on the next daemon start. Consul-side handlers must be
 //! idempotent (they already are — every escalation kind is keyed
-//! by a stable id: instruction_id for `InstructionResult` /
-//! `InstructionAcknowledged`, session_id for the lifecycle events).
+//! by a stable id: `instruction_id` for `InstructionResult` /
+//! `InstructionAcknowledged`, `session_id` for the lifecycle events).
 //!
 //! ## Storage shape
 //!
@@ -49,6 +49,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
+use consul_domain::identity::InstructionId;
 use fs2::FileExt;
 use tracing::warn;
 
@@ -165,6 +166,45 @@ impl PersistentEscalationOutbox {
         removed
     }
 
+    /// Remove the first queued event matching `instruction_id`,
+    /// regardless of its position in the FIFO. Used by the
+    /// inbound-`EscalationAck` handler in
+    /// [`crate::client::handle_inbound`]: when consul confirms
+    /// processing of an `InstructionAck` / `InstructionResult`
+    /// event, the matching outbox entry can be removed
+    /// regardless of whether `remove_head` already fired on the
+    /// post-`send_signed` path.
+    ///
+    /// Returns `true` when a matching entry was found and
+    /// removed; `false` on empty queue / missing file / lock
+    /// failure / no match.
+    ///
+    /// **Scope**: matches only the per-instruction variants
+    /// (`EscalationKind::InstructionAck`,
+    /// `EscalationKind::InstructionResult`). Lifecycle variants
+    /// (`Blocked` / `Completed` / `Failed`) don't carry an
+    /// `instruction_id` and are skipped by this method —
+    /// removing them by `(session_id, *_at_ms)` key requires
+    /// storing the sent-time timestamp on disk too, which is
+    /// the next refactor in this arc.
+    pub fn remove_by_instruction_id(&self, instruction_id: InstructionId) -> bool {
+        let file = match OpenOptions::new().read(true).write(true).open(&self.path) {
+            Ok(f) => f,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return false,
+            Err(err) => {
+                warn!(?err, path = ?self.path, "persistent_outbox: open(rw) failed");
+                return false;
+            },
+        };
+        if let Err(err) = file.lock_exclusive() {
+            warn!(?err, "persistent_outbox: lock_exclusive failed");
+            return false;
+        }
+        let removed = remove_by_instruction_id_under_lock(&file, instruction_id);
+        let _ = file.unlock();
+        removed
+    }
+
     /// Read all queued events without removing them. Called on
     /// daemon startup to replay pending escalations through the
     /// mpsc channel before entering the select loop.
@@ -203,6 +243,66 @@ impl PersistentEscalationOutbox {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+}
+
+/// Atomic-rewrite shape mirroring `remove_head_under_lock`, but
+/// filters by `instruction_id` instead of "first valid line".
+/// Matches the first entry whose `EscalationKind` carries that
+/// id (the two variants that do are `InstructionAck` and
+/// `InstructionResult`).
+fn remove_by_instruction_id_under_lock(
+    mut file: &File,
+    instruction_id: InstructionId,
+) -> bool {
+    let lines: Vec<String> = BufReader::new(file).lines().map_while(Result::ok).collect();
+
+    let mut removed = false;
+    let mut remainder: Vec<String> = Vec::with_capacity(lines.len());
+
+    for line in lines {
+        if line.trim().is_empty() {
+            continue;
+        }
+        if removed {
+            remainder.push(line);
+            continue;
+        }
+        match serde_json::from_str::<EscalationKind>(&line) {
+            Ok(event) if event_matches_instruction_id(&event, instruction_id) => {
+                removed = true;
+            },
+            Ok(_) => remainder.push(line),
+            Err(err) => {
+                warn!(?err, "persistent_outbox: dropping malformed line during remove_by_instruction_id");
+            },
+        }
+    }
+
+    if let Err(err) = file.seek(SeekFrom::Start(0)) {
+        warn!(?err, "persistent_outbox: seek(0) failed during remove_by_instruction_id");
+        return removed;
+    }
+    if let Err(err) = file.set_len(0) {
+        warn!(?err, "persistent_outbox: set_len(0) failed during remove_by_instruction_id");
+        return removed;
+    }
+    for line in &remainder {
+        if let Err(err) = writeln!(file, "{line}") {
+            warn!(?err, "persistent_outbox: remainder writeln failed during remove_by_instruction_id");
+            return removed;
+        }
+    }
+    removed
+}
+
+fn event_matches_instruction_id(event: &EscalationKind, target: InstructionId) -> bool {
+    match event {
+        EscalationKind::InstructionAck { instruction_id }
+        | EscalationKind::InstructionResult { instruction_id, .. } => *instruction_id == target,
+        EscalationKind::Blocked { .. }
+        | EscalationKind::Completed { .. }
+        | EscalationKind::Failed { .. } => false,
     }
 }
 
@@ -480,5 +580,89 @@ mod tests {
         assert!(p.ends_with("legatus-escalations.jsonl"));
         assert!(p.to_string_lossy().contains(".claude"));
         assert!(p.to_string_lossy().contains("sentinel"));
+    }
+
+    // ----- remove_by_instruction_id ----------------------------------------
+
+    #[test]
+    fn remove_by_instruction_id_removes_matching_ack_entry() {
+        let dir = tempdir().unwrap();
+        let outbox = outbox_at(&dir);
+        let a = InstructionId::new();
+        let b = InstructionId::new();
+        outbox.append(&ack(a));
+        outbox.append(&ack(b));
+
+        // Remove b first (not the head — verifies non-FIFO removal).
+        assert!(outbox.remove_by_instruction_id(b));
+        let snap = outbox.snapshot();
+        assert_eq!(snap.len(), 1);
+        match &snap[0] {
+            EscalationKind::InstructionAck { instruction_id } => {
+                assert_eq!(*instruction_id, a);
+            },
+            other => panic!("expected InstructionAck for a, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn remove_by_instruction_id_removes_matching_result_entry() {
+        let dir = tempdir().unwrap();
+        let outbox = outbox_at(&dir);
+        let id = InstructionId::new();
+        outbox.append(&declined(id, "operator rolled back"));
+
+        assert!(outbox.remove_by_instruction_id(id));
+        assert!(outbox.is_empty());
+    }
+
+    #[test]
+    fn remove_by_instruction_id_no_match_returns_false() {
+        let dir = tempdir().unwrap();
+        let outbox = outbox_at(&dir);
+        outbox.append(&ack(InstructionId::new()));
+        // Different id → no match.
+        assert!(!outbox.remove_by_instruction_id(InstructionId::new()));
+        // Queue is unchanged.
+        assert_eq!(outbox.len(), 1);
+    }
+
+    #[test]
+    fn remove_by_instruction_id_on_missing_file_returns_false() {
+        let dir = tempdir().unwrap();
+        let outbox = outbox_at(&dir);
+        assert!(!outbox.remove_by_instruction_id(InstructionId::new()));
+    }
+
+    #[test]
+    fn remove_by_instruction_id_skips_lifecycle_variants() {
+        // Lifecycle variants (Blocked/Completed/Failed) don't
+        // carry instruction_id — they're not matched by this
+        // method (deferred to the next refactor that stores the
+        // sent-time timestamp on disk).
+        let dir = tempdir().unwrap();
+        let outbox = outbox_at(&dir);
+        outbox.append(&EscalationKind::Completed {
+            summary: Some("done".into()),
+        });
+        // Any instruction id → no match because no entry carries one.
+        assert!(!outbox.remove_by_instruction_id(InstructionId::new()));
+        assert_eq!(outbox.len(), 1, "lifecycle entry should not be touched");
+    }
+
+    #[test]
+    fn remove_by_instruction_id_only_removes_first_match() {
+        // Defensive: if a duplicate entry ever lands on disk (replay
+        // edge case), the remove should drop one occurrence not all.
+        let dir = tempdir().unwrap();
+        let outbox = outbox_at(&dir);
+        let id = InstructionId::new();
+        outbox.append(&ack(id));
+        outbox.append(&ack(id));
+
+        assert!(outbox.remove_by_instruction_id(id));
+        assert_eq!(outbox.len(), 1, "second copy should remain");
+        assert!(outbox.remove_by_instruction_id(id));
+        assert!(outbox.is_empty());
     }
 }
