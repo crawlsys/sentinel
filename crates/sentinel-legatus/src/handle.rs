@@ -273,6 +273,16 @@ impl LegatusHandle {
     pub fn persistent_inbox(&self) -> Option<&PersistentInbox> {
         self.inbox.as_ref()
     }
+
+    /// Diagnostic: borrow the underlying `PersistentEscalationOutbox`,
+    /// if any. Exposed for the daemon's `/legatus/pending` HTTP route
+    /// so operators can see how many escalations are queued on disk
+    /// for delivery.
+    #[must_use]
+    #[allow(clippy::missing_const_for_fn)] // Option::as_ref is not const.
+    pub fn persistent_outbox(&self) -> Option<&PersistentEscalationOutbox> {
+        self.outbox.as_ref()
+    }
 }
 
 /// Returned by [`LegatusHandle::escalate`] when the runtime has
@@ -367,5 +377,43 @@ mod tests {
         let second = handle.try_pop_inbox().await.unwrap();
         assert_eq!(first.content, "a");
         assert_eq!(second.content, "b");
+    }
+
+    #[tokio::test]
+    async fn persistent_outbox_accessor_returns_some_when_seeded() {
+        // The /legatus/pending HTTP route reads outbox state through
+        // this accessor — make sure it isn't accidentally None on a
+        // pair built with persistence.
+        let dir = tempdir().unwrap();
+        let inbox = PersistentInbox::new(dir.path().join("legatus-inbox.jsonl"));
+        let outbox =
+            PersistentEscalationOutbox::new(dir.path().join("legatus-escalations.jsonl"));
+        let (handle, _runtime) = make_pair_with_persistence(inbox, outbox);
+
+        let outbox_ref = handle.persistent_outbox().expect("outbox is seeded");
+        assert_eq!(outbox_ref.len(), 0);
+
+        handle
+            .escalate(EscalationKind::Failed {
+                error: "boom".into(),
+            })
+            .unwrap();
+        // escalate() appends to the outbox synchronously before the
+        // mpsc send, so the count is visible immediately.
+        assert_eq!(handle.persistent_outbox().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn persistent_outbox_accessor_returns_none_for_standalone_pair() {
+        // make_pair() and make_pair_with_inbox() build outbox-less
+        // pairs; the accessor must report that honestly so the
+        // pending route returns 0 rather than panicking.
+        let (handle, _runtime) = make_pair();
+        assert!(handle.persistent_outbox().is_none());
+
+        let dir = tempdir().unwrap();
+        let inbox = PersistentInbox::new(dir.path().join("legatus-inbox.jsonl"));
+        let (handle, _runtime) = make_pair_with_inbox(inbox);
+        assert!(handle.persistent_outbox().is_none());
     }
 }

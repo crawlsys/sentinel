@@ -304,6 +304,7 @@ fn legatus_routes(handle: LegatusHandle) -> Router {
     Router::new()
         .route("/legatus/escalate", post(handle_legatus_escalate))
         .route("/legatus/inbox/next", get(handle_legatus_inbox_next))
+        .route("/legatus/pending", get(handle_legatus_pending))
         .with_state(handle)
 }
 
@@ -329,4 +330,41 @@ async fn handle_legatus_inbox_next(State(handle): State<LegatusHandle>) -> Respo
         },
         None => StatusCode::NO_CONTENT.into_response(),
     }
+}
+
+/// `GET /legatus/pending` — operator-visible "what's in flight"
+/// snapshot. Returns counts for the daemon's persistent inbox
+/// (operator instructions queued for the next Claude Code
+/// prompt) and persistent outbox (outbound escalations queued
+/// for WS send). Useful for `consul status`-style operator
+/// tooling and demo dashboards.
+///
+/// Response shape:
+/// ```json
+/// {"inbox_pending": 0, "outbox_pending": 3}
+/// ```
+///
+/// File I/O is wrapped in `tokio::task::spawn_blocking` so the
+/// HTTP handler never stalls on the advisory lock. Returns
+/// `0`-counts for whichever direction lacks a persistent store
+/// (e.g. standalone-CLI legatus with no daemon-hosted disk
+/// state).
+async fn handle_legatus_pending(State(handle): State<LegatusHandle>) -> Response {
+    let inbox_pending = match handle.persistent_inbox().cloned() {
+        Some(inbox) => tokio::task::spawn_blocking(move || inbox.len())
+            .await
+            .unwrap_or(0),
+        None => 0,
+    };
+    let outbox_pending = match handle.persistent_outbox().cloned() {
+        Some(outbox) => tokio::task::spawn_blocking(move || outbox.len())
+            .await
+            .unwrap_or(0),
+        None => 0,
+    };
+    let body = serde_json::json!({
+        "inbox_pending": inbox_pending,
+        "outbox_pending": outbox_pending,
+    });
+    (StatusCode::OK, Json(body)).into_response()
 }
