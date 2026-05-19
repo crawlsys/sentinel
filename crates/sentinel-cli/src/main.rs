@@ -17,6 +17,7 @@ mod cache_cmd;
 mod claude_md_cmd;
 mod cleanup_cmd;
 mod config_cmd;
+mod ba_cmd;
 mod cost_per_point_cmd;
 mod daemon_cmd;
 mod deploy_freq_cmd;
@@ -359,6 +360,15 @@ enum Commands {
         #[command(subcommand)]
         action: EvalAction,
     },
+
+    /// BA-orchestrator surface. Produces the verifiable
+    /// recommendation envelope (citations + requirement_refs +
+    /// spec_challenge) that sentinel's BA1 / BA3 / A13 gates verify
+    /// downstream. Phase 3 ships the `draft` subcommand.
+    Ba {
+        #[command(subcommand)]
+        action: BaAction,
+    },
 }
 
 /// `sentinel eval` subcommands.
@@ -414,6 +424,45 @@ enum EvalAction {
 
         /// Emit the full `EvalRunResult` as JSON instead of a
         /// human-readable summary.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+/// `sentinel ba` subcommands.
+#[derive(Subcommand)]
+enum BaAction {
+    /// Draft a BA recommendation. Calls the orchestrator's
+    /// `draft()` use case via the Anthropic LLM adapter
+    /// (`ANTHROPIC_API_KEY` required), returns a structured
+    /// [`BaRecommendation`] containing the recommendation body,
+    /// citations, requirement_refs, and a complete A13 spec
+    /// challenge. The resulting envelope is exactly what sentinel's
+    /// BA1 / BA3 / A13 gates verify when it's serialized into a
+    /// downstream tool's `extra` payload.
+    Draft {
+        /// Stakeholder brief (required). Quote to preserve
+        /// whitespace.
+        #[arg(long, value_name = "TEXT")]
+        brief: String,
+
+        /// Audience for the recommendation. One of:
+        /// `exec`, `board`, `customer`, `internal_team`.
+        #[arg(long, value_name = "AUDIENCE")]
+        audience: String,
+
+        /// Operator constraint the orchestrator must honor or
+        /// surface as `constraints_not_satisfied`. Repeatable.
+        #[arg(long = "constraint", value_name = "TEXT")]
+        constraints: Vec<String>,
+
+        /// Free-form identifier for the calling agent. Used for
+        /// audit attribution on the emitted [`BaRecommendation`].
+        #[arg(long, value_name = "ID", default_value = "ba-orchestrator")]
+        agent_id: String,
+
+        /// Emit the full [`BaRecommendation`] as pretty JSON
+        /// instead of a human-readable summary.
         #[arg(long)]
         json: bool,
     },
@@ -842,6 +891,24 @@ async fn main() -> anyhow::Result<()> {
                 runs_dir,
                 json,
             }),
+        },
+        Commands::Ba { action } => match action {
+            BaAction::Draft {
+                brief,
+                audience,
+                constraints,
+                agent_id,
+                json,
+            } => {
+                ba_cmd::draft(ba_cmd::DraftArgs {
+                    brief,
+                    audience,
+                    constraints,
+                    agent_id,
+                    json,
+                })
+                .await
+            }
         },
         Commands::Legatus { action } => match action {
             LegatusAction::Connect {
