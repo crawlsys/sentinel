@@ -35,6 +35,7 @@ pub mod request_limits;
 pub mod reversibility;
 pub mod review;
 pub mod ssrf;
+pub mod spec_challenge;
 pub mod step_manifest;
 pub mod step_proof;
 pub mod step_verifier;
