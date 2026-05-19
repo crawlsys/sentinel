@@ -30,6 +30,7 @@ pub mod qdrant;
 pub mod rate_limit;
 pub mod requirement_matrix;
 pub mod reversibility;
+pub mod spec_challenge_scorer;
 pub mod spec_challenge_store;
 pub mod rig_classifier;
 pub mod rig_judge;
