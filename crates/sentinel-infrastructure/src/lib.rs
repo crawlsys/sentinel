@@ -14,6 +14,7 @@ pub mod env;
 pub mod error_log;
 pub mod eval_corpus;
 pub mod eval_run_store;
+pub mod eval_scorer;
 pub mod evidence_browserbase;
 pub mod evidence_filesystem;
 pub mod filesystem;
