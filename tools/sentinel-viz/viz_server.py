@@ -461,10 +461,14 @@ def load_graph(db_path: Path, limit: int = 100) -> dict[str, Any]:
         n["session_status"] = status
         n["last_activity_age_s"] = int(age) if last_activity else None
 
+    # Ticker keeps a wider window than the graph node-window — atomic events get
+    # client-side rolled-up into segments, so we ship more raw rows so the rollup
+    # can cover a useful history span (~hour for moderately busy sessions).
+    EVENTS_LIMIT = max(limit * 6, 600)
     return {
         "nodes": kept_nodes,
         "edges": kept_edges,
-        "events": recent_events[-limit:],
+        "events": recent_events[-EVENTS_LIMIT:],
         "max_seq": max_seq,
         "window_limit": limit,
         "stats": {
@@ -472,7 +476,7 @@ def load_graph(db_path: Path, limit: int = 100) -> dict[str, Any]:
             "edges_total": len(kept_edges),
             "by_type": by_type_win,
             "by_outcome": by_outcome_win,
-            "events_total": len(recent_events[-limit:]),
+            "events_total": len(recent_events[-EVENTS_LIMIT:]),
             "corpus_nodes": len(nodes),
             "corpus_edges": len(edges_all),
             "corpus_by_type": by_type_all,
@@ -1117,7 +1121,8 @@ function renderSegment(s, idx) {
   const errMark = s.had_error ? ' <span style="color:var(--deny)">⚠</span>' : "";
   return `<div class="seg ${s.kind}${errCls}" data-seg="${idx}">
     <div class="seg-head" onclick="this.parentElement.classList.toggle('expanded')">
-      <span class="ts" data-relts="${escHtml(ts)}">${tsShort}</span>
+      <span class="ts" title="${escHtml(ts)}">${tsShort}</span>
+      <span class="ts-rel" data-relts="${escHtml(ts)}" style="color:var(--muted);font-size:9px;margin-left:4px">${relTime(ts)}</span>
       <span class="label">${escHtml(s.label)}${errMark}</span>
       <span class="caret">▶</span>
     </div>
@@ -1331,29 +1336,37 @@ function renderStats(s) {
 
 function groupTickerEvents(events) {
   // Group consecutive ticker events that share session × sentinel_event × outcome
-  // within a 3s window. A single PreToolUse from claude fires N gates in sequence;
-  // we collapse them into one row with [N] badge + expand to see the individual hooks.
+  // within a tight time window relative to the GROUP'S FIRST event (not the most
+  // recently added — otherwise a continuous burst of multiple tool calls all
+  // collapses into one giant row).
+  //
+  // A single PreToolUse fires up to ~10 gates in <300ms. Two distinct tool calls
+  // back-to-back typically have a ≥500ms gap. So 1500ms span + a hard cap of 14
+  // members per group keeps the unit-of-rollup honest.
   const sorted = events.slice().sort((a, b) => {
     const ta = ((a.payload || {}).ts) || a.ts || "";
     const tb = ((b.payload || {}).ts) || b.ts || "";
     return tb.localeCompare(ta);
   });
-  const GROUP_WINDOW_MS = 3000;
+  const GROUP_SPAN_MS = 1500;
+  const GROUP_MAX = 14;
   const groups = [];
   let current = null;
   for (const e of sorted) {
     const p = e.payload || {};
     const sig = `${p.session_id || ""}|${p.sentinel_event || ""}|${p.outcome || ""}`;
     const tms = new Date(p.ts || e.ts || 0).getTime();
-    if (current && current.sig === sig && Math.abs(current.lastTs - tms) <= GROUP_WINDOW_MS) {
+    const fits = current && current.sig === sig
+                 && Math.abs(current.firstTs - tms) <= GROUP_SPAN_MS
+                 && current.members.length < GROUP_MAX;
+    if (fits) {
       current.members.push(e);
-      current.lastTs = Math.min(current.lastTs, tms); // remember earliest in group
       if (!current.hooks.includes(p.hook)) current.hooks.push(p.hook);
       if (p.outcome === "deny" || p.outcome === "block") current.hasDeny = true;
     } else {
       if (current) groups.push(current);
       current = {
-        sig, lastTs: tms, members: [e], hooks: [p.hook].filter(Boolean),
+        sig, firstTs: tms, members: [e], hooks: [p.hook].filter(Boolean),
         first: e, hasDeny: p.outcome === "deny" || p.outcome === "block",
       };
     }
