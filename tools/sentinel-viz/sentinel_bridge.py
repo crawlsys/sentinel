@@ -116,6 +116,40 @@ def _ingest_sessions(graph: ag.Graph, sessions: list[dict]) -> dict[str, str]:
     return created
 
 
+def _safe_parse_jsonl_lines(lines):
+    """Parse a list of raw JSONL lines, skipping anything that fails to decode.
+    Resilient to partial writes (a tailed file may contain a half-written
+    final line on a read between flushes); also resilient to one bad row.
+    """
+    out = []
+    for ln in lines:
+        s = (ln or "").strip()
+        if not s:
+            continue
+        try:
+            out.append(json.loads(s))
+        except json.JSONDecodeError:
+            continue
+    return out
+
+
+def _hook_dedupe_key(h):
+    """Composite dedupe key for hook invocations.
+
+    Sentinel's `trace_id` is a correlation id shared across hooks fired for
+    a single user-initiated operation (per CLAUDE_TRACE_ID semantics) — it is
+    NOT unique per hook. Using trace_id alone for dedupe silently skips real
+    invocations when multiple hooks share one trace. Composite (trace_id, hook,
+    event, ts) is unique per fire and degrades gracefully if any field is missing.
+    """
+    return (
+        h.get("trace_id", "") or "",
+        h.get("hook", "") or "",
+        h.get("event", "") or "",
+        h.get("ts", "") or "",
+    )
+
+
 def _ingest_hooks(
     graph: ag.Graph,
     hooks: list[dict],
@@ -128,10 +162,11 @@ def _ingest_hooks(
     """
     added = 0
     for h in hooks:
-        tid = h.get("trace_id", "")
-        if tid in seen_traces:
+        key = _hook_dedupe_key(h)
+        if key in seen_traces:
             continue
-        seen_traces.add(tid)
+        seen_traces.add(key)
+        tid = h.get("trace_id", "")
         added += 1
 
         sid = h.get("session_id", "unknown")
@@ -233,12 +268,11 @@ def one_shot(store_path: Path, out_trace: bool) -> None:
     sessions = _read_jsonls_merged(SESSIONS_JSONL_PATHS)
     hooks = _read_jsonls_merged(HOOK_INVOCATIONS_PATHS)
 
-    # Build set of already-ingested trace IDs (for resumable imports)
-    seen_traces: set[str] = {
-        o.data.get("trace_id", "")
+    # Composite-key dedupe of already-ingested invocations (resumable imports).
+    seen_traces: set[tuple] = {
+        _hook_dedupe_key(o.data)
         for o in graph.objects(type="SentinelHookInvocation")
     }
-    seen_traces.discard("")
 
     session_map = _ingest_sessions(graph, sessions)
     new_count = _ingest_hooks(graph, hooks, session_map, seen_traces)
@@ -301,25 +335,53 @@ def tail_mode(store_path: Path) -> None:
 
     rt, graph = _load_or_create(store_path)
 
-    seen_traces: set[str] = {
-        o.data.get("trace_id", "")
+    # Composite-key dedupe (trace_id alone is a correlation id, not unique).
+    seen_traces: set[tuple] = {
+        _hook_dedupe_key(o.data)
         for o in graph.objects(type="SentinelHookInvocation")
     }
-    seen_traces.discard("")
 
     session_map: dict[str, str] = {
         o.data["session_id"]: o.id
         for o in graph.objects(type="SentinelSession")
     }
 
-    # Seed from existing data first (merged across all metrics dirs)
-    _ingest_sessions(graph, _read_jsonls_merged(SESSIONS_JSONL_PATHS))
+    # Seed from existing data first (merged across all metrics dirs). Capture
+    # the {session_id -> object_id} map returned by _ingest_sessions so future
+    # hook ingests can resolve their parent session without creating stubs.
+    session_map.update(_ingest_sessions(graph, _read_jsonls_merged(SESSIONS_JSONL_PATHS)))
     _ingest_hooks(graph, _read_jsonls_merged(HOOK_INVOCATIONS_PATHS), session_map, seen_traces)
     rt.save_state()
 
     # Track file offsets per path
     hook_offsets: dict[Path, int] = {p: (p.stat().st_size if p.exists() else 0) for p in HOOK_INVOCATIONS_PATHS}
     sess_offsets: dict[Path, int] = {p: (p.stat().st_size if p.exists() else 0) for p in SESSIONS_JSONL_PATHS}
+
+    def _read_new(path: Path, offsets: dict) -> tuple[list[str], int]:
+        """Read new lines since the last offset; handle truncation/rotation.
+
+        Sentinel rotates metrics JSONLs when they exceed a size cap (see
+        sentinel-infrastructure rotation logic). On rotation the file's size
+        falls below our remembered offset — we reset offset to 0 and re-read
+        from the top so we don't silently lose the new (rotated-in) content.
+        """
+        try:
+            new_size = path.stat().st_size
+        except FileNotFoundError:
+            return [], offsets.get(path, 0)
+        cur = offsets.get(path, 0)
+        if new_size < cur:
+            # File was truncated or rotated — start over from byte 0
+            cur = 0
+        if new_size <= cur:
+            return [], new_size
+        try:
+            with path.open() as f:
+                f.seek(cur)
+                lines = f.readlines()
+        except OSError:
+            return [], cur
+        return lines, new_size
 
     try:
         while True:
@@ -329,25 +391,19 @@ def tail_mode(store_path: Path) -> None:
             for path in SESSIONS_JSONL_PATHS:
                 if not path.exists():
                     continue
-                new_size = path.stat().st_size
-                if new_size > sess_offsets.get(path, 0):
-                    with path.open() as f:
-                        f.seek(sess_offsets.get(path, 0))
-                        new_lines = [json.loads(ln) for ln in f if ln.strip()]
+                raw, new_size = _read_new(path, sess_offsets)
+                if raw:
                     sess_offsets[path] = new_size
-                    _ingest_sessions(graph, new_lines)
+                    session_map.update(_ingest_sessions(graph, _safe_parse_jsonl_lines(raw)))
                     changed = True
 
             for path in HOOK_INVOCATIONS_PATHS:
                 if not path.exists():
                     continue
-                new_size = path.stat().st_size
-                if new_size > hook_offsets.get(path, 0):
-                    with path.open() as f:
-                        f.seek(hook_offsets.get(path, 0))
-                        new_lines = [json.loads(ln) for ln in f if ln.strip()]
+                raw, new_size = _read_new(path, hook_offsets)
+                if raw:
                     hook_offsets[path] = new_size
-                    added = _ingest_hooks(graph, new_lines, session_map, seen_traces)
+                    added = _ingest_hooks(graph, _safe_parse_jsonl_lines(raw), session_map, seen_traces)
                     if added:
                         ts = datetime.now(timezone.utc).strftime("%H:%M:%S")
                         tag = "real" if ".claude-sentinel" not in str(path) else "sandbox"

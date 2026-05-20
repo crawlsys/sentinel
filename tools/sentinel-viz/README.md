@@ -30,19 +30,58 @@ A two-process live visualizer for [Sentinel](https://github.com/garysomerhalder/
 ## Quick start
 
 ```bash
+# From the sentinel repo root, the tool lives at tools/sentinel-viz/.
+cd /path/to/sentinel/tools/sentinel-viz
+
+# One-shot bring-up (idempotent — re-runs are no-ops if already alive).
+./ensure-viz.sh
+
+# Open the UI
+xdg-open http://127.0.0.1:8081/   # or just hit it in a browser
+```
+
+`ensure-viz.sh` spawns both the bridge and the viz server in the background,
+keeps them running across re-runs, and respects:
+- `SENTINEL_VIZ_PORT` (default `8081`)
+- `SENTINEL_VIZ_DISABLE=1` (skip entirely)
+- `SENTINEL_VIZ_LOG_DIR` (default `/tmp`)
+
+To auto-launch the viz from every Claude Code session, drop a hook into
+`~/.claude/settings.json` (or the sandbox `~/.claude-sentinel/config/settings.json`):
+
+```json
+"hooks": {
+  "SessionStart": [{
+    "matcher": "",
+    "hooks": [{
+      "type": "command",
+      "command": "/path/to/sentinel/tools/sentinel-viz/ensure-viz.sh",
+      "async": true
+    }]
+  }]
+}
+```
+
+A common pattern is to symlink the script onto `PATH` so the absolute path in
+`settings.json` survives worktree moves:
+
+```bash
+ln -sf /path/to/sentinel/tools/sentinel-viz/ensure-viz.sh ~/.local/bin/sentinel-ensure-viz
+```
+
+### Manual bring-up (without ensure-viz.sh)
+
+```bash
 # 1. Bridge (live-tail mode — keeps SQLite store fresh)
 nohup ~/.local/share/pipx/venvs/activegraph/bin/python \
-  ~/.agents/scratch/activegraph-bridge/sentinel_bridge.py --tail \
+  tools/sentinel-viz/sentinel_bridge.py --tail \
   > /tmp/sentinel-bridge.log 2>&1 &
 disown
 
 # 2. Viz server (port 8081)
-nohup python3 ~/.agents/scratch/activegraph-bridge/viz_server.py --port 8081 \
+nohup python3 tools/sentinel-viz/viz_server.py --port 8081 \
   > /tmp/sentinel-viz.log 2>&1 &
 disown
-
-# 3. Open the UI
-xdg-open http://127.0.0.1:8081/  # or just hit it in a browser
 ```
 
 ## Viz features
@@ -108,11 +147,14 @@ xdg-open http://127.0.0.1:8081/  # or just hit it in a browser
 ## Where it lives
 
 ```
-~/.agents/scratch/activegraph-bridge/
+sentinel/tools/sentinel-viz/
 ├── README.md             ← this file
-├── sentinel_bridge.py    ← JSONL → activegraph SQLite ingester
+├── ensure-viz.sh         ← idempotent bring-up; safe from a SessionStart hook
+├── sentinel_bridge.py    ← JSONL → activegraph SQLite ingester (live-tail)
 ├── viz_server.py         ← stdlib HTTP server + embedded D3 UI
-└── sentinel.db           ← activegraph SQLite store (gitignored)
+├── static/
+│   └── d3.v7.min.js      ← vendored D3 so the UI is offline-capable
+└── sentinel.db           ← activegraph SQLite store (gitignored; written by bridge)
 ```
 
 The viz reads the same SQLite the bridge writes; both can be run independently. Killing one doesn't break the other (the viz reads the DB in `?mode=ro` and tolerates the DB being absent).

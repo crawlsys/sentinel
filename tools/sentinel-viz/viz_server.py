@@ -1,14 +1,21 @@
 #!/usr/bin/env python3
-"""Sentinel/activegraph live viz — first-pass.
+"""Sentinel/activegraph live viz.
 
-Tails the activegraph SQLite event store and serves a D3 force-directed graph
-of sessions ↔ hook invocations with outcome-coloured nodes and a live event
-ticker. Frontend polls every 2s.
+Reads the activegraph SQLite event store (populated by sentinel_bridge.py) and
+serves a single-page D3 visualisation of sessions ↔ hook invocations with
+outcome-coloured nodes, per-session liveness pulses, a slide-out info panel
+with transcript-derived activity rollups, and a right-rail event ticker.
+
+Live updates push via Server-Sent Events at `/api/stream` — the server probes
+MAX(seq) every 250ms and emits a full snapshot only on change. The client uses
+`EventSource()` (no polling). Auto-reconnects on drop.
 
 Run:
-    python3 viz_server.py [--port 8081] [--db ~/.agents/scratch/activegraph-bridge/sentinel.db]
+    python3 viz_server.py [--port 8081] [--db PATH] [--host 127.0.0.1]
 
-Then open http://localhost:8081/
+Default DB:  ~/.agents/scratch/activegraph-bridge/sentinel.db
+
+Then open http://localhost:8081/.
 """
 from __future__ import annotations
 
@@ -266,6 +273,22 @@ def _tool_summary(name: str, inp) -> str:
         return _trim(inp.get("description", "") + " · " + inp.get("subagent_type", ""), 200)
     # fallback: dump shortened JSON
     return _trim(json.dumps(inp, default=str), 200)
+
+
+def peek_max_seq(db_path: Path) -> int:
+    """Cheap MAX(seq) probe — single index hit, used by the SSE loop to decide
+    whether a full load_graph() is needed."""
+    if not db_path.exists():
+        return -1
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        try:
+            row = conn.execute("SELECT MAX(seq) FROM events").fetchone()
+            return int(row[0] or 0)
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return -1
 
 
 def load_graph(db_path: Path, limit: int = 100) -> dict[str, Any]:
@@ -717,7 +740,7 @@ INDEX_HTML = r"""<!doctype html>
     <div id="ticker"></div>
   </div>
 </div>
-<script src="https://d3js.org/d3.v7.min.js"></script>
+<script src="/static/d3.v7.min.js"></script>
 <script>
 const svg = d3.select("svg");
 const tipEl = document.getElementById("tip");
@@ -920,8 +943,9 @@ function relTime(iso) {
 // Wrap a relative time in a span tagged with the source ISO so it can be re-ticked.
 function rtSpan(iso) {
   if (!iso) return "";
-  const esc = String(iso).replace(/"/g, "&quot;");
-  return `<span data-relts="${esc}">${relTime(iso)}</span>`;
+  // Escape both the attribute value AND the body (relTime may return the iso
+  // verbatim if it fails to parse).
+  return `<span data-relts="${escHtml(String(iso))}">${escHtml(relTime(iso))}</span>`;
 }
 function tickRelTimes() {
   document.querySelectorAll("[data-relts]").forEach(el => {
@@ -944,8 +968,16 @@ function openPanelForEvent(seq, manual = true) {
   document.getElementById("panel-body").innerHTML = panelHtmlFromEvent(e, chain);
   document.getElementById("panel").classList.add("open");
   document.querySelectorAll("#ticker .row").forEach(r => r.classList.toggle("active", parseInt(r.dataset.seq) === seq));
-  // Find the actual invocation node corresponding to this event (match by trace_id)
-  const invNode = (p.trace_id && latestGraph.nodes.find(n => n.type === "SentinelHookInvocation" && (n.data||{}).trace_id === p.trace_id)) || null;
+  // Find the invocation node for this event. trace_id alone isn't unique (it's
+  // a correlation id shared across hooks for one user-initiated operation), so
+  // also match on hook + sentinel_event + ts. Falls back to the session node.
+  const invNode = latestGraph.nodes.find(n =>
+    n.type === "SentinelHookInvocation"
+    && (n.data || {}).trace_id === p.trace_id
+    && (!p.hook || (n.data || {}).hook === p.hook)
+    && (!p.sentinel_event || (n.data || {}).event === p.sentinel_event)
+    && (!p.ts || (n.data || {}).ts === p.ts)
+  ) || null;
   const focusId = invNode ? invNode.id : (sid ? (latestGraph.nodes.find(n => n.type === "SentinelSession" && (n.data||{}).session_id === sid) || {}).id : null);
   applyFocus(focusId);
   panToNode(focusId);
@@ -1164,24 +1196,25 @@ function panelHtmlFromEvent(e, chain) {
   const ts = p.ts || e.ts;
   const outcome = p.outcome || "";
   const oclass = outcome === "allow" ? "ok" : outcome === "deny" ? "deny" : outcome === "ask" ? "ask" : "";
-  let h = `<h3>${p.hook || e.type}</h3>`;
-  h += `<div class="kv"><span>event</span><span>${p.sentinel_event || e.type}</span></div>`;
-  if (outcome) h += `<div class="kv"><span>outcome</span><span class="pill ${oclass}">${outcome}</span></div>`;
-  h += `<div class="kv"><span>session</span><span>${(p.session_id || "").slice(0,12)}…</span></div>`;
-  if (p.trace_id) h += `<div class="kv"><span>trace</span><span>${p.trace_id.slice(0,8)}…</span></div>`;
-  if (p.duration_us !== undefined) h += `<div class="kv"><span>duration</span><span>${p.duration_us}µs</span></div>`;
+  let h = `<h3>${escHtml(p.hook || e.type)}</h3>`;
+  h += `<div class="kv"><span>event</span><span>${escHtml(p.sentinel_event || e.type)}</span></div>`;
+  if (outcome) h += `<div class="kv"><span>outcome</span><span class="pill ${oclass}">${escHtml(outcome)}</span></div>`;
+  h += `<div class="kv"><span>session</span><span>${escHtml((p.session_id || "").slice(0,12))}…</span></div>`;
+  if (p.trace_id) h += `<div class="kv"><span>trace</span><span>${escHtml(p.trace_id.slice(0,8))}…</span></div>`;
+  if (p.duration_us !== undefined) h += `<div class="kv"><span>duration</span><span>${Number(p.duration_us)|0}µs</span></div>`;
   h += `<div class="kv"><span>time</span><span>${rtSpan(ts)}</span></div>`;
-  h += `<div class="kv"><span>ts</span><span style="font-size:9px">${ts || ""}</span></div>`;
-  const sumTs1 = (p.ts || e.ts || "").replace(/'/g, "");
-  h += `<div class="sec"><h4>summary <button onclick="summarizeActivity('${p.session_id||''}','${sumTs1}','panel-summary')" style="float:right;background:var(--accent);color:#fff;border:0;border-radius:3px;padding:1px 8px;font-size:10px;cursor:pointer">summarize</button></h4><div id="panel-summary" class="summary" style="margin-top:6px"><span style="color:var(--muted)">click summarize to call openai</span></div></div>`;
+  h += `<div class="kv"><span>ts</span><span style="font-size:9px">${escHtml(ts || "")}</span></div>`;
+  const sumTs1 = (p.ts || e.ts || "").replace(/['"\\<>]/g, "");
+  const sumSid1 = (p.session_id || "").replace(/['"\\<>]/g, "");
+  h += `<div class="sec"><h4>summary <button onclick="summarizeActivity('${sumSid1}','${sumTs1}','panel-summary')" style="float:right;background:var(--accent);color:#fff;border:0;border-radius:3px;padding:1px 8px;font-size:10px;cursor:pointer">summarize</button></h4><div id="panel-summary" class="summary" style="margin-top:6px"><span style="color:var(--muted)">click summarize to call openai</span></div></div>`;
   h += `<div class="sec"><h4>session activity</h4><div id="panel-activity"></div></div>`;
-  h += `<div class="sec"><h4>raw payload</h4><pre>${JSON.stringify(p, null, 2)}</pre></div>`;
+  h += `<div class="sec"><h4>raw payload</h4><pre>${escHtml(JSON.stringify(p, null, 2))}</pre></div>`;
   if (chain.length > 1) {
     h += `<div class="sec"><h4>session chain (${chain.length})</h4>`;
     for (const c of chain.slice(-20)) {
       const cp = c.payload || {};
       const cls = c.seq === e.seq ? "chain current" : "chain";
-      h += `<div class="${cls}" onclick="openPanelForEvent(${c.seq})">${cp.hook || c.type} <span style="color:var(--muted);font-size:10px">· ${(cp.outcome||"").slice(0,6)}</span></div>`;
+      h += `<div class="${cls}" onclick="openPanelForEvent(${Number(c.seq)|0})">${escHtml(cp.hook || c.type)} <span style="color:var(--muted);font-size:10px">· ${escHtml((cp.outcome||"").slice(0,6))}</span></div>`;
     }
     h += `</div>`;
   }
@@ -1190,39 +1223,40 @@ function panelHtmlFromEvent(e, chain) {
 
 function panelHtmlFromNode(n, chain) {
   const d = n.data || {};
-  let h = `<h3>${n.type}</h3>`;
-  h += `<div class="kv"><span>id</span><span>${n.id}</span></div>`;
+  let h = `<h3>${escHtml(n.type)}</h3>`;
+  h += `<div class="kv"><span>id</span><span>${escHtml(n.id)}</span></div>`;
   if (n.type === "SentinelSession") {
-    h += `<div class="kv"><span>session_id</span><span>${(d.session_id || "").slice(0,16)}…</span></div>`;
-    if (d.cwd) h += `<div class="kv"><span>cwd</span><span style="font-size:9px">${d.cwd}</span></div>`;
-    if (d.platform) h += `<div class="kv"><span>platform</span><span>${d.platform}</span></div>`;
+    h += `<div class="kv"><span>session_id</span><span>${escHtml((d.session_id || "").slice(0,16))}…</span></div>`;
+    if (d.cwd) h += `<div class="kv"><span>cwd</span><span style="font-size:9px">${escHtml(d.cwd)}</span></div>`;
+    if (d.platform) h += `<div class="kv"><span>platform</span><span>${escHtml(d.platform)}</span></div>`;
     if (d.started_at) h += `<div class="kv"><span>started</span><span>${rtSpan(d.started_at)}</span></div>`;
     if (n.session_status) {
-      const ageStr = n.last_activity_age_s !== null && n.last_activity_age_s !== undefined ? ` (${n.last_activity_age_s}s ago)` : "";
-      h += `<div class="kv"><span>state</span><span>${n.session_status}${ageStr}</span></div>`;
+      const ageStr = n.last_activity_age_s !== null && n.last_activity_age_s !== undefined ? ` (${Number(n.last_activity_age_s)|0}s ago)` : "";
+      h += `<div class="kv"><span>state</span><span>${escHtml(n.session_status)}${ageStr}</span></div>`;
     }
   } else if (n.type === "SentinelHookInvocation") {
-    h += `<div class="kv"><span>hook</span><span>${d.hook}</span></div>`;
-    h += `<div class="kv"><span>event</span><span>${d.event}</span></div>`;
-    if (d.outcome) h += `<div class="kv"><span>outcome</span><span class="pill ${d.outcome==='allow'?'ok':d.outcome==='deny'?'deny':d.outcome==='ask'?'ask':''}">${d.outcome}</span></div>`;
-    if (d.tool) h += `<div class="kv"><span>tool</span><span>${d.tool}</span></div>`;
-    if (d.duration_us !== undefined) h += `<div class="kv"><span>duration</span><span>${d.duration_us}µs</span></div>`;
-    if (d.trace_id) h += `<div class="kv"><span>trace</span><span>${d.trace_id.slice(0,8)}…</span></div>`;
-    if (d.session_id) h += `<div class="kv"><span>session</span><span>${(d.session_id).slice(0,12)}…</span></div>`;
-    if (d.repo_root) h += `<div class="kv"><span>repo</span><span style="font-size:9px">${d.repo_root.split("/").slice(-2).join("/")}</span></div>`;
+    h += `<div class="kv"><span>hook</span><span>${escHtml(d.hook || "")}</span></div>`;
+    h += `<div class="kv"><span>event</span><span>${escHtml(d.event || "")}</span></div>`;
+    if (d.outcome) h += `<div class="kv"><span>outcome</span><span class="pill ${d.outcome==='allow'?'ok':d.outcome==='deny'?'deny':d.outcome==='ask'?'ask':''}">${escHtml(d.outcome)}</span></div>`;
+    if (d.tool) h += `<div class="kv"><span>tool</span><span>${escHtml(d.tool)}</span></div>`;
+    if (d.duration_us !== undefined) h += `<div class="kv"><span>duration</span><span>${Number(d.duration_us)|0}µs</span></div>`;
+    if (d.trace_id) h += `<div class="kv"><span>trace</span><span>${escHtml(d.trace_id.slice(0,8))}…</span></div>`;
+    if (d.session_id) h += `<div class="kv"><span>session</span><span>${escHtml(d.session_id.slice(0,12))}…</span></div>`;
+    if (d.repo_root) h += `<div class="kv"><span>repo</span><span style="font-size:9px">${escHtml(d.repo_root.split("/").slice(-2).join("/"))}</span></div>`;
     if (d.ts) h += `<div class="kv"><span>time</span><span>${rtSpan(d.ts)}</span></div>`;
   }
-  const nSid = (d.session_id || "").replace(/'/g, "");
-  const nTs  = (d.ts || "").replace(/'/g, "");
+  const nSid = (d.session_id || "").replace(/['"\\<>]/g, "");
+  const nTs  = (d.ts || "").replace(/['"\\<>]/g, "");
   h += `<div class="sec"><h4>summary <button onclick="summarizeActivity('${nSid}','${nTs}','panel-summary')" style="float:right;background:var(--accent);color:#fff;border:0;border-radius:3px;padding:1px 8px;font-size:10px;cursor:pointer">summarize</button></h4><div id="panel-summary" class="summary" style="margin-top:6px"><span style="color:var(--muted)">click summarize to call openai</span></div></div>`;
   h += `<div class="sec"><h4>session activity</h4><div id="panel-activity"></div></div>`;
-  h += `<div class="sec"><h4>raw data</h4><pre>${JSON.stringify(d, null, 2)}</pre></div>`;
+  h += `<div class="sec"><h4>raw data</h4><pre>${escHtml(JSON.stringify(d, null, 2))}</pre></div>`;
   if (chain.length > 1) {
     h += `<div class="sec"><h4>${n.type === "SentinelSession" ? "session hooks" : "session chain"} (${chain.length})</h4>`;
     for (const c of chain.slice(-20)) {
       const cd = c.data || {};
       const cls = c.id === n.id ? "chain current" : "chain";
-      h += `<div class="${cls}" onclick="openPanelForNode('${c.id}')">${cd.hook || c.type} <span style="color:var(--muted);font-size:10px">· ${(cd.outcome||"").slice(0,6)} · ${rtSpan(cd.ts)}</span></div>`;
+      const safeId = (c.id || "").replace(/['"\\<>]/g, "");
+      h += `<div class="${cls}" onclick="openPanelForNode('${safeId}')">${escHtml(cd.hook || c.type)} <span style="color:var(--muted);font-size:10px">· ${escHtml((cd.outcome||"").slice(0,6))} · ${rtSpan(cd.ts)}</span></div>`;
     }
     h += `</div>`;
   }
@@ -1387,34 +1421,39 @@ function renderTicker(events) {
     const ts = p.ts || e.ts;
     const sev = p.sentinel_event || e.type.replace("sentinel.","");
 
+    const tsSafe = escHtml(ts || "");
+    const tsShortSafe = ts ? escHtml(ts.slice(11,19)) : "";
+    const sidShort = p.session_id ? " · " + escHtml(p.session_id.slice(0,8)) : "";
+
     if (g.members.length === 1) {
-      // Single event — render as before
-      return `<div class="row ${isNew ? "new" : ""} ${isActive ? "active" : ""}" data-seq="${e.seq}" onclick="openPanelForEvent(${e.seq})">
-        <span class="pill ${oclass}">${outcome || e.type.replace("sentinel.","")}</span>
-        <strong>${p.hook || ""}</strong> ${sev}
-        <div class="meta"><span data-relts="${ts}">${relTime(ts)}</span> · ${ts ? ts.slice(11,19) : ""}${p.session_id ? " · " + p.session_id.slice(0,8) : ""}${p.duration_us ? " · " + p.duration_us + "µs" : ""}</div>
+      const durTag = p.duration_us ? " · " + (Number(p.duration_us)|0) + "µs" : "";
+      return `<div class="row ${isNew ? "new" : ""} ${isActive ? "active" : ""}" data-seq="${Number(e.seq)|0}" onclick="openPanelForEvent(${Number(e.seq)|0})">
+        <span class="pill ${oclass}">${escHtml(outcome || e.type.replace("sentinel.",""))}</span>
+        <strong>${escHtml(p.hook || "")}</strong> ${escHtml(sev)}
+        <div class="meta"><span data-relts="${tsSafe}">${relTime(ts)}</span> · ${tsShortSafe}${sidShort}${durTag}</div>
       </div>`;
     }
 
     // Grouped row — show count badge + collapsed hook list
     const n = g.members.length;
-    const hookPreview = g.hooks.slice(0, 3).join(", ") + (g.hooks.length > 3 ? `, +${g.hooks.length - 3}` : "");
+    const hookPreview = escHtml(g.hooks.slice(0, 3).join(", ")) + (g.hooks.length > 3 ? `, +${g.hooks.length - 3}` : "");
     const members = g.members.map(me => {
       const mp = me.payload || {};
       const moc = (mp.outcome || "") === "allow" ? "ok" : (mp.outcome === "deny" ? "deny" : (mp.outcome === "ask" ? "ask" : ""));
-      return `<div class="grp-member" onclick="event.stopPropagation();openPanelForEvent(${me.seq})">
-        <span class="pill ${moc}" style="font-size:9px">${mp.outcome || ""}</span>
-        ${mp.hook || ""}${mp.duration_us ? " · " + mp.duration_us + "µs" : ""}
+      const durTag = mp.duration_us ? " · " + (Number(mp.duration_us)|0) + "µs" : "";
+      return `<div class="grp-member" onclick="event.stopPropagation();openPanelForEvent(${Number(me.seq)|0})">
+        <span class="pill ${moc}" style="font-size:9px">${escHtml(mp.outcome || "")}</span>
+        ${escHtml(mp.hook || "")}${durTag}
       </div>`;
     }).join("");
 
-    return `<div class="row grouped ${isNew ? "new" : ""} ${g.hasDeny ? "has-deny" : ""}" onclick="openPanelForEvent(${e.seq})">
+    return `<div class="row grouped ${isNew ? "new" : ""} ${g.hasDeny ? "has-deny" : ""}" onclick="openPanelForEvent(${Number(e.seq)|0})">
       <span class="grp-count">${n}</span>
-      <span class="pill ${oclass}">${outcome}</span>
-      <strong>${sev}</strong>
+      <span class="pill ${oclass}">${escHtml(outcome)}</span>
+      <strong>${escHtml(sev)}</strong>
       <span class="grp-caret" onclick="event.stopPropagation();this.closest('.row').classList.toggle('expanded')">▶</span>
       <div class="grp-tools">${hookPreview}</div>
-      <div class="meta"><span data-relts="${ts}">${relTime(ts)}</span> · ${ts ? ts.slice(11,19) : ""}${p.session_id ? " · " + p.session_id.slice(0,8) : ""}</div>
+      <div class="meta"><span data-relts="${tsSafe}">${relTime(ts)}</span> · ${tsShortSafe}${sidShort}</div>
       <div class="grp-members">${members}</div>
     </div>`;
   });
@@ -1483,7 +1522,7 @@ function renderGraph(nodes, edges, hasNew) {
     tipEl.style.top  = (ev.pageY + 12) + "px";
     const tsStr = (d.data && d.data.ts) ? `<br><span style="color:var(--muted)">${rtSpan(d.data.ts)}</span>` : "";
     const hook = (d.data && d.data.hook) ? d.data.hook : d.type;
-    tipEl.innerHTML = `<strong>${hook}</strong>${tsStr}<br><span style="color:var(--muted);font-size:10px">click for details</span>`;
+    tipEl.innerHTML = `<strong>${escHtml(hook)}</strong>${tsStr}<br><span style="color:var(--muted);font-size:10px">click for details</span>`;
   }).on("mouseout", () => { tipEl.style.opacity = 0; })
     .on("click", (ev, d) => { ev.stopPropagation(); openPanelForNode(d.id); });
   merged.call(d3.drag()
@@ -1512,11 +1551,43 @@ setInterval(() => { if (latestGraph) renderGraph(latestGraph.nodes, latestGraph.
 """
 
 
+STATIC_DIR = Path(__file__).resolve().parent / "static"
+STATIC_MIME = {
+    ".js":  "application/javascript",
+    ".css": "text/css; charset=utf-8",
+    ".png": "image/png",
+    ".svg": "image/svg+xml; charset=utf-8",
+    ".map": "application/json",
+}
+
+
 class Handler(BaseHTTPRequestHandler):
     db_path: Path = DEFAULT_DB
 
     def log_message(self, format, *args):  # quieter
         sys.stderr.write("[viz] " + format % args + "\n")
+
+    def _serve_static(self, rel: str) -> bool:
+        """Serve a file from tools/sentinel-viz/static/. Returns False if not found / unsafe."""
+        # Guard against path traversal — only allow simple basenames.
+        if "/" in rel or rel.startswith("."):
+            return False
+        candidate = STATIC_DIR / rel
+        try:
+            real = candidate.resolve()
+        except OSError:
+            return False
+        if not real.is_file() or STATIC_DIR.resolve() not in real.parents:
+            return False
+        body = real.read_bytes()
+        ctype = STATIC_MIME.get(real.suffix.lower(), "application/octet-stream")
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Cache-Control", "public, max-age=3600")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+        return True
 
     def do_GET(self):
         if self.path == "/" or self.path.startswith("/index"):
@@ -1526,6 +1597,13 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
+            return
+        if self.path.startswith("/static/"):
+            rel = self.path[len("/static/"):].split("?", 1)[0]
+            if self._serve_static(rel):
+                return
+            self.send_response(404)
+            self.end_headers()
             return
         if self.path.startswith("/api/graph"):
             g = load_graph(self.db_path)
@@ -1563,6 +1641,10 @@ class Handler(BaseHTTPRequestHandler):
             return
         if self.path.startswith("/api/stream"):
             # Server-Sent Events. Pushes a full snapshot whenever max_seq changes.
+            # Performance: we probe MAX(seq) (a single index hit) every tick and
+            # only invoke load_graph() when the seq actually changed. With N
+            # connected clients this scales as N × cheap-probe + 1 × full-load
+            # per change, rather than N × full-load per tick.
             try:
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream")
@@ -1571,8 +1653,9 @@ class Handler(BaseHTTPRequestHandler):
                 self.end_headers()
                 last_seq = -1
                 while True:
-                    g = load_graph(self.db_path)
-                    if g.get("max_seq", 0) != last_seq:
+                    cur_seq = peek_max_seq(self.db_path)
+                    if cur_seq != last_seq:
+                        g = load_graph(self.db_path)
                         last_seq = g.get("max_seq", 0)
                         payload = ("data: " + json.dumps(g) + "\n\n").encode("utf-8")
                         self.wfile.write(payload)
@@ -1581,7 +1664,7 @@ class Handler(BaseHTTPRequestHandler):
                         # keep-alive comment every loop so connection doesn't idle out
                         self.wfile.write(b": ping\n\n")
                         self.wfile.flush()
-                    time.sleep(0.25)  # 250 ms tick — DB read is cheap
+                    time.sleep(0.25)
             except (BrokenPipeError, ConnectionResetError):
                 return  # client disconnected
             return
