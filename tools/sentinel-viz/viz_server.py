@@ -943,16 +943,21 @@ let lastEventIds = new Set();
 let latestGraph = null;
 let selectedNodeId = null;
 let selectedEventSeq = null;
+// Track what the panel was last rebuilt for, so per-tick refreshes don't
+// clobber the summary by re-running openPanelForEvent unnecessarily.
+let renderedPanelKey = null;
 const PULSE_WINDOW_SECS = 30;
 
 // ── AI config (localStorage) ─────────────────────────────────────────────────
 function loadAIConfig() {
   const key   = localStorage.getItem("sentinel_viz_openai_key") || "";
   const model = localStorage.getItem("sentinel_viz_openai_model") || "gpt-4o-mini";
+  // auto-summarize defaults OFF — each new card auto-watch lands on would
+  // otherwise burn an OpenAI call (cache helps on revisits but a busy session
+  // produces many unique cards). User opts in explicitly via Settings.
   const auto  = localStorage.getItem("sentinel_viz_openai_auto") === "1";
   // auto-watch defaults to ON — without it the viz can pin on a stale card
-  // forever, which is exactly the failure mode dogfooding caught. Users who
-  // want it off can untoggle in Settings; the "off" choice persists via "0".
+  // forever, which is exactly the failure mode dogfooding caught.
   const watchSetting = localStorage.getItem("sentinel_viz_auto_watch");
   const watch = (watchSetting === null) ? true : (watchSetting === "1");
   document.getElementById("ai-key").value = key;
@@ -1291,6 +1296,7 @@ function closePanel() {
   document.getElementById("panel").classList.remove("open");
   selectedNodeId = null;
   selectedEventSeq = null;
+  renderedPanelKey = null;
   document.querySelectorAll("#ticker .row.active").forEach(r => r.classList.remove("active"));
   applyFocus(null);
   // Don't immediately re-yank the view — leave a beat after close before auto-watch fires
@@ -1323,6 +1329,31 @@ function renderSegment(s, idx) {
     ${s.preview ? `<div class="seg-preview">${escHtml(s.preview)}</div>` : ""}
     ${details}
   </div>`;
+}
+
+// Refresh just the activity feed of the currently-open panel (no HTML rebuild,
+// no summary clobber). Called every SSE tick when the selected card is the
+// same one already rendered.
+function refreshOpenPanelActivity() {
+  if (!latestGraph) return;
+  if (selectedEventSeq !== null) {
+    const e = (latestGraph.events || []).find(x => x.seq === selectedEventSeq);
+    if (!e) return;
+    const p = e.payload || {};
+    const sid = p.session_id;
+    const ts = p.ts || e.ts;
+    if (sid && document.getElementById("panel-activity")) {
+      loadActivityInto("panel-activity", sid, ts);
+    }
+  } else if (selectedNodeId !== null) {
+    const n = (latestGraph.nodes || []).find(x => x.id === selectedNodeId);
+    if (!n) return;
+    const sid = (n.data || {}).session_id;
+    const ts = (n.data || {}).ts;
+    if (sid && document.getElementById("panel-activity")) {
+      loadActivityInto("panel-activity", sid, ts);
+    }
+  }
 }
 
 async function loadActivityInto(targetId, sessionId, atTs) {
@@ -1542,11 +1573,22 @@ function apply(g) {
   renderTicker(g.events);
   renderGraph(g.nodes, g.edges, g.max_seq > lastSeq);
   lastSeq = g.max_seq;
-  // Refresh open panel content (new tool_results may have streamed in). Pass
-  // manual=false so this background refresh does NOT bump the user-click
-  // cooldown — otherwise auto-watch would be blocked forever on any open card.
-  if (selectedEventSeq !== null) openPanelForEvent(selectedEventSeq, /*manual=*/ false);
-  else if (selectedNodeId !== null) openPanelForNode(selectedNodeId, /*manual=*/ false);
+  // Panel refresh discipline:
+  //   - If the SELECTED card hasn't changed since last render, only refresh
+  //     the activity feed in place (don't rebuild panel HTML — that would
+  //     clobber the AI summary back to its placeholder every 250ms).
+  //   - If the selected card HAS changed, rebuild the panel (auto-watch just
+  //     advanced us, or a manual click changed things between ticks).
+  const panelKey = selectedEventSeq !== null ? `evt:${selectedEventSeq}` :
+                   selectedNodeId   !== null ? `node:${selectedNodeId}` : null;
+  if (panelKey && panelKey !== renderedPanelKey) {
+    if (selectedEventSeq !== null) openPanelForEvent(selectedEventSeq, /*manual=*/ false);
+    else if (selectedNodeId !== null) openPanelForNode(selectedNodeId, /*manual=*/ false);
+    renderedPanelKey = panelKey;
+  } else if (panelKey) {
+    // Same card — just live-refresh the activity feed without rebuilding HTML.
+    refreshOpenPanelActivity();
+  }
   // Auto-watch ALWAYS evaluates, regardless of whether a panel is open.
   // The 10s debounce + 8s click cooldown handle thrash protection.
   // Without this, an open panel pinned the view to a stale card forever.
