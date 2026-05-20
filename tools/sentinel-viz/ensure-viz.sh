@@ -15,8 +15,9 @@ fi
 
 PORT="${SENTINEL_VIZ_PORT:-8081}"
 LOG_DIR="${SENTINEL_VIZ_LOG_DIR:-/tmp}"
-# This script lives alongside the python files; VIZ_DIR is our own dir.
-VIZ_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# This script lives alongside the python files; resolve through symlinks
+# (we're often called via ~/.local/bin/sentinel-ensure-viz → real path).
+VIZ_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 
 if [[ ! -f "$VIZ_DIR/viz_server.py" ]]; then
   echo "[sentinel-viz] viz_server.py not found at $VIZ_DIR — skipping" >&2

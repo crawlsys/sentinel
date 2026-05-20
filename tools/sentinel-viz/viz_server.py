@@ -926,10 +926,11 @@ function tickRelTimes() {
 }
 setInterval(tickRelTimes, 30 * 1000);
 
-function openPanelForEvent(seq) {
+function openPanelForEvent(seq, manual = true) {
   if (!latestGraph) return;
   const e = latestGraph.events.find(x => x.seq === seq);
   if (!e) return;
+  if (manual) noteUserInteraction();
   selectedEventSeq = seq;
   selectedNodeId = null;
   const p = e.payload || {};
@@ -951,10 +952,11 @@ function openPanelForEvent(seq) {
   }
 }
 
-function openPanelForNode(nodeId) {
+function openPanelForNode(nodeId, manual = true) {
   if (!latestGraph) return;
   const n = latestGraph.nodes.find(x => x.id === nodeId);
   if (!n) return;
+  if (manual) noteUserInteraction();
   selectedNodeId = nodeId;
   selectedEventSeq = null;
   let chain = [];
@@ -1096,12 +1098,6 @@ function closePanel() {
   // Don't immediately re-yank the view — leave a beat after close before auto-watch fires
   noteUserInteraction();
 }
-// Bump the interaction timer on any explicit panel open
-(function wrapOpeners(){
-  const _e = openPanelForEvent, _n = openPanelForNode;
-  openPanelForEvent = function(seq) { noteUserInteraction(); _e(seq); };
-  openPanelForNode  = function(id)  { noteUserInteraction(); _n(id); };
-})();
 
 function escHtml(s) {
   return (s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
@@ -1248,30 +1244,42 @@ function labelFor(node) {
   return (node.data || {}).hook || "";
 }
 
+const AUTO_WATCH_IDLE_MS = 10000;     // wait for the activity stream to go quiet for 10s before jumping
+const USER_CLICK_COOLDOWN_MS = 8000;  // after a manual click, defer auto-jumps for 8s
 let lastAutoWatchSeq = -1;
-let lastUserInteractionMs = 0;
-function noteUserInteraction() { lastUserInteractionMs = Date.now(); }
+let lastUserClickMs = 0;
+let autoWatchTimer = null;
+function noteUserInteraction() { lastUserClickMs = Date.now(); }
+
+function scheduleAutoWatch(g) {
+  // Restart the debounce: each new max_seq during a burst pushes the jump out by another 10s.
+  if (autoWatchTimer) clearTimeout(autoWatchTimer);
+  autoWatchTimer = setTimeout(() => {
+    autoWatchTimer = null;
+    const cfg = getAIConfig();
+    if (!cfg.autoWatch) return;
+    // Skip if user clicked recently (regardless of whether they currently have a panel open).
+    if ((Date.now() - lastUserClickMs) < USER_CLICK_COOLDOWN_MS) return;
+    const events = latestGraph?.events || [];
+    if (!events.length) return;
+    const sorted = events.slice().sort((a, b) => {
+      const ta = ((a.payload || {}).ts) || a.ts || "";
+      const tb = ((b.payload || {}).ts) || b.ts || "";
+      return tb.localeCompare(ta);
+    });
+    const newest = sorted[0];
+    if (!newest) return;
+    if (newest.seq === selectedEventSeq) return;  // already on the newest card
+    lastAutoWatchSeq = latestGraph.max_seq;
+    openPanelForEvent(newest.seq, /*manual=*/ false);
+  }, AUTO_WATCH_IDLE_MS);
+}
 
 function maybeAutoWatch(g) {
   const cfg = getAIConfig();
   if (!cfg.autoWatch) return;
   if (g.max_seq <= lastAutoWatchSeq) return;
-  // Skip when user clicked something recently OR is examining a card
-  const cooldownMs = 8000;
-  const examining = (selectedEventSeq !== null) || (selectedNodeId !== null);
-  if (examining && (Date.now() - lastUserInteractionMs) < cooldownMs) return;
-  // Find newest event by ts desc
-  const events = g.events || [];
-  if (!events.length) return;
-  const sorted = events.slice().sort((a, b) => {
-    const ta = ((a.payload || {}).ts) || a.ts || "";
-    const tb = ((b.payload || {}).ts) || b.ts || "";
-    return tb.localeCompare(ta);
-  });
-  const newest = sorted[0];
-  if (!newest) return;
-  lastAutoWatchSeq = g.max_seq;
-  openPanelForEvent(newest.seq);
+  scheduleAutoWatch(g);
 }
 
 function apply(g) {
