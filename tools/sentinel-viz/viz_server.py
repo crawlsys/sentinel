@@ -242,6 +242,68 @@ def session_activity(session_id: str, limit: int = 60, at_ts: str | None = None,
     }
 
 
+def detect_awaiting_user(session_id: str):
+    """Returns (is_awaiting, question_text, options).
+
+    A session is "awaiting user" if the LAST assistant tool_use whose tool_use_id
+    has no matching user-message tool_result is an AskUserQuestion. We track
+    pending tool_use_ids by scanning the transcript chronologically.
+    """
+    path = find_transcript(session_id)
+    if not path:
+        return (False, None, None)
+    pending: dict[str, dict] = {}  # tool_use_id → {name, input, ts}
+    last_pending_id: str | None = None
+    try:
+        with path.open() as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    r = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                typ = r.get("type") or ""
+                msg = r.get("message", {})
+                if typ == "assistant":
+                    for c in (msg.get("content") or []):
+                        if isinstance(c, dict) and c.get("type") == "tool_use":
+                            tu_id = c.get("id")
+                            if tu_id:
+                                pending[tu_id] = {
+                                    "name": c.get("name", ""),
+                                    "input": c.get("input", {}),
+                                    "ts": r.get("timestamp", ""),
+                                }
+                                last_pending_id = tu_id
+                elif typ == "user":
+                    content = msg.get("content")
+                    if isinstance(content, list):
+                        for c in content:
+                            if isinstance(c, dict) and c.get("type") == "tool_result":
+                                tu_id = c.get("tool_use_id")
+                                if tu_id and tu_id in pending:
+                                    pending.pop(tu_id, None)
+                                    if last_pending_id == tu_id:
+                                        last_pending_id = None
+    except OSError:
+        return (False, None, None)
+
+    if not last_pending_id or last_pending_id not in pending:
+        return (False, None, None)
+    p = pending[last_pending_id]
+    if p["name"] != "AskUserQuestion":
+        return (False, None, None)
+    # AskUserQuestion's input shape: {"questions": [{"question": "...", "options": [...]}]}
+    inp = p.get("input") or {}
+    qs = inp.get("questions") or []
+    if not qs or not isinstance(qs[0], dict):
+        return (True, None, None)
+    q0 = qs[0]
+    return (True, _trim(q0.get("question", ""), 600), q0.get("options") or [])
+
+
 def _tool_summary(name: str, inp) -> str:
     """One-liner summarising a tool_use call. No external model — pure heuristics."""
     if not isinstance(inp, dict):
@@ -481,6 +543,15 @@ def load_graph(db_path: Path, limit: int = 100) -> dict[str, Any]:
         elif age < 300: status = "idle"
         elif age < 1800: status = "dormant"
         else:           status = "dead"
+        # Awaiting-user OVERRIDES every other status — a session blocked on
+        # AskUserQuestion is the most important state to surface, even if
+        # activity is otherwise dormant/dead (the whole point of being
+        # awaiting is that no hooks fire until the user responds).
+        awaiting, question, options = detect_awaiting_user(sid)
+        if awaiting:
+            status = "awaiting_user"
+            n["awaiting_question"] = question
+            n["awaiting_options"] = options
         n["session_status"] = status
         n["last_activity_age_s"] = int(age) if last_activity else None
 
@@ -680,6 +751,52 @@ INDEX_HTML = r"""<!doctype html>
   /* dead: confirmed inactive — gone dark */
   .node.dead circle:not(.pulse-ring) { opacity: 0.30; filter: grayscale(0.6); }
   .node.dead text { opacity: 0.40; }
+  /* awaiting_user: distinct amber pulse — blocked on AskUserQuestion */
+  @keyframes pulse-await {
+    0%, 100% { stroke: var(--ask); stroke-width: 2px; filter: drop-shadow(0 0 4px var(--ask)); }
+    50%      { stroke: var(--ask); stroke-width: 3px; filter: drop-shadow(0 0 14px var(--ask)) drop-shadow(0 0 24px var(--ask)); }
+  }
+  @keyframes pulse-ring-await {
+    0%   { r: 12; opacity: 0.85; }
+    100% { r: 32; opacity: 0; }
+  }
+  .node.awaiting_user circle:not(.pulse-ring) {
+    animation: pulse-await 1.6s ease-in-out infinite;
+    fill: var(--ask) !important;
+  }
+  .node.awaiting_user .pulse-ring {
+    fill: none; stroke: var(--ask); stroke-width: 2px;
+    animation: pulse-ring-await 1.6s ease-out infinite;
+    pointer-events: none;
+  }
+  /* Waiting-on-you callout (right rail, above ticker) */
+  #await-callout { display: none; margin-bottom: 12px; }
+  #await-callout.shown { display: block; }
+  #await-callout .await-card {
+    padding: 10px; background: linear-gradient(135deg, #d2992233, #161b22);
+    border: 1px solid var(--ask); border-radius: 4px;
+    margin-bottom: 6px; cursor: pointer;
+    box-shadow: 0 0 12px #d2992244;
+  }
+  #await-callout .await-card:hover { background: linear-gradient(135deg, #d2992255, #161b22); }
+  #await-callout .await-head {
+    color: var(--ask); font-size: 10px; font-weight: bold;
+    text-transform: uppercase; letter-spacing: 1px; margin-bottom: 4px;
+    display: flex; align-items: center; gap: 6px;
+  }
+  #await-callout .await-head .pulse-dot {
+    display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+    background: var(--ask); animation: pulse-dot 1.4s ease-in-out infinite;
+  }
+  @keyframes pulse-dot {
+    0%, 100% { box-shadow: 0 0 0 0 var(--ask); }
+    50% { box-shadow: 0 0 0 6px transparent; }
+  }
+  #await-callout .await-q { font-size: 11px; color: var(--fg); line-height: 1.4; }
+  #await-callout .await-opts { font-size: 10px; color: var(--muted); margin-top: 6px; }
+  #await-callout .await-opts .opt { padding: 1px 0; }
+  #await-callout .await-opts .opt-n { color: var(--ask); font-weight: bold; margin-right: 4px; }
+  #await-callout .await-sid { font-size: 9px; color: var(--muted); margin-top: 6px; }
   /* Focus mode: distance-graded — BFS hop count drives opacity + accent stroke.
      Bright accent in 0..2 hops, fade through ~8 hops, normal beyond. Inline styles
      applied in JS (applyFocus); these are just the selected-node highlight. */
@@ -735,6 +852,7 @@ INDEX_HTML = r"""<!doctype html>
         <div class="status" id="ai-status-detail"></div>
       </div>
     </details>
+    <div id="await-callout"></div>
     <div id="stats"></div>
     <h2>recent events</h2>
     <div id="ticker"></div>
@@ -1234,6 +1352,19 @@ function panelHtmlFromNode(n, chain) {
       const ageStr = n.last_activity_age_s !== null && n.last_activity_age_s !== undefined ? ` (${Number(n.last_activity_age_s)|0}s ago)` : "";
       h += `<div class="kv"><span>state</span><span>${escHtml(n.session_status)}${ageStr}</span></div>`;
     }
+    if (n.session_status === "awaiting_user" && n.awaiting_question) {
+      const opts = Array.isArray(n.awaiting_options) ? n.awaiting_options : [];
+      const optsHtml = opts.slice(0, 6).map((o, i) => {
+        const label = (o && o.label) ? o.label : (typeof o === "string" ? o : "");
+        const desc = (o && o.description) ? `<div style="color:var(--muted);font-size:9px;padding-left:18px">${escHtml(o.description)}</div>` : "";
+        return `<div style="padding:3px 0"><span style="color:var(--ask);font-weight:bold;margin-right:6px">${i + 1}.</span>${escHtml(label)}${desc}</div>`;
+      }).join("");
+      h += `<div class="sec" style="border-left:2px solid var(--ask);padding-left:8px;background:#d2992211;border-radius:0 3px 3px 0">
+        <h4 style="color:var(--ask)">⏸ awaiting user input</h4>
+        <div style="font-size:11px;color:var(--fg);line-height:1.4;margin-bottom:6px">${escHtml(n.awaiting_question)}</div>
+        ${optsHtml || ""}
+      </div>`;
+    }
   } else if (n.type === "SentinelHookInvocation") {
     h += `<div class="kv"><span>hook</span><span>${escHtml(d.hook || "")}</span></div>`;
     h += `<div class="kv"><span>event</span><span>${escHtml(d.event || "")}</span></div>`;
@@ -1321,13 +1452,45 @@ function maybeAutoWatch(g) {
   scheduleAutoWatch(g);
 }
 
+function renderAwaitCallout(nodes) {
+  const el = document.getElementById("await-callout");
+  if (!el) return;
+  const awaiters = (nodes || []).filter(n =>
+    n.type === "SentinelSession" && n.session_status === "awaiting_user"
+  );
+  if (awaiters.length === 0) {
+    el.classList.remove("shown");
+    el.innerHTML = "";
+    return;
+  }
+  el.classList.add("shown");
+  el.innerHTML = awaiters.map(n => {
+    const sid = (n.data || {}).session_id || "";
+    const q = n.awaiting_question || "(question text not in transcript)";
+    const opts = Array.isArray(n.awaiting_options) ? n.awaiting_options : [];
+    const optsHtml = opts.slice(0, 5).map((o, i) => {
+      const label = (o && o.label) ? o.label : (typeof o === "string" ? o : "");
+      return `<div class="opt"><span class="opt-n">${i + 1}.</span>${escHtml(label)}</div>`;
+    }).join("");
+    return `<div class="await-card" onclick="openPanelForNode('${escHtml(n.id)}')">
+      <div class="await-head"><span class="pulse-dot"></span>WAITING ON YOU</div>
+      <div class="await-q">${escHtml(q)}</div>
+      ${optsHtml ? `<div class="await-opts">${optsHtml}</div>` : ""}
+      <div class="await-sid">session ${escHtml(sid.slice(0,12))}…</div>
+    </div>`;
+  }).join("");
+}
+
 function apply(g) {
   latestGraph = g;
   const w = g.window_limit || 100;
   const corpusNodes = (g.stats || {}).corpus_nodes || g.stats.nodes_total;
   const cfg = getAIConfig();
   const watchTag = cfg.autoWatch ? " · 👁 watch" : "";
-  statusEl.textContent = `seq ${g.max_seq} · window ${g.stats.nodes_total}/${corpusNodes} · ${g.stats.edges_total} edges · live${watchTag}`;
+  const awaitCount = (g.nodes || []).filter(n => n.type === "SentinelSession" && n.session_status === "awaiting_user").length;
+  const awaitTag = awaitCount ? ` · ⏸ ${awaitCount} waiting` : "";
+  statusEl.textContent = `seq ${g.max_seq} · window ${g.stats.nodes_total}/${corpusNodes} · ${g.stats.edges_total} edges · live${watchTag}${awaitTag}`;
+  renderAwaitCallout(g.nodes);
   renderStats(g.stats);
   renderTicker(g.events);
   renderGraph(g.nodes, g.edges, g.max_seq > lastSeq);
