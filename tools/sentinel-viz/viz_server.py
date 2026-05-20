@@ -243,17 +243,29 @@ def session_activity(session_id: str, limit: int = 60, at_ts: str | None = None,
 
 
 def detect_awaiting_user(session_id: str):
-    """Returns (is_awaiting, question_text, options).
+    """Returns (kind, question_text, options).
 
-    A session is "awaiting user" if the LAST assistant tool_use whose tool_use_id
-    has no matching user-message tool_result is an AskUserQuestion. We track
-    pending tool_use_ids by scanning the transcript chronologically.
+    kind values:
+      "question"     — last pending tool_use is AskUserQuestion (structured)
+      "reply"       — agent's turn finished, no pending tool_uses, transcript's
+                      last entry is an assistant message (= agent at the prompt
+                      waiting on free-form user reply, e.g. "want me to open
+                      the worktree?"). question_text is the tail of the last
+                      assistant text block; options is [].
+      None          — not awaiting.
+
+    "question" is the strong signal — there's an explicit unmatched tool_use_id.
+    "reply" is heuristic — agent has finished its turn cleanly but there's no
+    user message yet, so it's sitting at the prompt expecting an answer.
     """
     path = find_transcript(session_id)
     if not path:
-        return (False, None, None)
-    pending: dict[str, dict] = {}  # tool_use_id → {name, input, ts}
+        return (None, None, None)
+    pending: dict[str, dict] = {}
     last_pending_id: str | None = None
+    last_assistant_text: str = ""
+    last_assistant_ts: str = ""
+    last_entry_type: str = ""
     try:
         with path.open() as f:
             for line in f:
@@ -267,6 +279,17 @@ def detect_awaiting_user(session_id: str):
                 typ = r.get("type") or ""
                 msg = r.get("message", {})
                 if typ == "assistant":
+                    last_entry_type = "assistant"
+                    last_assistant_ts = r.get("timestamp", "")
+                    # Capture the LAST text block in this assistant message (often
+                    # the post-tool summary / question to the user).
+                    text_blocks = [
+                        c.get("text", "")
+                        for c in (msg.get("content") or [])
+                        if isinstance(c, dict) and c.get("type") == "text" and (c.get("text") or "").strip()
+                    ]
+                    if text_blocks:
+                        last_assistant_text = text_blocks[-1]
                     for c in (msg.get("content") or []):
                         if isinstance(c, dict) and c.get("type") == "tool_use":
                             tu_id = c.get("id")
@@ -278,6 +301,7 @@ def detect_awaiting_user(session_id: str):
                                 }
                                 last_pending_id = tu_id
                 elif typ == "user":
+                    last_entry_type = "user"
                     content = msg.get("content")
                     if isinstance(content, list):
                         for c in content:
@@ -288,20 +312,29 @@ def detect_awaiting_user(session_id: str):
                                     if last_pending_id == tu_id:
                                         last_pending_id = None
     except OSError:
-        return (False, None, None)
+        return (None, None, None)
 
-    if not last_pending_id or last_pending_id not in pending:
-        return (False, None, None)
-    p = pending[last_pending_id]
-    if p["name"] != "AskUserQuestion":
-        return (False, None, None)
-    # AskUserQuestion's input shape: {"questions": [{"question": "...", "options": [...]}]}
-    inp = p.get("input") or {}
-    qs = inp.get("questions") or []
-    if not qs or not isinstance(qs[0], dict):
-        return (True, None, None)
-    q0 = qs[0]
-    return (True, _trim(q0.get("question", ""), 600), q0.get("options") or [])
+    # 1) Structured AskUserQuestion still pending
+    if last_pending_id and last_pending_id in pending:
+        p = pending[last_pending_id]
+        if p["name"] == "AskUserQuestion":
+            inp = p.get("input") or {}
+            qs = inp.get("questions") or []
+            if qs and isinstance(qs[0], dict):
+                q0 = qs[0]
+                return ("question", _trim(q0.get("question", ""), 600), q0.get("options") or [])
+            return ("question", None, [])
+        # A non-question tool is pending — that's "agent is working", not "waiting".
+        return (None, None, None)
+
+    # 2) Agent finished its turn cleanly. If the LAST entry in the transcript
+    #    is an assistant message (no user reply yet), the session is sitting
+    #    at the prompt awaiting free-form input. The agent's last text is the
+    #    most useful "what is it waiting on?" snippet.
+    if last_entry_type == "assistant" and last_assistant_text:
+        return ("reply", _trim(last_assistant_text, 600), [])
+
+    return (None, None, None)
 
 
 def _tool_summary(name: str, inp) -> str:
@@ -543,13 +576,18 @@ def load_graph(db_path: Path, limit: int = 100) -> dict[str, Any]:
         elif age < 300: status = "idle"
         elif age < 1800: status = "dormant"
         else:           status = "dead"
-        # Awaiting-user OVERRIDES every other status — a session blocked on
-        # AskUserQuestion is the most important state to surface, even if
-        # activity is otherwise dormant/dead (the whole point of being
-        # awaiting is that no hooks fire until the user responds).
-        awaiting, question, options = detect_awaiting_user(sid)
-        if awaiting:
+        # Awaiting-user OVERRIDES every other status. Two flavours:
+        #  - "question": structured AskUserQuestion (with numbered options)
+        #  - "reply":    free-form ask — agent ended its turn with a question
+        #                and is sitting at the prompt waiting for a text reply
+        # Freshness gate: only flag awaiting if the transcript was touched in
+        # the last 24h. Older "awaiting" states are abandoned sessions where
+        # the user moved on rather than actually-blocking-work.
+        AWAIT_FRESHNESS_SECS = 24 * 3600
+        awaiting_kind, question, options = detect_awaiting_user(sid)
+        if awaiting_kind and tmtime and (now - tmtime) <= AWAIT_FRESHNESS_SECS:
             status = "awaiting_user"
+            n["awaiting_kind"] = awaiting_kind
             n["awaiting_question"] = question
             n["awaiting_options"] = options
         n["session_status"] = status
@@ -1466,14 +1504,17 @@ function renderAwaitCallout(nodes) {
   el.classList.add("shown");
   el.innerHTML = awaiters.map(n => {
     const sid = (n.data || {}).session_id || "";
-    const q = n.awaiting_question || "(question text not in transcript)";
+    const kind = n.awaiting_kind || "question";
+    const q = n.awaiting_question || "(no text captured)";
     const opts = Array.isArray(n.awaiting_options) ? n.awaiting_options : [];
     const optsHtml = opts.slice(0, 5).map((o, i) => {
       const label = (o && o.label) ? o.label : (typeof o === "string" ? o : "");
       return `<div class="opt"><span class="opt-n">${i + 1}.</span>${escHtml(label)}</div>`;
     }).join("");
-    return `<div class="await-card" onclick="openPanelForNode('${escHtml(n.id)}')">
-      <div class="await-head"><span class="pulse-dot"></span>WAITING ON YOU</div>
+    const headLabel = kind === "reply" ? "AWAITING REPLY (FREE-FORM)" : "WAITING ON YOU";
+    const safeId = (n.id || "").replace(/['"\\<>]/g, "");
+    return `<div class="await-card" onclick="openPanelForNode('${safeId}')">
+      <div class="await-head"><span class="pulse-dot"></span>${headLabel}</div>
       <div class="await-q">${escHtml(q)}</div>
       ${optsHtml ? `<div class="await-opts">${optsHtml}</div>` : ""}
       <div class="await-sid">session ${escHtml(sid.slice(0,12))}…</div>
