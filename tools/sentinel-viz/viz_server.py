@@ -950,7 +950,11 @@ function loadAIConfig() {
   const key   = localStorage.getItem("sentinel_viz_openai_key") || "";
   const model = localStorage.getItem("sentinel_viz_openai_model") || "gpt-4o-mini";
   const auto  = localStorage.getItem("sentinel_viz_openai_auto") === "1";
-  const watch = localStorage.getItem("sentinel_viz_auto_watch") === "1";
+  // auto-watch defaults to ON — without it the viz can pin on a stale card
+  // forever, which is exactly the failure mode dogfooding caught. Users who
+  // want it off can untoggle in Settings; the "off" choice persists via "0".
+  const watchSetting = localStorage.getItem("sentinel_viz_auto_watch");
+  const watch = (watchSetting === null) ? true : (watchSetting === "1");
   document.getElementById("ai-key").value = key;
   document.getElementById("ai-model").value = model;
   document.getElementById("opt-auto-summarize").checked = auto;
@@ -1538,10 +1542,15 @@ function apply(g) {
   renderTicker(g.events);
   renderGraph(g.nodes, g.edges, g.max_seq > lastSeq);
   lastSeq = g.max_seq;
-  // Refresh open panel content (e.g., new tool_results may have streamed in)
-  if (selectedEventSeq !== null) openPanelForEvent(selectedEventSeq);
-  else if (selectedNodeId !== null) openPanelForNode(selectedNodeId);
-  else maybeAutoWatch(g);
+  // Refresh open panel content (new tool_results may have streamed in). Pass
+  // manual=false so this background refresh does NOT bump the user-click
+  // cooldown — otherwise auto-watch would be blocked forever on any open card.
+  if (selectedEventSeq !== null) openPanelForEvent(selectedEventSeq, /*manual=*/ false);
+  else if (selectedNodeId !== null) openPanelForNode(selectedNodeId, /*manual=*/ false);
+  // Auto-watch ALWAYS evaluates, regardless of whether a panel is open.
+  // The 10s debounce + 8s click cooldown handle thrash protection.
+  // Without this, an open panel pinned the view to a stale card forever.
+  maybeAutoWatch(g);
 }
 function connectStream() {
   const es = new EventSource("/api/stream");
