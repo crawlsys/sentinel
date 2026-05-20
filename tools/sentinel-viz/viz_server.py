@@ -581,9 +581,11 @@ def load_graph(db_path: Path, limit: int = 100) -> dict[str, Any]:
         #  - "reply":    free-form ask — agent ended its turn with a question
         #                and is sitting at the prompt waiting for a text reply
         # Freshness gate: only flag awaiting if the transcript was touched in
-        # the last 24h. Older "awaiting" states are abandoned sessions where
-        # the user moved on rather than actually-blocking-work.
-        AWAIT_FRESHNESS_SECS = 24 * 3600
+        # the last hour. Older "awaiting" states are abandoned sessions where
+        # the user moved on. Stale ScheduleWakeup polls and snapshot scans can
+        # bump the mtime of long-dead sessions, but anything > 1h since real
+        # activity isn't actually waiting on the user any more.
+        AWAIT_FRESHNESS_SECS = 60 * 60
         awaiting_kind, question, options = detect_awaiting_user(sid)
         if awaiting_kind and tmtime and (now - tmtime) <= AWAIT_FRESHNESS_SECS:
             status = "awaiting_user"
