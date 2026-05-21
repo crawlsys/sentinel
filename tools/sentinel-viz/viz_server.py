@@ -732,6 +732,22 @@ INDEX_HTML = r"""<!doctype html>
   #panel .summary { padding: 8px; background: linear-gradient(135deg, #1f6feb15, #0d1117); border-left: 2px solid var(--accent); border-radius: 0 4px 4px 0; font-size: 11px; line-height: 1.5; }
   #panel .summary.loading { color: var(--muted); font-style: italic; }
   #panel .summary.err { color: var(--deny); }
+  /* Live log feed */
+  #live-log-wrap { display: none; margin-bottom: 12px; padding: 8px; background: #0d1117; border: 1px solid var(--line); border-radius: 4px; }
+  #live-log-wrap.on { display: block; }
+  #live-log-wrap h2 { margin: 0 0 6px; font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: 1px; display: flex; align-items: center; gap: 6px; }
+  #live-log-wrap h2 .pulse-dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: var(--ok); animation: pulse-dot 1.4s ease-in-out infinite; }
+  #live-log-wrap h2 .pulse-dot.paused { background: var(--muted); animation: none; }
+  #live-log-wrap h2 .since { margin-left: auto; font-size: 9px; color: var(--muted); text-transform: none; letter-spacing: 0; }
+  #live-log { max-height: 280px; overflow-y: auto; font-size: 11px; line-height: 1.4; padding-right: 4px; }
+  #live-log .entry { padding: 5px 6px; margin: 3px 0; background: #161b22; border-left: 2px solid var(--line); border-radius: 0 3px 3px 0; }
+  #live-log .entry.fresh { border-left-color: var(--accent); animation: flash 1.2s ease-out; }
+  #live-log .entry .meta { font-size: 9px; color: var(--muted); margin-bottom: 2px; }
+  #live-log .entry .meta .sid { color: var(--accent); }
+  #live-log .entry .narr { color: var(--fg); }
+  #live-log .entry.err { border-left-color: var(--deny); }
+  #live-log .entry.err .narr { color: var(--deny); }
+  #live-log .empty { color: var(--muted); font-style: italic; padding: 8px 0; }
   #side { border-left: 1px solid var(--line); padding: 12px; overflow-y: auto; }
   h1 { font-size: 14px; margin: 0 0 8px; color: var(--accent); }
   h2 { font-size: 11px; margin: 14px 0 4px; color: var(--muted); text-transform: uppercase; letter-spacing: 1px; }
@@ -876,6 +892,10 @@ INDEX_HTML = r"""<!doctype html>
           <input type="checkbox" id="opt-auto-summarize" onchange="saveAIConfig()">
           <span>auto-summarize on card open</span>
         </label>
+        <label class="opt">
+          <input type="checkbox" id="opt-live-log" onchange="saveAIConfig()">
+          <span>live log feed <span class="hint">(periodic AI narrative; costs $$)</span></span>
+        </label>
 
         <div class="sec-title">openai key</div>
         <input type="password" id="ai-key" placeholder="sk-..." autocomplete="off">
@@ -893,6 +913,10 @@ INDEX_HTML = r"""<!doctype html>
       </div>
     </details>
     <div id="await-callout"></div>
+    <div id="live-log-wrap">
+      <h2><span class="pulse-dot" id="live-log-dot"></span>live log<span class="since" id="live-log-since"></span></h2>
+      <div id="live-log"><div class="empty">waiting for activity…</div></div>
+    </div>
     <div id="stats"></div>
     <h2>recent events</h2>
     <div id="ticker"></div>
@@ -952,48 +976,54 @@ const PULSE_WINDOW_SECS = 30;
 function loadAIConfig() {
   const key   = localStorage.getItem("sentinel_viz_openai_key") || "";
   const model = localStorage.getItem("sentinel_viz_openai_model") || "gpt-4o-mini";
-  // auto-summarize defaults OFF — each new card auto-watch lands on would
-  // otherwise burn an OpenAI call (cache helps on revisits but a busy session
-  // produces many unique cards). User opts in explicitly via Settings.
   const auto  = localStorage.getItem("sentinel_viz_openai_auto") === "1";
-  // auto-watch defaults to ON — without it the viz can pin on a stale card
-  // forever, which is exactly the failure mode dogfooding caught.
   const watchSetting = localStorage.getItem("sentinel_viz_auto_watch");
   const watch = (watchSetting === null) ? true : (watchSetting === "1");
+  const liveLog = localStorage.getItem("sentinel_viz_live_log") === "1";
   document.getElementById("ai-key").value = key;
   document.getElementById("ai-model").value = model;
   document.getElementById("opt-auto-summarize").checked = auto;
   document.getElementById("opt-auto-watch").checked = watch;
+  const llEl = document.getElementById("opt-live-log");
+  if (llEl) llEl.checked = liveLog;
 
-  // Inline status on the summary line (always visible)
+  // Inline status
   const inline = document.getElementById("ai-status");
   const detail = document.getElementById("ai-status-detail");
   const bits = [];
   if (key) bits.push(model);
   if (auto) bits.push("auto-summary");
   if (watch) bits.push("auto-watch");
+  if (liveLog) bits.push("live-log");
   inline.textContent = bits.length ? bits.join(" · ") : "not configured";
   inline.className = "status-inline" + (key ? " ok" : "");
   if (detail) {
     detail.textContent = key ? "openai key set" : "set an OpenAI key to enable summaries";
     detail.className = "status" + (key ? " ok" : "");
   }
+
+  // Toggle live-log feed visibility
+  const wrap = document.getElementById("live-log-wrap");
+  if (wrap) wrap.classList.toggle("on", liveLog && !!key);
 }
 function saveAIConfig() {
   const key   = document.getElementById("ai-key").value.trim();
   const model = document.getElementById("ai-model").value;
   const auto  = document.getElementById("opt-auto-summarize").checked;
   const watch = document.getElementById("opt-auto-watch").checked;
+  const liveLog = document.getElementById("opt-live-log") ? document.getElementById("opt-live-log").checked : false;
   if (key) localStorage.setItem("sentinel_viz_openai_key", key);
   localStorage.setItem("sentinel_viz_openai_model", model);
   localStorage.setItem("sentinel_viz_openai_auto", auto ? "1" : "0");
   localStorage.setItem("sentinel_viz_auto_watch", watch ? "1" : "0");
+  localStorage.setItem("sentinel_viz_live_log", liveLog ? "1" : "0");
   loadAIConfig();
 }
 function clearAIConfig() {
   localStorage.removeItem("sentinel_viz_openai_key");
   document.getElementById("ai-key").value = "";
   document.getElementById("opt-auto-summarize").checked = false;
+  const llEl = document.getElementById("opt-live-log"); if (llEl) llEl.checked = false;
   loadAIConfig();
 }
 function getAIConfig() {
@@ -1002,8 +1032,130 @@ function getAIConfig() {
     model: localStorage.getItem("sentinel_viz_openai_model") || "gpt-4o-mini",
     auto:  localStorage.getItem("sentinel_viz_openai_auto") === "1",
     autoWatch: localStorage.getItem("sentinel_viz_auto_watch") === "1",
+    liveLog: localStorage.getItem("sentinel_viz_live_log") === "1",
   };
 }
+
+// ── Live log feed ────────────────────────────────────────────────────────────
+const LIVE_LOG_INTERVAL_MS = 30 * 1000;   // tick once per 30s (cost throttle)
+const LIVE_LOG_MAX_ENTRIES = 50;          // ring-buffer cap
+const LIVE_LOG_MIN_EVENT_DELTA = 5;       // skip tick if fewer than N new events
+let liveLogLastSeq = -1;
+let liveLogInFlight = false;
+let liveLogPausedByHover = false;
+let liveLogLastFireMs = 0;
+
+function liveLogPushEntry(html, opts = {}) {
+  const el = document.getElementById("live-log");
+  if (!el) return;
+  // First entry clears placeholder
+  if (el.querySelector(".empty")) el.innerHTML = "";
+  const div = document.createElement("div");
+  div.className = "entry fresh" + (opts.err ? " err" : "");
+  div.innerHTML = html;
+  el.insertBefore(div, el.firstChild);
+  // Cap to LIVE_LOG_MAX_ENTRIES
+  while (el.children.length > LIVE_LOG_MAX_ENTRIES) el.removeChild(el.lastChild);
+  // Drop .fresh class after the flash animation completes
+  setTimeout(() => div.classList.remove("fresh"), 1300);
+}
+
+async function liveLogTick() {
+  const cfg = getAIConfig();
+  if (!cfg.liveLog || !cfg.key) return;
+  if (liveLogInFlight) return;          // a prior tick is still rolling
+  if (liveLogPausedByHover) return;     // user reading older entries
+  if (!latestGraph) return;
+  const max = latestGraph.max_seq || 0;
+  // Bootstrap on first run: don't summarize the entire backlog
+  if (liveLogLastSeq === -1) { liveLogLastSeq = max; updateLiveLogSince(); return; }
+  // Only fire if there's enough new activity (and ≥ tick interval since last fire)
+  const newEvents = (latestGraph.events || []).filter(e => e.seq > liveLogLastSeq);
+  if (newEvents.length < LIVE_LOG_MIN_EVENT_DELTA) { updateLiveLogSince(); return; }
+  if (Date.now() - liveLogLastFireMs < LIVE_LOG_INTERVAL_MS) return;
+
+  // Group new events by session, pick the session with the most activity in
+  // this window (keeps the narrative coherent + the prompt small).
+  const bySession = {};
+  for (const e of newEvents) {
+    const sid = (e.payload || {}).session_id || "";
+    if (!sid) continue;
+    (bySession[sid] ||= []).push(e);
+  }
+  const sids = Object.keys(bySession);
+  if (!sids.length) { liveLogLastSeq = max; updateLiveLogSince(); return; }
+  sids.sort((a, b) => bySession[b].length - bySession[a].length);
+  const topSid = sids[0];
+
+  liveLogInFlight = true;
+  liveLogLastFireMs = Date.now();
+  try {
+    // Get the transcript-derived activity in the same time window. Use the
+    // earliest new event's ts as the anchor so we get a tight context slice.
+    const sorted = bySession[topSid].slice().sort((a, b) => {
+      const ta = (a.payload || {}).ts || a.ts || "";
+      const tb = (b.payload || {}).ts || b.ts || "";
+      return ta.localeCompare(tb);
+    });
+    const anchorTs = (sorted[Math.floor(sorted.length / 2)].payload || {}).ts || sorted[0].ts;
+    const actUrl = `/api/activity/${encodeURIComponent(topSid)}?at_ts=${encodeURIComponent(anchorTs)}&window=60`;
+    const a = await (await fetch(actUrl)).json();
+    const evs = (a.events || []).map(ev => {
+      const ts = (ev.ts || "").slice(11, 19);
+      if (ev.kind === "tool_use") return `[${ts}] tool ${ev.tool}: ${ev.text}`;
+      if (ev.kind === "tool_result") return `[${ts}] ↳ ${ev.text}`;
+      if (ev.kind === "user") return `[${ts}] user: ${ev.text}`;
+      if (ev.kind === "assistant") return `[${ts}] assistant: ${ev.text}`;
+      return `[${ts}] ${ev.kind}: ${ev.text || ""}`;
+    }).join("\n");
+
+    if (!evs) { liveLogLastSeq = max; updateLiveLogSince(); return; }
+    const messages = [
+      { role: "system", content: "You narrate the recent activity of an autonomous coding agent for an at-a-glance live log feed. ONE concise sentence, plain text, present tense, no preamble, no quotes, no markdown. Focus on the concrete action+target. Example: 'Edited worker.rs to track DB-write success on the redelivered failure path.' or 'Ran cargo nextest; clippy passed, tests still running.'" },
+      { role: "user",   content: `Narrate (one sentence) what the agent just did:\n\n${evs}` },
+    ];
+    const r = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: { "Authorization": "Bearer " + cfg.key, "Content-Type": "application/json" },
+      body: JSON.stringify({ model: cfg.model, messages, max_tokens: 80, temperature: 0.3 }),
+    });
+    if (!r.ok) {
+      const t = await r.text();
+      liveLogPushEntry(`<div class="meta">${new Date().toISOString().slice(11,19)} · <span class="sid">${escHtml(topSid.slice(0,8))}</span></div><div class="narr">openai error: ${escHtml(t.slice(0,160))}</div>`, { err: true });
+      return;
+    }
+    const data = await r.json();
+    const text = (data.choices?.[0]?.message?.content || "").trim();
+    if (text) {
+      const tsShort = new Date().toISOString().slice(11, 19);
+      liveLogPushEntry(`<div class="meta">${tsShort} · <span class="sid">${escHtml(topSid.slice(0,8))}</span> · ${sorted.length} events</div><div class="narr">${escHtml(text)}</div>`);
+    }
+    liveLogLastSeq = max;
+    updateLiveLogSince();
+  } catch (e) {
+    liveLogPushEntry(`<div class="narr">live-log error: ${escHtml(String(e).slice(0,160))}</div>`, { err: true });
+  } finally {
+    liveLogInFlight = false;
+  }
+}
+
+function updateLiveLogSince() {
+  const el = document.getElementById("live-log-since");
+  if (!el) return;
+  const ago = Math.floor((Date.now() - liveLogLastFireMs) / 1000);
+  el.textContent = liveLogLastFireMs ? `last ${ago}s ago` : "";
+}
+
+// Pause when user is reading older entries
+(function liveLogHoverPause() {
+  const el = document.getElementById("live-log-wrap");
+  if (!el) return;
+  el.addEventListener("mouseenter", () => { liveLogPausedByHover = true; const d = document.getElementById("live-log-dot"); if (d) d.classList.add("paused"); });
+  el.addEventListener("mouseleave", () => { liveLogPausedByHover = false; const d = document.getElementById("live-log-dot"); if (d) d.classList.remove("paused"); });
+})();
+
+setInterval(liveLogTick, 5 * 1000);   // poll every 5s; tick actually fires per LIVE_LOG_INTERVAL_MS gate
+setInterval(updateLiveLogSince, 2 * 1000);
 function maybeAutoSummarize(sessionId, atTs) {
   const cfg = getAIConfig();
   if (!cfg.key || !cfg.auto) return;
@@ -1128,6 +1280,9 @@ function openPanelForEvent(seq, manual = true) {
   if (manual) noteUserInteraction();
   selectedEventSeq = seq;
   selectedNodeId = null;
+  // Update render key so the next SSE tick doesn't see a mismatch and
+  // rebuild the panel AGAIN (which would clobber the AI summary fetch).
+  renderedPanelKey = `evt:${seq}`;
   const p = e.payload || {};
   const sid = p.session_id;
   const chain = sid ? latestGraph.events.filter(x => (x.payload || {}).session_id === sid)
@@ -1162,6 +1317,7 @@ function openPanelForNode(nodeId, manual = true) {
   if (manual) noteUserInteraction();
   selectedNodeId = nodeId;
   selectedEventSeq = null;
+  renderedPanelKey = `node:${nodeId}`;
   let chain = [];
   let sid = null;
   let nodeTs = null;
