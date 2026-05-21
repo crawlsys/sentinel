@@ -634,7 +634,8 @@ INDEX_HTML = r"""<!doctype html>
   html, body { margin: 0; padding: 0; background: var(--bg); color: var(--fg);
                font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
   #grid { display: grid; grid-template-columns: 1fr 360px; height: 100vh; }
-  #graph { position: relative; min-width: 0; min-height: 0; overflow: hidden; }
+  #graph { position: relative; min-width: 0; min-height: 0; overflow: hidden; display: flex; flex-direction: column; }
+  #graph-viewport { position: relative; flex: 1 1 auto; min-height: 0; }
   svg { width: 100%; height: 100%; display: block; cursor: grab; }
   svg:active { cursor: grabbing; }
   .node circle, .node text { cursor: default; }
@@ -732,15 +733,29 @@ INDEX_HTML = r"""<!doctype html>
   #panel .summary { padding: 8px; background: linear-gradient(135deg, #1f6feb15, #0d1117); border-left: 2px solid var(--accent); border-radius: 0 4px 4px 0; font-size: 11px; line-height: 1.5; }
   #panel .summary.loading { color: var(--muted); font-style: italic; }
   #panel .summary.err { color: var(--deny); }
-  /* Live log feed */
-  #live-log-wrap { display: none; margin-bottom: 12px; padding: 8px; background: #0d1117; border: 1px solid var(--line); border-radius: 4px; }
-  #live-log-wrap.on { display: block; }
-  #live-log-wrap h2 { margin: 0 0 6px; font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: 1px; display: flex; align-items: center; gap: 6px; }
-  #live-log-wrap h2 .pulse-dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: var(--ok); animation: pulse-dot 1.4s ease-in-out infinite; }
-  #live-log-wrap h2 .pulse-dot.paused { background: var(--muted); animation: none; }
-  #live-log-wrap h2 .since { margin-left: auto; font-size: 9px; color: var(--muted); text-transform: none; letter-spacing: 0; }
-  #live-log { max-height: 280px; overflow-y: auto; font-size: 11px; line-height: 1.4; padding-right: 4px; }
-  #live-log .entry { padding: 5px 6px; margin: 3px 0; background: #161b22; border-left: 2px solid var(--line); border-radius: 0 3px 3px 0; }
+  /* Live log console — bottom dock of the main view area, resizable */
+  #live-log-wrap { display: none; flex: 0 0 auto; background: #0d1117; border-top: 1px solid var(--line);
+                   position: relative; overflow: hidden; min-height: 80px; max-height: 70vh; }
+  #live-log-wrap.on { display: flex; flex-direction: column; }
+  #live-log-resize { position: absolute; top: 0; left: 0; right: 0; height: 5px;
+                     cursor: ns-resize; background: transparent; z-index: 5; }
+  #live-log-resize:hover, #live-log-resize.dragging { background: var(--accent); opacity: 0.6; }
+  #live-log-head { padding: 6px 10px; font-size: 10px; color: var(--muted);
+                   text-transform: uppercase; letter-spacing: 1px;
+                   display: flex; align-items: center; gap: 8px;
+                   border-bottom: 1px solid var(--line); user-select: none; }
+  #live-log-head .pulse-dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%;
+                              background: var(--ok); animation: pulse-dot 1.4s ease-in-out infinite; }
+  #live-log-head .pulse-dot.paused { background: var(--muted); animation: none; }
+  #live-log-head .since { font-size: 9px; color: var(--muted); text-transform: none; letter-spacing: 0; }
+  #live-log-head .ll-spacer { margin-left: auto; }
+  #live-log-head button { background: #21262d; color: var(--fg); border: 1px solid var(--line);
+                          border-radius: 3px; padding: 1px 8px; font-size: 10px; cursor: pointer; }
+  #live-log-head button:hover { filter: brightness(1.2); background: var(--accent); color: #fff; border-color: var(--accent); }
+  #live-log { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 8px 10px;
+              font-size: 11px; line-height: 1.4; }
+  #live-log .entry { padding: 5px 8px; margin: 3px 0; background: #161b22;
+                     border-left: 2px solid var(--line); border-radius: 0 3px 3px 0; }
   #live-log .entry.fresh { border-left-color: var(--accent); animation: flash 1.2s ease-out; }
   #live-log .entry .meta { font-size: 9px; color: var(--muted); margin-bottom: 2px; }
   #live-log .entry .meta .sid { color: var(--accent); }
@@ -863,6 +878,7 @@ INDEX_HTML = r"""<!doctype html>
 <body>
 <div id="grid">
   <div id="graph">
+    <div id="graph-viewport">
     <svg></svg>
     <div id="legend">
       <span><span class="dot" style="background: var(--session)"></span>session</span>
@@ -876,6 +892,19 @@ INDEX_HTML = r"""<!doctype html>
     <div id="panel">
       <span class="close" onclick="closePanel()">×</span>
       <div id="panel-body"></div>
+    </div>
+    </div><!-- /#graph-viewport -->
+    <div id="live-log-wrap">
+      <div id="live-log-resize" title="drag to resize"></div>
+      <div id="live-log-head">
+        <span class="pulse-dot" id="live-log-dot"></span>
+        <span>live log</span>
+        <span class="since" id="live-log-since"></span>
+        <span class="ll-spacer"></span>
+        <button onclick="liveLogTickNow()" title="fire one tick now, bypassing throttle gates">test fire</button>
+        <button onclick="liveLogClear()" title="clear the feed">clear</button>
+      </div>
+      <div id="live-log"><div class="empty">enable in Settings → live log feed</div></div>
     </div>
   </div>
   <div id="side">
@@ -913,10 +942,6 @@ INDEX_HTML = r"""<!doctype html>
       </div>
     </details>
     <div id="await-callout"></div>
-    <div id="live-log-wrap">
-      <h2><span class="pulse-dot" id="live-log-dot"></span>live log<span class="since" id="live-log-since"></span></h2>
-      <div id="live-log"><div class="empty">waiting for activity…</div></div>
-    </div>
     <div id="stats"></div>
     <h2>recent events</h2>
     <div id="ticker"></div>
@@ -929,8 +954,10 @@ const tipEl = document.getElementById("tip");
 const statusEl = document.getElementById("status");
 const statsEl = document.getElementById("stats");
 const tickerEl = document.getElementById("ticker");
-const W = () => document.getElementById("graph").clientWidth;
-const H = () => document.getElementById("graph").clientHeight;
+// Force-layout sizing is based on the live VIEWPORT (the part of the graph
+// area NOT covered by the bottom live-log console), not the whole #graph.
+const W = () => (document.getElementById("graph-viewport") || document.getElementById("graph")).clientWidth;
+const H = () => (document.getElementById("graph-viewport") || document.getElementById("graph")).clientHeight;
 
 const zoomLayer = svg.append("g").attr("class", "zoom-layer");
 const gLinks = zoomLayer.append("g").attr("class", "links");
@@ -1145,6 +1172,65 @@ function updateLiveLogSince() {
   const ago = Math.floor((Date.now() - liveLogLastFireMs) / 1000);
   el.textContent = liveLogLastFireMs ? `last ${ago}s ago` : "";
 }
+
+// Manual one-shot — fires a tick bypassing the activity-delta and interval gates.
+async function liveLogTickNow() {
+  const cfg = getAIConfig();
+  if (!cfg.key) {
+    liveLogPushEntry(`<div class="narr">set an OpenAI key in Settings first</div>`, { err: true });
+    return;
+  }
+  if (!cfg.liveLog) {
+    liveLogPushEntry(`<div class="narr">enable 'live log feed' in Settings first</div>`, { err: true });
+    return;
+  }
+  // Reset gates so liveLogTick runs immediately
+  liveLogLastFireMs = 0;
+  liveLogLastSeq = Math.max(-1, (latestGraph?.max_seq || 0) - 50); // ensure at least some delta
+  await liveLogTick();
+}
+function liveLogClear() {
+  const el = document.getElementById("live-log");
+  if (el) el.innerHTML = '<div class="empty">cleared. waiting for next tick…</div>';
+}
+
+// Bottom-dock resize handle. Drag the top edge to grow/shrink the console.
+// Height persists across reloads via localStorage.
+(function liveLogResize() {
+  const wrap = document.getElementById("live-log-wrap");
+  const handle = document.getElementById("live-log-resize");
+  if (!wrap || !handle) return;
+  // Restore saved height
+  const saved = parseInt(localStorage.getItem("sentinel_viz_live_log_height") || "0", 10);
+  if (saved >= 80 && saved <= 800) wrap.style.height = saved + "px";
+  else wrap.style.height = "240px";
+  let dragging = false;
+  let startY = 0, startH = 0;
+  handle.addEventListener("mousedown", (ev) => {
+    dragging = true; startY = ev.clientY; startH = wrap.getBoundingClientRect().height;
+    handle.classList.add("dragging");
+    document.body.style.userSelect = "none";
+    document.body.style.cursor = "ns-resize";
+    ev.preventDefault();
+  });
+  window.addEventListener("mousemove", (ev) => {
+    if (!dragging) return;
+    const dy = ev.clientY - startY;
+    let newH = startH - dy;            // drag up → grow; drag down → shrink
+    newH = Math.max(80, Math.min(window.innerHeight * 0.7, newH));
+    wrap.style.height = newH + "px";
+    // Kick the d3 force-center to the new viewport
+    if (typeof sim !== "undefined") sim.force("center", centerForce()).alpha(0.2).restart();
+  });
+  window.addEventListener("mouseup", () => {
+    if (!dragging) return;
+    dragging = false;
+    handle.classList.remove("dragging");
+    document.body.style.userSelect = "";
+    document.body.style.cursor = "";
+    localStorage.setItem("sentinel_viz_live_log_height", String(parseInt(wrap.style.height, 10)));
+  });
+})();
 
 // Pause when user is reading older entries
 (function liveLogHoverPause() {
