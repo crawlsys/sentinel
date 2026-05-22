@@ -1023,13 +1023,13 @@ Sentinel just demonstrated it can drive your real `EnterPlanMode` permission sta
 1. **Git Hygiene** — hourly at :03
    ```
    CronCreate(cron: "3 * * * *", recurring: true,
-     prompt: "Check for unpushed commits: run git log @{{upstream}}..HEAD --oneline. Check for uncommitted changes: run git status --short. If either has results, remind Gary to push or commit.")
+     prompt: "First run git rev-parse --is-inside-work-tree. If that fails or is not true, report 'not in a git repository; skipping git hygiene' and do not run git commands. Check for upstream with git rev-parse --abbrev-ref --symbolic-full-name @{{upstream}}. If no upstream is configured, report 'no upstream configured' and skip the unpushed-commit check. Otherwise run git log @{{upstream}}..HEAD --oneline. Check for uncommitted changes with git status --short. If either check has results, remind Gary to push or commit.")
    ```
 
 2. **Worktree Cleanup** — hourly at :17
    ```
    CronCreate(cron: "17 * * * *", recurring: true,
-     prompt: "Run git worktree list. For each worktree, check if its branch is merged into main with git branch --merged main. Report any stale worktrees that should be cleaned up.")
+     prompt: "First run git rev-parse --is-inside-work-tree. If that fails or is not true, report 'not in a git repository; skipping worktree cleanup' and do not run git commands. Otherwise run git worktree list. For each worktree, check if its branch is merged into main with git branch --merged main. Report any stale worktrees that should be cleaned up.")
    ```
 
 3. **Task Audit** — hourly at :33
