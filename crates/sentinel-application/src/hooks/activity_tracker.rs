@@ -120,11 +120,28 @@ fn extract_file_path(tool: &str, input: &serde_json::Value) -> Option<String> {
     }
 }
 
+/// Truncate `s` to at most `max_bytes`, backing off to the nearest valid
+/// UTF-8 char boundary so we never split a multi-byte character.
+///
+/// **Why:** plain byte-slicing (`&s[..n]`) panics when `n` falls inside a
+/// multi-byte char (e.g., em-dash `—` is 3 bytes). Commit messages, task
+/// descriptions, and skill names routinely contain such characters.
+fn truncate_to_char_boundary(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
 /// Extract command from Bash tool input (truncated).
 fn extract_command(input: &serde_json::Value) -> Option<String> {
     input.get("command").and_then(|v| v.as_str()).map(|s| {
         if s.len() > 120 {
-            format!("{}...", &s[..120])
+            format!("{}...", truncate_to_char_boundary(s, 120))
         } else {
             s.to_string()
         }
@@ -263,7 +280,7 @@ pub fn process_stop(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
         if let Some(ref cmd) = entry.command {
             if cmd.contains("git ") {
                 let short = if cmd.len() > 80 {
-                    format!("{}...", &cmd[..80])
+                    format!("{}...", truncate_to_char_boundary(cmd, 80))
                 } else {
                     cmd.clone()
                 };
@@ -478,6 +495,52 @@ mod tests {
         let result = extract_command(&input).unwrap();
         assert!(result.len() < 130);
         assert!(result.ends_with("..."));
+    }
+
+    #[test]
+    fn test_truncate_to_char_boundary_handles_multibyte() {
+        // Em-dash is 3 bytes in UTF-8: E2 80 94. String layout:
+        //   'a' 'b' 'c'   —(3 bytes)   'd' 'e' 'f'
+        //    0   1   2    3  4  5      6   7   8
+        let s = "abc—def";
+        assert_eq!(s.len(), 9);
+
+        // Cutting at byte 4 would split the em-dash → back off to byte 3
+        assert_eq!(truncate_to_char_boundary(s, 4), "abc");
+        // Cutting at byte 5 also splits → back off to byte 3
+        assert_eq!(truncate_to_char_boundary(s, 5), "abc");
+        // Byte 6 is the boundary just after the em-dash
+        assert_eq!(truncate_to_char_boundary(s, 6), "abc—");
+        // Beyond length → return whole string
+        assert_eq!(truncate_to_char_boundary(s, 100), s);
+        // Edge: zero
+        assert_eq!(truncate_to_char_boundary(s, 0), "");
+    }
+
+    #[test]
+    fn test_extract_command_truncated_with_multibyte_char() {
+        // Regression: a commit message containing an em-dash at byte
+        // position 79-81 used to panic on `&s[..80]` because byte 80
+        // is mid em-dash. Reported at activity_tracker.rs:239 (now :266).
+        let mut cmd = "git add -A && git commit -m \"docs(audit pass 3): CHANGELOG entry ".to_string();
+        // Pad to put an em-dash spanning the 120-byte boundary
+        while cmd.len() < 119 {
+            cmd.push('a');
+        }
+        cmd.push('—'); // bytes 119..122
+        cmd.push_str(" full Pass-3 batch\"");
+        assert!(cmd.len() > 120, "test setup: cmd must exceed truncation threshold");
+        let input = json!({"command": cmd});
+        // Must not panic.
+        let result = extract_command(&input).unwrap();
+        // Output is valid UTF-8 (Rust strings always are; this asserts
+        // the format!() didn't panic mid-construction).
+        assert!(result.ends_with("..."));
+        // Truncation backed off to before the em-dash (byte 119), so the
+        // body before "..." is 119 bytes of ASCII; total = 119 + 3.
+        assert_eq!(result.len(), 119 + 3);
+        // The em-dash itself must NOT appear in the truncated result.
+        assert!(!result.contains('—'));
     }
 
     #[test]
