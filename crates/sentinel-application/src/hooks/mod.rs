@@ -12,6 +12,7 @@ mod block_context;
 pub mod bug_task_gate;
 pub mod build_auto_monitor;
 pub mod build_notify;
+pub mod catastrophic_escalation;
 pub mod commit_hygiene;
 pub mod commit_message_validator;
 pub mod constitution_gate;
@@ -247,6 +248,7 @@ pub const HOOK_NAMES: &[&str] = &[
     "audit_extract",
     "bug_task_gate",
     "build_auto_monitor",
+    "catastrophic_escalation",
     "commit_hygiene",
     "commit_message_validator",
     "constitution_gate",

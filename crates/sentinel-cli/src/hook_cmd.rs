@@ -232,18 +232,17 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
             .join("config")
             .join("agents.toml")
     });
-    let capability_router = match TomlCapabilityRouter::with_shipped_and_overrides(
-        agents_overrides_path.as_deref(),
-    ) {
-        Ok(r) => r,
-        Err(err) => {
-            tracing::warn!(
-                ?err,
-                "failed to load agents.toml; capability router empty, A2 substrate inert"
-            );
-            TomlCapabilityRouter::from_profiles(Vec::new())
-        }
-    };
+    let capability_router =
+        match TomlCapabilityRouter::with_shipped_and_overrides(agents_overrides_path.as_deref()) {
+            Ok(r) => r,
+            Err(err) => {
+                tracing::warn!(
+                    ?err,
+                    "failed to load agents.toml; capability router empty, A2 substrate inert"
+                );
+                TomlCapabilityRouter::from_profiles(Vec::new())
+            }
+        };
 
     // A3 Phase 4 + A2 Phase 4: construct the dry-run auditor. Two
     // paths in priority order:
@@ -677,14 +676,13 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
             // ba-enforcement.toml; shipped default is ObserveOnly (no
             // blocking; telemetry only).
             if let Some(ref provenance_arc) = provenance_store {
-                let prov_output =
-                    time_and_record(ctx.fs, &mk_ctx("provenance_validate"), || {
-                        hooks::provenance_validate::process(
-                            &input,
-                            provenance_arc.as_ref(),
-                            ba_enforcement.provenance_validate_mode,
-                        )
-                    });
+                let prov_output = time_and_record(ctx.fs, &mk_ctx("provenance_validate"), || {
+                    hooks::provenance_validate::process(
+                        &input,
+                        provenance_arc.as_ref(),
+                        ba_enforcement.provenance_validate_mode,
+                    )
+                });
                 output.merge(&prov_output);
             }
 
@@ -765,10 +763,9 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
 
                 // tasks.md auto-block guard — block edits/writes that would
                 // mutate the SENTINEL:TASKS auto block (owned by task_persist).
-                let tasks_guard_output =
-                    time_and_record(ctx.fs, &mk_ctx("tasks_md_guard"), || {
-                        hooks::tasks_md_guard::process(&input, &ctx)
-                    });
+                let tasks_guard_output = time_and_record(ctx.fs, &mk_ctx("tasks_md_guard"), || {
+                    hooks::tasks_md_guard::process(&input, &ctx)
+                });
                 output.merge(&tasks_guard_output);
 
                 // Tool usage gate — require sequential thinking + task creation.
@@ -785,6 +782,18 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
                     )
                 });
                 output.merge(&usage_output);
+
+                // Catastrophic-escalation hook — signals Catastrophic-class
+                // tool calls upstream to the operator's consul via the
+                // legatus escalation path AND denies locally pending
+                // voice-attested authorization. Orthogonal to
+                // tool_usage_gate's local-blast-radius logic; both run on
+                // PreToolUse and merge.
+                let catastrophic_output =
+                    time_and_record(ctx.fs, &mk_ctx("catastrophic_escalation"), || {
+                        hooks::catastrophic_escalation::process(&input, &reversibility_classifier)
+                    });
+                output.merge(&catastrophic_output);
             }
 
             // Doppler/Auth0 gate — block mutation tools (any tool type)
@@ -798,10 +807,9 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
             // operator's TOML config. Empty config = no-op; the
             // gate ships inert by default so machines that haven't
             // authored their own rules see no behaviour change.
-            let constitution_output =
-                time_and_record(ctx.fs, &mk_ctx("constitution_gate"), || {
-                    hooks::constitution_gate::process(&input, &constitution_rules)
-                });
+            let constitution_output = time_and_record(ctx.fs, &mk_ctx("constitution_gate"), || {
+                hooks::constitution_gate::process(&input, &constitution_rules)
+            });
             output.merge(&constitution_output);
 
             // Pre-commit verification — block git commit/push without test evidence (Bash only)
@@ -820,9 +828,10 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
                 output.merge(&msg_output);
 
                 // Pre-push Steel test — block git push without Steel test (Bash only)
-                let steel_output = time_and_record(ctx.fs, &mk_ctx("pre_push_browser_test"), || {
-                    hooks::pre_push_browser_test::process(&input, &ctx)
-                });
+                let steel_output =
+                    time_and_record(ctx.fs, &mk_ctx("pre_push_browser_test"), || {
+                        hooks::pre_push_browser_test::process(&input, &ctx)
+                    });
                 output.merge(&steel_output);
 
                 // PR merge gate — block gh pr merge without confirmation (Bash only)
@@ -845,8 +854,7 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
             // that emit a structured `provenance_audit` field; silently
             // skips otherwise. Observational (always allows).
             if let Some(ref provenance_arc) = provenance_store {
-                let audit_output =
-                    hooks::audit_extract::process(&input, provenance_arc.as_ref());
+                let audit_output = hooks::audit_extract::process(&input, provenance_arc.as_ref());
                 output.merge(&audit_output);
             }
 
