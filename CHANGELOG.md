@@ -104,6 +104,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   **Out of scope (lifecycle-key support)**: storing the sent-time `*_at_ms` on each outbox entry so `remove_by_key(SessionBlocked { session_id, detected_at_ms })` can match by the full key. Currently lifecycle escalations rely on the at-least-once `remove_head` only. Acceptable — lifecycle events are self-correcting; per-instruction events are the ones that need exactly-once semantics for the operator's audit-trail correctness.
 
 ### Fixed
+- **Operator-visible startup banners for daemon + legatus handshake** (2026-05-23). The `sentinel daemon` startup path and the `run_connect_hosted` consular-handshake path both emit only `info!` logs, but `tracing_subscriber`'s default filter is `warn` — so operators following the Fabrica `consul-sentinel-roundtrip.md` runbook saw Terminal 2 completely silent after starting the daemon, with no way to know (a) whether the daemon started, (b) where the bearer token lives, (c) what value to use for `Authorization: Bearer …`, or (d) whether the legatus actually handshook with the consulate. Symptoms: HTTP 401 on every dashboard call, with no diagnostic signal.
+
+  **Root cause.** Two failures stacked: (1) every operator-facing diagnostic was an `info!` filtered out at default log level; (2) the file `~/.claude/sentinel/daemon-token` is `{port}:{token}` format, but the auth middleware expects `{token}` only — operators who `cat` the file and paste-as-Bearer get 401, while no signal explains why.
+
+  **Fix.** Added two stderr banners (visible regardless of `RUST_LOG`):
+  - `daemon_cmd.rs::run` — startup banner on every daemon launch listing dashboard URL, token-file path with format note, ready-to-paste `Authorization: Bearer <token>` (no port prefix — matches what the middleware actually checks), and legatus configuration (consulate URL / display name / heartbeat interval) when `--legatus-*` flags are set.
+  - `sentinel-legatus/src/client.rs::run_connect_hosted` — handshake-complete banner emitted immediately after registration succeeds: consulate URL, registered `session_id`, final `display_name` (post-collision-suffix), heartbeat interval.
+
+  Banners use `eprintln!` so they appear regardless of subscriber configuration; structured `info!` lines remain for production log aggregation.
+
+  Verified live: 2026-05-23 demo run with the new binaries confirmed (a) both banners visible, (b) banner-displayed token works against `GET /legatus/pending` (200 OK + JSON body), (c) `POST /legatus/escalate` returns 202 Accepted, (d) escalation drains the outbox over WS to consulate with exactly-once-arc ack closure (outbox count returns to 0 within 3s).
+
 - **UTF-8 char-boundary panic in `activity_tracker.rs`** (2026-05-22). The Stop hook panicked on commit messages containing multi-byte UTF-8 characters: `&cmd[..80]` byte-slicing through em-dash `—` (3 bytes) hit `end byte index 80 is not a char boundary` at line 239 (post-fix: line 266 in `process_stop`).
 
   **Root cause.** Two sites used plain byte-slicing for length-based truncation, which is unsafe for any user-controlled string that may contain non-ASCII characters (commit messages, task descriptions, file paths). The first panic surfaced from a commit body like `git add -A && git commit -m "docs(audit pass 3): CHANGELOG entry — full Pass-3 batch"` where the em-dash sat at bytes 79..82 and the 80-byte truncation cut through it.

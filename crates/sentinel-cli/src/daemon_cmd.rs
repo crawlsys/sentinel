@@ -147,6 +147,42 @@ async fn bearer_auth(req: Request, next: Next) -> Result<Response, axum::http::S
 #[derive(Clone)]
 struct BearerToken(String);
 
+/// Emit the operator-facing startup banner to stderr.
+///
+/// **Why:** `tracing_subscriber` defaults to `warn` filter, so every
+/// `info!` in the daemon startup path is silenced unless the operator
+/// remembers `RUST_LOG=info`. Operators following the consul↔sentinel
+/// runbook need *some* signal that the daemon started cleanly and where
+/// to find the bearer token — without this banner, Terminal 2 is
+/// completely silent and the integration appears broken.
+fn print_daemon_banner(
+    port: u16,
+    token_path: &std::path::Path,
+    token: &str,
+    legatus: &LegatusOptions,
+) {
+    eprintln!();
+    eprintln!("============================================================");
+    eprintln!("  Sentinel daemon ready");
+    eprintln!("============================================================");
+    eprintln!("  Dashboard:     http://127.0.0.1:{port}");
+    eprintln!("  Token path:    {} (file format: {{port}}:{{token}})", token_path.display());
+    eprintln!("  Auth header:   Authorization: Bearer {token}");
+    if let Some(url) = &legatus.consulate_url {
+        eprintln!("  Legatus mode:  ON");
+        eprintln!("  Consulate URL: {url}");
+        eprintln!("  Display name:  {}", legatus.suggested_name);
+        if let Some(wd) = &legatus.working_dir {
+            eprintln!("  Working dir:   {wd}");
+        }
+        eprintln!("  Heartbeat:     {}s", legatus.heartbeat_secs);
+    } else {
+        eprintln!("  Legatus mode:  OFF (no --legatus-consulate-url)");
+    }
+    eprintln!("============================================================");
+    eprintln!();
+}
+
 pub async fn run(port: u16, legatus: LegatusOptions) -> Result<()> {
     info!("Sentinel daemon starting on port {port}");
 
@@ -154,6 +190,13 @@ pub async fn run(port: u16, legatus: LegatusOptions) -> Result<()> {
     let token = generate_bearer_token();
     let token_path = write_token_file(&token, port);
     info!("Bearer token written to {}", token_path.display());
+
+    // Operator-facing startup banner. Goes to stderr so it is visible
+    // regardless of RUST_LOG filter (default is `warn`, which swallows
+    // every info! the daemon emits). Operators following a runbook need
+    // to see *some* sign of life from Terminal 2 — without this, the
+    // daemon log appears silent and the round-trip looks broken.
+    print_daemon_banner(port, &token_path, &token, &legatus);
 
     let state = Arc::new(RwLock::new(SessionState::new("daemon")));
     let app_state = crate::api::AppState { session: state };

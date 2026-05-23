@@ -205,6 +205,23 @@ pub async fn run_connect_hosted(
     );
     info!(%session_id, %display_name, "legatus registered");
 
+    // Operator-facing handshake-complete banner. Goes to stderr so it
+    // is visible regardless of RUST_LOG filter (default is `warn`).
+    // Operators following the consul↔sentinel runbook need to see a
+    // sign of life when the WS handshake actually completes — the
+    // info! above is filtered out by default and the consulate side's
+    // logs are in a different terminal.
+    eprintln!();
+    eprintln!("------------------------------------------------------------");
+    eprintln!("  Legatus handshake complete");
+    eprintln!("------------------------------------------------------------");
+    eprintln!("  Consulate URL: {}", config.consulate_url);
+    eprintln!("  Session ID:    {session_id}");
+    eprintln!("  Display name:  {display_name}");
+    eprintln!("  Heartbeat:     {:?}", config.heartbeat_interval);
+    eprintln!("------------------------------------------------------------");
+    eprintln!();
+
     // --- Post-handshake loop --------------------------------------
     // Per the session_loop convention in consulate: our outbound
     // direction signs with `pair.outbound` and consulate verifies
