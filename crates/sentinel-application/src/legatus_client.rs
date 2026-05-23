@@ -436,6 +436,71 @@ pub fn escalate_fire_and_forget(event: EscalationKind) {
     });
 }
 
+/// Synchronously check the daemon's catastrophic approval cache
+/// for `(session_id, action_class)`. Returns `true` when an
+/// unspent approval is present (and consumes it -- single-use).
+/// Returns `false` when no approval is present, the daemon is
+/// unreachable, or the HTTP call fails.
+///
+/// Called from the `catastrophic_escalation` PreToolUse hook
+/// before classifying the tool call. The cache lookup is the
+/// retry-allow path: an approval recorded by the legatus's
+/// inbound `CatastrophicAck` handler authorizes exactly one
+/// retry of the same `action_class` in the same session.
+///
+/// Fails-closed: a daemon outage returns `false`, the hook
+/// proceeds to classify + emit + deny as usual.
+#[must_use]
+pub fn consume_catastrophic_approval(session_id: &str, action_class: &str) -> bool {
+    let Some((port, token)) = read_daemon_token() else {
+        return false;
+    };
+    // URL-encode minimal: session_id is a UUID (URL-safe) and
+    // action_class comes from a tool name (alnum + _ in practice).
+    // Conservative percent-encode of any non-alnum chars to avoid
+    // surprises if a tool name ever includes punctuation.
+    let encoded_class = percent_encode_path(action_class);
+    let url = format!(
+        "http://127.0.0.1:{port}/legatus/catastrophic-acks/{session_id}/{encoded_class}"
+    );
+    let client = match reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(2))
+        .build()
+    {
+        Ok(c) => c,
+        Err(err) => {
+            tracing::debug!(?err, "legatus_client: cannot build reqwest client");
+            return false;
+        }
+    };
+    match client
+        .get(&url)
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+    {
+        Ok(resp) => resp.status().is_success(),
+        Err(err) => {
+            tracing::debug!(?err, "legatus_client: consume_catastrophic_approval failed");
+            false
+        }
+    }
+}
+
+/// Minimal percent-encoder for path segments. Encodes any byte
+/// that isn't an unreserved character per RFC 3986 §2.3.
+fn percent_encode_path(s: &str) -> String {
+    const UNRESERVED: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~";
+    let mut out = String::with_capacity(s.len());
+    for &b in s.as_bytes() {
+        if UNRESERVED.contains(&b) {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
 #[derive(Debug, thiserror::Error)]
 enum LegatusClientError {
     #[error("daemon token file not present (daemon not running?)")]

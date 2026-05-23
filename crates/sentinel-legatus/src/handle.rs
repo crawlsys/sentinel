@@ -152,6 +152,27 @@ pub struct LegatusRuntime {
     pub(crate) escalation_loopback: mpsc::UnboundedSender<OutboxItem>,
     pub(crate) inbox: Option<PersistentInbox>,
     pub(crate) outbox: Option<PersistentEscalationOutbox>,
+    /// Optional approval cache the inbound `CatastrophicAck` handler
+    /// writes to. Set on the daemon path via
+    /// [`LegatusRuntime::with_approval_cache`] before the runtime
+    /// is handed to `run_connect_hosted`. Standalone CLI builds
+    /// leave it `None` (CatastrophicAcks are logged-only).
+    pub(crate) approval_cache: Option<std::sync::Arc<crate::approval_cache::CatastrophicApprovalCache>>,
+}
+
+impl LegatusRuntime {
+    /// Install a [`CatastrophicApprovalCache`] handle. Called from
+    /// the daemon path between `make_pair_with_persistence` and
+    /// `run_connect_hosted`. Standalone CLI invocations don't call
+    /// this; their inbound `CatastrophicAck`s are debug-logged
+    /// without altering any retry-allow state.
+    pub fn with_approval_cache(
+        mut self,
+        cache: std::sync::Arc<crate::approval_cache::CatastrophicApprovalCache>,
+    ) -> Self {
+        self.approval_cache = Some(cache);
+        self
+    }
 }
 
 /// Construct a paired `(handle, runtime)` with no persistent inbox
@@ -171,6 +192,7 @@ pub fn make_pair() -> (LegatusHandle, LegatusRuntime) {
     let runtime = LegatusRuntime {
         escalation_rx,
         escalation_loopback: escalation_tx,
+        approval_cache: None,
         inbox: None,
         outbox: None,
     };
@@ -191,6 +213,7 @@ pub fn make_pair_with_inbox(inbox: PersistentInbox) -> (LegatusHandle, LegatusRu
     let runtime = LegatusRuntime {
         escalation_rx,
         escalation_loopback: escalation_tx,
+        approval_cache: None,
         inbox: Some(inbox),
         outbox: None,
     };
@@ -218,6 +241,7 @@ pub fn make_pair_with_persistence(
     let runtime = LegatusRuntime {
         escalation_rx,
         escalation_loopback: escalation_tx,
+        approval_cache: None,
         inbox: Some(inbox),
         outbox: Some(outbox),
     };

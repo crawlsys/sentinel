@@ -791,7 +791,11 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
                 // PreToolUse and merge.
                 let catastrophic_output =
                     time_and_record(ctx.fs, &mk_ctx("catastrophic_escalation"), || {
-                        hooks::catastrophic_escalation::process(&input, &reversibility_classifier)
+                        hooks::catastrophic_escalation::process(
+                            &input,
+                            &reversibility_classifier,
+                            &hooks::catastrophic_escalation::DaemonApprovalChecker,
+                        )
                     });
                 output.merge(&catastrophic_output);
             }

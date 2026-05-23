@@ -25,12 +25,17 @@
 //! (`SessionId`, `SessionMasterKey`, etc.) come in transitively
 //! through the same path dep.
 
+pub mod approval_cache;
 pub mod client;
 pub mod error;
 pub mod handle;
 pub mod persistent_inbox;
 pub mod persistent_outbox;
 
+pub use approval_cache::{
+    parse_action_class_from_transcript, CatastrophicApprovalCache, ConsumedApproval,
+    DEFAULT_TTL as APPROVAL_CACHE_DEFAULT_TTL,
+};
 pub use client::{run_connect, run_connect_hosted, ConnectConfig};
 pub use error::LegatusError;
 pub use handle::{

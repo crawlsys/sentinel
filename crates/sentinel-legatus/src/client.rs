@@ -661,6 +661,75 @@ fn handle_inbound(msg: &ConsularMessage, session_id: SessionId, runtime: &Legatu
                 "processed inbound EscalationAck",
             );
         }
+        ConsularMessage::CatastrophicAck(ack) => {
+            // v0.1 sentinel-side handling per the catastrophic-flow
+            // architecture: parse the action_class out of the
+            // operator's voiceprint-attested transcript, record an
+            // unspent approval in the daemon's
+            // CatastrophicApprovalCache. On the operator's next
+            // Claude Code prompt, the catastrophic_escalation hook
+            // will check the cache, consume the approval, and let
+            // the previously-blocked tool call through.
+            //
+            // v0.1 LIMITATION: cryptographic witness verification
+            // (Ed25519 signature + Praefectus 6-step check) is NOT
+            // performed here. The cache lives in-process; daemon
+            // HTTP routes are bearer-auth localhost-only; the
+            // threat model is "anyone with shell access" which
+            // already owns the machine. v0.2 swaps in
+            // `PraefectusClient` verification before the cache
+            // write.
+            use consul_protocol::messages::AckDecision;
+            tracing::info!(
+                %session_id,
+                ack_operator = %ack.voiceprint_witness.operator,
+                decision = ?ack.decision,
+                "received CatastrophicAck",
+            );
+            match &ack.decision {
+                AckDecision::Approve | AckDecision::Modify { .. } => {
+                    let transcript = ack.voiceprint_witness.utterance_transcript.clone();
+                    let Some(action_class) =
+                        crate::approval_cache::parse_action_class_from_transcript(&transcript)
+                    else {
+                        warn!(
+                            %session_id,
+                            transcript = %transcript,
+                            "CatastrophicAck transcript did not match \
+                             'approve <action_class>, code <nonce>' shape; \
+                             approval NOT recorded"
+                        );
+                        return;
+                    };
+                    let Some(cache) = runtime.approval_cache.as_ref() else {
+                        debug!(
+                            %session_id,
+                            action_class = %action_class,
+                            "CatastrophicAck received but no approval_cache wired \
+                             (standalone CLI?); approval not retained"
+                        );
+                        return;
+                    };
+                    cache.record(session_id, action_class.clone(), transcript);
+                    tracing::info!(
+                        %session_id,
+                        action_class = %action_class,
+                        "CatastrophicAck recorded approval in cache; \
+                         the operator's next retry of the matching tool call will be allowed"
+                    );
+                }
+                AckDecision::Deny { reason } => {
+                    // No cache write on deny -- the hook will keep
+                    // denying on retry, which matches the
+                    // operator's intent.
+                    tracing::info!(
+                        %session_id,
+                        reason = %reason,
+                        "CatastrophicAck denied; no cache write"
+                    );
+                }
+            }
+        }
         other => {
             debug!(%session_id, ?other, "unhandled inbound message");
         }

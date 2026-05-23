@@ -234,8 +234,8 @@ pub async fn run(port: u16, legatus: LegatusOptions) -> Result<()> {
     });
 
     let api_app = crate::api::router(app_state);
-    let app = if let Some(handle) = &legatus_handle {
-        api_app.merge(legatus_routes(handle.clone()))
+    let app = if let Some(legatus_state) = &legatus_handle {
+        api_app.merge(legatus_routes(legatus_state.clone()))
     } else {
         api_app
     }
@@ -257,7 +257,19 @@ pub async fn run(port: u16, legatus: LegatusOptions) -> Result<()> {
     Ok(())
 }
 
-async fn start_legatus_if_configured(options: LegatusOptions) -> Result<Option<LegatusHandle>> {
+/// Bundle returned by [`start_legatus_if_configured`] -- the handle
+/// (for outbound escalations) plus the approval cache that the
+/// inbound CatastrophicAck handler writes to and the new HTTP
+/// route reads from.
+#[derive(Clone)]
+pub struct LegatusRouteState {
+    pub handle: LegatusHandle,
+    pub approval_cache: Arc<sentinel_legatus::CatastrophicApprovalCache>,
+}
+
+async fn start_legatus_if_configured(
+    options: LegatusOptions,
+) -> Result<Option<LegatusRouteState>> {
     let Some(consulate_url) = options.consulate_url else {
         return Ok(None);
     };
@@ -333,6 +345,11 @@ async fn start_legatus_if_configured(options: LegatusOptions) -> Result<Option<L
         warn!("no resolvable home dir; legatus inbox + outbox are in-memory only");
         make_pair()
     };
+    // Approval cache: shared between the inbound CatastrophicAck
+    // handler (writes when an ack arrives) and the
+    // /legatus/catastrophic-acks HTTP route (reads on hook retry).
+    let approval_cache = Arc::new(sentinel_legatus::CatastrophicApprovalCache::new());
+    let runtime = runtime.with_approval_cache(approval_cache.clone());
     let cancel = Arc::new(Notify::new());
     info!(url = %consulate_url, "daemon hosting legatus");
     tokio::spawn(async move {
@@ -340,15 +357,60 @@ async fn start_legatus_if_configured(options: LegatusOptions) -> Result<Option<L
             warn!(?err, "hosted legatus exited with error");
         }
     });
-    Ok(Some(handle))
+    Ok(Some(LegatusRouteState {
+        handle,
+        approval_cache,
+    }))
 }
 
-fn legatus_routes(handle: LegatusHandle) -> Router {
-    Router::new()
+fn legatus_routes(state: LegatusRouteState) -> Router {
+    // Two layered routers because the escalate/inbox/pending routes
+    // were originally stated on `LegatusHandle`; the new
+    // catastrophic-acks route is stated on `Arc<ApprovalCache>`.
+    // axum supports merging routers with different State types as
+    // long as nothing depends across the seam.
+    let handle_state = state.handle.clone();
+    let cache_state = state.approval_cache.clone();
+    let handle_routes: Router = Router::new()
         .route("/legatus/escalate", post(handle_legatus_escalate))
         .route("/legatus/inbox/next", get(handle_legatus_inbox_next))
         .route("/legatus/pending", get(handle_legatus_pending))
-        .with_state(handle)
+        .with_state(handle_state);
+    let cache_routes: Router = Router::new()
+        .route(
+            "/legatus/catastrophic-acks/{session_id}/{action_class}",
+            get(handle_consume_catastrophic_ack),
+        )
+        .with_state(cache_state);
+    handle_routes.merge(cache_routes)
+}
+
+/// `GET /legatus/catastrophic-acks/:session_id/:action_class`
+///
+/// Single-use approval check for the `catastrophic_escalation`
+/// hook. Returns 200 with a JSON body containing the captured
+/// transcript when an approval is present (and consumes it). 404
+/// when no approval is present. Bearer-auth + localhost-bind +
+/// single-use semantics mean replay across retries is structurally
+/// blocked.
+async fn handle_consume_catastrophic_ack(
+    State(cache): State<Arc<sentinel_legatus::CatastrophicApprovalCache>>,
+    axum::extract::Path((session_id, action_class)): axum::extract::Path<(String, String)>,
+) -> Response {
+    let Ok(uuid) = uuid::Uuid::parse_str(&session_id) else {
+        return (StatusCode::BAD_REQUEST, "session_id must be a UUID").into_response();
+    };
+    let sid = sentinel_legatus::SessionId::from_uuid(uuid);
+    match cache.consume(sid, &action_class) {
+        Some(approval) => {
+            let body = serde_json::json!({
+                "transcript": approval.transcript,
+                "age_seconds": approval.age.as_secs(),
+            });
+            (StatusCode::OK, Json(body)).into_response()
+        }
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
 }
 
 async fn handle_legatus_escalate(

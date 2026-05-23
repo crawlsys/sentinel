@@ -49,45 +49,97 @@ use sentinel_domain::ports::ReversibilityClassifierPort;
 use sentinel_domain::reversibility::ReversibilityClass;
 use sentinel_legatus::{BlockReason, EscalationKind};
 
-use crate::legatus_client::escalate_fire_and_forget;
+use crate::legatus_client::{consume_catastrophic_approval, escalate_fire_and_forget};
+
+/// Decouples the hook from the daemon HTTP call so tests can
+/// inject a fixed-result checker.
+pub trait CatastrophicApprovalChecker {
+    /// Returns `true` when an unspent approval is present for
+    /// `(session_id, action_class)`. Implementations consume the
+    /// approval on a hit.
+    fn check(&self, session_id: &str, action_class: &str) -> bool;
+}
+
+/// Production checker: hits the daemon's
+/// `/legatus/catastrophic-acks/:session_id/:action_class` route.
+/// Fails-closed on daemon outage.
+pub struct DaemonApprovalChecker;
+
+impl CatastrophicApprovalChecker for DaemonApprovalChecker {
+    fn check(&self, session_id: &str, action_class: &str) -> bool {
+        consume_catastrophic_approval(session_id, action_class)
+    }
+}
 
 /// Maximum length of the operator-facing instruction-content
 /// summary embedded in the BlockReason::Custom description.
 /// Conservative cap to keep notification payloads small.
 const SUMMARY_MAX_LEN: usize = 120;
 
-/// Process a PreToolUse event. Returns Deny when the classifier
-/// rules the tool call Catastrophic; returns Allow otherwise.
-pub fn process(input: &HookInput, classifier: &dyn ReversibilityClassifierPort) -> HookOutput {
+/// Process a PreToolUse event.
+///
+/// Decision order:
+///   1. If no tool_name -> allow.
+///   2. If not Catastrophic -> allow (other hooks own those
+///      classes).
+///   3. If Catastrophic AND the operator has a fresh unspent
+///      approval for `(session_id, action_class)` in the daemon's
+///      cache -> mark spent + allow. This is the retry-allow path
+///      that closes the catastrophic loop on the sentinel side.
+///   4. Else (Catastrophic + no approval) -> emit SessionBlocked
+///      upstream + deny locally. Operator approves via voice
+///      surface; CatastrophicAck arrives at the daemon; the
+///      operator's NEXT prompt triggers a retry that hits the
+///      allow-path above.
+pub fn process(
+    input: &HookInput,
+    classifier: &dyn ReversibilityClassifierPort,
+    approval_checker: &dyn CatastrophicApprovalChecker,
+) -> HookOutput {
     let Some(tool) = input.tool_name.as_deref() else {
         return HookOutput::allow();
     };
     let null_input = serde_json::Value::Null;
     let tool_input = input.tool_input.as_ref().unwrap_or(&null_input);
 
-    match classifier.classify(tool, tool_input) {
-        ReversibilityClass::Catastrophic => {
-            let description = render_description(tool, tool_input);
-            tracing::warn!(
+    let class = classifier.classify(tool, tool_input);
+    if class != ReversibilityClass::Catastrophic {
+        return HookOutput::allow();
+    }
+
+    // Catastrophic. Try to consume an existing approval first.
+    // session_id can be absent in synthetic / test inputs; without
+    // it we cannot look up an approval, so fall through to emit +
+    // deny.
+    if let Some(session_id) = input.session_id.as_deref() {
+        if approval_checker.check(session_id, tool) {
+            tracing::info!(
                 target: "sentinel::catastrophic_escalation",
                 tool = %tool,
-                "Catastrophic-class tool call intercepted; \
-                 emitting SessionBlocked upstream and denying locally"
+                session_id = %session_id,
+                "consumed pre-recorded CatastrophicAck approval; allowing this retry"
             );
-            escalate_fire_and_forget(EscalationKind::Blocked {
-                reason: BlockReason::Custom {
-                    description: description.clone(),
-                },
-            });
-            HookOutput::deny(format!(
-                "Catastrophic-class action requires voice-attested authorization from the \
-                 operator. Sentinel has signaled the consul; await approval. ({description})"
-            ))
+            return HookOutput::allow();
         }
-        ReversibilityClass::TriviallyReversible
-        | ReversibilityClass::ReversibleWithEffort
-        | ReversibilityClass::Irreversible => HookOutput::allow(),
     }
+
+    // No approval -- emit upstream + deny locally.
+    let description = render_description(tool, tool_input);
+    tracing::warn!(
+        target: "sentinel::catastrophic_escalation",
+        tool = %tool,
+        "Catastrophic-class tool call intercepted; \
+         emitting SessionBlocked upstream and denying locally"
+    );
+    escalate_fire_and_forget(EscalationKind::Blocked {
+        reason: BlockReason::Custom {
+            description: description.clone(),
+        },
+    });
+    HookOutput::deny(format!(
+        "Catastrophic-class action requires voice-attested authorization from the \
+         operator. Sentinel has signaled the consul; await approval. ({description})"
+    ))
 }
 
 /// Render a short operator-facing description from the tool name +
@@ -161,6 +213,21 @@ mod tests {
         }
     }
 
+    /// Approval checker that always returns the configured value.
+    /// Models a daemon that always has / never has a pending
+    /// approval.
+    #[derive(Clone, Copy)]
+    struct FixedApproval(bool);
+
+    impl CatastrophicApprovalChecker for FixedApproval {
+        fn check(&self, _session_id: &str, _action_class: &str) -> bool {
+            self.0
+        }
+    }
+
+    const NEVER_APPROVE: FixedApproval = FixedApproval(false);
+    const ALWAYS_APPROVE: FixedApproval = FixedApproval(true);
+
     fn input_with(tool: &str, tool_input: serde_json::Value) -> HookInput {
         HookInput {
             tool_name: Some(tool.into()),
@@ -172,7 +239,11 @@ mod tests {
     #[test]
     fn catastrophic_tool_call_denies_locally() {
         let input = input_with("Bash", json!({"command": "rm -rf /"}));
-        let r = process(&input, &FixedClassifier(ReversibilityClass::Catastrophic));
+        let r = process(
+            &input,
+            &FixedClassifier(ReversibilityClass::Catastrophic),
+            &NEVER_APPROVE,
+        );
         // The hook denies; the operator-facing message names the
         // tool and the action.
         assert_eq!(r.blocked, Some(true), "expected deny");
@@ -189,7 +260,11 @@ mod tests {
     #[test]
     fn irreversible_tool_call_allows() {
         let input = input_with("Bash", json!({"command": "git push origin main"}));
-        let r = process(&input, &FixedClassifier(ReversibilityClass::Irreversible));
+        let r = process(
+            &input,
+            &FixedClassifier(ReversibilityClass::Irreversible),
+            &NEVER_APPROVE,
+        );
         assert!(
             r.blocked != Some(true),
             "expected allow, got blocked={:?}",
@@ -203,6 +278,7 @@ mod tests {
         let r = process(
             &input,
             &FixedClassifier(ReversibilityClass::ReversibleWithEffort),
+            &NEVER_APPROVE,
         );
         assert!(
             r.blocked != Some(true),
@@ -217,6 +293,7 @@ mod tests {
         let r = process(
             &input,
             &FixedClassifier(ReversibilityClass::TriviallyReversible),
+            &NEVER_APPROVE,
         );
         assert!(
             r.blocked != Some(true),
@@ -228,7 +305,11 @@ mod tests {
     #[test]
     fn missing_tool_name_allows() {
         let input = HookInput::default();
-        let r = process(&input, &FixedClassifier(ReversibilityClass::Catastrophic));
+        let r = process(
+            &input,
+            &FixedClassifier(ReversibilityClass::Catastrophic),
+            &NEVER_APPROVE,
+        );
         assert!(
             r.blocked != Some(true),
             "expected allow, got blocked={:?}",
@@ -284,7 +365,11 @@ mod tests {
     #[test]
     fn catastrophic_message_mentions_authorization() {
         let input = input_with("Bash", json!({"command": "drop database prod"}));
-        let r = process(&input, &FixedClassifier(ReversibilityClass::Catastrophic));
+        let r = process(
+            &input,
+            &FixedClassifier(ReversibilityClass::Catastrophic),
+            &NEVER_APPROVE,
+        );
         let hso = r
             .hook_specific_output
             .as_ref()
@@ -294,5 +379,78 @@ mod tests {
             msg.to_lowercase().contains("authorization"),
             "deny message should mention authorization, got: {msg}"
         );
+    }
+
+    /// Retry-allow path: when the daemon's cache reports an
+    /// existing approval for (session, action_class), the hook
+    /// allows the retry without re-emitting SessionBlocked.
+    #[test]
+    fn catastrophic_with_pending_approval_allows_retry() {
+        let input = HookInput {
+            tool_name: Some("Bash".into()),
+            tool_input: Some(json!({"command": "rm -rf /var/log/old"})),
+            session_id: Some("11111111-2222-3333-4444-555555555555".into()),
+            ..Default::default()
+        };
+        let r = process(
+            &input,
+            &FixedClassifier(ReversibilityClass::Catastrophic),
+            &ALWAYS_APPROVE,
+        );
+        assert!(
+            r.blocked != Some(true),
+            "approved retry should allow, got blocked={:?}",
+            r.blocked
+        );
+    }
+
+    /// Without session_id we cannot look up an approval (the
+    /// daemon keys by session). Catastrophic + no session_id +
+    /// even an ALWAYS_APPROVE checker -> still deny, because the
+    /// hook short-circuits the approval check.
+    #[test]
+    fn catastrophic_without_session_id_skips_approval_check_and_denies() {
+        let input = HookInput {
+            tool_name: Some("Bash".into()),
+            tool_input: Some(json!({"command": "rm -rf /"})),
+            session_id: None,
+            ..Default::default()
+        };
+        let r = process(
+            &input,
+            &FixedClassifier(ReversibilityClass::Catastrophic),
+            &ALWAYS_APPROVE,
+        );
+        assert_eq!(
+            r.blocked,
+            Some(true),
+            "without session_id we cannot consume approval; \
+             must deny + emit so the operator re-authorizes"
+        );
+    }
+
+    /// Approval check is only consulted for Catastrophic. For
+    /// other classes the hook silently allows regardless of cache
+    /// state (other hooks own those classes).
+    #[test]
+    fn approval_check_not_consulted_for_non_catastrophic() {
+        struct ExplodingChecker;
+        impl CatastrophicApprovalChecker for ExplodingChecker {
+            fn check(&self, _session_id: &str, _action_class: &str) -> bool {
+                panic!("approval checker should not be consulted for non-Catastrophic class");
+            }
+        }
+        let input = HookInput {
+            tool_name: Some("Edit".into()),
+            tool_input: Some(json!({"file_path": "/tmp/foo.rs"})),
+            session_id: Some("11111111-2222-3333-4444-555555555555".into()),
+            ..Default::default()
+        };
+        let r = process(
+            &input,
+            &FixedClassifier(ReversibilityClass::ReversibleWithEffort),
+            &ExplodingChecker,
+        );
+        assert!(r.blocked != Some(true));
     }
 }
