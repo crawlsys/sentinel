@@ -363,3 +363,283 @@ async fn instruction_outcome_failure_round_trips_with_error_body() {
 
     cancel.notify_one();
 }
+
+// ----------------------------------------------------------------------
+// T1: live cross-repo end-to-end test for the voice-attested
+// catastrophic flow.
+//
+// Exercises every wire-level piece sentinel + consulate must
+// agree on:
+//
+//   1. Sentinel-legatus connects to a real consulate.
+//   2. Sentinel emits SessionBlocked{CatastrophicPending} via
+//      LegatusHandle::escalate.
+//   3. The consulate forwards the SessionBlocked onto its
+//      escalation bus; the test code (simulating consul-app's
+//      CatastrophicAckProducer) observes it.
+//   4. Test constructs a CatastrophicAck with a fixture
+//      VoiceprintWitness and dispatches via
+//      ConnectionRegistry::dispatch_catastrophic_ack.
+//   5. The consulate session_loop's new outbound arm sends the
+//      CatastrophicAck back to sentinel-legatus over the WS.
+//   6. Sentinel-legatus's handle_inbound CatastrophicAck arm
+//      records the approval in the daemon-held cache.
+//   7. Test asserts the cache contains the matching approval.
+//
+// The CatastrophicAckProducer's gate-invocation logic is unit-
+// tested in consul-app/src/catastrophic_producer.rs; this test
+// covers the wire path between the producer's dispatch and the
+// hook-visible cache state.
+// ----------------------------------------------------------------------
+
+#[tokio::test]
+async fn t1_catastrophic_ack_round_trips_into_approval_cache() {
+    use chrono::Utc;
+    use consul_domain::identity::republic::{ChallengeNonce, OperatorId, VoiceprintWitness};
+    use consul_protocol::messages::{
+        AckDecision, BlockReason, CatastrophicAck, EscalationKey, SessionBlocked,
+    };
+    use sentinel_legatus::{CatastrophicApprovalCache, SpentNonceLog};
+
+    let SpawnedConsulate {
+        url,
+        session_id_rx,
+        mut escalation_rx,
+        connections,
+    } = spawn_consulate().await;
+
+    // Wire the runtime with an approval cache + spent-nonce log
+    // exactly as the production daemon does. The hook would
+    // consume from this cache; the test asserts on it directly.
+    let cancel = Arc::new(Notify::new());
+    let cancel_for_task = cancel.clone();
+    let (handle, runtime) = make_pair();
+    let approval_cache = Arc::new(CatastrophicApprovalCache::new());
+    let spent_nonces = Arc::new(SpentNonceLog::new());
+    let runtime = runtime
+        .with_approval_cache(approval_cache.clone())
+        .with_spent_nonce_log(spent_nonces);
+    let legatus_task = tokio::spawn(async move {
+        run_connect_hosted(sentinel_config(url), cancel_for_task, runtime).await
+    });
+
+    let session_id = tokio::time::timeout(Duration::from_secs(5), session_id_rx)
+        .await
+        .expect("handshake within 5s")
+        .expect("session_id from handshake");
+
+    for _ in 0..200 {
+        if !connections.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert_eq!(connections.len(), 1, "exactly one legatus connection");
+
+    // Phase 1: sentinel-legatus emits the SessionBlocked. The
+    // catastrophic_escalation hook does this in production via
+    // escalate_fire_and_forget; here we drive it directly.
+    let action_class = "Bash";
+    handle
+        .escalate(EscalationKind::Blocked {
+            reason: BlockReason::CatastrophicPending {
+                action_class: action_class.into(),
+                action_summary: "rm -rf /var/log/old".into(),
+            },
+        })
+        .expect("escalate CatastrophicPending");
+
+    // Phase 2: consulate forwards onto the escalation bus.
+    let blocked_env = wait_for(
+        &mut escalation_rx,
+        |e| {
+            matches!(
+                e,
+                EscalationEvent::Blocked(b) if matches!(
+                    b.reason,
+                    BlockReason::CatastrophicPending { .. }
+                )
+            )
+        },
+        "SessionBlocked{CatastrophicPending} on consulate escalation bus",
+    )
+    .await;
+    let blocked: SessionBlocked = match blocked_env.event {
+        EscalationEvent::Blocked(b) => b,
+        _ => unreachable!(),
+    };
+
+    // Phase 3: simulate consul-app's CatastrophicAckProducer.
+    // Real producer would run the voice-attested gate; the test
+    // synthesizes a witness + dispatches directly so we can
+    // assert the WIRE path independently of the gate's behaviour
+    // (that's covered in consul-app/src/catastrophic_producer.rs
+    // unit tests).
+    let operator = OperatorId::new();
+    let nonce = ChallengeNonce::from_bytes([0xAB; 16]);
+    let witness = VoiceprintWitness {
+        operator,
+        utterance_audio_hash: [0x11; 32],
+        utterance_transcript: format!("approve {action_class}, code {}", nonce.to_hex()),
+        challenge_nonce: nonce,
+        signature: [0x22; 64],
+        signed_at: Utc::now(),
+    };
+    let ack = CatastrophicAck {
+        key: EscalationKey::SessionBlocked {
+            session_id: blocked.session_id,
+            detected_at_ms: blocked.detected_at_ms,
+        },
+        decision: AckDecision::Approve,
+        signed_at: Utc::now(),
+        voiceprint_witness: witness,
+    };
+    connections
+        .dispatch_catastrophic_ack(blocked.session_id, ack)
+        .expect("dispatch CatastrophicAck through consulate");
+
+    // Phase 4: poll the daemon-held approval cache until the
+    // sentinel-legatus inbound handler has parsed the witness +
+    // recorded the approval. handle_inbound runs on the WS recv
+    // task; the cache write happens out-of-band, so we poll
+    // briefly.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        if let Some(consumed) = approval_cache.consume(session_id, action_class) {
+            assert!(
+                consumed.transcript.contains("approve Bash"),
+                "transcript should round-trip the operator's spoken phrase, got: {}",
+                consumed.transcript
+            );
+            break;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            panic!(
+                "approval did not land in cache within 3s (cache len = {})",
+                approval_cache.len()
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    // Single-use semantics: a second consume should miss.
+    assert!(
+        approval_cache.consume(session_id, action_class).is_none(),
+        "approval should be consumed (single-use)"
+    );
+
+    cancel.notify_one();
+    let _ = tokio::time::timeout(Duration::from_secs(2), legatus_task).await;
+}
+
+/// Companion test: replay protection. Same CatastrophicAck
+/// dispatched twice -- the second one must NOT land in the cache
+/// (the spent-nonce log rejects it).
+#[tokio::test]
+async fn t1_catastrophic_ack_replay_is_rejected() {
+    use chrono::Utc;
+    use consul_domain::identity::republic::{ChallengeNonce, OperatorId, VoiceprintWitness};
+    use consul_protocol::messages::{
+        AckDecision, BlockReason, CatastrophicAck, EscalationKey,
+    };
+    use sentinel_legatus::{CatastrophicApprovalCache, SpentNonceLog};
+
+    let SpawnedConsulate {
+        url,
+        session_id_rx,
+        mut escalation_rx,
+        connections,
+    } = spawn_consulate().await;
+
+    let cancel = Arc::new(Notify::new());
+    let cancel_for_task = cancel.clone();
+    let (handle, runtime) = make_pair();
+    let approval_cache = Arc::new(CatastrophicApprovalCache::new());
+    let spent_nonces = Arc::new(SpentNonceLog::new());
+    let runtime = runtime
+        .with_approval_cache(approval_cache.clone())
+        .with_spent_nonce_log(spent_nonces.clone());
+    let legatus_task = tokio::spawn(async move {
+        run_connect_hosted(sentinel_config(url), cancel_for_task, runtime).await
+    });
+
+    let session_id = tokio::time::timeout(Duration::from_secs(5), session_id_rx)
+        .await
+        .unwrap()
+        .unwrap();
+    for _ in 0..200 {
+        if !connections.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+
+    let action_class = "Bash";
+    handle
+        .escalate(EscalationKind::Blocked {
+            reason: BlockReason::CatastrophicPending {
+                action_class: action_class.into(),
+                action_summary: "drop database prod".into(),
+            },
+        })
+        .unwrap();
+
+    let blocked_env = wait_for(
+        &mut escalation_rx,
+        |e| matches!(e, EscalationEvent::Blocked(_)),
+        "Blocked",
+    )
+    .await;
+    let blocked = match blocked_env.event {
+        EscalationEvent::Blocked(b) => b,
+        _ => unreachable!(),
+    };
+
+    let nonce = ChallengeNonce::from_bytes([0xCD; 16]);
+    let make_ack = || CatastrophicAck {
+        key: EscalationKey::SessionBlocked {
+            session_id: blocked.session_id,
+            detected_at_ms: blocked.detected_at_ms,
+        },
+        decision: AckDecision::Approve,
+        signed_at: Utc::now(),
+        voiceprint_witness: VoiceprintWitness {
+            operator: OperatorId::new(),
+            utterance_audio_hash: [0x11; 32],
+            utterance_transcript: format!("approve {action_class}, code {}", nonce.to_hex()),
+            challenge_nonce: nonce,
+            signature: [0x22; 64],
+            signed_at: Utc::now(),
+        },
+    };
+
+    // First ack lands.
+    connections
+        .dispatch_catastrophic_ack(blocked.session_id, make_ack())
+        .unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        if approval_cache.consume(session_id, action_class).is_some() {
+            break;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            panic!("first approval did not land in cache");
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    // Second dispatch with the SAME nonce -- replay-rejected by
+    // the spent-nonce log; should NOT land in the cache.
+    connections
+        .dispatch_catastrophic_ack(blocked.session_id, make_ack())
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    assert!(
+        approval_cache.consume(session_id, action_class).is_none(),
+        "replayed CatastrophicAck must not land in approval cache"
+    );
+    assert_eq!(spent_nonces.len(), 1, "exactly one nonce spent");
+
+    cancel.notify_one();
+    let _ = tokio::time::timeout(Duration::from_secs(2), legatus_task).await;
+}
