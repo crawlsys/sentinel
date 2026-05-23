@@ -31,10 +31,14 @@ pub mod error;
 pub mod handle;
 pub mod persistent_inbox;
 pub mod persistent_outbox;
+pub mod witness_verifier;
 
 pub use approval_cache::{
-    parse_action_class_from_transcript, CatastrophicApprovalCache, ConsumedApproval,
-    DEFAULT_TTL as APPROVAL_CACHE_DEFAULT_TTL,
+    default_approval_cache_path, parse_action_class_from_transcript,
+    CatastrophicApprovalCache, ConsumedApproval, DEFAULT_TTL as APPROVAL_CACHE_DEFAULT_TTL,
+};
+pub use witness_verifier::{
+    AlwaysAccept, AlwaysReject, WitnessVerificationError, WitnessVerifierPort,
 };
 pub use client::{run_connect, run_connect_hosted, ConnectConfig};
 pub use error::LegatusError;

@@ -348,7 +348,24 @@ async fn start_legatus_if_configured(
     // Approval cache: shared between the inbound CatastrophicAck
     // handler (writes when an ack arrives) and the
     // /legatus/catastrophic-acks HTTP route (reads on hook retry).
-    let approval_cache = Arc::new(sentinel_legatus::CatastrophicApprovalCache::new());
+    // v0.2: persistent JSONL snapshot under
+    // ~/.claude/sentinel/state/legatus-catastrophic-approvals.json
+    // so pending approvals survive daemon restart. Falls back to
+    // in-memory-only if HOME is unresolvable (degenerate hosts).
+    let approval_cache = Arc::new(
+        sentinel_legatus::CatastrophicApprovalCache::default_persistent()
+            .unwrap_or_else(sentinel_legatus::CatastrophicApprovalCache::new),
+    );
+    if let Some(path) = sentinel_legatus::default_approval_cache_path() {
+        let count = approval_cache.len();
+        if count > 0 {
+            info!(
+                queued = count,
+                path = %path.display(),
+                "rehydrated persistent approval cache at startup",
+            );
+        }
+    }
     let runtime = runtime.with_approval_cache(approval_cache.clone());
     let cancel = Arc::new(Notify::new());
     info!(url = %consulate_url, "daemon hosting legatus");

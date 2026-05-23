@@ -158,6 +158,15 @@ pub struct LegatusRuntime {
     /// is handed to `run_connect_hosted`. Standalone CLI builds
     /// leave it `None` (CatastrophicAcks are logged-only).
     pub(crate) approval_cache: Option<std::sync::Arc<crate::approval_cache::CatastrophicApprovalCache>>,
+    /// Optional cryptographic witness verifier consulted by
+    /// `handle_inbound` BEFORE recording a CatastrophicAck approval
+    /// in the cache. `None` (default) preserves the v0.1 daemon-
+    /// local trust model: every ack is recorded unconditionally.
+    /// `Some(...)` enforces verification: failures are logged and
+    /// the cache is not written. Wired by the daemon via
+    /// [`LegatusRuntime::with_witness_verifier`].
+    pub(crate) witness_verifier:
+        Option<std::sync::Arc<dyn crate::witness_verifier::WitnessVerifierPort>>,
 }
 
 impl LegatusRuntime {
@@ -171,6 +180,19 @@ impl LegatusRuntime {
         cache: std::sync::Arc<crate::approval_cache::CatastrophicApprovalCache>,
     ) -> Self {
         self.approval_cache = Some(cache);
+        self
+    }
+
+    /// Install a [`WitnessVerifierPort`]. When set, the inbound
+    /// CatastrophicAck handler verifies the witness BEFORE writing
+    /// to the approval cache; failed verifications are logged and
+    /// the approval is dropped. When unset (default), every ack
+    /// records an approval (the v0.1 daemon-local trust model).
+    pub fn with_witness_verifier(
+        mut self,
+        verifier: std::sync::Arc<dyn crate::witness_verifier::WitnessVerifierPort>,
+    ) -> Self {
+        self.witness_verifier = Some(verifier);
         self
     }
 }
@@ -193,6 +215,7 @@ pub fn make_pair() -> (LegatusHandle, LegatusRuntime) {
         escalation_rx,
         escalation_loopback: escalation_tx,
         approval_cache: None,
+        witness_verifier: None,
         inbox: None,
         outbox: None,
     };
@@ -214,6 +237,7 @@ pub fn make_pair_with_inbox(inbox: PersistentInbox) -> (LegatusHandle, LegatusRu
         escalation_rx,
         escalation_loopback: escalation_tx,
         approval_cache: None,
+        witness_verifier: None,
         inbox: Some(inbox),
         outbox: None,
     };
@@ -242,6 +266,7 @@ pub fn make_pair_with_persistence(
         escalation_rx,
         escalation_loopback: escalation_tx,
         approval_cache: None,
+        witness_verifier: None,
         inbox: Some(inbox),
         outbox: Some(outbox),
     };

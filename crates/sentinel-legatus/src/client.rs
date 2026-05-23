@@ -710,10 +710,28 @@ fn handle_inbound(msg: &ConsularMessage, session_id: SessionId, runtime: &Legatu
                         );
                         return;
                     };
+                    // Cryptographic verification gate: when a
+                    // WitnessVerifierPort is wired the witness is
+                    // verified BEFORE the cache write. On failure
+                    // the approval is dropped + logged so a forged
+                    // ack cannot authorize a retry.
+                    if let Some(verifier) = runtime.witness_verifier.as_ref() {
+                        if let Err(err) = verifier.verify(&ack.voiceprint_witness, &ack.key) {
+                            warn!(
+                                %session_id,
+                                action_class = %action_class,
+                                error = %err,
+                                "CatastrophicAck verification FAILED; \
+                                 approval dropped, cache not written"
+                            );
+                            return;
+                        }
+                    }
                     cache.record(session_id, action_class.clone(), transcript);
                     tracing::info!(
                         %session_id,
                         action_class = %action_class,
+                        verified = runtime.witness_verifier.is_some(),
                         "CatastrophicAck recorded approval in cache; \
                          the operator's next retry of the matching tool call will be allowed"
                     );
