@@ -18,11 +18,18 @@ use sentinel_domain::workflow::SkillWorkflow;
 use std::collections::HashMap;
 
 fn block_with_context(input: &HookInput, reason: impl Into<String>) -> HookOutput {
-    HookOutput::block(super::block_context::append_block_context(reason, input))
+    let full = super::block_context::append_block_context(reason, input);
+    // Also signal upstream so operators on remote surfaces see
+    // their agent stuck. Fire-and-forget; daemon outage is a
+    // silent no-op (preserves the local block behavior).
+    super::upstream_block::signal_upstream("phase_gate", &full);
+    HookOutput::block(full)
 }
 
 fn deny_with_context(input: &HookInput, reason: impl Into<String>) -> HookOutput {
-    HookOutput::deny(super::block_context::append_block_context(reason, input))
+    let full = super::block_context::append_block_context(reason, input);
+    super::upstream_block::signal_upstream("phase_gate", &full);
+    HookOutput::deny(full)
 }
 
 /// Extracted phase file info from a Read() tool_input path.

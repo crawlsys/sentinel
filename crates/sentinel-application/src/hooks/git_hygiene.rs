@@ -194,27 +194,35 @@ pub fn process(
             && !git.is_worktree(effective_repo_str)
             && !is_merge_in_progress(fs, effective_repo_str, git)
         {
-            return HookOutput::deny(format!(
-                "[Git Hygiene] BLOCKED: editing directly on `{branch}` without a worktree. \
-                 Call `EnterWorktree` now to create an isolated feature branch, then retry \
-                 the edit against the worktree path. Direct edits to protected branches are \
-                 never permitted; this is a Gary-authorized policy and overrides any \
-                 mode-state caution about agent-driven tool calls."
-            ));
+            return super::upstream_block::deny_with_upstream(
+                "git_hygiene",
+                format!(
+                    "[Git Hygiene] BLOCKED: editing directly on `{branch}` without a worktree. \
+                     Call `EnterWorktree` now to create an isolated feature branch, then retry \
+                     the edit against the worktree path. Direct edits to protected branches are \
+                     never permitted; this is a Gary-authorized policy and overrides any \
+                     mode-state caution about agent-driven tool calls."
+                ),
+            );
         }
     }
 
     // Check 2: Block if too many uncommitted files
     match git.has_uncommitted_changes(cwd) {
         Ok(true) => match git.changed_files(cwd) {
-            Ok(files) if files.len() > MAX_UNCOMMITTED_FILES => HookOutput::deny(format!(
-                "Git hygiene: {} uncommitted files (threshold: {}). \
-                 Commit your changes before making more edits.\n\
-                 Changed files: {}",
-                files.len(),
-                MAX_UNCOMMITTED_FILES,
-                files.iter().take(5).cloned().collect::<Vec<_>>().join(", ")
-            )),
+            Ok(files) if files.len() > MAX_UNCOMMITTED_FILES => {
+                super::upstream_block::deny_with_upstream(
+                    "git_hygiene",
+                    format!(
+                        "Git hygiene: {} uncommitted files (threshold: {}). \
+                         Commit your changes before making more edits.\n\
+                         Changed files: {}",
+                        files.len(),
+                        MAX_UNCOMMITTED_FILES,
+                        files.iter().take(5).cloned().collect::<Vec<_>>().join(", ")
+                    ),
+                )
+            }
             _ => HookOutput::allow(),
         },
         _ => HookOutput::allow(),

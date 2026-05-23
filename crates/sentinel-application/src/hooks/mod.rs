@@ -78,6 +78,7 @@ pub mod test_evidence_recorder;
 pub mod todo_interceptor;
 pub mod todo_loader;
 pub mod tool_usage_gate;
+pub mod upstream_block;
 pub mod verification_gate;
 pub mod worktree_reminder;
 
@@ -312,6 +313,7 @@ pub const HOOK_NAMES: &[&str] = &[
     "todo_interceptor",
     "todo_loader",
     "tool_usage_gate",
+    "upstream_block",
     "verification_gate",
     "worktree_reminder",
 ];
