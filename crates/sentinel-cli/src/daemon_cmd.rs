@@ -68,7 +68,7 @@ pub struct LegatusOptions {
 
 /// Verifier wiring mode for inbound CatastrophicAck witnesses.
 /// Surfaced through `--legatus-witness-verify`.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum WitnessVerifyMode {
     /// No verifier installed; daemon trusts on receipt. Default.
     #[default]
@@ -77,6 +77,17 @@ pub enum WitnessVerifyMode {
     /// in-memory client accepts every witness unless test toggles
     /// force a fail.
     InMemory,
+    /// Wrap an HttpPraefectusClient pointing at the operator's
+    /// reachable Praefectus. Production mode -- every inbound
+    /// CatastrophicAck witness is verified cryptographically
+    /// against a live Praefectus before the approval is recorded.
+    Http {
+        /// Base URL of the Praefectus HTTP endpoint
+        /// (e.g. `http://127.0.0.1:9001`).
+        base_url: String,
+        /// Bearer token used to authenticate every request.
+        bearer_token: String,
+    },
 }
 
 /// Generate a random bearer token for this daemon instance.
@@ -443,6 +454,29 @@ async fn start_legatus_if_configured(
             info!("witness verifier: InMemoryPraefectusClient (dev/demo mode)");
             let client = Arc::new(InMemoryPraefectusClient::new());
             let verifier = Arc::new(PraefectusClientWitnessVerifier::new(client));
+            runtime.with_witness_verifier(verifier)
+        }
+        WitnessVerifyMode::Http {
+            base_url,
+            bearer_token,
+        } => {
+            use sentinel_application::praefectus_client::{
+                HttpPraefectusClient, HttpPraefectusConfig,
+            };
+            use sentinel_application::witness_verifier_adapter::PraefectusClientWitnessVerifier;
+            info!(
+                base_url = %base_url,
+                "witness verifier: HttpPraefectusClient (production mode)"
+            );
+            let cfg = HttpPraefectusConfig {
+                base_url,
+                bearer_token,
+                timeout: std::time::Duration::from_secs(5),
+            };
+            let client = HttpPraefectusClient::new(cfg).map_err(|e| {
+                anyhow::anyhow!("failed to build HttpPraefectusClient: {e}")
+            })?;
+            let verifier = Arc::new(PraefectusClientWitnessVerifier::new(Arc::new(client)));
             runtime.with_witness_verifier(verifier)
         }
     };

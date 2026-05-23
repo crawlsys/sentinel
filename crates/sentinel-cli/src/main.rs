@@ -87,15 +87,33 @@ enum Commands {
         legatus_heartbeat_secs: u64,
 
         /// Witness verification mode for inbound CatastrophicAck
-        /// messages. `none` (default) preserves the v0.1 daemon-
-        /// local trust model: every ack is recorded. `in-memory`
-        /// wraps an InMemoryPraefectusClient -- useful for
-        /// dev / demo flows where there's no real Praefectus
-        /// reachable but you still want the verification surface
-        /// exercised. Production HTTP-backed verifier is pending
-        /// consul-side Praefectus config surfacing.
-        #[arg(long, default_value = "none", value_parser = ["none", "in-memory"])]
+        /// messages.
+        ///
+        /// - `none` (default): no verifier installed; the daemon
+        ///   trusts every ack on receipt. Matches the v0.1
+        ///   daemon-local trust model.
+        /// - `in-memory`: wraps an InMemoryPraefectusClient.
+        ///   Dev / demo mode -- exercises the verification surface
+        ///   end-to-end without a real Praefectus.
+        /// - `http`: wraps an HttpPraefectusClient pointing at the
+        ///   operator's reachable Praefectus. Requires
+        ///   --legatus-praefectus-url + --legatus-praefectus-token
+        ///   (or LEGATUS_PRAEFECTUS_TOKEN in env). Production
+        ///   cryptographic verification path.
+        #[arg(long, default_value = "none", value_parser = ["none", "in-memory", "http"])]
         legatus_witness_verify: String,
+
+        /// Praefectus HTTP endpoint base URL. Required when
+        /// --legatus-witness-verify=http.
+        #[arg(long)]
+        legatus_praefectus_url: Option<String>,
+
+        /// Bearer token for the Praefectus HTTP endpoint. Reads
+        /// LEGATUS_PRAEFECTUS_TOKEN from env so it's not exposed
+        /// in process listings. Required when
+        /// --legatus-witness-verify=http.
+        #[arg(long, env = "LEGATUS_PRAEFECTUS_TOKEN", hide_env_values = true)]
+        legatus_praefectus_token: Option<String>,
 
         /// Single-operator binding scaffold (v0.1). When set, the
         /// daemon logs the binding at startup so operators can
@@ -865,10 +883,31 @@ async fn main() -> anyhow::Result<()> {
             legatus_working_dir,
             legatus_heartbeat_secs,
             legatus_witness_verify,
+            legatus_praefectus_url,
+            legatus_praefectus_token,
             legatus_operator_id,
         } => {
             let witness_verify = match legatus_witness_verify.as_str() {
                 "in-memory" => daemon_cmd::WitnessVerifyMode::InMemory,
+                "http" => {
+                    let base_url = legatus_praefectus_url.ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "--legatus-witness-verify=http requires \
+                             --legatus-praefectus-url <URL>"
+                        )
+                    })?;
+                    let bearer_token = legatus_praefectus_token.ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "--legatus-witness-verify=http requires \
+                             --legatus-praefectus-token <TOKEN> \
+                             (or LEGATUS_PRAEFECTUS_TOKEN env)"
+                        )
+                    })?;
+                    daemon_cmd::WitnessVerifyMode::Http {
+                        base_url,
+                        bearer_token,
+                    }
+                }
                 _ => daemon_cmd::WitnessVerifyMode::None,
             };
             daemon_cmd::run(
