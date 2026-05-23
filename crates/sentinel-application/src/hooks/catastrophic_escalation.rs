@@ -124,22 +124,43 @@ pub fn process(
     }
 
     // No approval -- emit upstream + deny locally.
+    // Use the dedicated BlockReason::CatastrophicPending variant
+    // (consul-protocol just landed it) so consul-side routing can
+    // pattern-match on the structured signal instead of parsing
+    // free-text out of BlockReason::Custom. action_class is the
+    // tool name -- matches what the operator says in
+    // "approve <action_class>, code <nonce>".
+    let action_summary = render_summary(tool_input);
     let description = render_description(tool, tool_input);
     tracing::warn!(
         target: "sentinel::catastrophic_escalation",
         tool = %tool,
         "Catastrophic-class tool call intercepted; \
-         emitting SessionBlocked upstream and denying locally"
+         emitting SessionBlocked{{CatastrophicPending}} upstream and denying locally"
     );
     escalate_fire_and_forget(EscalationKind::Blocked {
-        reason: BlockReason::Custom {
-            description: description.clone(),
+        reason: BlockReason::CatastrophicPending {
+            action_class: tool.to_string(),
+            action_summary,
         },
     });
     HookOutput::deny(format!(
         "Catastrophic-class action requires voice-attested authorization from the \
          operator. Sentinel has signaled the consul; await approval. ({description})"
     ))
+}
+
+/// Render just the action-content summary (without the tool name
+/// prefix) for the CatastrophicPending::action_summary field. The
+/// tool name is carried separately in action_class, so the
+/// summary doesn't need to repeat it.
+fn render_summary(tool_input: &serde_json::Value) -> String {
+    let raw = extract_summary(tool_input);
+    if raw.len() > SUMMARY_MAX_LEN {
+        format!("{}...", &raw[..SUMMARY_MAX_LEN.saturating_sub(3)])
+    } else {
+        raw
+    }
 }
 
 /// Render a short operator-facing description from the tool name +
