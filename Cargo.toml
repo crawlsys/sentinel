@@ -93,9 +93,17 @@ getrandom = "0.2"
 # layout ever changes, only these two paths need to update.
 consul-protocol = { path = "../legatus-consul-agent/crates/consul-protocol" }
 consul-domain = { path = "../legatus-consul-agent/crates/consul-domain" }
+# Additional path deps used only by sentinel-legatus dev-dependencies
+# for the in-process round-trip integration test. Consulate is the
+# server half; consul-storage/consul-transport supply the in-memory
+# sqlite session store and the WebSocket transport adapter.
+consulate = { path = "../legatus-consul-agent/consulate" }
+consul-storage = { path = "../legatus-consul-agent/crates/consul-storage" }
+consul-transport = { path = "../legatus-consul-agent/crates/consul-transport" }
 
 # Dev
 tempfile = "3"
+pretty_assertions = "1"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

@@ -39,3 +39,10 @@ fs2 = { workspace = true }
 [dev-dependencies]
 tokio = { workspace = true }
 tempfile = { workspace = true }
+# Round-trip integration test dependencies — used only by
+# tests/round_trip_consulate.rs to spin up an in-process consulate
+# and assert end-to-end Consulate <-> Sentinel-legatus flow.
+consulate = { workspace = true }
+consul-storage = { workspace = true }
+consul-transport = { workspace = true }
+pretty_assertions = { workspace = true }
