@@ -156,6 +156,164 @@ impl PraefectusClient for InMemoryPraefectusClient {
     }
 }
 
+// ============================================================
+// HttpPraefectusClient (Path B) — production HTTP/IPC adapter
+// pointing at consul-app's Praefectus endpoint.
+//
+// Endpoint shape (server-side endpoint deferred to consul-app commit):
+//   POST {base_url}/praefectus/verify-witness
+//     Body: { witness, expected_operator, expected_escalation }
+//     Auth: Bearer <token>
+//     200 → { "ok": true }
+//     401 → PraefectusClientError::Verification (auth bad)
+//     422 → PraefectusClientError::Verification (verification failed,
+//           body carries reason)
+//
+//   POST {base_url}/praefectus/role-binding
+//     Body: { session_id }
+//     Auth: Bearer <token>
+//     200 → { "binding": Some(RoleBinding) | None }
+//     other → PraefectusClientError::NoRoleBinding | Unreachable
+//
+// Network errors (connect refused, timeout) → Unreachable. Sentinel's
+// proof_engine treats Unreachable as None (best-effort) for actor
+// lookup, but the Catastrophic gate (deferred) treats it as deny.
+// ============================================================
+
+/// Configuration for [`HttpPraefectusClient`].
+#[derive(Clone, Debug)]
+pub struct HttpPraefectusConfig {
+    /// Base URL of the Praefectus HTTP endpoint (e.g.
+    /// `http://127.0.0.1:9001`). Typically localhost since the
+    /// Praefectus runs on the operator's machine per ADR-001 §1.
+    pub base_url: String,
+    /// Bearer token used to authenticate every request. Mirrors the
+    /// sentinel-daemon /legatus/* auth pattern (per-instance random
+    /// token written to a known path; client reads from disk at boot).
+    pub bearer_token: String,
+    /// Per-request timeout. Network operations that don't return
+    /// within this window count as `Unreachable`.
+    pub timeout: std::time::Duration,
+}
+
+impl HttpPraefectusConfig {
+    /// Construct a config with a default 5-second timeout.
+    #[must_use]
+    pub fn new(base_url: impl Into<String>, bearer_token: impl Into<String>) -> Self {
+        Self {
+            base_url: base_url.into(),
+            bearer_token: bearer_token.into(),
+            timeout: std::time::Duration::from_secs(5),
+        }
+    }
+}
+
+/// Production HTTP client implementing [`PraefectusClient`].
+///
+/// Posts JSON-encoded requests to a Praefectus endpoint exposed by
+/// consul-app on localhost. Authentication via Bearer token mirroring
+/// the existing sentinel-daemon `/legatus/*` pattern.
+///
+/// **Server-side endpoint deferred:** consul-app needs to expose the
+/// matching `POST /praefectus/verify-witness` and
+/// `POST /praefectus/role-binding` routes. Until then,
+/// `HttpPraefectusClient` returns `Unreachable` against a missing
+/// endpoint, and `ProofEngine.lookup_actor()` falls back to `None`
+/// — proof construction stays unblocked.
+#[derive(Clone, Debug)]
+pub struct HttpPraefectusClient {
+    config: HttpPraefectusConfig,
+    http: reqwest::Client,
+}
+
+impl HttpPraefectusClient {
+    /// Construct from a config. Builds a `reqwest::Client` with the
+    /// configured timeout.
+    ///
+    /// # Errors
+    /// Returns an error if `reqwest::Client::builder().build()` fails
+    /// (typically TLS backend initialization issues).
+    pub fn new(config: HttpPraefectusConfig) -> Result<Self, PraefectusClientError> {
+        let http = reqwest::Client::builder()
+            .timeout(config.timeout)
+            .build()
+            .map_err(|e| PraefectusClientError::Unreachable(format!("reqwest build: {e}")))?;
+        Ok(Self { config, http })
+    }
+
+    fn url(&self, path: &str) -> String {
+        format!("{}{}", self.config.base_url.trim_end_matches('/'), path)
+    }
+
+    fn auth_header(&self) -> String {
+        format!("Bearer {}", self.config.bearer_token)
+    }
+}
+
+#[async_trait]
+impl PraefectusClient for HttpPraefectusClient {
+    async fn verify_voiceprint_witness(
+        &self,
+        witness: &VoiceprintWitness,
+        expected_operator: OperatorId,
+        expected_escalation: &EscalationRef,
+    ) -> Result<(), PraefectusClientError> {
+        let body = serde_json::json!({
+            "witness": witness,
+            "expected_operator": expected_operator,
+            "expected_escalation": expected_escalation.0,
+        });
+        let resp = self
+            .http
+            .post(self.url("/praefectus/verify-witness"))
+            .header(reqwest::header::AUTHORIZATION, self.auth_header())
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| PraefectusClientError::Unreachable(e.to_string()))?;
+        match resp.status().as_u16() {
+            200 => Ok(()),
+            401 => Err(PraefectusClientError::Verification(
+                "auth rejected by Praefectus".into(),
+            )),
+            422 => {
+                let body = resp.text().await.unwrap_or_else(|_| "no body".into());
+                Err(PraefectusClientError::Verification(body))
+            }
+            other => Err(PraefectusClientError::Unreachable(format!(
+                "unexpected status {other}"
+            ))),
+        }
+    }
+
+    async fn current_role_binding(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<RoleBinding>, PraefectusClientError> {
+        let body = serde_json::json!({ "session_id": session_id });
+        let resp = self
+            .http
+            .post(self.url("/praefectus/role-binding"))
+            .header(reqwest::header::AUTHORIZATION, self.auth_header())
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| PraefectusClientError::Unreachable(e.to_string()))?;
+        if !resp.status().is_success() {
+            return Err(PraefectusClientError::NoRoleBinding(session_id.to_string()));
+        }
+        #[derive(serde::Deserialize)]
+        struct Resp {
+            binding: Option<RoleBinding>,
+        }
+        let parsed: Resp = resp
+            .json()
+            .await
+            .map_err(|e| PraefectusClientError::Unreachable(format!("body parse: {e}")))?;
+        Ok(parsed.binding)
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
@@ -241,5 +399,63 @@ mod tests {
         c.set_role_binding("sess-a", binding());
         let r = c.current_role_binding("sess-b").await.unwrap();
         assert!(r.is_none());
+    }
+
+    // ── HttpPraefectusClient ───────────────────────────────────────
+
+    #[test]
+    fn http_config_construction() {
+        let cfg = HttpPraefectusConfig::new("http://127.0.0.1:9001", "tok123");
+        assert_eq!(cfg.base_url, "http://127.0.0.1:9001");
+        assert_eq!(cfg.bearer_token, "tok123");
+        assert_eq!(cfg.timeout, std::time::Duration::from_secs(5));
+    }
+
+    #[test]
+    fn http_client_builds_cleanly() {
+        let cfg = HttpPraefectusConfig::new("http://127.0.0.1:9001", "tok123");
+        let client = HttpPraefectusClient::new(cfg);
+        assert!(client.is_ok());
+    }
+
+    #[test]
+    fn http_url_construction_strips_trailing_slash() {
+        let cfg = HttpPraefectusConfig::new("http://127.0.0.1:9001/", "tok");
+        let c = HttpPraefectusClient::new(cfg).unwrap();
+        assert_eq!(
+            c.url("/praefectus/verify-witness"),
+            "http://127.0.0.1:9001/praefectus/verify-witness"
+        );
+    }
+
+    #[test]
+    fn http_url_construction_without_trailing_slash() {
+        let cfg = HttpPraefectusConfig::new("http://127.0.0.1:9001", "tok");
+        let c = HttpPraefectusClient::new(cfg).unwrap();
+        assert_eq!(
+            c.url("/praefectus/role-binding"),
+            "http://127.0.0.1:9001/praefectus/role-binding"
+        );
+    }
+
+    #[test]
+    fn http_auth_header_format() {
+        let cfg = HttpPraefectusConfig::new("http://127.0.0.1:9001", "tok456");
+        let c = HttpPraefectusClient::new(cfg).unwrap();
+        assert_eq!(c.auth_header(), "Bearer tok456");
+    }
+
+    #[tokio::test]
+    async fn http_unreachable_endpoint_returns_unreachable_error() {
+        // Bind to a port we know is closed (port 1 is privileged + reserved).
+        // The request should immediately fail at connect with Unreachable.
+        let cfg = HttpPraefectusConfig {
+            base_url: "http://127.0.0.1:1".into(),
+            bearer_token: "tok".into(),
+            timeout: std::time::Duration::from_millis(200),
+        };
+        let c = HttpPraefectusClient::new(cfg).unwrap();
+        let r = c.current_role_binding("test-session").await;
+        assert!(matches!(r, Err(PraefectusClientError::Unreachable(_))));
     }
 }
