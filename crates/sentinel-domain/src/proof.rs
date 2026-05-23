@@ -832,6 +832,7 @@ mod tests {
             started_at: Utc::now(),
             completed_at: Utc::now(),
             duration_ms: 5,
+            actor: None,
         }
     }
 

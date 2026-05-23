@@ -135,6 +135,18 @@ pub struct StepProof {
     pub started_at: DateTime<Utc>,
     pub completed_at: DateTime<Utc>,
     pub duration_ms: u64,
+
+    // ── Republic-of-Agents actor binding (Fabrica ADR-001, ADR-003) ──
+    //
+    // Sibling field to `PhaseProof.actor`. Same shape, same backward-
+    // compat story: `Option<RoleBinding>` with `#[serde(default)]` so
+    // old on-disk StepProofs parse cleanly as `actor: None`.
+    //
+    // Not yet part of `combined_hash` — adding actor to the hash
+    // would invalidate every pre-actor proof on disk. Migration to a
+    // hash-included actor tracked separately (post-Praefectus-wiring).
+    #[serde(default)]
+    pub actor: Option<consul_domain::identity::republic::RoleBinding>,
 }
 
 impl StepProof {
@@ -361,7 +373,48 @@ mod tests {
             started_at: Utc::now(),
             completed_at: Utc::now(),
             duration_ms: 42,
+            actor: None,
         }
+    }
+
+    // ── Actor backward-compat (Fabrica ADR-003, sibling to PhaseProof.actor) ──
+
+    #[test]
+    fn step_actor_defaults_to_none_when_field_absent_in_json() {
+        // Build a real StepProof, serialize, strip the actor field,
+        // then verify deserialization defaults to None per #[serde(default)].
+        let s = make_step("1", "claim", "linear", GENESIS_HASH, serde_json::json!({}));
+        let mut v: serde_json::Value = serde_json::to_value(&s).unwrap();
+        v.as_object_mut()
+            .expect("StepProof serializes as object")
+            .remove("actor");
+        let parsed: StepProof = serde_json::from_value(v)
+            .expect("old-shape StepProof must parse with actor defaulting to None");
+        assert!(parsed.actor.is_none());
+    }
+
+    #[test]
+    fn step_actor_roundtrip_when_populated() {
+        use consul_domain::identity::republic::{
+            AuxiliumId, BusinessId, CenturionId, ConstitutionVersion, MilesId, OperatorId, ProofId,
+            RoleBinding, SpecContractRef,
+        };
+        let mut s = make_step("1", "claim", "linear", GENESIS_HASH, serde_json::json!({}));
+        s.actor = Some(RoleBinding {
+            miles: MilesId::new(),
+            auxilium: AuxiliumId::new("support-auxilium"),
+            centurion: CenturionId::new(),
+            spec_contract: SpecContractRef::new("support-auxilium.refund-miles@1.0.0"),
+            constitution_version: ConstitutionVersion::new("1.0.0"),
+            operator: OperatorId::new(),
+            business: BusinessId::new(),
+            authorized_at: Utc::now(),
+            authorized_by_proof: ProofId::new(),
+        });
+        let json = serde_json::to_string(&s).unwrap();
+        let parsed: StepProof = serde_json::from_str(&json).unwrap();
+        let a = parsed.actor.expect("actor must round-trip as Some");
+        assert_eq!(a.auxilium.as_str(), "support-auxilium");
     }
 
     #[test]

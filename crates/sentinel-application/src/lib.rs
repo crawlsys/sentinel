@@ -33,6 +33,9 @@ pub mod legatus_client;
 pub mod master_dashboard;
 pub mod mcp_handler;
 pub mod pr_review;
+/// Sentinel-side Praefectus client surface (Fabrica ADR-001 §1 + ADR-002 §3).
+/// Trait + in-memory stub; production HTTP/IPC adapter deferred.
+pub mod praefectus_client;
 pub mod project_init;
 pub mod proof_archive;
 pub mod proof_engine;

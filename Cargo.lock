@@ -2346,6 +2346,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "chrono-tz",
+ "consul-domain",
  "dirs",
  "fs2",
  "hex",

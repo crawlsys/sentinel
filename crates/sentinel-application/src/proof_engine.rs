@@ -289,6 +289,8 @@ impl ProofEngine {
                 duration_ms: (completed_at - started_at)
                     .num_milliseconds()
                     .unsigned_abs(),
+                // Praefectus wiring deferred (Fabrica task #28).
+                actor: None,
             };
 
             // Append to chain — creates a fresh ProofChain on first step.

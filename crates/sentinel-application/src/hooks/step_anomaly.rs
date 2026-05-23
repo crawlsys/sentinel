@@ -532,6 +532,7 @@ mod tests {
             started_at: Utc::now() - chrono::Duration::seconds(1),
             completed_at: Utc::now(),
             duration_ms,
+            actor: None,
         }
     }
 
