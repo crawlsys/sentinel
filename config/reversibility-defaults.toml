@@ -163,6 +163,73 @@ match = "(?i)DELETE[[:space:]]+FROM[[:space:]]+[a-zA-Z_]+[[:space:]]*;"
 class = "Catastrophic"
 # DELETE FROM <table>; without WHERE — full-table wipe.
 
+[[bash.pattern]]
+match = "aws[[:space:]]+s3[[:space:]]+rb[[:space:]]+.*--force"
+class = "Catastrophic"
+# `aws s3 rb --force` — bucket-with-contents deletion. The bucket
+# AND every object in it are gone; no soft-delete unless versioning
+# was on (often isn't).
+
+[[bash.pattern]]
+match = "aws[[:space:]]+rds[[:space:]]+delete-db-instance.*--skip-final-snapshot"
+class = "Catastrophic"
+# RDS instance delete without taking the final snapshot. The
+# `--skip-final-snapshot` flag is the explicit "I don't want to
+# keep the data" choice; without it, RDS keeps a snapshot you can
+# restore from.
+
+[[bash.pattern]]
+match = "aws[[:space:]]+iam[[:space:]]+delete-(user|role|policy)"
+class = "Catastrophic"
+# IAM principal deletion — breaks anything using the identity.
+# Recovery requires recreating + re-binding everywhere; in
+# practice teams declare the surface lost and migrate.
+
+[[bash.pattern]]
+match = "^gcloud[[:space:]]+projects[[:space:]]+delete"
+class = "Catastrophic"
+# GCP project delete — 30-day soft-delete, but the time window is
+# easy to miss and the action drops every service in the project.
+
+[[bash.pattern]]
+match = "kubectl[[:space:]]+delete[[:space:]]+(namespace|ns)([[:space:]]|$)"
+class = "Catastrophic"
+# Namespace delete is mass-delete: every workload, service,
+# configmap, secret, pvc in the namespace goes with it.
+
+[[bash.pattern]]
+match = "^(helm[[:space:]]+uninstall|helm[[:space:]]+delete).*(prod|production)"
+class = "Catastrophic"
+# Helm uninstall on a prod-tagged release. Removes every resource
+# the chart created.
+
+[[bash.pattern]]
+match = "^gh[[:space:]]+repo[[:space:]]+delete"
+class = "Catastrophic"
+# `gh repo delete` — repo + every fork relationship + every
+# downstream CI integration gone. Recovery is "did anyone keep a
+# clone".
+
+[[bash.pattern]]
+match = "^dropdb([[:space:]]|$)"
+class = "Catastrophic"
+# Postgres `dropdb` CLI — drops an entire database. The DROP
+# DATABASE SQL pattern above only catches the in-SQL form;
+# this catches the CLI shorthand.
+
+[[bash.pattern]]
+match = "git[[:space:]]+push[[:space:]]+(--force|-f)[[:space:]]+.*[[:space:]]+(release|prod|production)"
+class = "Catastrophic"
+# Force-push to release/prod branches. The existing rule above
+# only catches main/master; this widens to other commonly-
+# protected branch names.
+
+[[bash.pattern]]
+match = "^(chmod[[:space:]]+777|chmod[[:space:]]+-R[[:space:]]+777)[[:space:]]+/(etc|usr|var|bin|sbin)"
+class = "Catastrophic"
+# chmod 777 on a system directory — security catastrophe and
+# pragmatically irreversible (no record of prior modes).
+
 # --- Irreversible: visible outside operator control ------------------------
 
 [[bash.pattern]]

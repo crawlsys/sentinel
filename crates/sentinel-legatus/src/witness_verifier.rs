@@ -69,18 +69,22 @@ impl std::error::Error for WitnessVerificationError {}
 
 /// Pluggable verifier for inbound `CatastrophicAck` witnesses.
 ///
-/// Sync-only by design: handle_inbound is sync and verification
-/// happens on the WS recv path's hot loop. Production adapters
-/// that need to round-trip to a remote Praefectus should spawn
-/// the network call from a wrapping adapter and gate it on a
-/// short tokio::time::timeout to bound the per-ack latency.
+/// Async because production adapters need to round-trip to a
+/// remote Praefectus. The default sentinel-legatus handle_inbound
+/// invocation pattern spawns the verifier as a `tokio::spawn`
+/// task so the synchronous WS recv loop isn't blocked while a
+/// verification is in flight; the record-into-cache step happens
+/// inside that task after the verification resolves.
+#[async_trait::async_trait]
 pub trait WitnessVerifierPort: Send + Sync {
     /// Verify `witness` against the operator identity it claims
-    /// and the `escalation_ref` it pretends to authorize.
+    /// and the `escalation_key` it pretends to authorize.
     ///
-    /// On `Ok(())` the caller (handle_inbound) records the
-    /// approval. On `Err`, the approval is dropped.
-    fn verify(
+    /// On `Ok(())` the caller records the approval. On `Err`,
+    /// the approval is dropped + logged. Implementations SHOULD
+    /// gate on a short per-call timeout so a hung Praefectus
+    /// can't pile up unbounded pending verifications.
+    async fn verify(
         &self,
         witness: &VoiceprintWitness,
         escalation_key: &EscalationKey,
@@ -93,8 +97,9 @@ pub trait WitnessVerifierPort: Send + Sync {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct AlwaysAccept;
 
+#[async_trait::async_trait]
 impl WitnessVerifierPort for AlwaysAccept {
-    fn verify(
+    async fn verify(
         &self,
         _witness: &VoiceprintWitness,
         _escalation_key: &EscalationKey,
@@ -129,8 +134,9 @@ impl Default for AlwaysReject {
     }
 }
 
+#[async_trait::async_trait]
 impl WitnessVerifierPort for AlwaysReject {
-    fn verify(
+    async fn verify(
         &self,
         _witness: &VoiceprintWitness,
         _escalation_key: &EscalationKey,
@@ -170,24 +176,27 @@ mod tests {
         }
     }
 
-    #[test]
-    fn always_accept_returns_ok() {
+    #[tokio::test]
+    async fn always_accept_returns_ok() {
         let v = AlwaysAccept;
-        assert!(v.verify(&fixture_witness(), &fixture_key()).is_ok());
+        assert!(v.verify(&fixture_witness(), &fixture_key()).await.is_ok());
     }
 
-    #[test]
-    fn always_reject_default_returns_err_with_default_reason() {
+    #[tokio::test]
+    async fn always_reject_default_returns_err_with_default_reason() {
         let v = AlwaysReject::default();
-        let r = v.verify(&fixture_witness(), &fixture_key());
+        let r = v.verify(&fixture_witness(), &fixture_key()).await;
         let err = r.unwrap_err();
         assert!(err.reason.contains("fail-closed"), "got: {err}");
     }
 
-    #[test]
-    fn always_reject_carries_caller_supplied_reason() {
+    #[tokio::test]
+    async fn always_reject_carries_caller_supplied_reason() {
         let v = AlwaysReject::new("praefectus unreachable");
-        let err = v.verify(&fixture_witness(), &fixture_key()).unwrap_err();
+        let err = v
+            .verify(&fixture_witness(), &fixture_key())
+            .await
+            .unwrap_err();
         assert!(err.reason.contains("praefectus unreachable"));
     }
 

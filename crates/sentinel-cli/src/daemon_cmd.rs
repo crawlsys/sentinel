@@ -40,6 +40,43 @@ pub struct LegatusOptions {
     pub working_dir: Option<String>,
     /// `--legatus-heartbeat-secs`.
     pub heartbeat_secs: u64,
+    /// `--legatus-witness-verify` (one of `none`, `in-memory`).
+    /// Controls how inbound CatastrophicAck witnesses are verified
+    /// before recording an approval in the daemon's cache:
+    ///
+    /// - `none` (default): no verifier installed; the daemon trusts
+    ///   the ack on receipt. Matches v0.1 daemon-local trust model.
+    /// - `in-memory`: wraps an `InMemoryPraefectusClient`. Useful
+    ///   for dev / tests / demo flows where there's no real
+    ///   Praefectus running but you still want the verification
+    ///   surface exercised end-to-end.
+    ///
+    /// `http` (production HTTP-backed Praefectus) is the next add:
+    /// requires a Praefectus URL + bearer token, both of which are
+    /// consul-side config the consul agent owns surfacing.
+    pub witness_verify: WitnessVerifyMode,
+    /// `--legatus-operator-id <UUID>` — operator identity scaffold
+    /// for single-operator deployments. When set, the daemon logs
+    /// the binding at startup so operators can confirm the daemon
+    /// is talking to "their" Praefectus. v0.2 will propagate this
+    /// through RegisterSession metadata so the consulate can route
+    /// per-operator (multi-operator support); for now it's a
+    /// declarative breadcrumb that records intent + surfaces in
+    /// the startup banner.
+    pub operator_id: Option<uuid::Uuid>,
+}
+
+/// Verifier wiring mode for inbound CatastrophicAck witnesses.
+/// Surfaced through `--legatus-witness-verify`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum WitnessVerifyMode {
+    /// No verifier installed; daemon trusts on receipt. Default.
+    #[default]
+    None,
+    /// Wrap an InMemoryPraefectusClient. Dev / test mode -- the
+    /// in-memory client accepts every witness unless test toggles
+    /// force a fail.
+    InMemory,
 }
 
 /// Generate a random bearer token for this daemon instance.
@@ -366,7 +403,49 @@ async fn start_legatus_if_configured(
             );
         }
     }
+    // v0.1 single-operator scaffold per --legatus-operator-id.
+    // Logged at startup so the operator can confirm the daemon
+    // thinks it's bound to them. Real multi-operator routing
+    // (operator-id flowing through RegisterSession metadata,
+    // per-session lookup at gate-fire time) is consul-side
+    // coordination work (see SENTINEL-COORDINATION.md item C3).
+    if let Some(op_id) = options.operator_id {
+        info!(operator_id = %op_id, "daemon bound to single operator (scaffold)");
+        eprintln!("[daemon] operator binding (scaffold): {op_id}");
+    } else {
+        info!("no --legatus-operator-id set; operator identity will not be carried in PhaseProof.actor");
+    }
     let runtime = runtime.with_approval_cache(approval_cache.clone());
+    // Spent-nonce log: replay protection on inbound CatastrophicAcks.
+    // Persistent JSONL snapshot so a witness stashed and replayed
+    // after a daemon restart still hits the spent set. Always
+    // installed in the daemon path (the cost is minimal and the
+    // security property is non-optional).
+    let spent_nonces = Arc::new(
+        sentinel_legatus::SpentNonceLog::default_persistent()
+            .unwrap_or_else(sentinel_legatus::SpentNonceLog::new),
+    );
+    let runtime = runtime.with_spent_nonce_log(spent_nonces);
+    // Optional witness verifier per --legatus-witness-verify. None
+    // mode preserves the v0.1 daemon-local trust model; InMemory
+    // mode wraps an InMemoryPraefectusClient via the
+    // sentinel-application adapter -- useful for dev / demo flows
+    // that want to exercise the verification surface without a real
+    // Praefectus.
+    let runtime = match options.witness_verify {
+        WitnessVerifyMode::None => {
+            info!("witness verifier: NOT installed (daemon-local trust)");
+            runtime
+        }
+        WitnessVerifyMode::InMemory => {
+            use sentinel_application::praefectus_client::InMemoryPraefectusClient;
+            use sentinel_application::witness_verifier_adapter::PraefectusClientWitnessVerifier;
+            info!("witness verifier: InMemoryPraefectusClient (dev/demo mode)");
+            let client = Arc::new(InMemoryPraefectusClient::new());
+            let verifier = Arc::new(PraefectusClientWitnessVerifier::new(client));
+            runtime.with_witness_verifier(verifier)
+        }
+    };
     let cancel = Arc::new(Notify::new());
     info!(url = %consulate_url, "daemon hosting legatus");
     tokio::spawn(async move {

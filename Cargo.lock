@@ -2838,6 +2838,7 @@ name = "sentinel-legatus"
 version = "0.4.1"
 dependencies = [
  "anyhow",
+ "async-trait",
  "chrono",
  "consul-domain",
  "consul-protocol",

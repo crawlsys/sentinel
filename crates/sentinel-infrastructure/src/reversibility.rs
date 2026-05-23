@@ -879,6 +879,114 @@ mod tests {
     }
 
     #[test]
+    fn shipped_defaults_bash_force_push_to_release_or_prod_branch_is_catastrophic() {
+        let c = shipped();
+        for cmd in [
+            "git push --force origin release",
+            "git push -f origin prod",
+            "git push --force origin production",
+        ] {
+            assert_eq!(
+                c.classify("Bash", &bash_cmd(cmd)),
+                ReversibilityClass::Catastrophic,
+                "expected Catastrophic for: {cmd}"
+            );
+        }
+    }
+
+    #[test]
+    fn shipped_defaults_bash_aws_destructive_patterns_are_catastrophic() {
+        let c = shipped();
+        for cmd in [
+            "aws s3 rb s3://prod-uploads --force",
+            "aws rds delete-db-instance --db-instance-identifier prod-db --skip-final-snapshot",
+            "aws iam delete-user --user-name svc-account",
+            "aws iam delete-role --role-name prod-deploy",
+            "aws iam delete-policy --policy-arn arn:aws:iam::123:policy/x",
+        ] {
+            assert_eq!(
+                c.classify("Bash", &bash_cmd(cmd)),
+                ReversibilityClass::Catastrophic,
+                "expected Catastrophic for: {cmd}"
+            );
+        }
+    }
+
+    #[test]
+    fn shipped_defaults_bash_gcloud_project_delete_is_catastrophic() {
+        let c = shipped();
+        assert_eq!(
+            c.classify("Bash", &bash_cmd("gcloud projects delete my-prod-proj")),
+            ReversibilityClass::Catastrophic
+        );
+    }
+
+    #[test]
+    fn shipped_defaults_bash_kubectl_namespace_delete_is_catastrophic() {
+        let c = shipped();
+        for cmd in [
+            "kubectl delete namespace billing",
+            "kubectl delete ns experiments",
+        ] {
+            assert_eq!(
+                c.classify("Bash", &bash_cmd(cmd)),
+                ReversibilityClass::Catastrophic,
+                "expected Catastrophic for: {cmd}"
+            );
+        }
+    }
+
+    #[test]
+    fn shipped_defaults_bash_helm_uninstall_prod_is_catastrophic() {
+        let c = shipped();
+        assert_eq!(
+            c.classify(
+                "Bash",
+                &bash_cmd("helm uninstall my-app --namespace production")
+            ),
+            ReversibilityClass::Catastrophic
+        );
+        assert_eq!(
+            c.classify("Bash", &bash_cmd("helm delete my-app -n prod")),
+            ReversibilityClass::Catastrophic
+        );
+    }
+
+    #[test]
+    fn shipped_defaults_bash_gh_repo_delete_is_catastrophic() {
+        let c = shipped();
+        assert_eq!(
+            c.classify("Bash", &bash_cmd("gh repo delete acme/internal-tools")),
+            ReversibilityClass::Catastrophic
+        );
+    }
+
+    #[test]
+    fn shipped_defaults_bash_dropdb_cli_is_catastrophic() {
+        let c = shipped();
+        assert_eq!(
+            c.classify("Bash", &bash_cmd("dropdb prod_archive")),
+            ReversibilityClass::Catastrophic
+        );
+    }
+
+    #[test]
+    fn shipped_defaults_bash_chmod_777_on_system_dirs_is_catastrophic() {
+        let c = shipped();
+        for cmd in [
+            "chmod 777 /etc/passwd",
+            "chmod -R 777 /usr/local/bin",
+            "chmod -R 777 /var/log",
+        ] {
+            assert_eq!(
+                c.classify("Bash", &bash_cmd(cmd)),
+                ReversibilityClass::Catastrophic,
+                "expected Catastrophic for: {cmd}"
+            );
+        }
+    }
+
+    #[test]
     fn shipped_defaults_bash_force_with_lease_is_demoted() {
         let c = shipped();
         // --force-with-lease is matched by its specific rule BEFORE the

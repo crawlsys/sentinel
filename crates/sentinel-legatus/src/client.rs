@@ -686,6 +686,21 @@ fn handle_inbound(msg: &ConsularMessage, session_id: SessionId, runtime: &Legatu
                 decision = ?ack.decision,
                 "received CatastrophicAck",
             );
+            // Replay protection: BEFORE any other processing, check
+            // the spent-nonce log. Already-spent nonces are rejected
+            // without verifier invocation or cache write. The log
+            // is optional; daemon path wires it via
+            // LegatusRuntime::with_spent_nonce_log.
+            if let Some(spent_log) = runtime.spent_nonces.as_ref() {
+                if !spent_log.try_spend(ack.voiceprint_witness.challenge_nonce) {
+                    warn!(
+                        %session_id,
+                        nonce = %ack.voiceprint_witness.challenge_nonce.to_hex(),
+                        "CatastrophicAck REPLAY rejected: nonce already spent"
+                    );
+                    return;
+                }
+            }
             match &ack.decision {
                 AckDecision::Approve | AckDecision::Modify { .. } => {
                     let transcript = ack.voiceprint_witness.utterance_transcript.clone();
@@ -712,29 +727,55 @@ fn handle_inbound(msg: &ConsularMessage, session_id: SessionId, runtime: &Legatu
                     };
                     // Cryptographic verification gate: when a
                     // WitnessVerifierPort is wired the witness is
-                    // verified BEFORE the cache write. On failure
-                    // the approval is dropped + logged so a forged
-                    // ack cannot authorize a retry.
-                    if let Some(verifier) = runtime.witness_verifier.as_ref() {
-                        if let Err(err) = verifier.verify(&ack.voiceprint_witness, &ack.key) {
-                            warn!(
-                                %session_id,
-                                action_class = %action_class,
-                                error = %err,
-                                "CatastrophicAck verification FAILED; \
-                                 approval dropped, cache not written"
-                            );
-                            return;
-                        }
+                    // verified BEFORE the cache write. The verifier
+                    // trait is async (production adapters round-trip
+                    // to a remote Praefectus); we tokio::spawn the
+                    // verification so the synchronous WS recv loop
+                    // isn't blocked while a verification is in
+                    // flight. The cache record happens inside the
+                    // spawned task after verify resolves.
+                    if let Some(verifier) = runtime.witness_verifier.clone() {
+                        let cache = cache.clone();
+                        let witness = ack.voiceprint_witness.clone();
+                        let key = ack.key.clone();
+                        let action_class_owned = action_class.clone();
+                        let transcript_owned = transcript.clone();
+                        tokio::spawn(async move {
+                            match verifier.verify(&witness, &key).await {
+                                Ok(()) => {
+                                    cache.record(
+                                        session_id,
+                                        action_class_owned.clone(),
+                                        transcript_owned,
+                                    );
+                                    tracing::info!(
+                                        %session_id,
+                                        action_class = %action_class_owned,
+                                        verified = true,
+                                        "CatastrophicAck verified + recorded approval"
+                                    );
+                                }
+                                Err(err) => {
+                                    warn!(
+                                        %session_id,
+                                        action_class = %action_class_owned,
+                                        error = %err,
+                                        "CatastrophicAck verification FAILED; \
+                                         approval dropped, cache not written"
+                                    );
+                                }
+                            }
+                        });
+                    } else {
+                        cache.record(session_id, action_class.clone(), transcript);
+                        tracing::info!(
+                            %session_id,
+                            action_class = %action_class,
+                            verified = false,
+                            "CatastrophicAck recorded approval in cache (no verifier wired); \
+                             the operator's next retry of the matching tool call will be allowed"
+                        );
                     }
-                    cache.record(session_id, action_class.clone(), transcript);
-                    tracing::info!(
-                        %session_id,
-                        action_class = %action_class,
-                        verified = runtime.witness_verifier.is_some(),
-                        "CatastrophicAck recorded approval in cache; \
-                         the operator's next retry of the matching tool call will be allowed"
-                    );
                 }
                 AckDecision::Deny { reason } => {
                     // No cache write on deny -- the hook will keep

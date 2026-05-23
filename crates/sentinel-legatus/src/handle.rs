@@ -167,6 +167,13 @@ pub struct LegatusRuntime {
     /// [`LegatusRuntime::with_witness_verifier`].
     pub(crate) witness_verifier:
         Option<std::sync::Arc<dyn crate::witness_verifier::WitnessVerifierPort>>,
+    /// Optional spent-nonce log consulted by handle_inbound BEFORE
+    /// any other verification. Rejects CatastrophicAcks whose
+    /// `voiceprint_witness.challenge_nonce` was already seen.
+    /// `None` (default) skips replay protection. Wired by the
+    /// daemon via [`LegatusRuntime::with_spent_nonce_log`].
+    pub(crate) spent_nonces:
+        Option<std::sync::Arc<crate::spent_nonce_log::SpentNonceLog>>,
 }
 
 impl LegatusRuntime {
@@ -195,6 +202,20 @@ impl LegatusRuntime {
         self.witness_verifier = Some(verifier);
         self
     }
+
+    /// Install a [`SpentNonceLog`] for replay protection. When set,
+    /// the inbound CatastrophicAck handler checks-and-spends the
+    /// witness's `challenge_nonce` BEFORE any other processing.
+    /// Already-spent nonces yield rejection without verifier
+    /// invocation or cache write. When unset, replay protection
+    /// is skipped (production daemon paths SHOULD wire it).
+    pub fn with_spent_nonce_log(
+        mut self,
+        log: std::sync::Arc<crate::spent_nonce_log::SpentNonceLog>,
+    ) -> Self {
+        self.spent_nonces = Some(log);
+        self
+    }
 }
 
 /// Construct a paired `(handle, runtime)` with no persistent inbox
@@ -216,6 +237,7 @@ pub fn make_pair() -> (LegatusHandle, LegatusRuntime) {
         escalation_loopback: escalation_tx,
         approval_cache: None,
         witness_verifier: None,
+        spent_nonces: None,
         inbox: None,
         outbox: None,
     };
@@ -238,6 +260,7 @@ pub fn make_pair_with_inbox(inbox: PersistentInbox) -> (LegatusHandle, LegatusRu
         escalation_loopback: escalation_tx,
         approval_cache: None,
         witness_verifier: None,
+        spent_nonces: None,
         inbox: Some(inbox),
         outbox: None,
     };
@@ -267,6 +290,7 @@ pub fn make_pair_with_persistence(
         escalation_loopback: escalation_tx,
         approval_cache: None,
         witness_verifier: None,
+        spent_nonces: None,
         inbox: Some(inbox),
         outbox: Some(outbox),
     };

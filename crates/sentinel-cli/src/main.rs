@@ -85,6 +85,27 @@ enum Commands {
         /// Heartbeat interval in seconds for the hosted legatus.
         #[arg(long, default_value_t = 20)]
         legatus_heartbeat_secs: u64,
+
+        /// Witness verification mode for inbound CatastrophicAck
+        /// messages. `none` (default) preserves the v0.1 daemon-
+        /// local trust model: every ack is recorded. `in-memory`
+        /// wraps an InMemoryPraefectusClient -- useful for
+        /// dev / demo flows where there's no real Praefectus
+        /// reachable but you still want the verification surface
+        /// exercised. Production HTTP-backed verifier is pending
+        /// consul-side Praefectus config surfacing.
+        #[arg(long, default_value = "none", value_parser = ["none", "in-memory"])]
+        legatus_witness_verify: String,
+
+        /// Single-operator binding scaffold (v0.1). When set, the
+        /// daemon logs the binding at startup so operators can
+        /// confirm the daemon is bound to them. Multi-operator
+        /// routing (per-session operator lookup, identity flowing
+        /// through RegisterSession metadata) is consul-side
+        /// coordination work; for now this is a declarative
+        /// breadcrumb.
+        #[arg(long)]
+        legatus_operator_id: Option<uuid::Uuid>,
     },
 
     /// Process a hook event (thin client → daemon, or standalone)
@@ -843,7 +864,13 @@ async fn main() -> anyhow::Result<()> {
             legatus_suggested_name,
             legatus_working_dir,
             legatus_heartbeat_secs,
+            legatus_witness_verify,
+            legatus_operator_id,
         } => {
+            let witness_verify = match legatus_witness_verify.as_str() {
+                "in-memory" => daemon_cmd::WitnessVerifyMode::InMemory,
+                _ => daemon_cmd::WitnessVerifyMode::None,
+            };
             daemon_cmd::run(
                 port,
                 daemon_cmd::LegatusOptions {
@@ -852,6 +879,8 @@ async fn main() -> anyhow::Result<()> {
                     suggested_name: legatus_suggested_name,
                     working_dir: legatus_working_dir,
                     heartbeat_secs: legatus_heartbeat_secs,
+                    witness_verify,
+                    operator_id: legatus_operator_id,
                 },
             )
             .await

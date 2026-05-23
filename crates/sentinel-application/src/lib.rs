@@ -37,6 +37,7 @@ pub mod pr_review;
 /// Trait + in-memory stub; production HTTP/IPC adapter deferred.
 pub mod praefectus_client;
 pub mod project_init;
+pub mod witness_verifier_adapter;
 pub mod proof_archive;
 pub mod proof_engine;
 pub mod reversibility_classifier;
