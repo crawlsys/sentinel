@@ -17,6 +17,7 @@ use sentinel_domain::state::SessionState;
 use sentinel_domain::step_proof::StepProof;
 
 use crate::judge_service::JudgeService;
+use crate::praefectus_client::{InMemoryPraefectusClient, PraefectusClient};
 
 /// Proof engine — builds and verifies proof chains
 pub struct ProofEngine {
@@ -25,11 +26,49 @@ pub struct ProofEngine {
 
     /// AI judge service
     judge: Arc<dyn JudgeService>,
+
+    /// Praefectus client for populating ProofBundle.actor per Fabrica
+    /// ADR-001 §IX. Defaults to an InMemoryPraefectusClient (returns
+    /// None for every lookup → existing behavior preserved). Production
+    /// deployments call [`Self::with_praefectus`] to wire a real
+    /// HTTP/IPC adapter against consul-app's Praefectus.
+    praefectus: Arc<dyn PraefectusClient>,
 }
 
 impl ProofEngine {
     pub fn new(state: Arc<RwLock<SessionState>>, judge: Arc<dyn JudgeService>) -> Self {
-        Self { state, judge }
+        Self {
+            state,
+            judge,
+            praefectus: Arc::new(InMemoryPraefectusClient::new()),
+        }
+    }
+
+    /// Replace the default in-memory Praefectus stub with a production
+    /// client (typically an HTTP/IPC adapter pointing at consul-app).
+    ///
+    /// Builder shape so existing callers (which pass `(state, judge)`)
+    /// keep compiling unchanged.
+    #[must_use]
+    pub fn with_praefectus(mut self, praefectus: Arc<dyn PraefectusClient>) -> Self {
+        self.praefectus = praefectus;
+        self
+    }
+
+    /// Look up the active `RoleBinding` for a session, swallowing any
+    /// client error as `None`. Binding lookup is a best-effort
+    /// enrichment of the proof chain — a Praefectus outage must not
+    /// block proof construction (the chain stays valid with
+    /// `actor: None`; the absence is itself an audit signal).
+    async fn lookup_actor(
+        &self,
+        session_id: &str,
+    ) -> Option<consul_domain::identity::republic::RoleBinding> {
+        self.praefectus
+            .current_role_binding(session_id)
+            .await
+            .ok()
+            .flatten()
     }
 
     /// Minimum seconds between resubmissions after a failure.
@@ -116,6 +155,10 @@ impl ProofEngine {
             let combined_hash =
                 PhaseProof::compute_combined_hash(phase_id, &evidence_hash, &previous_hash);
 
+            // Best-effort actor lookup — Praefectus outage doesn't block
+            // proof construction; absent binding is itself an audit signal.
+            let actor = self.lookup_actor(&state.session_id).await;
+
             let proof = PhaseProof {
                 phase_id: phase_id.to_string(),
                 skill: skill.to_string(),
@@ -131,8 +174,7 @@ impl ProofEngine {
                 duration_ms: (completed_at - started_at)
                     .num_milliseconds()
                     .unsigned_abs(),
-                // Praefectus wiring deferred (Fabrica task #24 phase 2c).
-                actor: None,
+                actor,
             };
 
             // Add to chain
@@ -268,6 +310,9 @@ impl ProofEngine {
                 &previous_hash,
             );
 
+            // Best-effort actor lookup — same pattern as PhaseProof above.
+            let actor = self.lookup_actor(&state.session_id).await;
+
             let proof = StepProof {
                 step_id: step_id.to_string(),
                 phase_id: phase_id.to_string(),
@@ -289,8 +334,7 @@ impl ProofEngine {
                 duration_ms: (completed_at - started_at)
                     .num_milliseconds()
                     .unsigned_abs(),
-                // Praefectus wiring deferred (Fabrica task #28).
-                actor: None,
+                actor,
             };
 
             // Append to chain — creates a fresh ProofChain on first step.
@@ -364,6 +408,81 @@ mod step_evidence_tests {
     fn engine() -> ProofEngine {
         let state = Arc::new(RwLock::new(SessionState::new("test-session")));
         ProofEngine::new(state, Arc::new(StubJudge))
+    }
+
+    #[tokio::test]
+    async fn praefectus_client_populates_actor_on_step_proof() {
+        use crate::praefectus_client::InMemoryPraefectusClient;
+        use consul_domain::identity::republic::{
+            AuxiliumId, BusinessId, CenturionId, ConstitutionVersion, MilesId, OperatorId, ProofId,
+            RoleBinding, SpecContractRef,
+        };
+
+        let state = Arc::new(RwLock::new(SessionState::new("test-session")));
+        let session_id = state.read().await.session_id.clone();
+
+        let praefectus = Arc::new(InMemoryPraefectusClient::new());
+        let installed_binding = RoleBinding {
+            miles: MilesId::new(),
+            auxilium: AuxiliumId::new("support-auxilium"),
+            centurion: CenturionId::new(),
+            spec_contract: SpecContractRef::new("support-auxilium.refund-miles@1.0.0"),
+            constitution_version: ConstitutionVersion::new("1.0.0"),
+            operator: OperatorId::new(),
+            business: BusinessId::new(),
+            authorized_at: Utc::now(),
+            authorized_by_proof: ProofId::new(),
+        };
+        praefectus.set_role_binding(session_id, installed_binding.clone());
+
+        let eng = ProofEngine::new(state, Arc::new(StubJudge)).with_praefectus(praefectus.clone());
+
+        let proof = eng
+            .submit_step_evidence(
+                "linear",
+                "claim",
+                "1",
+                "Open PR with Ref FPCRM-XXX",
+                Evidence::default(),
+                JudgeVerdict::pass(0.93, "evidence sufficient"),
+                JudgeModel::Sonnet,
+                serde_json::json!({"pr_url": "https://github.com/foo/bar/pull/9"}),
+                Some("firefly-pro".into()),
+                Utc::now() - chrono::Duration::milliseconds(50),
+            )
+            .await
+            .unwrap();
+
+        // The proof should carry the binding the Praefectus stub had registered.
+        let actor = proof
+            .actor
+            .expect("actor must be populated when Praefectus returns Some");
+        assert_eq!(actor.auxilium.as_str(), "support-auxilium");
+        assert_eq!(actor.constitution_version.as_str(), "1.0.0");
+        assert_eq!(actor.operator, installed_binding.operator);
+    }
+
+    #[tokio::test]
+    async fn praefectus_client_absent_binding_yields_actor_none() {
+        // Default engine uses InMemoryPraefectusClient with no installed
+        // bindings — actor should be None, matching pre-wire behavior.
+        let eng = engine();
+        let proof = eng
+            .submit_step_evidence(
+                "linear",
+                "claim",
+                "1",
+                "Open PR",
+                Evidence::default(),
+                JudgeVerdict::pass(0.93, "ok"),
+                JudgeModel::Sonnet,
+                serde_json::json!({}),
+                None,
+                Utc::now() - chrono::Duration::milliseconds(50),
+            )
+            .await
+            .unwrap();
+        assert!(proof.actor.is_none());
     }
 
     #[tokio::test]
