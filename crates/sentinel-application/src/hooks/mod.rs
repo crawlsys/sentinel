@@ -48,11 +48,10 @@ pub mod pr_auto_monitor;
 pub mod pr_merge_gate;
 pub mod pre_commit_verification;
 pub mod pre_compact;
-pub mod prompt_injection_nudge;
 pub mod pre_push_browser_test;
+pub mod prompt_injection_nudge;
 pub mod provenance_validate;
 pub mod requirements_traceability_gate;
-pub mod spec_challenge_gate;
 pub mod session_end;
 pub mod session_index;
 pub mod session_init;
@@ -60,6 +59,7 @@ pub mod setup;
 pub mod skill_invocation_gate;
 pub mod skill_router;
 pub mod skill_telemetry;
+pub mod spec_challenge_gate;
 pub mod step_anomaly;
 pub mod step_gate;
 pub mod step_judge;
@@ -190,7 +190,11 @@ pub fn migrate_persistent_tasks_dir(fs: &dyn FileSystemPort, home: &std::path::P
     }
     let entries = fs.read_dir(&legacy_root).unwrap_or_default();
     for entry in entries {
-        let Some(name) = entry.file_name().and_then(|n| n.to_str()).map(str::to_string) else {
+        let Some(name) = entry
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(str::to_string)
+        else {
             continue;
         };
         let dest = new_root.join(&name);
@@ -700,16 +704,24 @@ mod migrate_tests {
     fn persistent_tasks_root_is_under_sentinel() {
         let home = PathBuf::from("/some/home");
         let root = persistent_tasks_root(&home);
-        assert!(root.ends_with(".claude/sentinel/persistent-tasks") || root.ends_with(r".claude\sentinel\persistent-tasks"),
-            "got: {}", root.display());
+        assert!(
+            root.ends_with(".claude/sentinel/persistent-tasks")
+                || root.ends_with(r".claude\sentinel\persistent-tasks"),
+            "got: {}",
+            root.display()
+        );
     }
 
     #[test]
     fn legacy_persistent_tasks_root_unchanged() {
         let home = PathBuf::from("/some/home");
         let root = legacy_persistent_tasks_root(&home);
-        assert!(root.ends_with(".claude/persistent-tasks") || root.ends_with(r".claude\persistent-tasks"),
-            "got: {}", root.display());
+        assert!(
+            root.ends_with(".claude/persistent-tasks")
+                || root.ends_with(r".claude\persistent-tasks"),
+            "got: {}",
+            root.display()
+        );
     }
 }
 

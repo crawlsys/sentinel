@@ -97,10 +97,7 @@ impl ConstitutionGateConfig {
                 anyhow::bail!("constitution-gate: rule with empty name is not allowed");
             }
             if r.path_prefix.trim().is_empty() {
-                anyhow::bail!(
-                    "constitution-gate: rule {:?} has empty path_prefix",
-                    r.name,
-                );
+                anyhow::bail!("constitution-gate: rule {:?} has empty path_prefix", r.name,);
             }
             if r.banned_patterns.is_empty() {
                 anyhow::bail!(
@@ -248,7 +245,9 @@ mod tests {
             reason: "y".into(),
             citation: None,
         };
-        let hit = r.find_banned("use sqlx::Pool;\nuse reqwest::Client;").unwrap();
+        let hit = r
+            .find_banned("use sqlx::Pool;\nuse reqwest::Client;")
+            .unwrap();
         assert_eq!(hit, "sqlx::");
         assert!(r.find_banned("use serde::Deserialize;").is_none());
     }

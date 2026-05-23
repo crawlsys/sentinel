@@ -127,7 +127,6 @@ pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
             input.cwd.as_deref(),
             Some("build_notify"),
         );
-
     }
 
     HookOutput::allow()

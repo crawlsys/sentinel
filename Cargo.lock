@@ -461,8 +461,10 @@ name = "consul-domain"
 version = "0.0.0"
 dependencies = [
  "chrono",
+ "hex",
  "rand 0.9.2",
  "serde",
+ "serde_bytes",
  "sha2",
  "subtle",
  "thiserror 2.0.18",
@@ -2371,6 +2373,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
+ "consul-domain",
  "ed25519-dalek",
  "hex",
  "petgraph",

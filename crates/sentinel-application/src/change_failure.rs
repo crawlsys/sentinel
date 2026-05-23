@@ -260,8 +260,7 @@ pub fn aggregate_at(
             .with_context(|| format!("create_dir_all {}", parent.display()))?;
     }
     let json = serde_json::to_string_pretty(&summary).context("serialize ChangeFailureSummary")?;
-    fs::write(summary_path, json)
-        .with_context(|| format!("write {}", summary_path.display()))?;
+    fs::write(summary_path, json).with_context(|| format!("write {}", summary_path.display()))?;
     Ok(summary)
 }
 
@@ -303,12 +302,7 @@ mod tests {
     use crate::deploy_freq::{append_deploy, DeployRecord};
     use chrono::TimeZone;
 
-    fn incident(
-        created: &str,
-        repo: &str,
-        env: &str,
-        completed: Option<&str>,
-    ) -> IncidentRecord {
+    fn incident(created: &str, repo: &str, env: &str, completed: Option<&str>) -> IncidentRecord {
         IncidentRecord {
             created_at: created.to_string(),
             repo: repo.to_string(),
@@ -335,7 +329,12 @@ mod tests {
     fn append_then_read_round_trips() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("incidents.jsonl");
-        let r = incident("2026-05-10T10:00:00Z", "sentinel", "prod", Some("2026-05-10T12:00:00Z"));
+        let r = incident(
+            "2026-05-10T10:00:00Z",
+            "sentinel",
+            "prod",
+            Some("2026-05-10T12:00:00Z"),
+        );
         append_incident(&path, &r).unwrap();
         let got = read_incidents(&path).unwrap();
         assert_eq!(got.len(), 1);
@@ -377,7 +376,11 @@ mod tests {
         let now = Utc.with_ymd_and_hms(2026, 5, 15, 12, 0, 0).unwrap();
         let deploy_ts = now - Duration::days(2);
         let incident_ts = deploy_ts + Duration::hours(1);
-        append_deploy(&deploys, &deploy(&deploy_ts.to_rfc3339(), "sentinel", "prod")).unwrap();
+        append_deploy(
+            &deploys,
+            &deploy(&deploy_ts.to_rfc3339(), "sentinel", "prod"),
+        )
+        .unwrap();
         append_incident(
             &incidents,
             &incident(&incident_ts.to_rfc3339(), "sentinel", "prod", None),
@@ -471,8 +474,11 @@ mod tests {
         .unwrap();
         // Unrecovered — excluded from median.
         let base3 = now - Duration::days(1);
-        append_incident(&incidents, &incident(&base3.to_rfc3339(), "sentinel", "prod", None))
-            .unwrap();
+        append_incident(
+            &incidents,
+            &incident(&base3.to_rfc3339(), "sentinel", "prod", None),
+        )
+        .unwrap();
         let s = aggregate_at(&deploys, &incidents, &summary, now).unwrap();
         let a = &s.per_repo_env[0];
         assert_eq!(a.incidents_count, 3);

@@ -209,9 +209,10 @@ mod tests {
         input
             .extra
             .insert("task_id".to_string(), serde_json::json!("?"));
-        input
-            .extra
-            .insert("task_subject".to_string(), serde_json::json!("unknown task"));
+        input.extra.insert(
+            "task_subject".to_string(),
+            serde_json::json!("unknown task"),
+        );
         input
             .extra
             .insert("teammate_name".to_string(), serde_json::json!("unknown"));

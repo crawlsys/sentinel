@@ -811,8 +811,7 @@ mod ba_port_tests {
 
     #[test]
     fn provenance_error_display_names_each_variant() {
-        let unavailable =
-            ProvenanceError::StoreUnavailable("disk full".to_string()).to_string();
+        let unavailable = ProvenanceError::StoreUnavailable("disk full".to_string()).to_string();
         assert!(unavailable.contains("unavailable"));
         assert!(unavailable.contains("disk full"));
 
@@ -1128,16 +1127,20 @@ mod spec_challenge_port_tests {
         assert!(SpecChallengeScorerError::Malformed("bad axes".to_string())
             .to_string()
             .contains("malformed"));
-        assert!(SpecChallengeScorerError::Configuration("no model".to_string())
-            .to_string()
-            .contains("configuration"));
+        assert!(
+            SpecChallengeScorerError::Configuration("no model".to_string())
+                .to_string()
+                .contains("configuration")
+        );
     }
 
     #[test]
     fn store_error_display_names_each_variant() {
-        assert!(SpecChallengeStoreError::StoreUnavailable("disk".to_string())
-            .to_string()
-            .contains("unavailable"));
+        assert!(
+            SpecChallengeStoreError::StoreUnavailable("disk".to_string())
+                .to_string()
+                .contains("unavailable")
+        );
         assert!(SpecChallengeStoreError::Malformed("schema".to_string())
             .to_string()
             .contains("malformed"));

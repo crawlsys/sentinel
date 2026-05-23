@@ -325,9 +325,7 @@ impl Capability {
                 _ => false,
             }),
             Self::ToolUse(req_tools) => profile.declared.iter().any(|c| match c {
-                Self::ToolUse(prof_tools) => {
-                    req_tools.iter().all(|t| prof_tools.contains(t))
-                }
+                Self::ToolUse(prof_tools) => req_tools.iter().all(|t| prof_tools.contains(t)),
                 _ => false,
             }),
             Self::StructuredOutput(req_schema) => profile.declared.iter().any(|c| match c {
@@ -339,9 +337,7 @@ impl Capability {
                 _ => false,
             }),
             Self::Vendor(req_vendor) => profile.vendor.true_vendor() == req_vendor.true_vendor(),
-            Self::DifferentVendorFrom(forbidden) => {
-                profile.vendor.is_different_from(forbidden)
-            }
+            Self::DifferentVendorFrom(forbidden) => profile.vendor.is_different_from(forbidden),
             Self::OpenWeights => profile
                 .declared
                 .iter()
@@ -595,15 +591,24 @@ mod tests {
     #[test]
     fn reasoning_capability_satisfied_when_deeper() {
         let req = Capability::Reasoning(ReasoningLevel::Standard);
-        assert!(req.is_satisfied_by(&opus_profile()), "Deep satisfies Standard");
-        assert!(req.is_satisfied_by(&kimi_profile()), "Standard satisfies Standard");
+        assert!(
+            req.is_satisfied_by(&opus_profile()),
+            "Deep satisfies Standard"
+        );
+        assert!(
+            req.is_satisfied_by(&kimi_profile()),
+            "Standard satisfies Standard"
+        );
     }
 
     #[test]
     fn reasoning_capability_fails_when_shallower() {
         let req = Capability::Reasoning(ReasoningLevel::Deep);
         assert!(req.is_satisfied_by(&opus_profile()), "Deep satisfies Deep");
-        assert!(!req.is_satisfied_by(&kimi_profile()), "Standard does not satisfy Deep");
+        assert!(
+            !req.is_satisfied_by(&kimi_profile()),
+            "Standard does not satisfy Deep"
+        );
     }
 
     #[test]
@@ -612,7 +617,10 @@ mod tests {
         assert!(req.is_satisfied_by(&opus_profile()));
         // Requirement with a tool not declared:
         let req2 = Capability::ToolUse(vec![ToolKind::Edit, ToolKind::WebFetch]);
-        assert!(!req2.is_satisfied_by(&opus_profile()), "WebFetch undeclared");
+        assert!(
+            !req2.is_satisfied_by(&opus_profile()),
+            "WebFetch undeclared"
+        );
     }
 
     #[test]
@@ -626,8 +634,14 @@ mod tests {
     #[test]
     fn latency_budget_lte_semantics() {
         let budget = Capability::LatencyBudget(20000);
-        assert!(budget.is_satisfied_by(&kimi_profile()), "kimi 15000 satisfies 20000 budget");
-        assert!(!budget.is_satisfied_by(&opus_profile()), "opus 30000 exceeds 20000 budget");
+        assert!(
+            budget.is_satisfied_by(&kimi_profile()),
+            "kimi 15000 satisfies 20000 budget"
+        );
+        assert!(
+            !budget.is_satisfied_by(&opus_profile()),
+            "opus 30000 exceeds 20000 budget"
+        );
     }
 
     #[test]
@@ -640,8 +654,14 @@ mod tests {
     #[test]
     fn different_vendor_from_satisfied_when_distinct() {
         let req = Capability::DifferentVendorFrom(VendorClass::Anthropic);
-        assert!(!req.is_satisfied_by(&opus_profile()), "opus IS Anthropic — fails");
-        assert!(req.is_satisfied_by(&kimi_profile()), "kimi is non-Anthropic — passes");
+        assert!(
+            !req.is_satisfied_by(&opus_profile()),
+            "opus IS Anthropic — fails"
+        );
+        assert!(
+            req.is_satisfied_by(&kimi_profile()),
+            "kimi is non-Anthropic — passes"
+        );
     }
 
     #[test]
@@ -649,7 +669,10 @@ mod tests {
         let req = Capability::StructuredOutput(SchemaRef::AuditorVerdict);
         assert!(req.is_satisfied_by(&opus_profile()));
         let req2 = Capability::StructuredOutput(SchemaRef::BaCritique);
-        assert!(!req2.is_satisfied_by(&opus_profile()), "opus doesn't declare BaCritique");
+        assert!(
+            !req2.is_satisfied_by(&opus_profile()),
+            "opus doesn't declare BaCritique"
+        );
     }
 
     #[test]
@@ -703,21 +726,17 @@ mod tests {
 
     #[test]
     fn requirement_fails_when_forbidden_satisfied() {
-        let req = CapabilityRequirement::new(vec![Capability::Reasoning(
-            ReasoningLevel::Standard,
-        )])
-        .with_forbidden(Capability::Vendor(VendorClass::Anthropic));
+        let req = CapabilityRequirement::new(vec![Capability::Reasoning(ReasoningLevel::Standard)])
+            .with_forbidden(Capability::Vendor(VendorClass::Anthropic));
         assert!(!req.is_satisfied_by(&opus_profile()), "Anthropic forbidden");
         assert!(req.is_satisfied_by(&kimi_profile()));
     }
 
     #[test]
     fn preferred_score_counts_satisfied_preferred() {
-        let req = CapabilityRequirement::new(vec![Capability::Reasoning(
-            ReasoningLevel::Standard,
-        )])
-        .with_preferred(Capability::Reasoning(ReasoningLevel::Deep))
-        .with_preferred(Capability::CostBudget(0.10));
+        let req = CapabilityRequirement::new(vec![Capability::Reasoning(ReasoningLevel::Standard)])
+            .with_preferred(Capability::Reasoning(ReasoningLevel::Deep))
+            .with_preferred(Capability::CostBudget(0.10));
         // opus: Deep satisfies preferred[0]; CostBudget(0.50) does NOT
         // satisfy CostBudget(0.10) (over budget) → score = 1.
         assert_eq!(req.preferred_score(&opus_profile()), 1);
@@ -736,7 +755,10 @@ mod tests {
             Capability::StructuredOutput(SchemaRef::AuditorVerdict),
         ])
         .with_preferred(Capability::Reasoning(ReasoningLevel::Deep));
-        assert!(!req.is_satisfied_by(&opus_profile()), "Anthropic disqualified");
+        assert!(
+            !req.is_satisfied_by(&opus_profile()),
+            "Anthropic disqualified"
+        );
         assert!(req.is_satisfied_by(&kimi_profile()), "Kimi qualifies");
     }
 

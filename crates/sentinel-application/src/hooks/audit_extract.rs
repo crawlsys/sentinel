@@ -228,7 +228,10 @@ mod tests {
         input.tool_name = Some("Bash".to_string());
         let output = process(&input, &writer);
         assert_eq!(output.blocked, None);
-        assert!(writer.recorded().is_empty(), "non-MCP tools must not produce records");
+        assert!(
+            writer.recorded().is_empty(),
+            "non-MCP tools must not produce records"
+        );
     }
 
     // ---- Skip paths (no record written) ----
@@ -238,7 +241,10 @@ mod tests {
         let writer = StubWriter::new();
         let input = mcp_input("Edit", "session-1", Some(valid_audit()));
         let _ = process(&input, &writer);
-        assert!(writer.recorded().is_empty(), "Edit is not an mcp__ tool — no record");
+        assert!(
+            writer.recorded().is_empty(),
+            "Edit is not an mcp__ tool — no record"
+        );
     }
 
     #[test]

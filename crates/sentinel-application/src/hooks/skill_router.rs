@@ -435,7 +435,8 @@ mod tests {
 
     #[test]
     fn test_strip_hook_context_removes_channel_blocks() {
-        let input = "do the thing\n<channel source=\"sentinel\" event=\"task_completed\">noise</channel>";
+        let input =
+            "do the thing\n<channel source=\"sentinel\" event=\"task_completed\">noise</channel>";
         let cleaned = strip_hook_context(input);
         assert_eq!(cleaned, "do the thing");
     }

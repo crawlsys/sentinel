@@ -62,8 +62,8 @@
 
 use std::collections::HashMap;
 
-use sentinel_domain::evidence::{Evidence, ToolCallEvidence, ToolResultEvidence};
 use sentinel_domain::events::{HookInput, HookOutput};
+use sentinel_domain::evidence::{Evidence, ToolCallEvidence, ToolResultEvidence};
 use sentinel_domain::judge::{JudgeModel, JudgeVerdict};
 use sentinel_domain::state::{BaselineCounter, SessionState};
 use sentinel_domain::workflow::SkillSteps;
@@ -103,10 +103,7 @@ pub enum StepJudgeOutcome {
     NoStepConfig,
     /// Skill has a step config but the specific step_id wasn't found in any
     /// phase. Possible misconfig or stale tool name.
-    UnknownStep {
-        skill: String,
-        step_id: String,
-    },
+    UnknownStep { skill: String, step_id: String },
     /// Glass break was active — judge skipped, no verdict.
     Skipped,
     /// Judge ran, here's the verdict + the resolved coordinates so M1.5 can
@@ -150,10 +147,7 @@ pub enum StepJudgeOutcome {
 /// Resolve `(phase_id, step_description, baseline_threshold)` for a given
 /// `step_id` within a skill's step config. Returns `None` if the step
 /// isn't found in any phase.
-fn locate_step<'a>(
-    skill_steps: &'a SkillSteps,
-    step_id: &str,
-) -> Option<(&'a str, &'a str, u64)> {
+fn locate_step<'a>(skill_steps: &'a SkillSteps, step_id: &str) -> Option<(&'a str, &'a str, u64)> {
     for phase in &skill_steps.phases {
         for step in &phase.steps {
             if step.id == step_id {
@@ -219,8 +213,8 @@ fn gather_evidence(input: &HookInput) -> Evidence {
         // or a top-level boolean false ⇒ failure. Otherwise assume success.
         // Real M1.5 evidence work will replace this with structured exit
         // codes from sentinel's tool-result capture path.
-        let success = !tool_result.get("error").is_some()
-            && tool_result.as_bool().map_or(true, |b| b);
+        let success =
+            !tool_result.get("error").is_some() && tool_result.as_bool().map_or(true, |b| b);
         evidence.tool_results.push(ToolResultEvidence {
             tool: tool_name.clone(),
             result_summary: truncate_json_summary(tool_result, 500),
@@ -232,7 +226,10 @@ fn gather_evidence(input: &HookInput) -> Evidence {
     // beyond the 500-char summaries. Keyed under "step_tool_io" so future
     // hooks know to look here.
     let mut custom = serde_json::Map::new();
-    custom.insert("step_tool_name".into(), serde_json::Value::String(tool_name));
+    custom.insert(
+        "step_tool_name".into(),
+        serde_json::Value::String(tool_name),
+    );
     if let Some(tool_input) = input.tool_input.clone() {
         custom.insert("step_tool_input".into(), tool_input);
     }
@@ -320,11 +317,7 @@ pub async fn process(
             // judgement that crosses the threshold would also be the
             // first one enforced — we want one clean post-threshold
             // judgement before enforcement engages.
-            let pre_baseline = state.step_baseline(
-                &step_ref.skill,
-                &phase_id,
-                &step_ref.step_id,
-            );
+            let pre_baseline = state.step_baseline(&step_ref.skill, &phase_id, &step_ref.step_id);
             let in_warmup = !pre_baseline.cleared(baseline_threshold);
 
             // Record the judgement (both passing and insufficient) so
@@ -493,11 +486,21 @@ mod tests {
     async fn passes_through_non_step_tools() {
         let judge = RecordingJudge::passing();
         let mut state = fresh_state();
-        let (out, outcome) =
-            process(&step_input("Read"), &mut state, &linear_step_config(), &judge, false).await;
+        let (out, outcome) = process(
+            &step_input("Read"),
+            &mut state,
+            &linear_step_config(),
+            &judge,
+            false,
+        )
+        .await;
         assert!(matches!(outcome, StepJudgeOutcome::NotAStepTool));
         assert!(out.hook_specific_output.is_none());
-        assert_eq!(judge.calls.load(Ordering::SeqCst), 0, "judge must NOT fire on non-step tools");
+        assert_eq!(
+            judge.calls.load(Ordering::SeqCst),
+            0,
+            "judge must NOT fire on non-step tools"
+        );
     }
 
     #[tokio::test]
@@ -513,7 +516,11 @@ mod tests {
         )
         .await;
         assert!(matches!(outcome, StepJudgeOutcome::Skipped));
-        assert_eq!(judge.calls.load(Ordering::SeqCst), 0, "judge must NOT fire during glass break");
+        assert_eq!(
+            judge.calls.load(Ordering::SeqCst),
+            0,
+            "judge must NOT fire during glass break"
+        );
     }
 
     #[tokio::test]
@@ -587,7 +594,11 @@ mod tests {
             }
             other => panic!("expected Judged, got {other:?}"),
         }
-        assert_eq!(judge.calls.load(Ordering::SeqCst), 1, "judge fires exactly once per step");
+        assert_eq!(
+            judge.calls.load(Ordering::SeqCst),
+            1,
+            "judge fires exactly once per step"
+        );
     }
 
     #[tokio::test]
@@ -628,7 +639,11 @@ mod tests {
         )
         .await;
         match outcome {
-            StepJudgeOutcome::JudgeError { skill, step_id, error } => {
+            StepJudgeOutcome::JudgeError {
+                skill,
+                step_id,
+                error,
+            } => {
                 assert_eq!(skill, "linear");
                 assert_eq!(step_id, "1");
                 assert!(error.contains("simulated upstream failure"), "got: {error}");
@@ -793,7 +808,9 @@ mod tests {
         )
         .await;
         match outcome {
-            StepJudgeOutcome::JudgedWarmup { baseline, verdict, .. } => {
+            StepJudgeOutcome::JudgedWarmup {
+                baseline, verdict, ..
+            } => {
                 assert!(!verdict.sufficient);
                 assert_eq!(baseline.successful_count, 0, "no passing yet");
                 assert_eq!(baseline.insufficient_count, 1, "this failing run counted");

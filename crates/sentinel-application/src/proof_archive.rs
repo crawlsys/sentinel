@@ -41,10 +41,10 @@
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
 use sentinel_domain::ports::FileSystemPort;
 use sentinel_domain::proof::{ProofChain, ProofEntry};
 use sentinel_domain::state::SessionState;
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 /// Current schema version for archived chain JSONs and index entries.
@@ -132,9 +132,7 @@ fn summarize(chain: &ProofChain) -> ArchivedChainSummary {
             .filter(|e| matches!(e, ProofEntry::Phase(_)))
             .count();
 
-    let all_sufficient = step_entries
-        .iter()
-        .all(|s| s.judge_verdict.sufficient)
+    let all_sufficient = step_entries.iter().all(|s| s.judge_verdict.sufficient)
         && chain.proofs.iter().all(|p| p.judge_verdict.sufficient);
 
     let step_sequence: Vec<String> = step_entries
@@ -220,8 +218,7 @@ fn archive_one_chain(
         chain: chain.clone(),
     };
 
-    let json_bytes = serde_json::to_vec_pretty(&record)
-        .context("serialize archived chain")?;
+    let json_bytes = serde_json::to_vec_pretty(&record).context("serialize archived chain")?;
 
     // Atomic write via tmp + rename. The fs.write impl handles parent dir
     // creation, but for atomicity we go through the .tmp dance ourselves so
@@ -369,6 +366,7 @@ mod tests {
             started_at: now,
             completed_at: now,
             duration_ms: 1,
+            actor: None,
         }
     }
 

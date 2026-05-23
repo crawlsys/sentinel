@@ -79,7 +79,9 @@ impl RetryPolicy {
         if attempt <= 1 {
             return 0;
         }
-        let raw = self.backoff_ms.saturating_mul(1u64 << (attempt - 2).min(20));
+        let raw = self
+            .backoff_ms
+            .saturating_mul(1u64 << (attempt - 2).min(20));
         raw.min(60_000)
     }
 }
@@ -183,7 +185,6 @@ pub struct WorkflowStep {
     // All four are optional; existing TOML configs without them load
     // unchanged. Future federation compose validation passes consult
     // these to verify cross-skill contracts hold.
-
     /// **`@provides`** — artifact types this step's StepProof exposes
     /// for downstream consumers. Strings are skill-namespaced (e.g.
     /// `"linear.ticket_id"`, `"git.pr_url"`). When other skills declare
@@ -221,7 +222,6 @@ pub struct WorkflowStep {
     // mirror that and add `@override` for explicit replacement
     // declarations. Both default to None so existing TOML loads
     // unchanged.
-
     /// **`@deprecated`** — when `Some(reason)`, this step is on its
     /// way out and operators should migrate. The reason is shown by
     /// federation compose as a warning (not an error — deprecated
@@ -253,7 +253,6 @@ pub struct WorkflowStep {
     // This is deliberately untyped at the core level. Plugins enforce
     // their own schemas at their boundaries (Pydantic-style validation
     // M4.8). The core only guarantees round-trip preservation.
-
     /// **Plugin metadata** — opaque to the core, structured for
     /// plugins. Defaults to `Value::Null` so existing TOML loads
     /// unchanged.

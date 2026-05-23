@@ -289,7 +289,8 @@ mod parse_worktree_remove_tests {
 
     #[test]
     fn parses_relative_path() {
-        let got = parse_worktree_remove_target(&s(&["worktree", "remove", ".claude/wt/x"]), "/repo");
+        let got =
+            parse_worktree_remove_target(&s(&["worktree", "remove", ".claude/wt/x"]), "/repo");
         assert_eq!(got.unwrap(), PathBuf::from("/repo").join(".claude/wt/x"));
     }
 
@@ -314,10 +315,7 @@ mod parse_worktree_remove_tests {
 
     #[test]
     fn parses_absolute_path_unchanged() {
-        let got = parse_worktree_remove_target(
-            &s(&["worktree", "remove", "/abs/path"]),
-            "/repo",
-        );
+        let got = parse_worktree_remove_target(&s(&["worktree", "remove", "/abs/path"]), "/repo");
         assert_eq!(got.unwrap(), PathBuf::from("/abs/path"));
     }
 

@@ -378,39 +378,34 @@ mod tests {
             fixed_time(),
         );
         // Any one missing → not complete.
-        assert!(
-            !base.clone()
-                .with_intent("x")
-                .with_reasoning("y")
-                .is_complete()
-        );
-        assert!(
-            !base.clone()
-                .with_reasoning("y")
-                .with_expected_effect("z")
-                .is_complete()
-        );
-        assert!(
-            !base.clone()
-                .with_intent("x")
-                .with_expected_effect("z")
-                .is_complete()
-        );
+        assert!(!base
+            .clone()
+            .with_intent("x")
+            .with_reasoning("y")
+            .is_complete());
+        assert!(!base
+            .clone()
+            .with_reasoning("y")
+            .with_expected_effect("z")
+            .is_complete());
+        assert!(!base
+            .clone()
+            .with_intent("x")
+            .with_expected_effect("z")
+            .is_complete());
         // Whitespace-only doesn't count.
-        assert!(
-            !base.clone()
-                .with_intent("   ")
-                .with_reasoning("y")
-                .with_expected_effect("z")
-                .is_complete()
-        );
+        assert!(!base
+            .clone()
+            .with_intent("   ")
+            .with_reasoning("y")
+            .with_expected_effect("z")
+            .is_complete());
         // All three nonblank → complete.
-        assert!(
-            base.with_intent("x")
-                .with_reasoning("y")
-                .with_expected_effect("z")
-                .is_complete()
-        );
+        assert!(base
+            .with_intent("x")
+            .with_reasoning("y")
+            .with_expected_effect("z")
+            .is_complete());
     }
 
     #[test]
@@ -475,19 +470,13 @@ mod tests {
     #[test]
     fn decision_is_pass_predicate() {
         assert!(AuditorDecision::Pass.is_pass());
-        assert!(!AuditorDecision::Block {
-            reason: "x".into()
-        }
-        .is_pass());
+        assert!(!AuditorDecision::Block { reason: "x".into() }.is_pass());
     }
 
     #[test]
     fn decision_is_block_predicate() {
         assert!(!AuditorDecision::Pass.is_block());
-        assert!(AuditorDecision::Block {
-            reason: "x".into()
-        }
-        .is_block());
+        assert!(AuditorDecision::Block { reason: "x".into() }.is_block());
     }
 
     #[test]

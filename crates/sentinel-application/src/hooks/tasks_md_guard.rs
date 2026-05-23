@@ -178,7 +178,10 @@ fn block_message(file_path: &str, action: &str) -> String {
 /// would mutate the auto block; `HookOutput::allow()` otherwise.
 pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     let tool_name = input.tool_name.as_deref().unwrap_or("");
-    if !GUARDED_TOOLS.iter().any(|t| t.eq_ignore_ascii_case(tool_name)) {
+    if !GUARDED_TOOLS
+        .iter()
+        .any(|t| t.eq_ignore_ascii_case(tool_name))
+    {
         return HookOutput::allow();
     }
 

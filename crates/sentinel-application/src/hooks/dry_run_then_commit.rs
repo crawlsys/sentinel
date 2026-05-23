@@ -38,9 +38,7 @@
 
 use std::path::PathBuf;
 
-use sentinel_domain::dry_run::{
-    AuditorDecision, AuditorError, AuditorVerdict, DryRunRequest,
-};
+use sentinel_domain::dry_run::{AuditorDecision, AuditorError, AuditorVerdict, DryRunRequest};
 use sentinel_domain::events::{HookInput, HookOutput};
 use sentinel_domain::ports::{AuditorPort, ReversibilityClassifierPort};
 use sentinel_domain::ReversibilityClass;
@@ -100,35 +98,27 @@ fn canonicalize_value(value: &serde_json::Value) -> serde_json::Value {
             }
             Value::Object(out)
         }
-        Value::Array(items) => {
-            Value::Array(items.iter().map(canonicalize_value).collect())
-        }
+        Value::Array(items) => Value::Array(items.iter().map(canonicalize_value).collect()),
         other => other.clone(),
     }
 }
 
 fn approval_marker_path(session_id: &str, action_hash: &str) -> PathBuf {
-    std::env::temp_dir().join(format!("{APPROVAL_MARKER_PREFIX}{session_id}-{action_hash}"))
+    std::env::temp_dir().join(format!(
+        "{APPROVAL_MARKER_PREFIX}{session_id}-{action_hash}"
+    ))
 }
 
 /// `true` if the auditor previously approved this exact action in this
 /// session.
 #[must_use]
-pub fn has_dry_run_approval(
-    fs: &dyn FileSystemPort,
-    session_id: &str,
-    action_hash: &str,
-) -> bool {
+pub fn has_dry_run_approval(fs: &dyn FileSystemPort, session_id: &str, action_hash: &str) -> bool {
     fs.exists(&approval_marker_path(session_id, action_hash))
 }
 
 /// Record that the auditor approved this action; subsequent identical
 /// calls in the same session will short-circuit at step 2 above.
-pub fn mark_dry_run_approved(
-    fs: &dyn FileSystemPort,
-    session_id: &str,
-    action_hash: &str,
-) {
+pub fn mark_dry_run_approved(fs: &dyn FileSystemPort, session_id: &str, action_hash: &str) {
     let path = approval_marker_path(session_id, action_hash);
     let _ = fs.write(&path, b"1");
 }
@@ -214,16 +204,10 @@ fn build_dry_run(
     let intent = extract_field(tool_input, "_intent");
     let reasoning = extract_field(tool_input, "_reasoning");
     let expected_effect = extract_field(tool_input, "_expected_effect");
-    DryRunRequest::new(
-        session_id,
-        tool,
-        tool_input.clone(),
-        class,
-        constructed_at,
-    )
-    .with_intent(intent)
-    .with_reasoning(reasoning)
-    .with_expected_effect(expected_effect)
+    DryRunRequest::new(session_id, tool, tool_input.clone(), class, constructed_at)
+        .with_intent(intent)
+        .with_reasoning(reasoning)
+        .with_expected_effect(expected_effect)
 }
 
 fn extract_field(value: &serde_json::Value, field: &str) -> String {
@@ -375,7 +359,10 @@ mod tests {
         let classifier = classifier_with("Bash", ReversibilityClass::TriviallyReversible);
         let auditor = StaticAuditor::pass(0.99); // shouldn't be consulted
         let output = process(&irreversible_input(), &fs, &classifier, &auditor);
-        assert!(output.blocked.is_none(), "Trivially must allow without audit");
+        assert!(
+            output.blocked.is_none(),
+            "Trivially must allow without audit"
+        );
     }
 
     #[test]
@@ -384,7 +371,10 @@ mod tests {
         let classifier = classifier_with("Bash", ReversibilityClass::ReversibleWithEffort);
         let auditor = StaticAuditor::pass(0.99);
         let output = process(&irreversible_input(), &fs, &classifier, &auditor);
-        assert!(output.blocked.is_none(), "RWE handled upstream by tool_usage_gate; A3 silent");
+        assert!(
+            output.blocked.is_none(),
+            "RWE handled upstream by tool_usage_gate; A3 silent"
+        );
     }
 
     // ---- Incomplete dry-run ----
@@ -405,7 +395,10 @@ mod tests {
             .as_ref()
             .and_then(|h| h.permission_decision_reason.as_deref())
             .unwrap_or("");
-        assert!(reason.contains("_intent"), "deny message names the missing field: {reason}");
+        assert!(
+            reason.contains("_intent"),
+            "deny message names the missing field: {reason}"
+        );
     }
 
     #[test]
@@ -533,7 +526,8 @@ mod tests {
     fn catastrophic_auditor_error_blocks_and_explicitly_escalates() {
         let fs = MockFs::new();
         let classifier = classifier_with("Bash", ReversibilityClass::Catastrophic);
-        let auditor = StaticAuditor::err(AuditorError::TimedOut(std::time::Duration::from_secs(30)));
+        let auditor =
+            StaticAuditor::err(AuditorError::TimedOut(std::time::Duration::from_secs(30)));
         let output = process(&irreversible_input(), &fs, &classifier, &auditor);
         assert_eq!(output.blocked, Some(true));
         let reason = output
@@ -570,10 +564,7 @@ mod tests {
     fn action_hash_differs_for_different_inputs() {
         let a = serde_json::json!({ "x": 1 });
         let b = serde_json::json!({ "x": 2 });
-        assert_ne!(
-            action_hash_for("Bash", &a),
-            action_hash_for("Bash", &b)
-        );
+        assert_ne!(action_hash_for("Bash", &a), action_hash_for("Bash", &b));
     }
 
     // ---- No tool_name ----

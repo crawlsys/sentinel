@@ -54,9 +54,7 @@
 use std::fmt::Write;
 use std::time::Duration;
 
-use sentinel_domain::ba::{
-    RequirementCheck, RequirementFinding, RequirementRef,
-};
+use sentinel_domain::ba::{RequirementCheck, RequirementFinding, RequirementRef};
 use sentinel_domain::events::{HookInput, HookOutput};
 use sentinel_domain::ports::{RequirementMatrixError, RequirementMatrixPort};
 
@@ -418,7 +416,12 @@ mod tests {
 
     #[test]
     fn allows_when_refs_present_and_match() {
-        let row = req("case-1", "R-001", "hash-v1", "Stakeholder needs churn under 2%");
+        let row = req(
+            "case-1",
+            "R-001",
+            "hash-v1",
+            "Stakeholder needs churn under 2%",
+        );
         let matrix = StubMatrix::new().with(row.clone());
         let input = input_with(vec![("requirement_refs", refs_json(vec![row]))]);
         let output = process(&input, &matrix, ValidationMode::DefaultBlocking);
@@ -432,7 +435,10 @@ mod tests {
         let matrix = StubMatrix::new();
         let input = input_with(vec![
             ("is_recommendation", serde_json::json!(true)),
-            ("recommendation_summary", serde_json::json!("Raise prices by 8%")),
+            (
+                "recommendation_summary",
+                serde_json::json!("Raise prices by 8%"),
+            ),
         ]);
         let output = process(&input, &matrix, ValidationMode::DefaultBlocking);
         assert_eq!(output.blocked, Some(true));
@@ -521,9 +527,9 @@ mod tests {
     #[test]
     fn matrix_unavailable_does_not_block_but_logs() {
         let cited = req("case-1", "R-001", "h", "x");
-        let matrix = StubMatrix::new().with_next_error(
-            RequirementMatrixError::MatrixUnavailable("timeout".to_string()),
-        );
+        let matrix = StubMatrix::new().with_next_error(RequirementMatrixError::MatrixUnavailable(
+            "timeout".to_string(),
+        ));
         let input = input_with(vec![("requirement_refs", refs_json(vec![cited]))]);
         let output = process(&input, &matrix, ValidationMode::DefaultBlocking);
         assert_eq!(
@@ -535,9 +541,9 @@ mod tests {
     #[test]
     fn malformed_matrix_response_does_not_block() {
         let cited = req("case-1", "R-001", "h", "x");
-        let matrix = StubMatrix::new().with_next_error(
-            RequirementMatrixError::Malformed("schema mismatch".to_string()),
-        );
+        let matrix = StubMatrix::new().with_next_error(RequirementMatrixError::Malformed(
+            "schema mismatch".to_string(),
+        ));
         let input = input_with(vec![("requirement_refs", refs_json(vec![cited]))]);
         let output = process(&input, &matrix, ValidationMode::DefaultBlocking);
         assert_eq!(output.blocked, None);
@@ -587,7 +593,10 @@ mod tests {
         let phantom2 = req("case-1", "R-B", "h", "y");
         let input = input_with(vec![
             ("is_recommendation", serde_json::json!(true)),
-            ("recommendation_summary", serde_json::json!("Adopt SaaS expansion")),
+            (
+                "recommendation_summary",
+                serde_json::json!("Adopt SaaS expansion"),
+            ),
             ("requirement_refs", refs_json(vec![phantom1, phantom2])),
         ]);
         let output = process(&input, &matrix, ValidationMode::DefaultBlocking);

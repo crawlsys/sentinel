@@ -213,7 +213,7 @@ fn render_linear_section(issues: &[LinearIssue]) -> String {
 
     fn status_rank(s: &str) -> u8 {
         match s {
-            "started" => 0, // In Progress
+            "started" => 0,   // In Progress
             "unstarted" => 1, // Todo
             "backlog" => 2,
             "triage" => 3,
@@ -267,7 +267,10 @@ fn render_linear_section(issues: &[LinearIssue]) -> String {
     });
 
     let mut md = String::from("## Linear Assigned\n\n");
-    md.push_str(&format!("_{} open issue(s) from Linear cache._\n\n", sorted.len()));
+    md.push_str(&format!(
+        "_{} open issue(s) from Linear cache._\n\n",
+        sorted.len()
+    ));
     md.push_str("| Issue | Pri | State | Title |\n");
     md.push_str("|---|---|---|---|\n");
     for i in sorted.iter().take(50) {
@@ -422,7 +425,9 @@ fn merge_with_existing(existing: Option<&str>, body: &str) -> String {
                 let before = &content[..s];
                 let end_idx = e + MARKER_END.len();
                 // Skip a trailing newline after MARKER_END so we don't accumulate blank lines.
-                let after = content[end_idx..].strip_prefix('\n').unwrap_or(&content[end_idx..]);
+                let after = content[end_idx..]
+                    .strip_prefix('\n')
+                    .unwrap_or(&content[end_idx..]);
                 format!("{before}{wrapped}{after}")
             }
             _ => {
@@ -559,10 +564,7 @@ fn write_project_tasks_md(
                 clippy::cast_sign_loss
             )]
             let allowed_min = (existing_count as f64 * SHRINK_GUARD_RATIO).ceil() as usize;
-            if !force
-                && existing_count >= SHRINK_GUARD_MIN_EXISTING
-                && new_count < allowed_min
-            {
+            if !force && existing_count >= SHRINK_GUARD_MIN_EXISTING && new_count < allowed_min {
                 tracing::warn!(
                     repo_root = %repo_root.display(),
                     existing_count,
@@ -652,7 +654,11 @@ fn write_memory_summary(
     } else {
         body.push_str("Top open tasks (by id):\n\n");
         for task in incomplete.iter().take(10) {
-            let mark = if task.status == "in_progress" { "~" } else { " " };
+            let mark = if task.status == "in_progress" {
+                "~"
+            } else {
+                " "
+            };
             body.push_str(&format!("- [{mark}] **#{}** {}", task.id, task.subject));
             if !task.blocked_by.is_empty() {
                 body.push_str(&format!(" _(blocked by {})_", task.blocked_by.join(", ")));
@@ -776,7 +782,10 @@ fn write_persistent_tasks(
             }
         }
     } else {
-        tracing::debug!(cwd, "Not inside a git repo — skipping project tasks.md write");
+        tracing::debug!(
+            cwd,
+            "Not inside a git repo — skipping project tasks.md write"
+        );
     }
 
     // Write meta.json (always — captures last_block_hash for the next compare).
@@ -970,7 +979,10 @@ mod tests {
         ];
         let section = render_linear_section(&issues);
         assert!(section.contains("X-1"));
-        assert!(!section.contains("X-2"), "completed issues must be filtered");
+        assert!(
+            !section.contains("X-2"),
+            "completed issues must be filtered"
+        );
         assert!(section.contains("1 open issue"));
     }
 
@@ -1337,7 +1349,10 @@ mod tests {
             metadata: None,
         }];
         let wrote = write_memory_summary(&fs, &repo_root, &tasks).unwrap();
-        assert!(!wrote, "should skip when ~/.claude/projects/<key> doesn't exist");
+        assert!(
+            !wrote,
+            "should skip when ~/.claude/projects/<key> doesn't exist"
+        );
     }
 
     #[test]
@@ -1435,7 +1450,10 @@ mod tests {
         let index = std::fs::read_to_string(memory_dir.join("MEMORY.md")).unwrap();
         // Old line replaced — only one Tasks-for line present.
         let count = index.matches("](project_tasks.md)").count();
-        assert_eq!(count, 1, "duplicate Tasks-for index lines must be collapsed");
+        assert_eq!(
+            count, 1,
+            "duplicate Tasks-for index lines must be collapsed"
+        );
         // Unrelated line preserved.
         assert!(index.contains("[Other](other.md)"));
         // New project name reflected.
@@ -1569,7 +1587,10 @@ mod tests {
         write_project_tasks_md(&fs, root, &initial).unwrap();
         let shrunk = synth_body(2, 0);
         let wrote = write_project_tasks_md(&fs, root, &shrunk).unwrap();
-        assert!(wrote, "shrink guard must not fire for small existing blocks");
+        assert!(
+            wrote,
+            "shrink guard must not fire for small existing blocks"
+        );
 
         let after = std::fs::read_to_string(root.join("tasks.md")).unwrap();
         assert_eq!(count_block_tasks(&after), 2);

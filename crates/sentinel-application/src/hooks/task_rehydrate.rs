@@ -306,11 +306,8 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
         ));
     }
 
-    let instruction = format_rehydrate_instruction(
-        incomplete.len(),
-        has_blocking,
-        ctx.autopilot_enabled(),
-    );
+    let instruction =
+        format_rehydrate_instruction(incomplete.len(), has_blocking, ctx.autopilot_enabled());
     context.push_str(&instruction);
 
     HookOutput::inject_context(HookEvent::SessionStart, &context)

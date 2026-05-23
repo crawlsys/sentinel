@@ -105,8 +105,7 @@ pub fn read_events(path: &Path) -> Result<Vec<CycleTimeEvent>> {
     if !path.exists() {
         return Ok(Vec::new());
     }
-    let raw = fs::read_to_string(path)
-        .with_context(|| format!("read {}", path.display()))?;
+    let raw = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
     let mut out = Vec::new();
     for (n, line) in raw.lines().enumerate() {
         let line = line.trim();
@@ -239,7 +238,12 @@ pub fn compute_stage_thresholds(
     cycle_time_path: &Path,
     summary_path: &Path,
 ) -> Result<StageThresholdSummary> {
-    compute_stage_thresholds_at(cycle_time_path, summary_path, Utc::now(), DEFAULT_WINDOW_DAYS)
+    compute_stage_thresholds_at(
+        cycle_time_path,
+        summary_path,
+        Utc::now(),
+        DEFAULT_WINDOW_DAYS,
+    )
 }
 
 /// SEN-17: per-(team, stage) mean + p50 + p75 of dwell time. Same input
@@ -315,7 +319,12 @@ pub fn compute_per_stage_breakdown(
     cycle_time_path: &Path,
     summary_path: &Path,
 ) -> Result<PerStageBreakdownSummary> {
-    compute_per_stage_breakdown_at(cycle_time_path, summary_path, Utc::now(), DEFAULT_WINDOW_DAYS)
+    compute_per_stage_breakdown_at(
+        cycle_time_path,
+        summary_path,
+        Utc::now(),
+        DEFAULT_WINDOW_DAYS,
+    )
 }
 
 /// Inclusive-rank percentile over a pre-sorted slice. Empty → 0.0.
@@ -352,7 +361,13 @@ mod tests {
     use crate::cycle_time::append_to;
     use chrono::TimeZone;
 
-    fn ev(issue: &str, team: Option<&str>, from: Option<&str>, to: &str, ts: &str) -> CycleTimeEvent {
+    fn ev(
+        issue: &str,
+        team: Option<&str>,
+        from: Option<&str>,
+        to: &str,
+        ts: &str,
+    ) -> CycleTimeEvent {
         CycleTimeEvent {
             issue_id: issue.to_string(),
             team: team.map(str::to_string),
@@ -376,14 +391,38 @@ mod tests {
     fn read_skips_malformed_lines() {
         let tmp = tempfile::tempdir().unwrap();
         let p = tmp.path().join("cycle-time.jsonl");
-        append_to(&p, &ev("X-1", Some("X"), Some("Todo"), "In Progress", "2026-05-01T10:00:00Z")).unwrap();
+        append_to(
+            &p,
+            &ev(
+                "X-1",
+                Some("X"),
+                Some("Todo"),
+                "In Progress",
+                "2026-05-01T10:00:00Z",
+            ),
+        )
+        .unwrap();
         std::fs::write(
             &p,
             format!(
                 "{}\n{}\n{}\n",
-                serde_json::to_string(&ev("X-1", Some("X"), Some("Todo"), "In Progress", "2026-05-01T10:00:00Z")).unwrap(),
+                serde_json::to_string(&ev(
+                    "X-1",
+                    Some("X"),
+                    Some("Todo"),
+                    "In Progress",
+                    "2026-05-01T10:00:00Z"
+                ))
+                .unwrap(),
                 "{not-json",
-                serde_json::to_string(&ev("X-1", Some("X"), Some("In Progress"), "Code Review", "2026-05-01T12:00:00Z")).unwrap(),
+                serde_json::to_string(&ev(
+                    "X-1",
+                    Some("X"),
+                    Some("In Progress"),
+                    "Code Review",
+                    "2026-05-01T12:00:00Z"
+                ))
+                .unwrap(),
             ),
         )
         .unwrap();
@@ -396,8 +435,20 @@ mod tests {
         // Two events for X-1: enter In Progress at T, enter Code Review at T+3h.
         // Pair attributes 3h to "In Progress".
         let events = vec![
-            ev("X-1", Some("X"), Some("Todo"), "In Progress", "2026-05-01T10:00:00Z"),
-            ev("X-1", Some("X"), Some("In Progress"), "Code Review", "2026-05-01T13:00:00Z"),
+            ev(
+                "X-1",
+                Some("X"),
+                Some("Todo"),
+                "In Progress",
+                "2026-05-01T10:00:00Z",
+            ),
+            ev(
+                "X-1",
+                Some("X"),
+                Some("In Progress"),
+                "Code Review",
+                "2026-05-01T13:00:00Z",
+            ),
         ];
         let pairs = pair_transitions(&events);
         assert_eq!(pairs.len(), 1);
@@ -411,16 +462,46 @@ mod tests {
     fn pair_transitions_isolates_per_issue() {
         // Two issues, each with two events. Pair count should be 2.
         let events = vec![
-            ev("X-1", Some("X"), Some("Todo"), "In Progress", "2026-05-01T10:00:00Z"),
-            ev("Y-1", Some("Y"), Some("Todo"), "In Progress", "2026-05-01T11:00:00Z"),
-            ev("X-1", Some("X"), Some("In Progress"), "Code Review", "2026-05-01T12:00:00Z"),
-            ev("Y-1", Some("Y"), Some("In Progress"), "Code Review", "2026-05-01T14:00:00Z"),
+            ev(
+                "X-1",
+                Some("X"),
+                Some("Todo"),
+                "In Progress",
+                "2026-05-01T10:00:00Z",
+            ),
+            ev(
+                "Y-1",
+                Some("Y"),
+                Some("Todo"),
+                "In Progress",
+                "2026-05-01T11:00:00Z",
+            ),
+            ev(
+                "X-1",
+                Some("X"),
+                Some("In Progress"),
+                "Code Review",
+                "2026-05-01T12:00:00Z",
+            ),
+            ev(
+                "Y-1",
+                Some("Y"),
+                Some("In Progress"),
+                "Code Review",
+                "2026-05-01T14:00:00Z",
+            ),
         ];
         let pairs = pair_transitions(&events);
         assert_eq!(pairs.len(), 2);
         // Each pair attributes 2h (X) and 3h (Y) to "In Progress".
-        let x = pairs.iter().find(|(t, _, _)| t.as_deref() == Some("X")).unwrap();
-        let y = pairs.iter().find(|(t, _, _)| t.as_deref() == Some("Y")).unwrap();
+        let x = pairs
+            .iter()
+            .find(|(t, _, _)| t.as_deref() == Some("X"))
+            .unwrap();
+        let y = pairs
+            .iter()
+            .find(|(t, _, _)| t.as_deref() == Some("Y"))
+            .unwrap();
         assert!((x.2 - 2.0).abs() < f64::EPSILON);
         assert!((y.2 - 3.0).abs() < f64::EPSILON);
     }
@@ -450,8 +531,16 @@ mod tests {
             let id = format!("X-{}", i + 1);
             let t0 = (base + Duration::hours(i64::try_from(i).unwrap() * 10)).to_rfc3339();
             let t1 = (base + Duration::hours(i64::try_from(i).unwrap() * 10 + dwell)).to_rfc3339();
-            append_to(&in_path, &ev(&id, Some("X"), Some("Todo"), "In Progress", &t0)).unwrap();
-            append_to(&in_path, &ev(&id, Some("X"), Some("In Progress"), "Code Review", &t1)).unwrap();
+            append_to(
+                &in_path,
+                &ev(&id, Some("X"), Some("Todo"), "In Progress", &t0),
+            )
+            .unwrap();
+            append_to(
+                &in_path,
+                &ev(&id, Some("X"), Some("In Progress"), "Code Review", &t1),
+            )
+            .unwrap();
         }
         let s = compute_stage_thresholds_at(&in_path, &out_path, now, 30).unwrap();
         let in_prog = s
@@ -475,13 +564,29 @@ mod tests {
         // Old transitions (45 days ago): excluded.
         let old0 = (now - Duration::days(45)).to_rfc3339();
         let old1 = (now - Duration::days(45) + Duration::hours(1)).to_rfc3339();
-        append_to(&in_path, &ev("X-1", Some("X"), Some("Todo"), "In Progress", &old0)).unwrap();
-        append_to(&in_path, &ev("X-1", Some("X"), Some("In Progress"), "Code Review", &old1)).unwrap();
+        append_to(
+            &in_path,
+            &ev("X-1", Some("X"), Some("Todo"), "In Progress", &old0),
+        )
+        .unwrap();
+        append_to(
+            &in_path,
+            &ev("X-1", Some("X"), Some("In Progress"), "Code Review", &old1),
+        )
+        .unwrap();
         // Recent: included.
         let new0 = (now - Duration::days(3)).to_rfc3339();
         let new1 = (now - Duration::days(3) + Duration::hours(5)).to_rfc3339();
-        append_to(&in_path, &ev("X-2", Some("X"), Some("Todo"), "In Progress", &new0)).unwrap();
-        append_to(&in_path, &ev("X-2", Some("X"), Some("In Progress"), "Code Review", &new1)).unwrap();
+        append_to(
+            &in_path,
+            &ev("X-2", Some("X"), Some("Todo"), "In Progress", &new0),
+        )
+        .unwrap();
+        append_to(
+            &in_path,
+            &ev("X-2", Some("X"), Some("In Progress"), "Code Review", &new1),
+        )
+        .unwrap();
         let s = compute_stage_thresholds_at(&in_path, &out_path, now, 30).unwrap();
         let in_prog = s
             .thresholds
@@ -505,8 +610,16 @@ mod tests {
             let id = format!("X-{}", i + 1);
             let t0 = (base + Duration::hours(i64::try_from(i).unwrap() * 20)).to_rfc3339();
             let t1 = (base + Duration::hours(i64::try_from(i).unwrap() * 20 + dwell)).to_rfc3339();
-            append_to(&in_path, &ev(&id, Some("X"), Some("In Progress"), "Code Review", &t0)).unwrap();
-            append_to(&in_path, &ev(&id, Some("X"), Some("Code Review"), "QA Testing", &t1)).unwrap();
+            append_to(
+                &in_path,
+                &ev(&id, Some("X"), Some("In Progress"), "Code Review", &t0),
+            )
+            .unwrap();
+            append_to(
+                &in_path,
+                &ev(&id, Some("X"), Some("Code Review"), "QA Testing", &t1),
+            )
+            .unwrap();
         }
         let s = compute_per_stage_breakdown_at(&in_path, &out_path, now, 30).unwrap();
         let review = s

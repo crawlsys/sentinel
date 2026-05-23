@@ -188,11 +188,9 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     // Summary is the last marker line, which is whatever the
     // session most recently surfaced as visible work.
     let summary = log_lines.last().map(|s| truncate_summary(s, 140));
-    crate::legatus_client::escalate_fire_and_forget(
-        sentinel_legatus::EscalationKind::Completed {
-            summary: summary.clone(),
-        },
-    );
+    crate::legatus_client::escalate_fire_and_forget(sentinel_legatus::EscalationKind::Completed {
+        summary: summary.clone(),
+    });
 
     // Per-instruction Result reporting: for every operator-relayed
     // instruction the consul_inbox hook drained during this

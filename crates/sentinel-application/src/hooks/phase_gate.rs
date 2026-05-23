@@ -1887,7 +1887,10 @@ mod tests {
             ".claude/skills/linear/phases/nonexistent-{}.md",
             uuid::Uuid::new_v4(),
         ));
-        assert!(!fake_path.exists(), "test setup: random path should not exist");
+        assert!(
+            !fake_path.exists(),
+            "test setup: random path should not exist"
+        );
 
         let input = HookInput {
             tool_name: Some("Read".to_string()),
@@ -1899,10 +1902,7 @@ mod tests {
         let output = process(&input, &mut state, &workflows, &test_fs());
         assert!(output.blocked.is_none());
         // Untrusted → not recorded.
-        let file_name = fake_path
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap();
+        let file_name = fake_path.file_name().and_then(|s| s.to_str()).unwrap();
         assert!(!state.has_phase_been_read("linear", file_name));
         // Untrusted → no workflow advance.
         assert!(

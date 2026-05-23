@@ -124,7 +124,10 @@ impl std::fmt::Display for SsrfError {
                 write!(f, "SSRF guard: host '{host}' resolves to {reason}")
             }
             Self::Reserved { host, reason } => {
-                write!(f, "SSRF guard: host '{host}' is in reserved range — {reason}")
+                write!(
+                    f,
+                    "SSRF guard: host '{host}' is in reserved range — {reason}"
+                )
             }
         }
     }
@@ -193,9 +196,7 @@ pub fn check_host(host: &str, policy: &SsrfPolicy) -> Result<(), SsrfError> {
             // wrapper by its embedded v4 — the user thinks of these
             // as private addresses, not "obscure IPv6 thing".
             let effective = match ip {
-                IpAddr::V6(v6) => v6
-                    .to_ipv4_mapped()
-                    .map_or(ip, IpAddr::V4),
+                IpAddr::V6(v6) => v6.to_ipv4_mapped().map_or(ip, IpAddr::V4),
                 IpAddr::V4(_) => ip,
             };
             let is_private_ip = match effective {
@@ -294,10 +295,7 @@ mod tests {
 
     #[test]
     fn empty_host_rejected() {
-        assert!(matches!(
-            check_host("", &pol()),
-            Err(SsrfError::EmptyHost)
-        ));
+        assert!(matches!(check_host("", &pol()), Err(SsrfError::EmptyHost)));
         assert!(matches!(
             check_host("   ", &pol()),
             Err(SsrfError::EmptyHost)

@@ -151,8 +151,7 @@ mod tests {
 
     #[test]
     fn with_axes_overrides_defaults() {
-        let auditor =
-            StaticAuditor::pass(0.9).with_axes(AuditorAxes::new(0.1, 0.2, 0.3, 0.4));
+        let auditor = StaticAuditor::pass(0.9).with_axes(AuditorAxes::new(0.1, 0.2, 0.3, 0.4));
         let verdict = auditor.score(&fixture_dry_run()).unwrap();
         assert!((verdict.axes.correctness - 0.1).abs() < f32::EPSILON);
         let (weakest, _) = verdict.axes.weakest_axis();

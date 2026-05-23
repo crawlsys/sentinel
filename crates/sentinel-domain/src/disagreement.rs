@@ -201,14 +201,7 @@ mod tests {
     #[test]
     fn new_marker_computes_consistent_hashes() {
         let v = sample_disagreement();
-        let m = DisagreementMarker::new(
-            "linear",
-            "sess-1",
-            "claim.3",
-            "claim",
-            v,
-            "abc123",
-        );
+        let m = DisagreementMarker::new("linear", "sess-1", "claim.3", "claim", v, "abc123");
         assert!(m.verify_self());
         assert!(!m.combined_hash.is_empty());
         assert!(!m.multi_judge_hash.is_empty());
@@ -217,14 +210,7 @@ mod tests {
     #[test]
     fn tamper_with_multi_judge_breaks_verify() {
         let v = sample_disagreement();
-        let mut m = DisagreementMarker::new(
-            "linear",
-            "sess-1",
-            "claim.3",
-            "claim",
-            v,
-            "abc123",
-        );
+        let mut m = DisagreementMarker::new("linear", "sess-1", "claim.3", "claim", v, "abc123");
         // Mutate the captured verdict — multi_judge_hash no longer
         // matches the recomputed value.
         m.multi_judge.sufficient = !m.multi_judge.sufficient;
@@ -234,14 +220,7 @@ mod tests {
     #[test]
     fn tamper_with_step_id_breaks_verify() {
         let v = sample_disagreement();
-        let mut m = DisagreementMarker::new(
-            "linear",
-            "sess-1",
-            "claim.3",
-            "claim",
-            v,
-            "abc123",
-        );
+        let mut m = DisagreementMarker::new("linear", "sess-1", "claim.3", "claim", v, "abc123");
         m.step_id = "claim.999".to_string();
         // multi_judge_hash still matches but combined_hash doesn't.
         assert!(!m.verify_self());
@@ -290,14 +269,7 @@ mod tests {
     #[test]
     fn marker_serde_round_trip() {
         let v = sample_disagreement();
-        let m = DisagreementMarker::new(
-            "linear",
-            "sess-1",
-            "claim.3",
-            "claim",
-            v,
-            "abc123",
-        );
+        let m = DisagreementMarker::new("linear", "sess-1", "claim.3", "claim", v, "abc123");
         let json = serde_json::to_string(&m).unwrap();
         let back: DisagreementMarker = serde_json::from_str(&json).unwrap();
         assert!(back.verify_self());

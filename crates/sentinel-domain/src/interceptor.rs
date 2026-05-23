@@ -658,11 +658,7 @@ mod tests {
 
     #[test]
     fn args_aware_allows_commit_with_filter_branch_in_message() {
-        let args = s(&[
-            "commit",
-            "-m",
-            "feat: detect filter-branch usage and warn",
-        ]);
+        let args = s(&["commit", "-m", "feat: detect filter-branch usage and warn"]);
         assert_eq!(evaluate_git_args(&args), InterceptorPolicy::Allow);
     }
 
@@ -678,10 +674,7 @@ mod tests {
 
     #[test]
     fn args_aware_allows_equals_form_message_flag() {
-        let args = s(&[
-            "commit",
-            "--message=feat: rebase -i workflow doc update",
-        ]);
+        let args = s(&["commit", "--message=feat: rebase -i workflow doc update"]);
         assert_eq!(evaluate_git_args(&args), InterceptorPolicy::Allow);
     }
 

@@ -448,9 +448,7 @@ impl McpHandler {
                 match serde_json::from_value(claim_raw.clone()) {
                     Ok(c) => c,
                     Err(e) => {
-                        return McpToolResult::err(format!(
-                            "Invalid 'evidence_claim' shape: {e}"
-                        ));
+                        return McpToolResult::err(format!("Invalid 'evidence_claim' shape: {e}"));
                     }
                 };
             let Some(registry) = self.evidence_adapters.as_ref() else {
@@ -470,9 +468,7 @@ impl McpHandler {
                     let receipt_json = match serde_json::to_value(&receipt) {
                         Ok(v) => v,
                         Err(e) => {
-                            return McpToolResult::err(format!(
-                                "Receipt serialization error: {e}"
-                            ));
+                            return McpToolResult::err(format!("Receipt serialization error: {e}"));
                         }
                     };
                     // `Evidence.custom` is a `serde_json::Value`. The
@@ -689,9 +685,7 @@ impl McpHandler {
                 continue;
             }
 
-            let all_sufficient = step_entries
-                .iter()
-                .all(|s| s.judge_verdict.sufficient)
+            let all_sufficient = step_entries.iter().all(|s| s.judge_verdict.sufficient)
                 && chain.proofs.iter().all(|p| p.judge_verdict.sufficient);
             if successful_only && !all_sufficient {
                 continue;
@@ -880,7 +874,10 @@ mod step_tools_tests {
         let proof = result.content;
         assert_eq!(proof.get("step_id").and_then(|v| v.as_str()), Some("1"));
         assert_eq!(proof.get("skill").and_then(|v| v.as_str()), Some("linear"));
-        assert_eq!(proof.get("phase_id").and_then(|v| v.as_str()), Some("claim"));
+        assert_eq!(
+            proof.get("phase_id").and_then(|v| v.as_str()),
+            Some("claim")
+        );
         assert!(proof.get("combined_hash").is_some());
     }
 
@@ -920,7 +917,7 @@ mod step_tools_tests {
     async fn get_step_proof_requires_skill_and_step_id() {
         let handler = handler_with_chain().await;
         for bad_args in [
-            serde_json::json!({}),                   // missing both
+            serde_json::json!({}),                  // missing both
             serde_json::json!({"skill": "linear"}), // missing step_id
             serde_json::json!({"step_id": "1"}),    // missing skill
         ] {
@@ -945,7 +942,10 @@ mod step_tools_tests {
             .await;
         assert!(result.success);
         let payload = result.content;
-        assert_eq!(payload.get("skill").and_then(|v| v.as_str()), Some("linear"));
+        assert_eq!(
+            payload.get("skill").and_then(|v| v.as_str()),
+            Some("linear")
+        );
         assert_eq!(payload.get("step_count").and_then(|v| v.as_u64()), Some(2));
         let steps = payload.get("steps").and_then(|v| v.as_array()).unwrap();
         assert_eq!(steps.len(), 2);
@@ -953,8 +953,14 @@ mod step_tools_tests {
         assert_eq!(steps[0].get("step_id").and_then(|v| v.as_str()), Some("1"));
         assert_eq!(steps[1].get("step_id").and_then(|v| v.as_str()), Some("2"));
         // head_hash matches the last step's combined_hash.
-        let last_combined = steps[1].get("combined_hash").and_then(|v| v.as_str()).unwrap();
-        assert_eq!(payload.get("head_hash").and_then(|v| v.as_str()), Some(last_combined));
+        let last_combined = steps[1]
+            .get("combined_hash")
+            .and_then(|v| v.as_str())
+            .unwrap();
+        assert_eq!(
+            payload.get("head_hash").and_then(|v| v.as_str()),
+            Some(last_combined)
+        );
     }
 
     #[tokio::test]
@@ -981,10 +987,16 @@ mod step_tools_tests {
             .await;
         assert!(result.success);
         let payload = result.content;
-        assert_eq!(payload.get("skill").and_then(|v| v.as_str()), Some("linear"));
+        assert_eq!(
+            payload.get("skill").and_then(|v| v.as_str()),
+            Some("linear")
+        );
         assert_eq!(payload.get("step_count").and_then(|v| v.as_u64()), Some(2));
         assert_eq!(payload.get("phase_count").and_then(|v| v.as_u64()), Some(0));
-        assert_eq!(payload.get("chain_length").and_then(|v| v.as_u64()), Some(2));
+        assert_eq!(
+            payload.get("chain_length").and_then(|v| v.as_u64()),
+            Some(2)
+        );
         let last = payload.get("last_step").unwrap();
         assert_eq!(last.get("step_id").and_then(|v| v.as_str()), Some("2"));
         assert_eq!(last.get("phase_id").and_then(|v| v.as_str()), Some("claim"));
@@ -1024,7 +1036,10 @@ mod step_tools_tests {
         let proof = result.content;
         assert_eq!(proof.get("skill").and_then(|v| v.as_str()), Some("linear"));
         assert_eq!(proof.get("step_id").and_then(|v| v.as_str()), Some("1"));
-        assert_eq!(proof.get("phase_id").and_then(|v| v.as_str()), Some("claim"));
+        assert_eq!(
+            proof.get("phase_id").and_then(|v| v.as_str()),
+            Some("claim")
+        );
         assert!(proof.get("combined_hash").is_some());
         // Default judge_model is sonnet (OpenRouter: openai/gpt-5.4).
         assert_eq!(
@@ -1062,7 +1077,10 @@ mod step_tools_tests {
             Some("firefly-pro"),
         );
         assert_eq!(
-            proof.get("artifact").and_then(|v| v.get("pr_url")).and_then(|v| v.as_str()),
+            proof
+                .get("artifact")
+                .and_then(|v| v.get("pr_url"))
+                .and_then(|v| v.as_str()),
             Some("https://github.com/foo/bar/pull/9"),
         );
         assert_eq!(
@@ -1097,7 +1115,10 @@ mod step_tools_tests {
 
         assert!(!result.success);
         let err = result.error.unwrap();
-        assert!(err.contains("insufficient"), "error mentions insufficient: {err}");
+        assert!(
+            err.contains("insufficient"),
+            "error mentions insufficient: {err}"
+        );
         // No chain mutation on failure.
         let s = state.read().await;
         assert!(!s.proof_chains.contains_key("linear"));
@@ -1112,10 +1133,7 @@ mod step_tools_tests {
         // Each entry below is missing exactly one required field.
         let cases = [
             (serde_json::json!({}), "skill"),
-            (
-                serde_json::json!({"skill": "linear"}),
-                "phase_id",
-            ),
+            (serde_json::json!({"skill": "linear"}), "phase_id"),
             (
                 serde_json::json!({"skill": "linear", "phase_id": "claim"}),
                 "step_id",
@@ -1172,7 +1190,11 @@ mod step_tools_tests {
             .await;
 
         assert!(!result.success);
-        assert!(result.error.as_deref().unwrap().contains("bogus-model-name"));
+        assert!(result
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("bogus-model-name"));
     }
 
     #[tokio::test]
@@ -1245,14 +1267,23 @@ mod step_tools_tests {
             .await;
         assert!(result.success);
         let payload = result.content;
-        assert_eq!(payload.get("scope").and_then(|v| v.as_str()), Some("live-session"));
-        assert_eq!(payload.get("total_matched").and_then(|v| v.as_u64()), Some(1));
+        assert_eq!(
+            payload.get("scope").and_then(|v| v.as_str()),
+            Some("live-session")
+        );
+        assert_eq!(
+            payload.get("total_matched").and_then(|v| v.as_u64()),
+            Some(1)
+        );
         let chains = payload.get("chains").and_then(|v| v.as_array()).unwrap();
         assert_eq!(chains.len(), 1);
         let c0 = &chains[0];
         assert_eq!(c0.get("skill").and_then(|v| v.as_str()), Some("linear"));
         assert_eq!(c0.get("step_count").and_then(|v| v.as_u64()), Some(2));
-        assert_eq!(c0.get("all_sufficient").and_then(|v| v.as_bool()), Some(true));
+        assert_eq!(
+            c0.get("all_sufficient").and_then(|v| v.as_bool()),
+            Some(true)
+        );
         // step_sequence is the pattern signal — exact ordered coordinates.
         let seq = c0.get("step_sequence").and_then(|v| v.as_array()).unwrap();
         let labels: Vec<&str> = seq.iter().filter_map(|v| v.as_str()).collect();
@@ -1270,8 +1301,15 @@ mod step_tools_tests {
             .await;
         assert!(result.success);
         let payload = result.content;
-        assert_eq!(payload.get("total_matched").and_then(|v| v.as_u64()), Some(0));
-        assert!(payload.get("chains").and_then(|v| v.as_array()).unwrap().is_empty());
+        assert_eq!(
+            payload.get("total_matched").and_then(|v| v.as_u64()),
+            Some(0)
+        );
+        assert!(payload
+            .get("chains")
+            .and_then(|v| v.as_array())
+            .unwrap()
+            .is_empty());
     }
 
     #[tokio::test]
@@ -1299,7 +1337,10 @@ mod step_tools_tests {
             .await;
         assert!(result2.success);
         assert_eq!(
-            result2.content.get("total_matched").and_then(|v| v.as_u64()),
+            result2
+                .content
+                .get("total_matched")
+                .and_then(|v| v.as_u64()),
             Some(1),
         );
     }
@@ -1338,7 +1379,10 @@ mod step_tools_tests {
             .await;
         assert!(result.success);
         let payload = result.content;
-        assert_eq!(payload.get("total_matched").and_then(|v| v.as_u64()), Some(3));
+        assert_eq!(
+            payload.get("total_matched").and_then(|v| v.as_u64()),
+            Some(3)
+        );
         let chains = payload.get("chains").and_then(|v| v.as_array()).unwrap();
         assert_eq!(chains.len(), 2, "max_results caps returned chains");
     }
@@ -1359,7 +1403,11 @@ mod step_tools_tests {
             })
             .await;
         assert!(result.success);
-        let chains = result.content.get("chains").and_then(|v| v.as_array()).unwrap();
+        let chains = result
+            .content
+            .get("chains")
+            .and_then(|v| v.as_array())
+            .unwrap();
         assert_eq!(chains.len(), 1);
         assert_eq!(
             chains[0].get("all_sufficient").and_then(|v| v.as_bool()),
@@ -1540,8 +1588,14 @@ mod step_tools_tests {
                 result.error
             );
             let proof = result.content;
-            assert_eq!(proof.get("phase_id").and_then(|v| v.as_str()), Some(*phase_id));
-            assert_eq!(proof.get("step_id").and_then(|v| v.as_str()), Some(*step_id));
+            assert_eq!(
+                proof.get("phase_id").and_then(|v| v.as_str()),
+                Some(*phase_id)
+            );
+            assert_eq!(
+                proof.get("step_id").and_then(|v| v.as_str()),
+                Some(*step_id)
+            );
             let hash = proof
                 .get("combined_hash")
                 .and_then(|v| v.as_str())
@@ -1571,20 +1625,15 @@ mod step_tools_tests {
             })
             .collect();
 
-        let phase_sequence: Vec<&str> =
-            step_entries.iter().map(|s| s.phase_id.as_str()).collect();
-        let expected_sequence: Vec<&str> =
-            pipeline.iter().map(|(p, _, _, _)| *p).collect();
+        let phase_sequence: Vec<&str> = step_entries.iter().map(|s| s.phase_id.as_str()).collect();
+        let expected_sequence: Vec<&str> = pipeline.iter().map(|(p, _, _, _)| *p).collect();
         assert_eq!(phase_sequence, expected_sequence);
 
-        let step_sequence: Vec<&str> =
-            step_entries.iter().map(|s| s.step_id.as_str()).collect();
-        let expected_step_sequence: Vec<&str> =
-            pipeline.iter().map(|(_, s, _, _)| *s).collect();
+        let step_sequence: Vec<&str> = step_entries.iter().map(|s| s.step_id.as_str()).collect();
+        let expected_step_sequence: Vec<&str> = pipeline.iter().map(|(_, s, _, _)| *s).collect();
         assert_eq!(step_sequence, expected_step_sequence);
 
-        let unique_hashes: std::collections::HashSet<_> =
-            sealed_hashes.iter().collect();
+        let unique_hashes: std::collections::HashSet<_> = sealed_hashes.iter().collect();
         assert_eq!(
             unique_hashes.len(),
             sealed_hashes.len(),
@@ -1911,7 +1960,10 @@ mod step_tools_tests {
         assert_eq!(final_step.phase_id, "qa-handoff");
         assert_eq!(final_step.step_id, "3.5.6");
         assert_eq!(
-            final_step.artifact.get("new_state").and_then(|v| v.as_str()),
+            final_step
+                .artifact
+                .get("new_state")
+                .and_then(|v| v.as_str()),
             Some("Completed")
         );
 
@@ -1988,7 +2040,10 @@ mod step_tools_tests {
         // honest record is the whole point of proof chains — they
         // can't lie about what happened.
         assert_eq!(
-            final_step.artifact.get("new_state").and_then(|v| v.as_str()),
+            final_step
+                .artifact
+                .get("new_state")
+                .and_then(|v| v.as_str()),
             Some("QA Failed")
         );
         assert!(
@@ -2165,8 +2220,7 @@ mod step_tools_tests {
                 _ => None,
             })
             .collect();
-        let unique_hashes: std::collections::HashSet<&str> =
-            hashes.iter().copied().collect();
+        let unique_hashes: std::collections::HashSet<&str> = hashes.iter().copied().collect();
         assert_eq!(
             unique_hashes.len(),
             hashes.len(),
@@ -2240,9 +2294,7 @@ mod step_tools_tests {
         // wire-in path without needing a real GitHub/Browserbase adapter.
         let state = Arc::new(RwLock::new(SessionState::new("bible-receipt")));
         let engine = Arc::new(ProofEngine::new(state.clone(), Arc::new(StubJudge)));
-        let registry = Arc::new(
-            crate::evidence_adapters::EvidenceAdapterRegistry::with_fallback(),
-        );
+        let registry = Arc::new(crate::evidence_adapters::EvidenceAdapterRegistry::with_fallback());
         let handler = McpHandler::new(state.clone(), engine).with_evidence_adapters(registry);
 
         let result = handler
@@ -2571,7 +2623,11 @@ mod step_tools_tests {
                 }),
             })
             .await;
-        assert!(result.success, "non-matching verifier must not block: {:?}", result.error);
+        assert!(
+            result.success,
+            "non-matching verifier must not block: {:?}",
+            result.error
+        );
     }
 
     #[tokio::test]
@@ -2580,9 +2636,7 @@ mod step_tools_tests {
         // a receipt in → verifier sees it → seal proceeds.
         let state = Arc::new(RwLock::new(SessionState::new("sv-bibled")));
         let engine = Arc::new(ProofEngine::new(state, Arc::new(StubJudge)));
-        let registry = Arc::new(
-            crate::evidence_adapters::EvidenceAdapterRegistry::with_fallback(),
-        );
+        let registry = Arc::new(crate::evidence_adapters::EvidenceAdapterRegistry::with_fallback());
         let req = sentinel_domain::step_verifier::StepVerifierRequirement::provenance_only(
             "linear",
             "qa-handoff",
@@ -2612,7 +2666,11 @@ mod step_tools_tests {
                 }),
             })
             .await;
-        assert!(result.success, "verifier should accept the bibled receipt: {:?}", result.error);
+        assert!(
+            result.success,
+            "verifier should accept the bibled receipt: {:?}",
+            result.error
+        );
     }
 
     #[tokio::test]
@@ -2627,9 +2685,8 @@ mod step_tools_tests {
             "3.5.5",
             "browserbase",
         );
-        let handler =
-            McpHandler::new(Arc::new(RwLock::new(SessionState::new("x"))), engine)
-                .with_step_verifiers(vec![req]);
+        let handler = McpHandler::new(Arc::new(RwLock::new(SessionState::new("x"))), engine)
+            .with_step_verifiers(vec![req]);
 
         let result = handler
             .handle(McpToolCall {
@@ -2664,9 +2721,8 @@ mod step_tools_tests {
             "3.5.5",
             "fake_failing_adapter",
         );
-        let handler =
-            McpHandler::new(Arc::new(RwLock::new(SessionState::new("x"))), engine)
-                .with_step_verifiers(vec![req]);
+        let handler = McpHandler::new(Arc::new(RwLock::new(SessionState::new("x"))), engine)
+            .with_step_verifiers(vec![req]);
 
         // Pre-build an "evidence" object with a verified=false receipt
         // manually (bypasses BIBLE wireup; lets us simulate "the

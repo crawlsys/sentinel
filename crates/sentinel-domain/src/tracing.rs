@@ -130,13 +130,15 @@ impl std::fmt::Display for TraceParseError {
                 f,
                 "trace_id must be 32 lowercase hex chars and not all-zero",
             ),
-            Self::InvalidSpanId => write!(
-                f,
-                "span_id must be 16 lowercase hex chars and not all-zero",
-            ),
+            Self::InvalidSpanId => {
+                write!(f, "span_id must be 16 lowercase hex chars and not all-zero",)
+            }
             Self::InvalidFlags => write!(f, "flags must be exactly 2 hex chars"),
             Self::NonHexCharacter => {
-                write!(f, "trace_id / span_id / flags contained a non-hex character")
+                write!(
+                    f,
+                    "trace_id / span_id / flags contained a non-hex character"
+                )
             }
             Self::MalformedTracestateEntry(s) => {
                 write!(f, "malformed tracestate entry '{s}' (expected key=value)")
@@ -196,7 +198,9 @@ impl TraceContext {
 
         let trace_id = parts[1];
         if trace_id.len() != TRACE_ID_HEX_LEN
-            || trace_id.chars().any(|c| !c.is_ascii_hexdigit() || c.is_ascii_uppercase())
+            || trace_id
+                .chars()
+                .any(|c| !c.is_ascii_hexdigit() || c.is_ascii_uppercase())
         {
             // Distinguish "wrong length" from "non-hex" for clearer errors.
             if trace_id.chars().any(|c| !c.is_ascii_hexdigit()) {
@@ -210,7 +214,9 @@ impl TraceContext {
 
         let span_id = parts[2];
         if span_id.len() != SPAN_ID_HEX_LEN
-            || span_id.chars().any(|c| !c.is_ascii_hexdigit() || c.is_ascii_uppercase())
+            || span_id
+                .chars()
+                .any(|c| !c.is_ascii_hexdigit() || c.is_ascii_uppercase())
         {
             if span_id.chars().any(|c| !c.is_ascii_hexdigit()) {
                 return Err(TraceParseError::NonHexCharacter);
@@ -225,8 +231,7 @@ impl TraceContext {
         if flags_str.len() != 2 || flags_str.chars().any(|c| !c.is_ascii_hexdigit()) {
             return Err(TraceParseError::InvalidFlags);
         }
-        let flags = u8::from_str_radix(flags_str, 16)
-            .map_err(|_| TraceParseError::InvalidFlags)?;
+        let flags = u8::from_str_radix(flags_str, 16).map_err(|_| TraceParseError::InvalidFlags)?;
 
         Ok(Self {
             trace_id: trace_id.to_string(),
@@ -448,10 +453,7 @@ mod tests {
     #[test]
     fn rejects_malformed_tracestate_entry() {
         let err = TraceContext::parse_tracestate("noequalshere").unwrap_err();
-        assert!(matches!(
-            err,
-            TraceParseError::MalformedTracestateEntry(_)
-        ));
+        assert!(matches!(err, TraceParseError::MalformedTracestateEntry(_)));
     }
 
     #[test]
@@ -460,10 +462,7 @@ mod tests {
         let many: Vec<String> = (0..40).map(|i| format!("k{i}=v{i}")).collect();
         let s = many.join(",");
         let err = TraceContext::parse_tracestate(&s).unwrap_err();
-        assert!(matches!(
-            err,
-            TraceParseError::TracestateTooManyEntries(40)
-        ));
+        assert!(matches!(err, TraceParseError::TracestateTooManyEntries(40)));
     }
 
     // ── to_traceparent / to_tracestate round-trip ────────────────────

@@ -304,7 +304,10 @@ impl std::fmt::Display for SignatureError {
         match self {
             Self::InvalidEncoding => write!(f, "signature is not valid hex"),
             Self::InvalidLength => write!(f, "signature is not 64 bytes (Ed25519 length)"),
-            Self::VerificationFailed => write!(f, "signature does not verify against the supplied public key"),
+            Self::VerificationFailed => write!(
+                f,
+                "signature does not verify against the supplied public key"
+            ),
         }
     }
 }
@@ -430,7 +433,13 @@ mod tests {
 
     #[test]
     fn verify_self_rejects_evidence_tamper() {
-        let mut p = make_step("1", "claim", "linear", GENESIS_HASH, serde_json::Value::Null);
+        let mut p = make_step(
+            "1",
+            "claim",
+            "linear",
+            GENESIS_HASH,
+            serde_json::Value::Null,
+        );
         // Mutate evidence after the hash was sealed.
         p.evidence.phase_file_read = !p.evidence.phase_file_read;
         assert!(!p.verify_self());
@@ -453,14 +462,26 @@ mod tests {
 
     #[test]
     fn verify_self_rejects_combined_hash_tamper() {
-        let mut p = make_step("1", "claim", "linear", GENESIS_HASH, serde_json::Value::Null);
+        let mut p = make_step(
+            "1",
+            "claim",
+            "linear",
+            GENESIS_HASH,
+            serde_json::Value::Null,
+        );
         p.combined_hash = "0".repeat(64);
         assert!(!p.verify_self());
     }
 
     #[test]
     fn verify_self_rejects_backwards_timestamps() {
-        let mut p = make_step("1", "claim", "linear", GENESIS_HASH, serde_json::Value::Null);
+        let mut p = make_step(
+            "1",
+            "claim",
+            "linear",
+            GENESIS_HASH,
+            serde_json::Value::Null,
+        );
         let now = Utc::now();
         p.started_at = now;
         p.completed_at = now - chrono::Duration::seconds(1);
@@ -480,7 +501,13 @@ mod tests {
 
     #[test]
     fn account_context_round_trips_through_serde() {
-        let mut p = make_step("1", "claim", "linear", GENESIS_HASH, serde_json::Value::Null);
+        let mut p = make_step(
+            "1",
+            "claim",
+            "linear",
+            GENESIS_HASH,
+            serde_json::Value::Null,
+        );
         p.account_context = Some("firefly-pro".into());
         let json = serde_json::to_string(&p).expect("serialize");
         let back: StepProof = serde_json::from_str(&json).expect("deserialize");
@@ -489,7 +516,13 @@ mod tests {
 
     #[test]
     fn account_context_omitted_when_none() {
-        let p = make_step("1", "claim", "linear", GENESIS_HASH, serde_json::Value::Null);
+        let p = make_step(
+            "1",
+            "claim",
+            "linear",
+            GENESIS_HASH,
+            serde_json::Value::Null,
+        );
         let json = serde_json::to_string(&p).expect("serialize");
         assert!(
             !json.contains("account_context"),
@@ -499,7 +532,13 @@ mod tests {
 
     #[test]
     fn signature_round_trips_through_serde() {
-        let mut p = make_step("1", "claim", "linear", GENESIS_HASH, serde_json::Value::Null);
+        let mut p = make_step(
+            "1",
+            "claim",
+            "linear",
+            GENESIS_HASH,
+            serde_json::Value::Null,
+        );
         p.signature = Some("abcd1234".into());
         let json = serde_json::to_string(&p).expect("serialize");
         let back: StepProof = serde_json::from_str(&json).expect("deserialize");
@@ -516,7 +555,13 @@ mod tests {
 
     #[test]
     fn sign_with_populates_signature_field() {
-        let mut p = make_step("1", "claim", "linear", GENESIS_HASH, serde_json::Value::Null);
+        let mut p = make_step(
+            "1",
+            "claim",
+            "linear",
+            GENESIS_HASH,
+            serde_json::Value::Null,
+        );
         assert!(p.signature.is_none(), "fresh proof has no signature");
         p.sign_with(&make_signing_key());
         assert!(p.signature.is_some(), "sign_with must populate signature");
@@ -528,9 +573,17 @@ mod tests {
     fn sign_then_verify_succeeds_with_matching_key() {
         let key = make_signing_key();
         let public = key.verifying_key();
-        let mut p = make_step("1", "claim", "linear", GENESIS_HASH, serde_json::Value::Null);
+        let mut p = make_step(
+            "1",
+            "claim",
+            "linear",
+            GENESIS_HASH,
+            serde_json::Value::Null,
+        );
         p.sign_with(&key);
-        let result = p.verify_signature(&public).expect("verify should not error");
+        let result = p
+            .verify_signature(&public)
+            .expect("verify should not error");
         assert!(result, "valid signature must verify true");
     }
 
@@ -539,9 +592,17 @@ mod tests {
         // Backwards compat: chains written before M1.7 have no signature.
         // verify_signature must distinguish "unsigned by policy" from
         // "signed but tampered" — return Ok(false), not Err.
-        let p = make_step("1", "claim", "linear", GENESIS_HASH, serde_json::Value::Null);
+        let p = make_step(
+            "1",
+            "claim",
+            "linear",
+            GENESIS_HASH,
+            serde_json::Value::Null,
+        );
         let public = make_signing_key().verifying_key();
-        let result = p.verify_signature(&public).expect("unsigned must not error");
+        let result = p
+            .verify_signature(&public)
+            .expect("unsigned must not error");
         assert!(!result, "unsigned proof returns Ok(false)");
     }
 
@@ -549,7 +610,13 @@ mod tests {
     fn verify_fails_with_wrong_public_key() {
         let key_a = make_signing_key();
         let key_b = SigningKey::from_bytes(&[7u8; 32]);
-        let mut p = make_step("1", "claim", "linear", GENESIS_HASH, serde_json::Value::Null);
+        let mut p = make_step(
+            "1",
+            "claim",
+            "linear",
+            GENESIS_HASH,
+            serde_json::Value::Null,
+        );
         p.sign_with(&key_a);
         // Verify against B's public key — must fail.
         let result = p.verify_signature(&key_b.verifying_key());
@@ -563,7 +630,13 @@ mod tests {
         // point of signing layered on top of hash chaining.
         let key = make_signing_key();
         let public = key.verifying_key();
-        let mut p = make_step("1", "claim", "linear", GENESIS_HASH, serde_json::Value::Null);
+        let mut p = make_step(
+            "1",
+            "claim",
+            "linear",
+            GENESIS_HASH,
+            serde_json::Value::Null,
+        );
         p.sign_with(&key);
         p.combined_hash = "0".repeat(64); // tamper
         let result = p.verify_signature(&public);
@@ -574,7 +647,13 @@ mod tests {
     fn verify_errors_on_malformed_signature_hex() {
         let key = make_signing_key();
         let public = key.verifying_key();
-        let mut p = make_step("1", "claim", "linear", GENESIS_HASH, serde_json::Value::Null);
+        let mut p = make_step(
+            "1",
+            "claim",
+            "linear",
+            GENESIS_HASH,
+            serde_json::Value::Null,
+        );
         p.signature = Some("not-valid-hex!!".into());
         let result = p.verify_signature(&public);
         assert_eq!(result, Err(SignatureError::InvalidEncoding));
@@ -584,7 +663,13 @@ mod tests {
     fn verify_errors_on_wrong_length_signature() {
         let key = make_signing_key();
         let public = key.verifying_key();
-        let mut p = make_step("1", "claim", "linear", GENESIS_HASH, serde_json::Value::Null);
+        let mut p = make_step(
+            "1",
+            "claim",
+            "linear",
+            GENESIS_HASH,
+            serde_json::Value::Null,
+        );
         // Hex-valid but only 32 bytes (half the required length).
         p.signature = Some("ab".repeat(32));
         let result = p.verify_signature(&public);
@@ -595,7 +680,13 @@ mod tests {
     fn signature_persists_through_serde_round_trip() {
         let key = make_signing_key();
         let public = key.verifying_key();
-        let mut p = make_step("1", "claim", "linear", GENESIS_HASH, serde_json::Value::Null);
+        let mut p = make_step(
+            "1",
+            "claim",
+            "linear",
+            GENESIS_HASH,
+            serde_json::Value::Null,
+        );
         p.sign_with(&key);
 
         // Round trip through JSON.
@@ -603,7 +694,9 @@ mod tests {
         let restored: StepProof = serde_json::from_str(&json).unwrap();
 
         // Restored proof must still verify against the same key.
-        assert!(restored.verify_signature(&public).expect("verify post-round-trip"));
+        assert!(restored
+            .verify_signature(&public)
+            .expect("verify post-round-trip"));
     }
 
     // ─── M4.5 trace_context tests ────────────────────────────────────
@@ -613,7 +706,13 @@ mod tests {
         // Fresh StepProofs constructed via make_step have no trace
         // context — that's the OTEL-off baseline. Existing chains
         // serialized before M4.5 deserialize with this same shape.
-        let p = make_step("1", "claim", "linear", GENESIS_HASH, serde_json::Value::Null);
+        let p = make_step(
+            "1",
+            "claim",
+            "linear",
+            GENESIS_HASH,
+            serde_json::Value::Null,
+        );
         assert!(p.trace_context.is_none());
     }
 
@@ -623,7 +722,13 @@ mod tests {
         // with OTEL off must be byte-identical to pre-M4.5 chains.
         // If this regresses, every chain on disk gets a `null`
         // field appended and verification breaks subtly.
-        let p = make_step("1", "claim", "linear", GENESIS_HASH, serde_json::Value::Null);
+        let p = make_step(
+            "1",
+            "claim",
+            "linear",
+            GENESIS_HASH,
+            serde_json::Value::Null,
+        );
         let json = serde_json::to_string(&p).unwrap();
         assert!(
             !json.contains("trace_context"),
@@ -670,8 +775,20 @@ mod tests {
         // must hash to the same combined_hash. Otherwise OTEL-on
         // sentinel and OTEL-off sentinel can't share chains.
         use crate::tracing::TraceContext;
-        let p1 = make_step("1", "claim", "linear", GENESIS_HASH, serde_json::Value::Null);
-        let mut p2 = make_step("1", "claim", "linear", GENESIS_HASH, serde_json::Value::Null);
+        let p1 = make_step(
+            "1",
+            "claim",
+            "linear",
+            GENESIS_HASH,
+            serde_json::Value::Null,
+        );
+        let mut p2 = make_step(
+            "1",
+            "claim",
+            "linear",
+            GENESIS_HASH,
+            serde_json::Value::Null,
+        );
         p2.trace_context = Some(TraceContext::new_root(
             "0af7651916cd43dd8448eb211c80319c",
             "b7ad6b7169203331",
@@ -694,7 +811,13 @@ mod tests {
         use crate::tracing::TraceContext;
         let key = make_signing_key();
         let public = key.verifying_key();
-        let mut p = make_step("1", "claim", "linear", GENESIS_HASH, serde_json::Value::Null);
+        let mut p = make_step(
+            "1",
+            "claim",
+            "linear",
+            GENESIS_HASH,
+            serde_json::Value::Null,
+        );
         p.sign_with(&key);
         assert!(p.verify_signature(&public).unwrap());
 

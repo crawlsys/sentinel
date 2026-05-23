@@ -193,10 +193,9 @@ impl std::fmt::Display for VerifierError {
                 "step verifier requires verified=true from adapter '{adapter}' \
                  but the supplied receipt has verified=false"
             ),
-            Self::MalformedReceipt { detail } => write!(
-                f,
-                "step verifier received a malformed receipt: {detail}"
-            ),
+            Self::MalformedReceipt { detail } => {
+                write!(f, "step verifier received a malformed receipt: {detail}")
+            }
         }
     }
 }
@@ -249,7 +248,10 @@ mod tests {
         let req = StepVerifierRequirement::new("linear", "qa-handoff", "3.5.5", "browserbase");
         let custom = good_receipt("filesystem", true);
         let err = req.check(&custom).unwrap_err();
-        assert!(matches!(err, VerifierError::WrongAdapter { .. }), "got: {err:?}");
+        assert!(
+            matches!(err, VerifierError::WrongAdapter { .. }),
+            "got: {err:?}"
+        );
     }
 
     #[test]
@@ -284,7 +286,10 @@ mod tests {
             "evidence_receipt": {"verified": true}
         });
         let err = req.check(&custom).unwrap_err();
-        assert!(matches!(err, VerifierError::MalformedReceipt { .. }), "got: {err:?}");
+        assert!(
+            matches!(err, VerifierError::MalformedReceipt { .. }),
+            "got: {err:?}"
+        );
     }
 
     #[test]
@@ -294,14 +299,19 @@ mod tests {
             "evidence_receipt": {"adapter_name": "browserbase"}
         });
         let err = req.check(&custom).unwrap_err();
-        assert!(matches!(err, VerifierError::MalformedReceipt { .. }), "got: {err:?}");
+        assert!(
+            matches!(err, VerifierError::MalformedReceipt { .. }),
+            "got: {err:?}"
+        );
     }
 
     #[test]
     fn display_strings_are_human_readable() {
         let cases: Vec<(VerifierError, &str)> = vec![
             (
-                VerifierError::MissingReceipt { required_adapter: "browserbase".into() },
+                VerifierError::MissingReceipt {
+                    required_adapter: "browserbase".into(),
+                },
                 "browserbase",
             ),
             (
@@ -312,7 +322,9 @@ mod tests {
                 "filesystem",
             ),
             (
-                VerifierError::ReceiptNotVerified { adapter: "browserbase".into() },
+                VerifierError::ReceiptNotVerified {
+                    adapter: "browserbase".into(),
+                },
                 "verified=true",
             ),
             (
@@ -322,7 +334,10 @@ mod tests {
         ];
         for (err, substring) in cases {
             let s = err.to_string();
-            assert!(s.contains(substring), "Display for {err:?} missing '{substring}': {s}");
+            assert!(
+                s.contains(substring),
+                "Display for {err:?} missing '{substring}': {s}"
+            );
         }
     }
 }

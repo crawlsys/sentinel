@@ -257,7 +257,10 @@ mod tests {
             cited_class: ProvenanceClass::SystemOfRecord,
             actual_class: ProvenanceClass::Inference,
         };
-        assert!(!f.is_block(), "class mismatch is operator-facing warn, not block");
+        assert!(
+            !f.is_block(),
+            "class mismatch is operator-facing warn, not block"
+        );
     }
 
     #[test]

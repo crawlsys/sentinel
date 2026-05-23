@@ -629,9 +629,7 @@ mod tests {
             "C:\\Users\\garys\\.claude\\session-env\\abc\\plans\\foo.md"
         ));
         assert!(!is_session_env_path("/repo/src/foo.rs"));
-        assert!(!is_session_env_path(
-            "/home/user/.claude/projects/foo.md"
-        ));
+        assert!(!is_session_env_path("/home/user/.claude/projects/foo.md"));
     }
 
     /// Stub that points `repo_root` at a real on-disk tempdir so

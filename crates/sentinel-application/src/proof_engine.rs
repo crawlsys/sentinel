@@ -131,6 +131,8 @@ impl ProofEngine {
                 duration_ms: (completed_at - started_at)
                     .num_milliseconds()
                     .unsigned_abs(),
+                // Praefectus wiring deferred (Fabrica task #24 phase 2c).
+                actor: None,
             };
 
             // Add to chain
@@ -423,8 +425,14 @@ mod step_evidence_tests {
 
         assert!(res.is_err(), "insufficient verdict must error");
         let err = res.unwrap_err().to_string();
-        assert!(err.contains("insufficient"), "error mentions 'insufficient', got: {err}");
-        assert!(err.contains("PR body missing"), "error includes judge reasoning");
+        assert!(
+            err.contains("insufficient"),
+            "error mentions 'insufficient', got: {err}"
+        );
+        assert!(
+            err.contains("PR body missing"),
+            "error includes judge reasoning"
+        );
 
         // No chain mutation on failure.
         let state = eng.state.read().await;
@@ -529,6 +537,7 @@ mod step_evidence_tests {
                 started_at: Utc::now() - chrono::Duration::seconds(10),
                 completed_at: Utc::now() - chrono::Duration::seconds(5),
                 duration_ms: 5000,
+                actor: None,
             };
             chain.add_proof(phase_proof).expect("seed phase");
             state.proof_chains.insert("linear".into(), chain);
@@ -539,7 +548,12 @@ mod step_evidence_tests {
         // proofs-tail, and there's no entries-tail yet.
         let phase_combined = {
             let state = eng.state.read().await;
-            state.proof_chains.get("linear").unwrap().head_hash().to_string()
+            state
+                .proof_chains
+                .get("linear")
+                .unwrap()
+                .head_hash()
+                .to_string()
         };
 
         let step = eng
@@ -565,7 +579,11 @@ mod step_evidence_tests {
 
         // The chain should now have 1 phase + 1 step and verify clean.
         let verification = eng.verify_chain("linear").await.expect("verifies");
-        assert!(verification.valid, "mixed chain errors: {:?}", verification.errors);
+        assert!(
+            verification.valid,
+            "mixed chain errors: {:?}",
+            verification.errors
+        );
         assert_eq!(verification.phases_verified, 1);
         assert_eq!(verification.steps_verified, 1);
     }

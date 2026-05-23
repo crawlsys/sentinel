@@ -171,8 +171,8 @@ impl MultiJudgeVerdict {
     #[must_use]
     pub fn synthesize(tier: JudgeTrustTier, runs: Vec<JudgeRun>) -> Self {
         let sufficient = runs.iter().all(|r| r.verdict.sufficient);
-        let disagreement = !runs.is_empty()
-            && !runs.iter().all(|r| r.verdict.sufficient == sufficient);
+        let disagreement =
+            !runs.is_empty() && !runs.iter().all(|r| r.verdict.sufficient == sufficient);
         let confidence = runs
             .iter()
             .map(|r| r.verdict.confidence)
@@ -219,12 +219,7 @@ mod tests {
         }
     }
 
-    fn run_with_cost(
-        model: JudgeModel,
-        sufficient: bool,
-        confidence: f64,
-        cost: f64,
-    ) -> JudgeRun {
+    fn run_with_cost(model: JudgeModel, sufficient: bool, confidence: f64, cost: f64) -> JudgeRun {
         let mut r = run(model, sufficient, confidence);
         r.cost_usd = Some(cost);
         r

@@ -54,14 +54,19 @@ pub trait JudgeService: Send + Sync {
         // step coordinates, then delegate. The judge sees enough context
         // to evaluate either way; the default impl is a thin shim, not a
         // shortcut around real verdicts.
-        let synthesized_objective = format!(
-            "STEP {step_id} of phase '{phase_id}' (skill '{skill}'): {step_description}"
-        );
+        let synthesized_objective =
+            format!("STEP {step_id} of phase '{phase_id}' (skill '{skill}'): {step_description}");
         // Compose a synthetic phase id so log/trace output distinguishes
         // step-level evaluations from true phase-level ones.
         let synthetic_phase = format!("{phase_id}.{step_id}");
-        self.evaluate(skill, &synthetic_phase, &synthesized_objective, evidence, model)
-            .await
+        self.evaluate(
+            skill,
+            &synthetic_phase,
+            &synthesized_objective,
+            evidence,
+            model,
+        )
+        .await
     }
 
     /// Evaluate evidence with EVERY judge model in the given tier and
@@ -110,11 +115,7 @@ pub trait JudgeService: Send + Sync {
                     // Surface the failure as a NOT-sufficient verdict
                     // tagged with ERROR: prefix in reasoning so strict
                     // callers can detect partial failures.
-                    JudgeVerdict::fail(
-                        0.0,
-                        format!("ERROR: judge call failed: {e}"),
-                        vec![],
-                    )
+                    JudgeVerdict::fail(0.0, format!("ERROR: judge call failed: {e}"), vec![])
                 }
             };
             runs.push(JudgeRun {
@@ -237,7 +238,10 @@ mod tests {
             JudgeTrustTier::Review.judge_models(),
             "Review tier must dispatch to exactly its configured models"
         );
-        assert!(verdict.sufficient, "default verdicts are pass → synthesis is sufficient");
+        assert!(
+            verdict.sufficient,
+            "default verdicts are pass → synthesis is sufficient"
+        );
         assert!(!verdict.disagreement);
         assert_eq!(verdict.individuals.len(), calls.len());
     }
@@ -295,8 +299,14 @@ mod tests {
 
         // Conservative aggregation: any FAIL among individuals →
         // sufficient=false at the multi level. AND disagreement=true.
-        assert!(!verdict.sufficient, "any judge failing must make the multi-verdict fail");
-        assert!(verdict.disagreement, "split votes must surface disagreement=true");
+        assert!(
+            !verdict.sufficient,
+            "any judge failing must make the multi-verdict fail"
+        );
+        assert!(
+            verdict.disagreement,
+            "split votes must surface disagreement=true"
+        );
         assert_eq!(verdict.individuals.len(), models.len());
     }
 
@@ -317,13 +327,7 @@ mod tests {
         judge.fail_after = Some(AtomicUsize::new(1));
 
         let verdict = judge
-            .evaluate_multi(
-                "linear",
-                "qa-handoff",
-                "ship",
-                &Evidence::default(),
-                tier,
-            )
+            .evaluate_multi("linear", "qa-handoff", "ship", &Evidence::default(), tier)
             .await
             .expect("per-judge error must not propagate as Err");
 

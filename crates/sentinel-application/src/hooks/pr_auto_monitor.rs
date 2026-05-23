@@ -49,7 +49,10 @@ fn git_config_path(cwd: &Path) -> Option<PathBuf> {
             let content = std::fs::read_to_string(&dot_git).ok()?;
             let gitdir = content.trim().strip_prefix("gitdir: ")?;
             let gitdir = Path::new(gitdir.trim());
-            return gitdir.parent().and_then(|p| p.parent()).map(|p| p.join("config"));
+            return gitdir
+                .parent()
+                .and_then(|p| p.parent())
+                .map(|p| p.join("config"));
         }
         cur = dir.parent();
     }
@@ -257,9 +260,7 @@ mod tests {
 
         let input = HookInput {
             tool_name: Some("Bash".to_string()),
-            tool_input: Some(
-                serde_json::json!({"command": "git merge feat/foo --no-edit"}),
-            ),
+            tool_input: Some(serde_json::json!({"command": "git merge feat/foo --no-edit"})),
             cwd: Some(tmp.path().to_string_lossy().into_owned()),
             ..Default::default()
         };
@@ -294,9 +295,7 @@ mod tests {
 
         let input = HookInput {
             tool_name: Some("Bash".to_string()),
-            tool_input: Some(
-                serde_json::json!({"command": "git merge feat/foo --no-edit"}),
-            ),
+            tool_input: Some(serde_json::json!({"command": "git merge feat/foo --no-edit"})),
             cwd: Some(tmp.path().to_string_lossy().into_owned()),
             ..Default::default()
         };

@@ -409,11 +409,7 @@ mod tests {
         // registered must fall through to phase_gate, not deny.
         let state = SessionState::new("sess-1");
         let configs = HashMap::new(); // empty — no skill registered
-        let out = process(
-            &step_input("mcp__skills__deploy__step_1"),
-            &state,
-            &configs,
-        );
+        let out = process(&step_input("mcp__skills__deploy__step_1"), &state, &configs);
         assert!(is_allow(&out));
     }
 
@@ -496,7 +492,10 @@ mod tests {
         let (_, reason) = decision_of(&out);
         let msg = reason.expect("deny carries a permission_decision_reason");
         // Message must include the prereq step id so the model knows what to fix.
-        assert!(msg.contains('1'), "deny message should name prereq id '1', got: {msg}");
+        assert!(
+            msg.contains('1'),
+            "deny message should name prereq id '1', got: {msg}"
+        );
         // Provenance prefix tells Claude this came from sentinel.
         assert!(
             msg.contains("[Sentinel-Authority]"),

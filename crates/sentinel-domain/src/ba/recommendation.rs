@@ -238,8 +238,8 @@ mod tests {
     use crate::ba::provenance::ProvenanceClass;
     use crate::reversibility::ReversibilityClass;
     use crate::spec_challenge::{
-        Alternative, Ambiguity, Assumption, AssumptionConfidence, ChallengeCategory,
-        GapResolution, SpecChallenge, SpecGap, SpecReference, WorkId,
+        Alternative, Ambiguity, Assumption, AssumptionConfidence, ChallengeCategory, GapResolution,
+        SpecChallenge, SpecGap, SpecReference, WorkId,
     };
     use chrono::TimeZone;
 

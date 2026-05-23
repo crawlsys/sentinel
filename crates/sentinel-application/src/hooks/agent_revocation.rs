@@ -144,10 +144,16 @@ mod tests {
     fn unrevoke_lifts_the_block() {
         let mut state = SessionState::new("test");
         state.revoke_agent("agent-x");
-        assert!(is_deny(&process(&input_with_agent(Some("agent-x")), &state)));
+        assert!(is_deny(&process(
+            &input_with_agent(Some("agent-x")),
+            &state
+        )));
 
         let removed = state.unrevoke_agent("agent-x");
-        assert!(removed, "unrevoke returned true for previously-revoked agent");
+        assert!(
+            removed,
+            "unrevoke returned true for previously-revoked agent"
+        );
 
         assert!(
             is_allow(&process(&input_with_agent(Some("agent-x")), &state)),

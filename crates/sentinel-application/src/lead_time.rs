@@ -205,8 +205,7 @@ pub fn aggregate_at(
             .with_context(|| format!("create_dir_all {}", parent.display()))?;
     }
     let json = serde_json::to_string_pretty(&summary).context("serialize LeadTimeSummary")?;
-    fs::write(summary_path, json)
-        .with_context(|| format!("write {}", summary_path.display()))?;
+    fs::write(summary_path, json).with_context(|| format!("write {}", summary_path.display()))?;
     Ok(summary)
 }
 

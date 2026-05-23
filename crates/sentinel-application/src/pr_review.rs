@@ -184,8 +184,8 @@ pub fn scan_pr_reviews(
     }
 
     // Write JSONL (full overwrite — input is the source of truth).
-    let mut jsonl_file = File::create(&jsonl_path)
-        .with_context(|| format!("create {}", jsonl_path.display()))?;
+    let mut jsonl_file =
+        File::create(&jsonl_path).with_context(|| format!("create {}", jsonl_path.display()))?;
     for row in &all_rows {
         let line = serde_json::to_string(row)?;
         writeln!(jsonl_file, "{line}")?;
@@ -512,7 +512,9 @@ fn accumulate_findings(
     codex: &mut CodexFindings,
     crab: &mut CodeRabbitFindings,
 ) {
-    if author.eq_ignore_ascii_case("coderabbitai") || author.to_ascii_lowercase().contains("coderabbit") {
+    if author.eq_ignore_ascii_case("coderabbitai")
+        || author.to_ascii_lowercase().contains("coderabbit")
+    {
         let f = count_coderabbit_findings(body);
         crab.critical += f.critical;
         crab.potential_issue += f.potential_issue;
@@ -543,7 +545,9 @@ fn round_2(v: f64) -> f64 {
 }
 
 fn parse_iso(s: &str) -> Option<DateTime<Utc>> {
-    DateTime::parse_from_rfc3339(s).ok().map(|d| d.with_timezone(&Utc))
+    DateTime::parse_from_rfc3339(s)
+        .ok()
+        .map(|d| d.with_timezone(&Utc))
 }
 
 // ---- gh CLI shell-out + JSON parsing ----
@@ -788,7 +792,8 @@ fn coderabbit_critical_regex() -> &'static regex::Regex {
 fn coderabbit_potential_regex() -> &'static regex::Regex {
     static RE: OnceLock<regex::Regex> = OnceLock::new();
     RE.get_or_init(|| {
-        regex::Regex::new(r"⚠️\s*potential issue|potential\s*issue\b").expect("static regex compiles")
+        regex::Regex::new(r"⚠️\s*potential issue|potential\s*issue\b")
+            .expect("static regex compiles")
     })
 }
 

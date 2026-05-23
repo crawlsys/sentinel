@@ -189,10 +189,7 @@ impl Default for DecompositionRule {
 }
 
 #[must_use]
-pub fn requires_decomposition(
-    prediction: &CycleTimePrediction,
-    rule: DecompositionRule,
-) -> bool {
+pub fn requires_decomposition(prediction: &CycleTimePrediction, rule: DecompositionRule) -> bool {
     // Rule 1: raw estimate over the ceiling.
     if let Some(est) = prediction.estimate {
         if f64::from(est) > rule.estimate_ceiling {
@@ -297,7 +294,7 @@ mod tests {
     fn predict_picks_lowest_sample_count_for_confidence() {
         let b = breakdown(vec![
             row(Some("X"), "In Progress", 4.0, 6.0, 50),
-            row(Some("X"), "Code Review", 2.0, 4.0, 3),   // smallest
+            row(Some("X"), "Code Review", 2.0, 4.0, 3), // smallest
             row(Some("X"), "QA Testing", 6.0, 8.0, 100),
         ]);
         let p = predict_cycle_time(&b, Some("X"), None, None);
@@ -307,12 +304,7 @@ mod tests {
 
     #[test]
     fn predict_records_input_metadata() {
-        let p = predict_cycle_time(
-            &breakdown(vec![]),
-            Some("FPCRM"),
-            Some(2),
-            Some(5),
-        );
+        let p = predict_cycle_time(&breakdown(vec![]), Some("FPCRM"), Some(2), Some(5));
         assert_eq!(p.team.as_deref(), Some("FPCRM"));
         assert_eq!(p.priority, Some(2));
         assert_eq!(p.estimate, Some(5));

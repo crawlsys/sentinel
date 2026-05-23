@@ -110,7 +110,9 @@ pub fn compile_command_patterns() -> Vec<regex::Regex> {
 /// checks. Hot paths (the recorder) should compile once and reuse.
 #[must_use]
 pub fn command_matches_test_pattern(command: &str) -> bool {
-    compile_command_patterns().iter().any(|r| r.is_match(command))
+    compile_command_patterns()
+        .iter()
+        .any(|r| r.is_match(command))
 }
 
 #[cfg(test)]

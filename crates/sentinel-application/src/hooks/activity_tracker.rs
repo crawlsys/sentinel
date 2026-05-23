@@ -522,14 +522,18 @@ mod tests {
         // Regression: a commit message containing an em-dash at byte
         // position 79-81 used to panic on `&s[..80]` because byte 80
         // is mid em-dash. Reported at activity_tracker.rs:239 (now :266).
-        let mut cmd = "git add -A && git commit -m \"docs(audit pass 3): CHANGELOG entry ".to_string();
+        let mut cmd =
+            "git add -A && git commit -m \"docs(audit pass 3): CHANGELOG entry ".to_string();
         // Pad to put an em-dash spanning the 120-byte boundary
         while cmd.len() < 119 {
             cmd.push('a');
         }
         cmd.push('—'); // bytes 119..122
         cmd.push_str(" full Pass-3 batch\"");
-        assert!(cmd.len() > 120, "test setup: cmd must exceed truncation threshold");
+        assert!(
+            cmd.len() > 120,
+            "test setup: cmd must exceed truncation threshold"
+        );
         let input = json!({"command": cmd});
         // Must not panic.
         let result = extract_command(&input).unwrap();
@@ -627,7 +631,10 @@ mod tests {
             ts: "2026-05-06T17:00:00Z".into(),
         };
         let json = serde_json::to_string(&entry).unwrap();
-        assert!(!json.contains("skill"), "skill field must be omitted when None, got: {json}");
+        assert!(
+            !json.contains("skill"),
+            "skill field must be omitted when None, got: {json}"
+        );
     }
 
     #[test]

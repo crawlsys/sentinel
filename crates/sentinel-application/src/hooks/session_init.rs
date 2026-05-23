@@ -884,11 +884,7 @@ fn generate_claude_md(
     let date_str = now.format("%A, %B %-d, %Y").to_string();
     let year = now.format("%Y").to_string();
     let month = now.format("%B").to_string();
-    let time_str = format!(
-        "{} {}",
-        now.format("%I:%M %p"),
-        local_tz_abbreviation(&now)
-    );
+    let time_str = format!("{} {}", now.format("%I:%M %p"), local_tz_abbreviation(&now));
     let user_name = user_name();
     let greeting = time_greeting();
 

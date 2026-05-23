@@ -165,12 +165,8 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     // `sentinel project init` in this repo). Failures here are
     // best-effort — log and continue; the global archive above is
     // the authoritative copy.
-    let repo_local_path = try_write_repo_local_archive(
-        ctx.fs,
-        Path::new(cwd),
-        &slug,
-        plan_content.as_bytes(),
-    );
+    let repo_local_path =
+        try_write_repo_local_archive(ctx.fs, Path::new(cwd), &slug, plan_content.as_bytes());
 
     // Emit channel event for real-time notification
     let summary = format!("Plan archived: {}", target_path.display());
@@ -205,7 +201,10 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
 
     // Inject context telling the user and Claude where the archived copies live.
     let repo_local_line = match &repo_local_path {
-        Some(p) => format!("\nRepo-local: {} (committed with the code via .sentinel/plans/)", p.display()),
+        Some(p) => format!(
+            "\nRepo-local: {} (committed with the code via .sentinel/plans/)",
+            p.display()
+        ),
         None => String::new(),
     };
     let context = format!(
@@ -409,7 +408,11 @@ mod tests {
         let worktree = tmp.path().join("wt");
         let deep = worktree.join("sub");
         std::fs::create_dir_all(&deep).unwrap();
-        std::fs::write(worktree.join(".git"), "gitdir: /elsewhere/.git/worktrees/wt").unwrap();
+        std::fs::write(
+            worktree.join(".git"),
+            "gitdir: /elsewhere/.git/worktrees/wt",
+        )
+        .unwrap();
         let found = find_repo_root(&RealFs, &deep);
         assert_eq!(found, Some(worktree));
     }
@@ -431,7 +434,10 @@ mod tests {
         let path = try_write_repo_local_archive(&RealFs, &repo, "my-plan", b"plan content");
         assert!(path.is_some());
         let p = path.unwrap();
-        assert_eq!(p, repo.join(".sentinel").join("plans").join("my-plan-v1.md"));
+        assert_eq!(
+            p,
+            repo.join(".sentinel").join("plans").join("my-plan-v1.md")
+        );
         assert_eq!(std::fs::read_to_string(&p).unwrap(), "plan content");
     }
 
@@ -443,7 +449,10 @@ mod tests {
 
         let path = try_write_repo_local_archive(&RealFs, &repo, "my-plan", b"plan content");
         assert!(path.is_none(), "must NOT auto-create .sentinel/plans/");
-        assert!(!repo.join(".sentinel").exists(), "must not create .sentinel/ implicitly");
+        assert!(
+            !repo.join(".sentinel").exists(),
+            "must not create .sentinel/ implicitly"
+        );
     }
 
     #[test]
@@ -464,6 +473,9 @@ mod tests {
 
         let path = try_write_repo_local_archive(&RealFs, &repo, "my-plan", b"new version");
         assert_eq!(path, Some(plans.join("my-plan-v2.md")));
-        assert_eq!(std::fs::read_to_string(plans.join("my-plan-v1.md")).unwrap(), "old version");
+        assert_eq!(
+            std::fs::read_to_string(plans.join("my-plan-v1.md")).unwrap(),
+            "old version"
+        );
     }
 }

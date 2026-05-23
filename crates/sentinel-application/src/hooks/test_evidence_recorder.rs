@@ -10,9 +10,7 @@
 //! glitch can never block a tool call.
 
 use sentinel_domain::events::{HookInput, HookOutput};
-use sentinel_domain::test_evidence::{
-    compile_command_patterns, evidence_path, TestEvidenceEntry,
-};
+use sentinel_domain::test_evidence::{compile_command_patterns, evidence_path, TestEvidenceEntry};
 
 pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
     // Bash only — every other tool is irrelevant for test evidence.

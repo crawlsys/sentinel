@@ -317,7 +317,12 @@ impl SpecChallenge {
             &mut findings,
             |item| {
                 if matches!(item.how_resolved, GapResolution::InferredFromContext)
-                    && item.inference_source.as_deref().unwrap_or("").trim().is_empty()
+                    && item
+                        .inference_source
+                        .as_deref()
+                        .unwrap_or("")
+                        .trim()
+                        .is_empty()
                 {
                     Some(CompletenessFinding::InferenceWithoutSource {
                         topic: item.topic.clone(),

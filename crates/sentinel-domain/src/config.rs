@@ -153,35 +153,20 @@ impl Default for SigningConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConfigError {
     /// `RequestLimits.max_evidence_bytes` exceeded the safety ceiling.
-    EvidenceLimitTooLarge {
-        actual: usize,
-        ceiling: usize,
-    },
+    EvidenceLimitTooLarge { actual: usize, ceiling: usize },
     /// `RequestLimits.max_artifact_bytes` exceeded the safety ceiling.
-    ArtifactLimitTooLarge {
-        actual: usize,
-        ceiling: usize,
-    },
+    ArtifactLimitTooLarge { actual: usize, ceiling: usize },
     /// `RequestLimits.window_seconds` is zero with rate limiting
     /// otherwise enabled — the math doesn't work.
-    RateLimitWindowZero {
-        max_calls_per_window: usize,
-    },
+    RateLimitWindowZero { max_calls_per_window: usize },
     /// SSRF allowlist entry has an invalid hostname (whitespace,
     /// empty, or contains spaces).
-    SsrfAllowlistInvalidHost {
-        entry: String,
-    },
+    SsrfAllowlistInvalidHost { entry: String },
     /// SSRF denylist entry has the same problem.
-    SsrfDenylistInvalidHost {
-        entry: String,
-    },
+    SsrfDenylistInvalidHost { entry: String },
     /// Aging window is unreasonably large (sanity check, not data
     /// integrity — > 365 days is almost certainly a typo).
-    ProofArchiveAgingTooLarge {
-        actual_days: u32,
-        ceiling_days: u32,
-    },
+    ProofArchiveAgingTooLarge { actual_days: u32, ceiling_days: u32 },
     /// `signing.hardware_required = true` but no `signing_key_env`
     /// is set — there's no path to produce a signature at all.
     HardwareSigningRequiredButNoKeyEnv,
@@ -287,8 +272,7 @@ fn validate_ssrf(s: &SsrfPolicy, errors: &mut Vec<ConfigError>) {
 /// (trailing space, embedded newline) that produce silent
 /// configuration drift.
 fn is_valid_hostlike(s: &str) -> bool {
-    !s.is_empty()
-        && !s.chars().any(|c| c.is_whitespace() || c.is_control())
+    !s.is_empty() && !s.chars().any(|c| c.is_whitespace() || c.is_control())
 }
 
 fn validate_judge(_j: &JudgeConfig, _errors: &mut Vec<ConfigError>) {
@@ -332,10 +316,7 @@ mod tests {
         cfg.request_limits.max_evidence_bytes = 200 * 1024 * 1024; // 200 MiB
         let errs = cfg.validate().unwrap_err();
         assert_eq!(errs.len(), 1);
-        assert!(matches!(
-            errs[0],
-            ConfigError::EvidenceLimitTooLarge { .. }
-        ));
+        assert!(matches!(errs[0], ConfigError::EvidenceLimitTooLarge { .. }));
     }
 
     #[test]

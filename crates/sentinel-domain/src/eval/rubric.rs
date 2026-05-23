@@ -237,9 +237,15 @@ mod tests {
     #[test]
     fn axis_key_is_snake_case() {
         for (axis, expected) in [
-            (EvalAxis::CitationDensityAccuracy, "citation_density_accuracy"),
+            (
+                EvalAxis::CitationDensityAccuracy,
+                "citation_density_accuracy",
+            ),
             (EvalAxis::RequirementsCoverage, "requirements_coverage"),
-            (EvalAxis::AlternativesSeriousness, "alternatives_seriousness"),
+            (
+                EvalAxis::AlternativesSeriousness,
+                "alternatives_seriousness",
+            ),
             (EvalAxis::TonalCalibration, "tonal_calibration"),
             (EvalAxis::OutcomeRealism, "outcome_realism"),
             (EvalAxis::StakeholderFit, "stakeholder_fit"),
@@ -258,14 +264,23 @@ mod tests {
             EvalAxis::TonalCalibration,
             EvalAxis::StakeholderFit,
         ] {
-            assert!(!other.requires_outcomes(), "{other:?} should not require outcomes");
+            assert!(
+                !other.requires_outcomes(),
+                "{other:?} should not require outcomes"
+            );
         }
     }
 
     #[test]
     fn axis_score_clamps_out_of_range() {
-        assert!((EvalAxisScore::new(EvalAxis::TonalCalibration, 1.7, 1.0).raw - 1.0).abs() < f32::EPSILON);
-        assert!((EvalAxisScore::new(EvalAxis::TonalCalibration, -0.3, 1.0).raw - 0.0).abs() < f32::EPSILON);
+        assert!(
+            (EvalAxisScore::new(EvalAxis::TonalCalibration, 1.7, 1.0).raw - 1.0).abs()
+                < f32::EPSILON
+        );
+        assert!(
+            (EvalAxisScore::new(EvalAxis::TonalCalibration, -0.3, 1.0).raw - 0.0).abs()
+                < f32::EPSILON
+        );
     }
 
     #[test]
@@ -322,7 +337,11 @@ mod tests {
         let score = EvalScore::new(
             EvalCaseId::new("c1").unwrap(),
             EvalRunId::new("r1").unwrap(),
-            vec![EvalAxisScore::new(EvalAxis::CitationDensityAccuracy, 0.9, 1.0)],
+            vec![EvalAxisScore::new(
+                EvalAxis::CitationDensityAccuracy,
+                0.9,
+                1.0,
+            )],
             &rubric,
         );
         assert!(score.for_axis(EvalAxis::OutcomeRealism).is_none());

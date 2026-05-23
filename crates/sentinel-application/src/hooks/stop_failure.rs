@@ -18,7 +18,6 @@
 
 use sentinel_domain::events::{HookInput, HookOutput};
 
-
 const DEFAULT_RATE_LIMIT_COOLDOWN_MINUTES: u64 = 300;
 
 /// Parse error_details to extract a cooldown duration in minutes.
@@ -286,8 +285,7 @@ pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
             } else {
                 format!("{error}: {error_details}")
             };
-            let outcome =
-                crate::legatus_client::classify_outcome(&[], Some(&combined), None);
+            let outcome = crate::legatus_client::classify_outcome(&[], Some(&combined), None);
             for instruction_id in pending {
                 crate::legatus_client::report_result_fire_and_forget(
                     instruction_id,

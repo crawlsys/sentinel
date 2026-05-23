@@ -129,12 +129,11 @@ pub fn score_for_skill(skill: &str, summaries: &[ArchivedChainSummary]) -> Trust
 /// Same as [`score_for_skill`] but keys on `session_id` (the agent
 /// identifier proxy until a richer agent abstraction exists).
 #[must_use]
-pub fn score_for_session(
-    session_id: &str,
-    summaries: &[ArchivedChainSummary],
-) -> TrustScore {
-    let matching: Vec<&ArchivedChainSummary> =
-        summaries.iter().filter(|s| s.session_id == session_id).collect();
+pub fn score_for_session(session_id: &str, summaries: &[ArchivedChainSummary]) -> TrustScore {
+    let matching: Vec<&ArchivedChainSummary> = summaries
+        .iter()
+        .filter(|s| s.session_id == session_id)
+        .collect();
     score_from_matches(&matching)
 }
 
@@ -154,8 +153,8 @@ fn score_from_matches(matching: &[&ArchivedChainSummary]) -> TrustScore {
     #[allow(clippy::cast_precision_loss)]
     let pass_rate = (sufficient as f64) / (sample_size as f64);
     #[allow(clippy::cast_precision_loss)]
-    let avg_step_count = matching.iter().map(|s| s.step_count as f64).sum::<f64>()
-        / (sample_size as f64);
+    let avg_step_count =
+        matching.iter().map(|s| s.step_count as f64).sum::<f64>() / (sample_size as f64);
 
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let base = ((pass_rate * 1000.0).round() as u16).min(1000);
@@ -185,7 +184,12 @@ mod tests {
     use super::*;
     use chrono::{TimeZone, Utc};
 
-    fn fake_summary(skill: &str, session_id: &str, sufficient: bool, steps: usize) -> ArchivedChainSummary {
+    fn fake_summary(
+        skill: &str,
+        session_id: &str,
+        sufficient: bool,
+        steps: usize,
+    ) -> ArchivedChainSummary {
         ArchivedChainSummary {
             schema_version: 1,
             session_id: session_id.to_string(),
@@ -275,9 +279,7 @@ mod tests {
         let mut summaries: Vec<ArchivedChainSummary> = (0..18)
             .map(|i| fake_summary("linear", &format!("p-{i}"), true, 3))
             .collect();
-        summaries.extend(
-            (0..3).map(|i| fake_summary("linear", &format!("f-{i}"), false, 3)),
-        );
+        summaries.extend((0..3).map(|i| fake_summary("linear", &format!("f-{i}"), false, 3)));
         let s = score_for_skill("linear", &summaries);
         assert_eq!(s.sample_size, 21);
         // base = round(0.857 * 1000) = 857; cap at this band = 800.

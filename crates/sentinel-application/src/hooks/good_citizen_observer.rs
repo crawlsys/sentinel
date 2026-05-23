@@ -39,8 +39,14 @@ use std::path::{Path, PathBuf};
 /// reminder can group findings cleanly.
 const OBSERVATION_PATTERNS: &[(&str, &str)] = &[
     // Rust compiler / clippy
-    (r"warning:\s+function\s+`[^`]+`\s+is\s+never\s+used", "dead code"),
-    (r"warning:\s+unused\s+(variable|import|imports|field|method)", "unused symbol"),
+    (
+        r"warning:\s+function\s+`[^`]+`\s+is\s+never\s+used",
+        "dead code",
+    ),
+    (
+        r"warning:\s+unused\s+(variable|import|imports|field|method)",
+        "unused symbol",
+    ),
     (r"warning:\s+\S+\s+is\s+deprecated", "deprecated API"),
     (r"\bdead_code\b", "dead code"),
     // Generic linters / typecheckers

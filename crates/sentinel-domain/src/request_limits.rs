@@ -180,12 +180,7 @@ impl CallWindow {
     /// proof and a successful proof for the same call.
     ///
     /// `limit == 0` disables the check (returns false always).
-    pub fn would_exceed(
-        &mut self,
-        now: DateTime<Utc>,
-        window_seconds: i64,
-        limit: usize,
-    ) -> bool {
+    pub fn would_exceed(&mut self, now: DateTime<Utc>, window_seconds: i64, limit: usize) -> bool {
         if limit == 0 {
             return false;
         }
@@ -424,14 +419,7 @@ mod tests {
             ..RequestLimits::default()
         };
         let big = serde_json::Value::String("y".repeat(100));
-        let result = enforce_limits(
-            &small_evidence(),
-            &big,
-            &limits,
-            ts(0),
-            &mut w,
-            true,
-        );
+        let result = enforce_limits(&small_evidence(), &big, &limits, ts(0), &mut w, true);
         match result {
             Err(LimitError::ArtifactTooLarge { actual, limit }) => {
                 assert!(actual > 50);

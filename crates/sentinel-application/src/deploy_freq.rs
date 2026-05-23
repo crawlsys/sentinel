@@ -389,8 +389,8 @@ pub fn aggregate_at(
     };
 
     ensure_parent(summary_path)?;
-    let mut f = File::create(summary_path)
-        .with_context(|| format!("create {}", summary_path.display()))?;
+    let mut f =
+        File::create(summary_path).with_context(|| format!("create {}", summary_path.display()))?;
     f.write_all(serde_json::to_string_pretty(&summary)?.as_bytes())?;
     f.flush()?;
 
@@ -676,7 +676,10 @@ mod tests {
         assert_eq!(DoraTier::from_change_failure_rate(0.15), DoraTier::Elite);
         assert_eq!(DoraTier::from_change_failure_rate(0.150001), DoraTier::High);
         assert_eq!(DoraTier::from_change_failure_rate(0.30), DoraTier::High);
-        assert_eq!(DoraTier::from_change_failure_rate(0.30001), DoraTier::Medium);
+        assert_eq!(
+            DoraTier::from_change_failure_rate(0.30001),
+            DoraTier::Medium
+        );
         assert_eq!(DoraTier::from_change_failure_rate(0.45), DoraTier::Medium);
         assert_eq!(DoraTier::from_change_failure_rate(0.46), DoraTier::Low);
         assert_eq!(DoraTier::from_change_failure_rate(1.0), DoraTier::Low);
@@ -686,7 +689,10 @@ mod tests {
     fn from_change_failure_rate_clamps_garbage_input() {
         assert_eq!(DoraTier::from_change_failure_rate(-0.5), DoraTier::Elite);
         assert_eq!(DoraTier::from_change_failure_rate(2.5), DoraTier::Low);
-        assert_eq!(DoraTier::from_change_failure_rate(f64::NAN), DoraTier::Elite);
+        assert_eq!(
+            DoraTier::from_change_failure_rate(f64::NAN),
+            DoraTier::Elite
+        );
     }
 
     #[test]

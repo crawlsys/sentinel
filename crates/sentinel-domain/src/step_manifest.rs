@@ -132,10 +132,7 @@ impl StepConfigManifest {
         let stripped = source.strip_prefix('\u{FEFF}').unwrap_or(source);
 
         // 2-4. Per-line: trim trailing whitespace.
-        let normalized: Vec<&str> = stripped
-            .lines()
-            .map(str::trim_end)
-            .collect();
+        let normalized: Vec<&str> = stripped.lines().map(str::trim_end).collect();
 
         // Strip trailing blank lines.
         let mut end = normalized.len();
@@ -166,7 +163,11 @@ impl StepConfigManifest {
     pub fn upsert_hash_only(&mut self, name: impl Into<String>, source: &str) {
         let name = name.into();
         let hash = Self::compute_hash(source);
-        let entry = ManifestEntry { name, hash, signature: None };
+        let entry = ManifestEntry {
+            name,
+            hash,
+            signature: None,
+        };
         self.replace_or_push(entry);
     }
 
@@ -175,12 +176,7 @@ impl StepConfigManifest {
     /// verification only needs the hash, not the source. This mirrors
     /// the `StepProof::sign_with` convention from M1.7 — signatures are
     /// always over hashes, never over content.
-    pub fn upsert_signed(
-        &mut self,
-        name: impl Into<String>,
-        source: &str,
-        key: &SigningKey,
-    ) {
+    pub fn upsert_signed(&mut self, name: impl Into<String>, source: &str, key: &SigningKey) {
         let name = name.into();
         let hash = Self::compute_hash(source);
         let signature: Signature = key.sign(hash.as_bytes());
@@ -311,7 +307,9 @@ impl std::fmt::Display for ManifestError {
         match self {
             Self::MissingEntry => write!(f, "no manifest entry by that name"),
             Self::HashMismatch => write!(f, "source canonical hash does not match manifest entry"),
-            Self::PublicKeyRequired => write!(f, "manifest entry is signed but no public key was supplied"),
+            Self::PublicKeyRequired => {
+                write!(f, "manifest entry is signed but no public key was supplied")
+            }
             Self::Signature(e) => write!(f, "signature error: {e}"),
         }
     }
@@ -356,19 +354,13 @@ mod tests {
     #[test]
     fn canonicalize_strips_trailing_whitespace_per_line() {
         let messy = "a = 1   \nb = 2\t\n";
-        assert_eq!(
-            StepConfigManifest::canonicalize(messy),
-            "a = 1\nb = 2\n"
-        );
+        assert_eq!(StepConfigManifest::canonicalize(messy), "a = 1\nb = 2\n");
     }
 
     #[test]
     fn canonicalize_strips_trailing_blank_lines() {
         let trailing = "a = 1\n\n\n\n";
-        assert_eq!(
-            StepConfigManifest::canonicalize(trailing),
-            "a = 1\n"
-        );
+        assert_eq!(StepConfigManifest::canonicalize(trailing), "a = 1\n");
     }
 
     #[test]
@@ -485,7 +477,10 @@ mod tests {
             .verify_entry("linear", src, Some(&other.verifying_key()))
             .expect_err("verifying with the wrong key must error");
         assert!(
-            matches!(err, ManifestError::Signature(SignatureError::VerificationFailed)),
+            matches!(
+                err,
+                ManifestError::Signature(SignatureError::VerificationFailed)
+            ),
             "got: {err:?}"
         );
     }

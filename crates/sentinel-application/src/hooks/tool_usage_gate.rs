@@ -241,7 +241,9 @@ fn persistent_store_has_active_task(fs: &dyn FileSystemPort) -> bool {
     // migrates lazily, so during the migration window data may live in
     // either location.
     let roots = [
-        home.join(".claude").join("sentinel").join("persistent-tasks"),
+        home.join(".claude")
+            .join("sentinel")
+            .join("persistent-tasks"),
         home.join(".claude").join("persistent-tasks"),
     ];
 
@@ -338,7 +340,6 @@ fn recent_pending_task_hint(fs: &dyn FileSystemPort, _session_id: &str) -> Optio
     }
     None
 }
-
 
 /// Process a PreToolUse event. Routes by reversibility class (A6, per
 /// `docs/a6-reversibility-graded-tripwires.md`):
@@ -692,7 +693,6 @@ mod tests {
             .with_default(ReversibilityClass::ReversibleWithEffort)
     }
 
-
     #[test]
     fn test_blocks_mutating_bash_without_preconditions() {
         // `git commit -m foo` is mutating — without sequential thinking,
@@ -718,7 +718,6 @@ mod tests {
         );
     }
 
-
     #[test]
     fn test_blocks_mutating_mcp_tool_without_preconditions() {
         // `mcp__linear__create_issue` is a write tool — gated.
@@ -742,7 +741,6 @@ mod tests {
         );
     }
 
-
     #[test]
     fn test_allows_when_no_session_id() {
         let fs = MockFs::new();
@@ -750,17 +748,15 @@ mod tests {
             tool_name: Some("Edit".to_string()),
             ..Default::default()
         };
-        assert!(
-            process(
+        assert!(process(
             &input,
             &fs,
             &crate::hooks::test_support::StubEnv::new(),
             &permissive_classifier(),
             false,
         )
-                .blocked
-                .is_none()
-        );
+        .blocked
+        .is_none());
     }
 
     #[test]
@@ -1032,11 +1028,7 @@ mod tests {
         assert!(persistent_store_has_active_task(&fs));
 
         // Bare-array shape (older snapshot format).
-        std::fs::write(
-            &tasks_file,
-            r#"[{"id":"1","status":"in_progress"}]"#,
-        )
-        .unwrap();
+        std::fs::write(&tasks_file, r#"[{"id":"1","status":"in_progress"}]"#).unwrap();
         assert!(persistent_store_has_active_task(&fs));
 
         // Malformed JSON → degrades to false (caller falls back to marker).
@@ -1816,9 +1808,8 @@ mod tests {
         // trivially-reversible (as if writing to a memory file or plan
         // file under the proper substrate) — must skip the gate stack.
         let fs = MockFs::new();
-        let classifier =
-            crate::reversibility_classifier::StaticReversibilityClassifier::empty()
-                .with("Edit", ReversibilityClass::TriviallyReversible);
+        let classifier = crate::reversibility_classifier::StaticReversibilityClassifier::empty()
+            .with("Edit", ReversibilityClass::TriviallyReversible);
         let output = process(
             &edit_input("test-session"),
             &fs,
@@ -1844,9 +1835,8 @@ mod tests {
             tool_input: Some(serde_json::json!({ "command": "rm -rf ." })),
             ..Default::default()
         };
-        let classifier =
-            crate::reversibility_classifier::StaticReversibilityClassifier::empty()
-                .with("Bash", ReversibilityClass::TriviallyReversible);
+        let classifier = crate::reversibility_classifier::StaticReversibilityClassifier::empty()
+            .with("Bash", ReversibilityClass::TriviallyReversible);
         let output = process(
             &input,
             &fs,
@@ -1946,9 +1936,8 @@ mod tests {
         // Catastrophic. ReversibleWithEffort (the bulk of edits) keeps
         // running the four-check stack regardless.
         let fs = MockFs::new();
-        let classifier =
-            crate::reversibility_classifier::StaticReversibilityClassifier::empty()
-                .with("Edit", ReversibilityClass::ReversibleWithEffort);
+        let classifier = crate::reversibility_classifier::StaticReversibilityClassifier::empty()
+            .with("Edit", ReversibilityClass::ReversibleWithEffort);
         let output = process(
             &edit_input("test-session"),
             &fs,
@@ -1975,9 +1964,8 @@ mod tests {
             tool_input: None,
             ..Default::default()
         };
-        let classifier =
-            crate::reversibility_classifier::StaticReversibilityClassifier::empty()
-                .with("Read", ReversibilityClass::TriviallyReversible);
+        let classifier = crate::reversibility_classifier::StaticReversibilityClassifier::empty()
+            .with("Read", ReversibilityClass::TriviallyReversible);
         let output = process(
             &input,
             &fs,

@@ -180,9 +180,7 @@ fn process_with_override(
     // hook writes the file on PostToolUse with the same session_id we get
     // here, so the lookup is exact — no transcript parsing required.
     if session_has_recorded_evidence(fs, session_id) {
-        eprintln!(
-            "[sentinel] pre-commit-verify: evidence file present for session '{session_id}'"
-        );
+        eprintln!("[sentinel] pre-commit-verify: evidence file present for session '{session_id}'");
         return HookOutput::allow();
     }
 

@@ -117,7 +117,10 @@ pub fn note_pending_instruction(session_id: &str, instruction_id: InstructionId)
         use std::io::Write;
         let _ = file.write_all(line.as_bytes());
     } else {
-        tracing::debug!(?path, "legatus_client: failed to record pending instruction");
+        tracing::debug!(
+            ?path,
+            "legatus_client: failed to record pending instruction"
+        );
     }
 }
 
@@ -136,7 +139,7 @@ pub fn take_pending_instructions(session_id: &str) -> Vec<InstructionId> {
         Err(err) => {
             tracing::debug!(?err, ?path, "legatus_client: pending file read failed");
             return Vec::new();
-        },
+        }
     };
     // Remove the file before parsing so concurrent appends start
     // a fresh file. (Race window: an append after the read but
@@ -226,7 +229,7 @@ pub fn take_tool_calls(session_id: &str) -> Vec<String> {
         Err(err) => {
             tracing::debug!(?err, ?path, "legatus_client: tool-calls read failed");
             return Vec::new();
-        },
+        }
     };
     let _ = std::fs::remove_file(&path);
     content
@@ -316,7 +319,7 @@ pub fn take_turn_signals(session_id: &str) -> Vec<TurnSignal> {
         Err(err) => {
             tracing::debug!(?err, ?path, "legatus_client: turn signals read failed");
             return Vec::new();
-        },
+        }
     };
     let _ = std::fs::remove_file(&path);
     content
@@ -469,7 +472,7 @@ pub fn drain_inbox() -> Vec<RelayInstruction> {
         Err(err) => {
             tracing::debug!(?err, "legatus_client: cannot build reqwest client");
             return out;
-        },
+        }
     };
     while out.len() < HARD_CAP {
         let resp = match client
@@ -481,7 +484,7 @@ pub fn drain_inbox() -> Vec<RelayInstruction> {
             Err(err) => {
                 tracing::debug!(?err, "legatus_client: inbox GET failed");
                 break;
-            },
+            }
         };
         let status = resp.status();
         if status == reqwest::StatusCode::NO_CONTENT {
@@ -496,7 +499,7 @@ pub fn drain_inbox() -> Vec<RelayInstruction> {
             Err(err) => {
                 tracing::debug!(?err, "legatus_client: inbox payload decode failed");
                 break;
-            },
+            }
         }
     }
     out
@@ -656,7 +659,10 @@ mod tests {
         let outcome = classify_outcome(&signals, None, None);
         match outcome {
             sentinel_legatus::InstructionOutcome::Declined { reason } => {
-                assert!(reason.contains("Bash"), "reason should name the tool: {reason}");
+                assert!(
+                    reason.contains("Bash"),
+                    "reason should name the tool: {reason}"
+                );
                 assert!(reason.contains("permission denied"), "reason: {reason}");
             }
             other => panic!("expected Declined, got {other:?}"),
@@ -686,7 +692,10 @@ mod tests {
     #[test]
     fn classify_outcome_no_signals_yields_success() {
         let outcome = classify_outcome(&[], None, None);
-        assert!(matches!(outcome, sentinel_legatus::InstructionOutcome::Success));
+        assert!(matches!(
+            outcome,
+            sentinel_legatus::InstructionOutcome::Success
+        ));
     }
 
     #[test]
@@ -704,7 +713,7 @@ mod tests {
         match outcome {
             sentinel_legatus::InstructionOutcome::Deferred { waiting_on } => {
                 assert_eq!(waiting_on, "i'll get to");
-            },
+            }
             other => panic!("expected Deferred, got {other:?}"),
         }
     }
@@ -729,19 +738,18 @@ mod tests {
         match outcome {
             sentinel_legatus::InstructionOutcome::Deferred { waiting_on } => {
                 assert_eq!(waiting_on, "queued for later");
-            },
+            }
             other => panic!("expected Deferred, got {other:?}"),
         }
     }
 
     #[test]
     fn classify_outcome_skipping_for_now_yields_deferred() {
-        let outcome =
-            classify_outcome(&[], None, Some("Skipping for now — will revisit."));
+        let outcome = classify_outcome(&[], None, Some("Skipping for now — will revisit."));
         match outcome {
             sentinel_legatus::InstructionOutcome::Deferred { waiting_on } => {
                 assert_eq!(waiting_on, "skipping for now");
-            },
+            }
             other => panic!("expected Deferred, got {other:?}"),
         }
     }
@@ -767,11 +775,7 @@ mod tests {
     fn classify_outcome_api_error_beats_deferral_phrase() {
         // StopFailure path takes precedence even when the assistant
         // text would otherwise look like a deferral.
-        let outcome = classify_outcome(
-            &[],
-            Some("rate_limit"),
-            Some("I'll get to that later."),
-        );
+        let outcome = classify_outcome(&[], Some("rate_limit"), Some("I'll get to that later."));
         assert!(matches!(
             outcome,
             sentinel_legatus::InstructionOutcome::Failure { .. }
@@ -786,8 +790,7 @@ mod tests {
         let signals = vec![TurnSignal::PermissionDenied {
             tool: "Bash".into(),
         }];
-        let outcome =
-            classify_outcome(&signals, None, Some("I'll get to that later."));
+        let outcome = classify_outcome(&signals, None, Some("I'll get to that later."));
         assert!(matches!(
             outcome,
             sentinel_legatus::InstructionOutcome::Declined { .. }
@@ -797,6 +800,9 @@ mod tests {
     #[test]
     fn classify_outcome_empty_reply_text_yields_success() {
         let outcome = classify_outcome(&[], None, Some(""));
-        assert!(matches!(outcome, sentinel_legatus::InstructionOutcome::Success));
+        assert!(matches!(
+            outcome,
+            sentinel_legatus::InstructionOutcome::Success
+        ));
     }
 }
