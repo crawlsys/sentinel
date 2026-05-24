@@ -126,6 +126,17 @@ enum Commands {
         legatus_operator_id: Option<uuid::Uuid>,
     },
 
+    /// Stop a running sentinel daemon by reading its PID file from
+    /// `~/.claude/sentinel/daemon-pid` and sending SIGTERM. Cleans
+    /// up the PID + daemon-token files on success. Unix-only today
+    /// (Windows lacks the same SIGTERM semantics).
+    Stop {
+        /// Wait up to N seconds for the daemon to exit cleanly
+        /// before returning. 0 = signal and return immediately.
+        #[arg(long, default_value_t = 5)]
+        wait_secs: u64,
+    },
+
     /// Process a hook event (thin client → daemon, or standalone)
     Hook {
         /// Hook event type
@@ -642,6 +653,33 @@ enum LegatusAction {
         #[arg(long, default_value_t = 20)]
         heartbeat_secs: u64,
     },
+    /// Generate a 32-byte bootstrap secret (64 hex chars), suitable
+    /// for use as `--legatus-bootstrap-secret` / consulate's
+    /// `--bootstrap-secret`. Prints to stdout by default; with
+    /// `--output <path>` writes the secret to the file (mode 0600)
+    /// instead. Uses the OS CSPRNG (`OsRng`).
+    Init {
+        /// Optional path to write the secret to. The file is
+        /// created with mode `0600`. Parent directories are
+        /// created if they don't already exist. When omitted, the
+        /// secret is printed to stdout and no file is written.
+        #[arg(long, value_name = "PATH")]
+        output: Option<String>,
+        /// Overwrite the output file if it already exists. Default
+        /// is to refuse — secrets shouldn't be silently rotated.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Query the running daemon's `/legatus/health` endpoint and
+    /// pretty-print the current connection state (and pending
+    /// outbox depth). Reads the daemon port + bearer token from
+    /// `~/.claude/sentinel/daemon-token`.
+    Status {
+        /// Emit the raw JSON instead of the pretty-printed
+        /// summary. Useful for piping into `jq` / dashboards.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// `sentinel project` subcommands.
@@ -924,6 +962,7 @@ async fn main() -> anyhow::Result<()> {
             )
             .await
         },
+        Commands::Stop { wait_secs } => daemon_cmd::run_stop(wait_secs),
         Commands::Hook {
             event,
             matcher,
@@ -999,6 +1038,8 @@ async fn main() -> anyhow::Result<()> {
                 )
                 .await
             },
+            LegatusAction::Init { output, force } => legatus_cmd::run_init(output, force),
+            LegatusAction::Status { json } => legatus_cmd::run_status(json).await,
         },
         Commands::Scan {
             counts_only,

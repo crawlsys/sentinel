@@ -1,0 +1,87 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  launchd plist template for auto-starting the sentinel daemon on
+  macOS login. Drop into ~/Library/LaunchAgents/ as:
+
+      com.anthropic.sentinel.plist
+
+  Then load it:
+
+      launchctl load ~/Library/LaunchAgents/com.anthropic.sentinel.plist
+
+  Disable / unload:
+
+      launchctl unload ~/Library/LaunchAgents/com.anthropic.sentinel.plist
+
+  ----- BEFORE COPYING IN PLACE: REPLACE THE PLACEHOLDERS BELOW -----
+
+  - {{SENTINEL_BIN}}        absolute path to the `sentinel` binary
+                            (e.g. /Users/you/.cargo/bin/sentinel)
+  - {{CONSULATE_URL}}       ws://127.0.0.1:9000 (or wss:// in prod)
+  - {{BOOTSTRAP_SECRET_PATH}}  absolute path to the file holding your
+                               64-hex-char bootstrap secret. The plist
+                               reads it via the wrapper script so the
+                               secret never appears in the plist or
+                               in `ps`. Mode 0600 expected.
+  - {{HOME}}                /Users/<you>
+  - {{LOG_DIR}}             /Users/<you>/Library/Logs/sentinel
+
+  ----- OPTIONAL -----
+
+  - Comment out the OperatorId block if you don't have a per-operator
+    binding (sessions register as ROOT in that case).
+-->
+
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.anthropic.sentinel</string>
+
+    <!-- We wrap the daemon in a tiny shell because the bootstrap
+         secret must be read from a 0600 file and injected via env,
+         and launchd's EnvironmentVariables can't read from a file
+         on its own. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/sh</string>
+        <string>-c</string>
+        <string>exec env CONSULATE_BOOTSTRAP_SECRET="$(cat {{BOOTSTRAP_SECRET_PATH}})" {{SENTINEL_BIN}} daemon --port 3001 --legatus-consulate-url {{CONSULATE_URL}} --legatus-suggested-name "$(hostname -s)" --legatus-heartbeat-secs 20</string>
+    </array>
+
+    <!-- Start at login, restart on crash. -->
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+
+    <!-- Don't thrash if the daemon keeps dying. -->
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <!-- Logs to a per-user log dir so `tail -F` is easy. Rotation
+         is the operator's responsibility (newsyslog / logrotate). -->
+    <key>StandardOutPath</key>
+    <string>{{LOG_DIR}}/sentinel.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>{{LOG_DIR}}/sentinel.err.log</string>
+
+    <!-- HOME must be set; otherwise dirs::home_dir() (used for the
+         token + PID file) breaks. -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>{{HOME}}</string>
+        <!-- Conservative log level so the daemon log is small but
+             still useful. Set to "debug" temporarily when
+             diagnosing. -->
+        <key>RUST_LOG</key>
+        <string>info,sentinel_legatus=debug</string>
+    </dict>
+
+    <!-- Background, no UI. -->
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>

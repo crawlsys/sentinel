@@ -18,8 +18,8 @@ use axum::{Json, Router};
 use sentinel_domain::state::SessionState;
 use sentinel_legatus::{
     default_inbox_path, default_outbox_path, make_pair, make_pair_with_persistence,
-    ConnectConfig, ConnectionStatus, EscalationKind, LegatusHandle, PersistentEscalationOutbox,
-    PersistentInbox, RuntimeKind, BOOTSTRAP_SECRET_LEN,
+    ConnectConfig, ConnectionEventLog, ConnectionStatus, EscalationKind, LegatusHandle,
+    PersistentEscalationOutbox, PersistentInbox, RuntimeKind, BOOTSTRAP_SECRET_LEN,
 };
 use tokio::sync::{Notify, RwLock};
 use tracing::{info, warn};
@@ -239,6 +239,13 @@ pub async fn run(port: u16, legatus: LegatusOptions) -> Result<()> {
     let token_path = write_token_file(&token, port);
     info!("Bearer token written to {}", token_path.display());
 
+    // PID file — written next to the token file so `sentinel stop`
+    // can find this daemon and send it SIGTERM. Mode 0644 (world-
+    // readable, owner-writable). Cleaned up on graceful shutdown
+    // below.
+    let pid_path = write_pid_file()?;
+    info!("PID file written to {}", pid_path.display());
+
     // Operator-facing startup banner. Goes to stderr so it is visible
     // regardless of RUST_LOG filter (default is `warn`, which swallows
     // every info! the daemon emits). Operators following a runbook need
@@ -299,10 +306,146 @@ pub async fn run(port: u16, legatus: LegatusOptions) -> Result<()> {
 
     axum::serve(listener, app).await?;
 
-    // Clean up token file on shutdown
+    // Clean up token file + PID file on shutdown
     let _ = std::fs::remove_file(&token_path);
+    let _ = std::fs::remove_file(&pid_path);
 
     Ok(())
+}
+
+/// Write the daemon's PID to `~/.claude/sentinel/daemon-pid` so
+/// `sentinel stop` can find it. Refuses to overwrite an existing
+/// PID file when the named PID is still alive — that signals a
+/// daemon is already running and starting a second would just race
+/// it on the same token file. When the PID file is stale (process
+/// gone), it's silently replaced.
+fn write_pid_file() -> Result<std::path::PathBuf> {
+    let dir = dirs::home_dir()
+        .ok_or_else(|| anyhow::anyhow!("cannot determine home directory"))?
+        .join(".claude")
+        .join("sentinel");
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join("daemon-pid");
+
+    if let Ok(existing) = std::fs::read_to_string(&path) {
+        if let Ok(prev_pid) = existing.trim().parse::<i32>() {
+            if is_pid_alive(prev_pid) {
+                anyhow::bail!(
+                    "a sentinel daemon (pid {prev_pid}) is already running per {}; \
+                     stop it first with `sentinel stop` or delete the PID file if \
+                     you're sure it's stale",
+                    path.display()
+                );
+            }
+            // Stale; fall through and overwrite.
+            info!(stale_pid = prev_pid, "overwriting stale daemon-pid file");
+        }
+    }
+
+    let pid = std::process::id();
+    let content = format!("{pid}\n");
+    std::fs::write(&path, content)?;
+    Ok(path)
+}
+
+/// True when the named PID is alive. Shells out to `/bin/kill -0
+/// <pid>` rather than calling `libc::kill` directly so the
+/// workspace's `unsafe_code = "forbid"` lint stays clean. The
+/// signal-0 idiom checks process existence without delivering a
+/// signal; exit code 0 means alive, anything else means gone.
+/// On non-Unix, returns `true` conservatively (better to refuse
+/// to start than silently double up).
+#[cfg(unix)]
+fn is_pid_alive(pid: i32) -> bool {
+    std::process::Command::new("/bin/kill")
+        .args(["-0", &pid.to_string()])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+#[cfg(not(unix))]
+fn is_pid_alive(_pid: i32) -> bool {
+    true
+}
+
+/// `sentinel stop` — read `~/.claude/sentinel/daemon-pid`, send
+/// SIGTERM, wait up to `wait_secs` for clean exit, then remove the
+/// PID file if the daemon hadn't already done so.
+///
+/// Returns Ok(()) when the daemon was successfully signalled
+/// (regardless of whether it exited within the wait window).
+/// Returns Err when there's no PID file, when the PID file's
+/// process doesn't exist, or when SIGTERM itself fails.
+#[cfg(unix)]
+pub fn run_stop(wait_secs: u64) -> Result<()> {
+    let path = dirs::home_dir()
+        .ok_or_else(|| anyhow::anyhow!("cannot determine home directory"))?
+        .join(".claude")
+        .join("sentinel")
+        .join("daemon-pid");
+    let pid_str = std::fs::read_to_string(&path)
+        .with_context(|| format!("reading PID file at {}", path.display()))?;
+    let pid: i32 = pid_str
+        .trim()
+        .parse()
+        .with_context(|| format!("parsing PID from {}", path.display()))?;
+
+    if !is_pid_alive(pid) {
+        eprintln!("PID {pid} from {} is not alive; cleaning up stale file", path.display());
+        let _ = std::fs::remove_file(&path);
+        return Ok(());
+    }
+
+    // Shell out to /bin/kill -TERM to keep the workspace's
+    // `unsafe_code = "forbid"` lint clean. SIGTERM is a polite
+    // shutdown signal; the daemon's axum::serve loop handles it via
+    // tokio's default SIGTERM handler that drops the runtime.
+    let status = std::process::Command::new("/bin/kill")
+        .args(["-TERM", &pid.to_string()])
+        .status()
+        .context("invoking /bin/kill")?;
+    if !status.success() {
+        anyhow::bail!("/bin/kill -TERM {pid} returned {status}");
+    }
+    eprintln!("Sent SIGTERM to PID {pid}");
+
+    // Poll for exit. Daemon removes the PID file in its graceful
+    // shutdown path, so file-gone is a reliable success signal.
+    // Also check liveness directly in case the daemon was killed
+    // out from under us by something else.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(wait_secs);
+    while std::time::Instant::now() < deadline {
+        if !path.exists() || !is_pid_alive(pid) {
+            eprintln!("Daemon exited cleanly");
+            // Belt-and-suspenders: tokio's default SIGTERM handler
+            // aborts the runtime before the daemon's post-serve
+            // cleanup code can run, so neither the PID file nor
+            // the daemon-token file get removed by the daemon
+            // itself. Clean up both here so the next
+            // `sentinel daemon` start isn't confused by stale
+            // state.
+            let _ = std::fs::remove_file(&path);
+            if let Some(token_path) = path
+                .parent()
+                .map(|p| p.join("daemon-token"))
+            {
+                let _ = std::fs::remove_file(&token_path);
+            }
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    eprintln!(
+        "Daemon did not exit within {wait_secs}s; SIGTERM delivered. \
+         Re-run `sentinel stop` or send SIGKILL manually if it's stuck."
+    );
+    Ok(())
+}
+#[cfg(not(unix))]
+pub fn run_stop(_wait_secs: u64) -> Result<()> {
+    anyhow::bail!("sentinel stop is only implemented on Unix today")
 }
 
 /// Bundle returned by [`start_legatus_if_configured`] -- the handle
@@ -495,11 +638,19 @@ async fn start_legatus_if_configured(
     };
     let cancel = Arc::new(Notify::new());
     info!(url = %consulate_url, "daemon hosting legatus");
-    // Canonical connection-status handle. One clone goes to the
-    // reconnect wrapper (writer); another to LegatusRouteState
-    // (read by GET /legatus/health). Cheap to clone — internally
-    // an Arc<AtomicU8>.
-    let connection_status = ConnectionStatus::new();
+    // Canonical connection-status handle, with the persistent
+    // JSONL event log attached when we can resolve a home dir.
+    // One clone goes to the reconnect wrapper (writer); another to
+    // LegatusRouteState (read by GET /legatus/health). Cheap to
+    // clone — internally Arc<AtomicU8> + Arc<AtomicU64> +
+    // Option<ConnectionEventLog>.
+    let connection_status = match ConnectionEventLog::default_path() {
+        Some(p) => ConnectionStatus::new().with_event_log(ConnectionEventLog::at_path(p)),
+        None => {
+            warn!("no resolvable home dir; legatus connection-event log disabled");
+            ConnectionStatus::new()
+        }
+    };
     let status_for_wrapper = connection_status.clone();
     tokio::spawn(async move {
         // Reconnect wrapper: transient transport / heartbeat failures
@@ -561,6 +712,7 @@ fn legatus_routes(state: LegatusRouteState) -> Router {
 async fn handle_legatus_health(State(status): State<ConnectionStatus>) -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "status": status.get().as_str(),
+        "attempt": status.attempt(),
     }))
 }
 

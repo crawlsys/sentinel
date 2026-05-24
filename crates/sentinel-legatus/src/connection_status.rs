@@ -11,7 +11,7 @@
 //! and writes are wait-free, which matters because the HTTP handler
 //! must not block on a hot WebSocket loop.
 
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
 
 /// Current state of the legatus -> consulate connection.
@@ -67,21 +67,47 @@ impl ConnectionState {
 }
 
 /// Observable, clone-cheap handle on the wrapper's connection
-/// state. Internally just an `Arc<AtomicU8>` so cloning is two
-/// pointer ops and reads/writes are wait-free.
+/// state. Internally an `Arc<AtomicU8>` (the live state byte) +
+/// an optional `ConnectionEventLog` (the persistent JSONL stream).
+/// Cloning is a handful of pointer ops; reads/writes are wait-free.
 ///
 /// The wrapper task and the HTTP route handler each hold a clone;
 /// the daemon constructs the canonical one at startup.
 #[derive(Clone, Debug, Default)]
 pub struct ConnectionStatus {
     inner: Arc<AtomicU8>,
+    attempt: Arc<AtomicU64>,
+    event_log: Option<crate::connection_event_log::ConnectionEventLog>,
 }
 
 impl ConnectionStatus {
-    /// Construct a fresh status in [`ConnectionState::Disconnected`].
+    /// Construct a fresh status in [`ConnectionState::Disconnected`]
+    /// with no event log attached. Tests that don't need on-disk
+    /// history use this; production attaches a log via
+    /// [`Self::with_event_log`].
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Attach a persistent event log so every transition is also
+    /// appended as a JSONL line. Cheap (the `ConnectionEventLog`
+    /// is itself `Arc`-shaped internally).
+    #[must_use]
+    pub fn with_event_log(
+        mut self,
+        log: crate::connection_event_log::ConnectionEventLog,
+    ) -> Self {
+        self.event_log = Some(log);
+        self
+    }
+
+    /// Borrow the optional event log. The wrapper uses this to
+    /// record transitions; callers who only want the live state
+    /// can ignore.
+    #[must_use]
+    pub fn event_log(&self) -> Option<&crate::connection_event_log::ConnectionEventLog> {
+        self.event_log.as_ref()
     }
 
     /// Snapshot the current state.
@@ -94,6 +120,23 @@ impl ConnectionStatus {
     /// `get()` calls in other tasks (Release/Acquire pair).
     pub fn set(&self, state: ConnectionState) {
         self.inner.store(state as u8, Ordering::Release);
+    }
+
+    /// Snapshot the current attempt counter — incremented once per
+    /// call into `run_connect_hosted` by the reconnect wrapper.
+    /// Useful in `/legatus/health` for "how many reconnects has
+    /// this daemon survived?" and in the event log for correlating
+    /// transitions.
+    #[must_use]
+    pub fn attempt(&self) -> u64 {
+        self.attempt.load(Ordering::Acquire)
+    }
+
+    /// Increment + return the new attempt counter. The reconnect
+    /// wrapper calls this once at the top of each attempt iteration
+    /// so observers (and the event log) see a monotonic series.
+    pub fn bump_attempt(&self) -> u64 {
+        self.attempt.fetch_add(1, Ordering::AcqRel) + 1
     }
 }
 

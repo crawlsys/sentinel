@@ -149,6 +149,9 @@ pub async fn run_connect_hosted(
     // Reconnecting (between retries). Either way, we're now actively
     // attempting; surface that to the observer.
     status.set(ConnectionState::Connecting);
+    if let Some(log) = status.event_log() {
+        log.record_connecting(status.attempt());
+    }
     let (ws, _) = tokio_tungstenite::connect_async(&config.consulate_url)
         .await
         .map_err(|err| {
@@ -231,6 +234,9 @@ pub async fn run_connect_hosted(
     // until cancel or a transport failure. Observers (HTTP /health)
     // see us as healthy from this point on.
     status.set(ConnectionState::Connected);
+    if let Some(log) = status.event_log() {
+        log.record_connected(status.attempt());
+    }
 
     // Operator-facing handshake-complete banner. Goes to stderr so it
     // is visible regardless of RUST_LOG filter (default is `warn`).
@@ -903,9 +909,12 @@ pub async fn run_connect_hosted_with_reconnect(
     status: ConnectionStatus,
 ) -> Result<(), LegatusError> {
     let mut backoff = INITIAL_RECONNECT_BACKOFF;
-    let mut attempt: u64 = 0;
     loop {
-        attempt += 1;
+        // Bump the shared attempt counter so Connecting / Connected
+        // events inside run_connect_hosted carry the right number,
+        // and so HTTP /health can surface "this daemon has survived
+        // N reconnects."
+        let attempt = status.bump_attempt();
         info!(
             attempt,
             url = %config.consulate_url,
@@ -921,6 +930,9 @@ pub async fn run_connect_hosted_with_reconnect(
                     "legatus session exited cleanly; reconnect-loop returning Ok"
                 );
                 status.set(ConnectionState::Disconnected);
+                if let Some(log) = status.event_log() {
+                    log.record_disconnected(attempt, None);
+                }
                 return Ok(());
             }
             Err(LegatusError::VersionMismatch {
@@ -930,12 +942,22 @@ pub async fn run_connect_hosted_with_reconnect(
                 // Protocol-level incompatibility; reconnecting
                 // won't help. Surface to caller.
                 status.set(ConnectionState::Disconnected);
+                if let Some(log) = status.event_log() {
+                    log.record_disconnected(
+                        attempt,
+                        Some(format!(
+                            "VersionMismatch: accepted_min={accepted_min:?} \
+                             accepted_max={accepted_max:?}"
+                        )),
+                    );
+                }
                 return Err(LegatusError::VersionMismatch {
                     accepted_min,
                     accepted_max,
                 });
             }
             Err(err) => {
+                let reason = format!("{err}");
                 warn!(
                     attempt,
                     ?err,
@@ -948,6 +970,9 @@ pub async fn run_connect_hosted_with_reconnect(
                 // see this — a Connecting blip across reconnects
                 // would falsely suggest a fresh first attempt.
                 status.set(ConnectionState::Reconnecting);
+                if let Some(log) = status.event_log() {
+                    log.record_reconnecting(attempt, reason);
+                }
             }
         }
 
@@ -965,6 +990,12 @@ pub async fn run_connect_hosted_with_reconnect(
                     "legatus reconnect cancelled during backoff window"
                 );
                 status.set(ConnectionState::Disconnected);
+                if let Some(log) = status.event_log() {
+                    log.record_disconnected(
+                        attempt,
+                        Some("cancelled during backoff".to_owned()),
+                    );
+                }
                 return Ok(());
             }
         }

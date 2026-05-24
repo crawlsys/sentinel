@@ -6,6 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added
+- **Daemon ergonomics: PID file + `sentinel stop` + launchd template + `sentinel legatus init` + `sentinel legatus status` + connection-event JSONL log** (2026-05-24). Four operator-facing improvements that together make the daemon usable as a long-lived service instead of a one-off process:
+
+  1. **PID file + `sentinel stop`** (Unix-only). Daemon now writes `~/.claude/sentinel/daemon-pid` at startup and refuses to start if an existing PID is alive (prevents accidental double-up on the same token file; stale PIDs are silently overwritten). New `sentinel stop --wait-secs <N>` shells out to `/bin/kill -TERM`, polls for process exit, and cleans up both the PID file and the `daemon-token` file as a belt-and-suspenders measure (tokio's default SIGTERM handler aborts the runtime before the daemon's post-serve cleanup code can run, so a stop-side cleanup is required to leave a clean slate). Uses `/bin/kill` shell-out rather than `libc::kill` so the workspace's `unsafe_code = "forbid"` lint stays intact.
+
+  2. **launchd plist template** at `scripts/launchd/com.anthropic.sentinel.plist.template`. Placeholders for `{{SENTINEL_BIN}}`, `{{CONSULATE_URL}}`, `{{BOOTSTRAP_SECRET_PATH}}`, `{{HOME}}`, `{{LOG_DIR}}`. Wraps the daemon in a tiny shell that reads the bootstrap secret from a 0600 file and injects it via env (launchd's `EnvironmentVariables` can't read from a file, and the secret should never appear in `ps`). `KeepAlive=true`, `ThrottleInterval=10`, `ProcessType=Background`.
+
+  3. **`sentinel legatus init`** — generates a 32-byte bootstrap secret via `getrandom::OsRng`, hex-encodes, and either prints to stdout or writes to `--output <PATH>` with mode 0600 (creating parent directories as needed). Refuses to overwrite an existing output file without `--force` — silent rotation can lock running legati out of the consul.
+
+  4. **`sentinel legatus status [--json]`** — reads `~/.claude/sentinel/daemon-token`, calls `GET /legatus/health` + `GET /legatus/pending`, pretty-prints connection state + outbox depth (or emits combined JSON for `jq`/dashboards). Surfaces "daemon not running" cleanly when the token file is missing.
+
+  5. **Connection-event JSONL log** at `~/.claude/sentinel/state/legatus-connection-events.jsonl`. New `crates/sentinel-legatus/src/connection_event_log.rs` provides `ConnectionEvent { t, state, attempt, reason? }` + `ConnectionEventLog` (append-only writer, best-effort: I/O failures `warn!` rather than block the WS loop). Wrapper writes one line per state transition (Connecting / Connected / Reconnecting{reason} / Disconnected{reason?}). `ConnectionStatus` gained an attached `AtomicU64` attempt counter (`bump_attempt()` / `attempt()`) so the event log entries and `/legatus/health` JSON both carry "how many reconnects has this daemon survived?" `/legatus/health` JSON now `{ status, attempt }`. 5 unit tests cover create-on-append, parent-dir auto-create, FIFO ordering, `skip_serializing_if` for None reason, and reason-carrying disconnect. End-to-end: started a daemon, killed it, restarted, verified the JSONL gained the right sequence of transitions with timestamps.
+
+  Workspace tests still all-green (~2466 tests, +5 new).
+
 ### Fixed
 - **Five dead-wired hooks: declared in HOOK_NAMES, never invoked** (2026-05-24). An audit of `crates/sentinel-cli/src/hook_cmd.rs` against `crates/sentinel-application/src/hooks/mod.rs::HOOK_NAMES` found six hooks that had complete `process()` functions with unit tests but **were never called from the production dispatcher**. They were silently inert in every real session. Wired five of them; one (`spec_challenge_gate`) deferred because it needs external store + scorer wiring that isn't in `hook_cmd.rs` today.
   - `catastrophic_escalation` (PreToolUse) — **the headline bug**. The entire voice-attested catastrophic-action loop was dead from the sentinel side. Catastrophic Bash commands were not being intercepted; no `SessionBlocked{CatastrophicPending}` ever reached consul. The whole point of the legatus connection was to carry these signals.

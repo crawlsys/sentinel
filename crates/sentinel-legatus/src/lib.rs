@@ -27,6 +27,7 @@
 
 pub mod approval_cache;
 pub mod client;
+pub mod connection_event_log;
 pub mod connection_status;
 pub mod error;
 pub mod handle;
@@ -50,6 +51,7 @@ pub use client::{
     run_connect, run_connect_hosted, run_connect_hosted_with_reconnect, ConnectConfig,
     INITIAL_RECONNECT_BACKOFF, MAX_RECONNECT_BACKOFF,
 };
+pub use connection_event_log::{ConnectionEvent, ConnectionEventLog};
 pub use connection_status::{ConnectionState, ConnectionStatus};
 pub use error::LegatusError;
 pub use handle::{
