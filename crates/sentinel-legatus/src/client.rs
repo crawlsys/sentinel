@@ -181,6 +181,7 @@ pub async fn run_connect_hosted(
             working_dir: config.working_dir.clone(),
             branch: config.branch.clone(),
             task_description: config.task_description.clone(),
+            operator_id: None,
         }),
     )
     .await?;

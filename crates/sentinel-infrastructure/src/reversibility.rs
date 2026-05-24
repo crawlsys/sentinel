@@ -234,14 +234,95 @@ impl LayeredReversibilityClassifier {
 /// Returns `None` when the tool name should be handled by a deeper
 /// layer (MCP via Layer 2, Bash via Layer 3) or by the unknown-tool
 /// fallback.
+///
+/// Coverage is exhaustive for the harness tools shipped by Claude Code
+/// and the Vulcan/FleetView runtime — anything not listed here falls
+/// through to the conservative Irreversible default, which strands the
+/// agent at A3 because `dry_run_then_commit` demands
+/// `_intent`/`_reasoning`/`_expected_effect` on tool calls that
+/// pure-read or only mutate in-conversation state. Observed deadlock
+/// pre-fix: skill_gate requires `Skill(...)` before `Bash`, but
+/// `dry_run_then_commit` refused `Skill(...)` (and `ToolSearch`,
+/// `AskUserQuestion`) as Irreversible, blocking the agent from
+/// loading the skill the gate demanded. Keep this list comprehensive;
+/// mirror new entries in
+/// `crates/sentinel-application/src/hooks/skill_gate.rs` if they
+/// should also bypass that gate's load requirement.
 fn builtin_class(tool_name: &str) -> Option<ReversibilityClass> {
     match tool_name {
-        "Read" | "Glob" | "Grep" | "TaskList" | "WebFetch" | "WebSearch" => {
-            Some(ReversibilityClass::TriviallyReversible)
-        }
-        "Edit" | "Write" | "TaskCreate" | "TaskUpdate" => {
-            Some(ReversibilityClass::ReversibleWithEffort)
-        }
+        // --- TriviallyReversible: pure reads, UI prompts, schema
+        // lookups, idempotent harness queries. Zero state change
+        // observable outside the agent's own conversation buffer. ---
+        "Read"
+        | "Glob"
+        | "Grep"
+        | "WebFetch"
+        | "WebSearch"
+        // Task introspection (writes covered below)
+        | "TaskList"
+        | "TaskGet"
+        | "TaskOutput"
+        // UI-only prompts — the agent asks the operator a question;
+        // no tool action commits until the operator answers.
+        | "AskUserQuestion"
+        // Skill / tool-schema loaders — load markdown / JSON Schema
+        // into the agent's context, no external side effect.
+        | "Skill"
+        | "ToolSearch"
+        // Onboarding share-link check — read-only in `check` mode
+        // (the default); operator-initiated create/update/delete
+        // modes re-classify at the explicit call site if needed.
+        | "ShareOnboardingGuide"
+        // Process introspection — Monitor streams stdout lines from
+        // an already-spawned background command, doesn't start work.
+        | "Monitor"
+        // Cron introspection (writes covered below)
+        | "CronList"
+        // LSP query surface — reads symbol tables / hovers /
+        // definitions. LSP-driven edits go through Edit/Write.
+        | "LSP" => Some(ReversibilityClass::TriviallyReversible),
+
+        // --- ReversibleWithEffort: in-conversation or local-tree
+        // mutations the operator can undo with a known recovery path
+        // (delete the task, kill the agent, delete the worktree, etc.).
+        // None of these reach external services or shared infrastructure. ---
+        "Edit"
+        | "Write"
+        | "NotebookEdit"
+        // Task lifecycle writes — confined to the harness task store.
+        | "TaskCreate"
+        | "TaskUpdate"
+        | "TaskStop"
+        // Mode transitions — change the agent's permission state for
+        // the rest of the session. Revertible by entering/exiting the
+        // opposite mode.
+        | "EnterPlanMode"
+        | "ExitPlanMode"
+        // Worktree lifecycle — local-disk only; ExitWorktree(remove)
+        // is the recovery for EnterWorktree.
+        | "EnterWorktree"
+        | "ExitWorktree"
+        // Agent / team orchestration — spawned work lives in the
+        // local task graph; recovery is TaskStop / TeamDelete.
+        | "Agent"
+        | "TeamCreate"
+        | "TeamDelete"
+        // Inter-agent messaging — stays inside the FleetView fleet;
+        // recovery is "agent ignores it" or restart the recipient.
+        | "SendMessage"
+        // Cron management — adding/removing scheduled work. Side
+        // effects of FIRING a cron go through their own tool calls
+        // and re-classify at that point.
+        | "CronCreate"
+        | "CronDelete"
+        // Wake-up scheduler (Loop dynamic mode) — schedules the next
+        // re-entry, doesn't act externally.
+        | "ScheduleWakeup"
+        // Local notification surfaces — push to the operator's own
+        // device / channel. No external commitment to anyone else.
+        | "PushNotification"
+        | "RemoteTrigger" => Some(ReversibilityClass::ReversibleWithEffort),
+
         _ => None,
     }
 }
