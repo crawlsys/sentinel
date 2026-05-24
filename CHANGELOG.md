@@ -6,7 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Fixed
+- **Five dead-wired hooks: declared in HOOK_NAMES, never invoked** (2026-05-24). An audit of `crates/sentinel-cli/src/hook_cmd.rs` against `crates/sentinel-application/src/hooks/mod.rs::HOOK_NAMES` found six hooks that had complete `process()` functions with unit tests but **were never called from the production dispatcher**. They were silently inert in every real session. Wired five of them; one (`spec_challenge_gate`) deferred because it needs external store + scorer wiring that isn't in `hook_cmd.rs` today.
+  - `catastrophic_escalation` (PreToolUse) — **the headline bug**. The entire voice-attested catastrophic-action loop was dead from the sentinel side. Catastrophic Bash commands were not being intercepted; no `SessionBlocked{CatastrophicPending}` ever reached consul. The whole point of the legatus connection was to carry these signals.
+  - `agent_revocation` (PreToolUse) — the agent kill-switch was inert; `sentinel agent revoke <id>` wrote state nobody read.
+  - `constitution_gate` (PreToolUse) — the structural-rules enforcer the previous changelog called "SHIPPED" was actually never called. Operators who wrote `~/.claude/sentinel/config/constitution-gate.toml` saw no enforcement.
+  - `step_gate` (PreToolUse) — the M1.1 step-level prereq gate. Skills that depended on per-step proofs got no enforcement.
+  - `prompt_injection_nudge` (PostToolUse) — the injection-detection warning was never added to additionalContext on any tool result.
+
+  Each wired with the appropriate dependencies (`DaemonApprovalChecker` for catastrophic; `&state` for agent_revocation; existing `step_configs` HashMap for step_gate; `constitution_rules: Vec<Rule>` loaded once at hook entry from `~/.claude/sentinel/config/constitution-gate.toml` with graceful no-op on missing/malformed file). Each routed through `time_and_record` so they show up in `sentinel stats`. Workspace tests still all-green (~2461 tests).
+
 ### Added
+- **End-to-end hook validation via extended smoke test** (2026-05-24). `scripts/smoke-sentinel-consul-roundtrip.sh` now drives a real hook subprocess (`sentinel hook --event PreToolUse` with a catastrophic `rm -rf /` command) against the running daemon, asserts the hook denies locally (parses stdout JSON for `permissionDecision=deny`), AND asserts the resulting `SessionBlocked{CatastrophicPending}` actually arrives on the consulate's WebSocket (greps the debug log for `escalation event ... kind="blocked"`). This pins the entire chain — hook subprocess → HTTP POST → daemon `LegatusHandle.escalate()` → WS frame → consulate session_loop. Without this test, the dead-wired `catastrophic_escalation` would still be silently inert. The smoke also runs under an isolated `$HOME` (`mktemp -d`) so the smoke daemon's token file never clobbers the operator's real `~/.claude/sentinel/daemon-token`. Pass observed end-to-end on macOS.
+
+- **Operator setup runbook** (2026-05-24). `docs/runbooks/operator-setup-sentinel-consul.md` — full zero-to-connected path: build both binaries, generate bootstrap secret, start consulate, start daemon, verify `/legatus/health`, optional operator binding, troubleshooting common failure modes (stuck in `connecting`, 401 on token, daemon dies on schema mismatch, hook can't reach daemon).
+
 - **Legatus connection-status observability + `GET /legatus/health` + shell smoke test** (2026-05-24). Operators (and the new smoke test) can now see whether the daemon's hosted legatus is actually connected to consul without grepping logs. Three pieces:
 
   1. **`ConnectionStatus` type** (`crates/sentinel-legatus/src/connection_status.rs`) — clone-cheap handle wrapping an `Arc<AtomicU8>` that encodes one of `Disconnected` / `Connecting` / `Connected` / `Reconnecting`. Lock-free reads + writes so the HTTP handler never blocks the hot WebSocket loop. Defensive `from_u8` decodes unknown bytes to `Disconnected` and never panics. 5 unit tests pin defaults, round-trip, clone-sharing semantics, unknown-byte handling, and the JSON wire strings.

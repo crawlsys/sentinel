@@ -45,12 +45,18 @@ pick_port() {
 CONSULATE_PORT="$(pick_port)"
 DAEMON_PORT="$(pick_port)"
 
-# Sentinel writes its bearer token to ~/.claude/sentinel/daemon-token
-# as "port:token". Read it AFTER the daemon starts.
-TOKEN_FILE="${HOME}/.claude/sentinel/daemon-token"
+# Isolated $HOME so the smoke daemon's token file doesn't clobber the
+# operator's real daemon-token at ~/.claude/sentinel/daemon-token.
+# Both the daemon and the hook subprocesses run under TEST_HOME.
+TEST_HOME="$(mktemp -d -t sentinel-smoke.XXXXXX)"
+
+# Sentinel writes its bearer token to $HOME/.claude/sentinel/daemon-token
+# as "port:token". Under the isolated TEST_HOME.
+TOKEN_FILE="${TEST_HOME}/.claude/sentinel/daemon-token"
 
 CONSULATE_LOG="$(mktemp -t consulate.XXXXXX.log)"
 SENTINEL_LOG="$(mktemp -t sentinel.XXXXXX.log)"
+HOOK_LOG="$(mktemp -t hook.XXXXXX.log)"
 TEST_DB="$(mktemp -t consul.XXXXXX.db)"
 
 CONSULATE_PID=""
@@ -67,11 +73,13 @@ cleanup() {
         wait "${CONSULATE_PID}" 2>/dev/null
     fi
     rm -f "${TEST_DB}"
+    rm -rf "${TEST_HOME}"
     if [[ "${KEEP_LOGS:-0}" != "1" ]]; then
-        rm -f "${CONSULATE_LOG}" "${SENTINEL_LOG}"
+        rm -f "${CONSULATE_LOG}" "${SENTINEL_LOG}" "${HOOK_LOG}"
     else
         echo "  consulate log: ${CONSULATE_LOG}"
         echo "  sentinel log:  ${SENTINEL_LOG}"
+        echo "  hook log:      ${HOOK_LOG}"
     fi
 }
 trap cleanup EXIT
@@ -127,7 +135,11 @@ command -v jq >/dev/null || fail "jq not installed"
 command -v lsof >/dev/null || fail "lsof not installed"
 
 echo "==> Starting consulate on 127.0.0.1:${CONSULATE_PORT}"
-"${CONSULATE_BIN}" \
+# RUST_LOG includes consulate=debug so we can grep for the
+# "escalation event forwarded onto bus" line that proves an
+# escalation from the daemon actually arrived on the WS.
+RUST_LOG="info,consulate=debug" NO_COLOR=1 \
+    "${CONSULATE_BIN}" \
     --bind "127.0.0.1:${CONSULATE_PORT}" \
     --insecure-localhost-only \
     --bootstrap-secret "${BOOTSTRAP_SECRET}" \
@@ -136,8 +148,9 @@ echo "==> Starting consulate on 127.0.0.1:${CONSULATE_PORT}"
 CONSULATE_PID=$!
 wait_for_port "${CONSULATE_PORT}" "consulate" 10
 
-echo "==> Starting sentinel daemon on 127.0.0.1:${DAEMON_PORT}"
-"${SENTINEL_BIN}" daemon \
+echo "==> Starting sentinel daemon on 127.0.0.1:${DAEMON_PORT} (HOME=${TEST_HOME})"
+HOME="${TEST_HOME}" \
+    "${SENTINEL_BIN}" daemon \
     --port "${DAEMON_PORT}" \
     --legatus-consulate-url "ws://127.0.0.1:${CONSULATE_PORT}" \
     --legatus-bootstrap-secret "${BOOTSTRAP_SECRET}" \
@@ -163,6 +176,80 @@ echo "==> Polling /legatus/health until status=connected"
 wait_for_health_status "connected" 15
 echo "    -> connected"
 
+# ------------------------------------------------------------------
+# Hook subprocess E2E: fire the real PreToolUse dispatcher with a
+# catastrophic Bash command, then verify that (a) the hook denies
+# locally and (b) the SessionBlocked escalation actually reaches
+# consulate over the WS. This proves the wiring chain:
+#
+#   hook subprocess  ->  POST /legatus/escalate (HTTP)
+#                    ->  daemon LegatusHandle.escalate()
+#                    ->  WS frame
+#                    ->  consulate session_loop receives + bus-forwards
+#
+# Before today, catastrophic_escalation was declared but NEVER
+# called from the dispatcher — this test pins the fix.
+# ------------------------------------------------------------------
+echo "==> Firing catastrophic hook subprocess (rm -rf /)"
+TEST_SESSION_ID="00000000-0000-0000-0000-000000000111"
+HOOK_INPUT_JSON=$(cat <<EOF
+{"hook_event_name":"PreToolUse","session_id":"${TEST_SESSION_ID}","tool_name":"Bash","tool_input":{"command":"rm -rf /"}}
+EOF
+)
+HOOK_STDOUT="$(mktemp -t hook-stdout.XXXXXX)"
+HOOK_EXIT=0
+HOME="${TEST_HOME}" "${SENTINEL_BIN}" hook --event PreToolUse \
+    <<<"${HOOK_INPUT_JSON}" \
+    >"${HOOK_STDOUT}" \
+    2>"${HOOK_LOG}" \
+    || HOOK_EXIT=$?
+
+# The PreToolUse hook chain returns a JSON HookOutput on stdout.
+# For a Catastrophic command, catastrophic_escalation should set
+# permissionDecision=deny — even if other gates also deny, the deny
+# from catastrophic_escalation must be present somewhere in the
+# stdout JSON. (Other gates like dry_run_then_commit may also deny
+# rm -rf /; we just need a deny.)
+if ! jq -e '.hookSpecificOutput.permissionDecision == "deny"' "${HOOK_STDOUT}" \
+    >/dev/null 2>&1; then
+    echo "FAIL: hook did not deny rm -rf /" >&2
+    cat "${HOOK_STDOUT}" >&2
+    fail "hook subprocess did not return permissionDecision=deny"
+fi
+echo "    -> hook denied locally"
+
+# Now verify the escalation reached consulate. catastrophic_escalation
+# calls escalate_fire_and_forget which spawns a background thread to
+# POST + the daemon enqueues + the WS loop drains. End-to-end may
+# take a few hundred ms.
+#
+# Match either of consulate's two debug-level lines for received
+# escalations: with a subscriber wired -> "forwarded onto bus";
+# without (standalone consulate, no consul-app brain) -> "received
+# but no bus subscriber wired". Either line is positive proof that
+# the SessionBlocked frame arrived on the WS. We additionally check
+# the kind is "blocked" (the SessionBlocked variant) so the test
+# fails if the escalation arrives but is mis-classified.
+ESCALATION_LINE='escalation event (forwarded onto bus|received but no bus subscriber wired).*kind="blocked"'
+# 10s budget — escalate_fire_and_forget spawns an OS thread that
+# does the POST asynchronously; on a cold cache or contended
+# system the round-trip can take 1-2s. 10s is comfortably above
+# any non-pathological latency.
+deadline=$(( $(date +%s) + 10 ))
+while (( $(date +%s) < deadline )); do
+    if grep -Eq "${ESCALATION_LINE}" "${CONSULATE_LOG}" 2>/dev/null; then
+        break
+    fi
+    sleep 0.1
+done
+if ! grep -Eq "${ESCALATION_LINE}" "${CONSULATE_LOG}"; then
+    echo "FAIL: consulate never observed a SessionBlocked escalation" >&2
+    tail -20 "${CONSULATE_LOG}" >&2
+    fail "catastrophic_escalation hook did not propagate to consulate over WS"
+fi
+echo "    -> consulate received the SessionBlocked escalation via WS"
+rm -f "${HOOK_STDOUT}"
+
 echo "==> Killing consulate to verify reconnect transitions"
 kill "${CONSULATE_PID}"
 wait "${CONSULATE_PID}" 2>/dev/null || true
@@ -175,7 +262,8 @@ wait_for_health_status "reconnecting" 10
 echo "    -> reconnecting"
 
 echo "==> Restarting consulate to verify reconnect succeeds"
-"${CONSULATE_BIN}" \
+RUST_LOG="info,consulate=debug" NO_COLOR=1 \
+    "${CONSULATE_BIN}" \
     --bind "127.0.0.1:${CONSULATE_PORT}" \
     --insecure-localhost-only \
     --bootstrap-secret "${BOOTSTRAP_SECRET}" \
