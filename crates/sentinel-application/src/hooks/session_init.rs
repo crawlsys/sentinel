@@ -1250,7 +1250,7 @@ Per-project settings live in `~/.claude/sentinel/projects/{{name}}.md` with YAML
 - **Doppler**: project name, config names (dev/stg/prd)
 - **Linear**: team ID, team key, issue prefix, project IDs, labels
 - **Deploy**: staging/production URLs, hosting provider
-- **QA**: Steel test user, Doppler secret path for test password
+- **QA**: Browser test user (Browserbase remote or CDP local), Doppler secret path for test password
 - **Auth**: Auth0 domains, callback URLs
 
 The skill router auto-detects the active project from issue prefixes (e.g. `FIR-123`), project aliases, or cwd path matching, and injects project context into every skill.
@@ -1262,7 +1262,7 @@ The skill router auto-detects the active project from issue prefixes (e.g. `FIR-
 | **SessionStart** | New session opens | Marketplace sync, CLAUDE.md gen, project auto-init, Linear key cache |
 | **SessionEnd** | Session closes | Session cleanup, metrics flush (1.5s timeout) |
 | **UserPromptSubmit** | Every user message | Skill router, phase validator, error reporter, todo loader, doc drift*, commit hygiene*, context monitor*, verification gate* |
-| **PreToolUse** | Before Claude uses a tool | Phase gate (blocks tools until phase loaded), git hygiene (Edit/Write), commit validator (Bash), pre-push Steel test (Bash), wrangler guard (Bash) |
+| **PreToolUse** | Before Claude uses a tool | Phase gate (blocks tools until phase loaded), git hygiene (Edit/Write), commit validator (Bash), pre-push browser test (Bash), wrangler guard (Bash) |
 | **PostToolUse** | After Claude uses a tool | MCP health check, todo interceptor, evidence collector, plan organizer (ExitPlanMode) |
 | **PostToolUseFailure** | After tool execution fails | Pass-through (logged) |
 | **Stop** | Claude finishes responding | Execution log, skill telemetry, context monitor*, commit hygiene*, doc drift*, verification gate* |
@@ -1585,7 +1585,9 @@ enforce — these do):
     `project`, with relative dates converted to absolute.
   * You discovered quirky external-system behaviour not documented
     in the code.
-- **Run the Steel test when the change touches UI surface** — any
+- **Run the browser test when the change touches UI surface** — CDP
+(`mcp__cdp__*` via edge-cdp skill) for localhost, Browserbase
+(`mcp__browserbase__*`) for staging/preview/production. Trigger any
 edit under `client/src/**`, `components/**`, `pages/**`, a `*.tsx` /
 `*.vue` / `*.html` file, or a server route that feeds UI data. Pure
 backend, pure config, pure tooling, and pure docs changes don't need

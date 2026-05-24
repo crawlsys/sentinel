@@ -1741,7 +1741,7 @@ mod step_tools_tests {
     //   review (3.L4) — CI green + CodeRabbit triaged
     //   review (3.L5) — Merge to main
     //   qa-handoff (3.5.0)   — Deploy to staging
-    //   qa-handoff (3.5.1)   — Steel smoke test on staging
+    //   qa-handoff (3.5.1)   — Browserbase smoke test on staging
     //   qa-handoff (3.5.2)   — Loom upload of smoke screenshots
     //   qa-handoff (3.5.3-4) — Transition Linear to QA Testing + assign
     //   qa-handoff (3.5.5)   — Implementation comment with evidence
@@ -1820,7 +1820,7 @@ mod step_tools_tests {
             (
                 "qa-handoff",
                 "3.5.1",
-                "Steel smoke test on staging — feature reachable, no console errors",
+                "Browserbase smoke test on staging — feature reachable, no console errors",
                 serde_json::json!({
                     "issue_id": "FPCRM-200",
                     "staging_url": "https://staging.firefly-pro.example/",
@@ -2012,7 +2012,7 @@ mod step_tools_tests {
             &handler,
             "qa-handoff",
             "3.5.6",
-            "QA tester rejects — bug found in staging Steel test",
+            "QA tester rejects — bug found in staging Browserbase test",
             serde_json::json!({
                 "issue_id": "FPCRM-201",
                 "previous_state": "QA Testing",

@@ -47,11 +47,11 @@ pub const HOOK_COOLDOWN_DOC_MS: u64 = 30 * 60 * 1000;
 pub const HOOK_COOLDOWN_VERIFY_MS: u64 = 5 * 60 * 1000;
 
 // ---------------------------------------------------------------------------
-// Steel / test validity
+// Browser test validity
 // ---------------------------------------------------------------------------
 
-/// How long a passing Steel browser test remains valid (2 hours).
-pub const STEEL_TEST_VALIDITY: Duration = Duration::from_secs(2 * 60 * 60);
+/// How long a passing browser test remains valid (2 hours).
+pub const BROWSER_TEST_VALIDITY: Duration = Duration::from_secs(2 * 60 * 60);
 
 // ---------------------------------------------------------------------------
 // Memory system

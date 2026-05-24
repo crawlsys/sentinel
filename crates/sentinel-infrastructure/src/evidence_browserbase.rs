@@ -3,9 +3,10 @@
 //!
 //! Verifies claims of the form `"browserbase.<verb>"` against
 //! caller-supplied Browserbase session metadata. This is the
-//! "judge evidence" pattern: the agent runs a Steel smoke test
-//! through the Browserbase MCP server, collects the session_id +
-//! screenshot count + console-error count + any artifact URLs,
+//! "judge evidence" pattern: the agent runs a browser smoke test
+//! through the Browserbase MCP server (remote URLs) or the CDP MCP
+//! server (localhost), collects the session_id + screenshot count +
+//! console-error count + any artifact URLs,
 //! and passes that context through `submit_step_complete`'s
 //! `evidence_claim` arg. This adapter then validates the shape
 //! is well-formed and seals a receipt with provenance binding

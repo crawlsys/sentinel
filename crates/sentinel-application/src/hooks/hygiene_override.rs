@@ -50,6 +50,16 @@ pub fn doppler_override_path(fs: &dyn FileSystemPort, session_id: &str) -> PathB
     override_dir(fs).join(format!("doppler-{hash}"))
 }
 
+/// Phase-gate override path. Suppresses the `phase_gate.rs` block on
+/// `~/.claude/skills/**/SKILL.md` and `~/.claude/skills/**/phases/**`
+/// edits. Lets the user perform marketplace-wide skill refactors. Does
+/// NOT suspend protection on `~/.claude/sentinel/`, settings.json, or
+/// hooks.toml — those remain blocked always.
+pub fn phase_gate_override_path(fs: &dyn FileSystemPort, session_id: &str) -> PathBuf {
+    let hash = sha256_hash(session_id);
+    override_dir(fs).join(format!("phase-gate-{hash}"))
+}
+
 /// SHA-256 hash of input, truncated to 32 hex chars (128 bits)
 fn sha256_hash(input: &str) -> String {
     let mut hasher = Sha256::new();
@@ -101,12 +111,20 @@ fn now_secs() -> u64 {
 /// Shorter window limits exposure from accidental or social-engineered overrides.
 const OVERRIDE_TTL_SECS: u64 = sentinel_domain::constants::OVERRIDE_TTL_SECS;
 
+/// Phase-gate override TTL — extended to 10 minutes (600s).
+/// Phase-gate overrides are explicitly invoked for marketplace-wide skill
+/// refactors which involve many sequential file edits. 60s is too tight for
+/// that workflow. Phase-gate overrides are also strictly scoped (only
+/// SKILL.md + phase files; sentinel config/state/settings remain protected),
+/// so the longer window is a smaller blast radius than the hygiene override.
+pub const PHASE_GATE_OVERRIDE_TTL_SECS: u64 = 600;
+
 // Override-phrase predicates have moved to `sentinel_domain::override_phrase`
 // where the patterns are reviewable + tested in isolation. The hook is still
 // responsible for what to *do* once a phrase matches (write a signed token,
 // reset cooldown).
 use sentinel_domain::override_phrase::{
-    is_doppler_override, is_hygiene_override, is_verification_override,
+    is_doppler_override, is_hygiene_override, is_phase_gate_override, is_verification_override,
 };
 
 /// Write a signed override file.
@@ -129,6 +147,7 @@ fn write_signed_override(
 }
 
 /// Check if a signed override file is active (exists, valid signature, not expired).
+/// Uses the default `OVERRIDE_TTL_SECS` (60s).
 ///
 /// **Attack #47**: Replaces the old `is_override_active_at()` which only checked
 /// file mtime. Now verifies the content signature, preventing `touch`-based bypass.
@@ -138,6 +157,19 @@ pub fn is_signed_override_active(
     override_type: &str,
     session_id: &str,
 ) -> bool {
+    is_signed_override_active_with_ttl(fs, path, override_type, session_id, OVERRIDE_TTL_SECS)
+}
+
+/// Like `is_signed_override_active` but with a caller-specified TTL.
+/// Used by phase_gate (which needs 600s instead of 60s) — see the
+/// `PHASE_GATE_OVERRIDE_TTL_SECS` rationale.
+pub fn is_signed_override_active_with_ttl(
+    fs: &dyn FileSystemPort,
+    path: &std::path::Path,
+    override_type: &str,
+    session_id: &str,
+    ttl_secs: u64,
+) -> bool {
     let content = match fs.read_to_string(path) {
         Ok(c) => c,
         Err(_) => return false,
@@ -145,7 +177,7 @@ pub fn is_signed_override_active(
     match verify_override_content(&content, override_type, session_id) {
         Some(timestamp) => {
             let now = now_secs();
-            if now.saturating_sub(timestamp) < OVERRIDE_TTL_SECS {
+            if now.saturating_sub(timestamp) < ttl_secs {
                 true
             } else {
                 // Expired — clean up (write empty)
@@ -178,6 +210,7 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     let hygiene = is_hygiene_override(&prompt);
     let verification = is_verification_override(&prompt);
     let doppler = is_doppler_override(&prompt);
+    let phase_gate = is_phase_gate_override(&prompt);
 
     if hygiene {
         if let Err(e) = write_signed_override(
@@ -245,6 +278,26 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
 |  Doppler mutation tools unblocked for {OVERRIDE_TTL_SECS} seconds.              |\n\
 |                                                             |\n\
 |  Secrets ops are high-risk — verify target config!          |\n\
+|  The gate will re-engage after timeout.                     |\n\
++-------------------------------------------------------------+"
+        );
+    }
+
+    if phase_gate {
+        let path = phase_gate_override_path(ctx.fs, session_id);
+        if let Err(e) = write_signed_override(ctx.fs, &path, "phase-gate", session_id) {
+            eprintln!("Failed to set phase-gate override: {e}");
+            return HookOutput::allow();
+        }
+        eprintln!(
+            "\
++-------------------------------------------------------------+\n\
+|  PHASE GATE OVERRIDE ACTIVATED                              |\n\
++-------------------------------------------------------------+\n\
+|  Skill/phase file edits unblocked for {OVERRIDE_TTL_SECS} seconds.              |\n\
+|                                                             |\n\
+|  Refactor-scope only: SKILL.md + phases/*.md.               |\n\
+|  Sentinel config/state + settings.json remain protected.    |\n\
 |  The gate will re-engage after timeout.                     |\n\
 +-------------------------------------------------------------+"
         );

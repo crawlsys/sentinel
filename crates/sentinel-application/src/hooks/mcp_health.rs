@@ -229,6 +229,37 @@ mod tests {
 
     #[test]
     fn test_detects_timeout_error() {
+        // Browserbase MCP (current) — typical remote browser timeout.
+        let input = HookInput {
+            tool_name: Some("mcp__browserbase__navigate".to_string()),
+            tool_result: Some(serde_json::json!("Request timed out after 30000ms")),
+            session_id: Some("test-session".to_string()),
+            ..Default::default()
+        };
+        let error = detect_error(&input);
+        assert!(error.is_some());
+        assert_eq!(error.unwrap(), "timed out");
+    }
+
+    #[test]
+    fn test_detects_timeout_error_cdp() {
+        // CDP MCP (current) — local browser timeout (e.g. wait_for_selector).
+        let input = HookInput {
+            tool_name: Some("mcp__cdp__navigate".to_string()),
+            tool_result: Some(serde_json::json!("Request timed out after 30000ms")),
+            session_id: Some("test-session".to_string()),
+            ..Default::default()
+        };
+        let error = detect_error(&input);
+        assert!(error.is_some());
+        assert_eq!(error.unwrap(), "timed out");
+    }
+
+    #[test]
+    fn test_detects_timeout_error_legacy_steel() {
+        // Legacy Steel MCP — kept as forward-compat regression. The
+        // steel-mcp binary is no longer registered, but if a residual
+        // tool name ever surfaced, the error detector should still classify it.
         let input = HookInput {
             tool_name: Some("mcp__steel__navigate".to_string()),
             tool_result: Some(serde_json::json!("Request timed out after 30000ms")),
@@ -254,6 +285,13 @@ mod tests {
     #[test]
     fn test_extract_server_name() {
         assert_eq!(extract_server_name("mcp__linear__get_issue"), "linear");
+        assert_eq!(
+            extract_server_name("mcp__browserbase__navigate"),
+            "browserbase"
+        );
+        assert_eq!(extract_server_name("mcp__cdp__navigate"), "cdp");
+        // Legacy Steel — kept as regression coverage. The steel-mcp binary
+        // is no longer registered but the extractor should still work.
         assert_eq!(extract_server_name("mcp__steel__navigate"), "steel");
         assert_eq!(extract_server_name("mcp__doppler__list_secrets"), "doppler");
         assert_eq!(extract_server_name("mcp__"), "");

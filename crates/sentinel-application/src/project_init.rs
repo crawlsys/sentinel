@@ -971,15 +971,15 @@ clap = { version = "4", features = ["derive"] }
     #[test]
     fn test_gen_readme_mcp() {
         let meta = ProjectMetadata {
-            name: "steel-mcp".to_string(),
+            name: "browserbase-mcp".to_string(),
             description: "Cloud browser automation".to_string(),
             rust_flavor: Some(RustFlavor::McpServer),
-            binary_name: Some("steel-mcp".to_string()),
+            binary_name: Some("browserbase-mcp".to_string()),
             ..Default::default()
         };
 
         let readme = gen_readme(&meta);
-        assert!(readme.contains("# steel-mcp"));
+        assert!(readme.contains("# browserbase-mcp"));
         assert!(readme.contains("MCP server"));
         assert!(readme.contains("Vulcan SDK"));
         assert!(readme.contains("mcp-router"));
@@ -1048,8 +1048,8 @@ clap = { version = "4", features = ["derive"] }
     #[test]
     fn test_gen_building_md_with_path_deps() {
         let meta = ProjectMetadata {
-            name: "steel-mcp".to_string(),
-            binary_name: Some("steel-mcp".to_string()),
+            name: "browserbase-mcp".to_string(),
+            binary_name: Some("browserbase-mcp".to_string()),
             path_dependencies: vec!["vulcan".to_string()],
             ..Default::default()
         };

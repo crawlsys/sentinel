@@ -41,6 +41,23 @@ pub const DOPPLER_OVERRIDE_PATTERNS: &[&str] = &[
     r"authorize\s+doppler\s+(write|writes|mutation|mutations)",
 ];
 
+/// Phrases that opt the user out of the `phase_gate` protection on
+/// `~/.claude/skills/**/SKILL.md` and `~/.claude/skills/**/phases/**`.
+/// Lets the user perform marketplace-wide skill refactors without
+/// tripping the "phase file modification" or "skill definition file"
+/// block. **Does NOT suspend protection on `~/.claude/sentinel/`,
+/// settings.json, or hooks.toml** — those remain blocked always.
+///
+/// Language is explicit: the user has to name "phase", "skills", or
+/// "refactor" so a passing mention of "override" in unrelated work
+/// won't unlock skill edits.
+pub const PHASE_GATE_OVERRIDE_PATTERNS: &[&str] = &[
+    r"override\s+(phase\s+gate|phase|skills?)",
+    r"(phase\s+gate|skills?)\s+override",
+    r"refactor\s+skills?",
+    r"allow\s+(skill|phase)\s+(edit|edits|modification|modifications)",
+];
+
 /// True if `prompt` matches any pattern in [`HYGIENE_OVERRIDE_PATTERNS`].
 #[must_use]
 pub fn is_hygiene_override(prompt: &str) -> bool {
@@ -57,6 +74,15 @@ pub fn is_verification_override(prompt: &str) -> bool {
 #[must_use]
 pub fn is_doppler_override(prompt: &str) -> bool {
     matches_any(prompt, DOPPLER_OVERRIDE_PATTERNS)
+}
+
+/// True if `prompt` matches any pattern in [`PHASE_GATE_OVERRIDE_PATTERNS`].
+/// When true, the hygiene_override hook will write a signed phase-gate
+/// override token; phase_gate.rs will let writes to skill files through
+/// for the override TTL (60s).
+#[must_use]
+pub fn is_phase_gate_override(prompt: &str) -> bool {
+    matches_any(prompt, PHASE_GATE_OVERRIDE_PATTERNS)
 }
 
 /// Common "match any of these regexes" helper. Returns `false` if a pattern
@@ -142,15 +168,54 @@ mod tests {
         assert!(is_hygiene_override(h));
         assert!(!is_verification_override(h));
         assert!(!is_doppler_override(h));
+        assert!(!is_phase_gate_override(h));
 
         let v = "skip tests";
         assert!(is_verification_override(v));
         assert!(!is_hygiene_override(v));
         assert!(!is_doppler_override(v));
+        assert!(!is_phase_gate_override(v));
 
         let d = "allow doppler writes";
         assert!(is_doppler_override(d));
         assert!(!is_hygiene_override(d));
         assert!(!is_verification_override(d));
+        assert!(!is_phase_gate_override(d));
+
+        let p = "refactor skills";
+        assert!(is_phase_gate_override(p));
+        assert!(!is_hygiene_override(p));
+        assert!(!is_verification_override(p));
+        assert!(!is_doppler_override(p));
+    }
+
+    // ─── phase gate ───────────────────────────────────────────────────
+
+    #[test]
+    fn phase_gate_override_recognizes_each_pattern() {
+        assert!(is_phase_gate_override("override phase gate"));
+        assert!(is_phase_gate_override("override phase"));
+        assert!(is_phase_gate_override("override skills"));
+        assert!(is_phase_gate_override("override skill"));
+        assert!(is_phase_gate_override("phase gate override"));
+        assert!(is_phase_gate_override("skills override"));
+        assert!(is_phase_gate_override("skill override"));
+        assert!(is_phase_gate_override("refactor skills"));
+        assert!(is_phase_gate_override("refactor skill"));
+        assert!(is_phase_gate_override("allow skill edit"));
+        assert!(is_phase_gate_override("allow skill edits"));
+        assert!(is_phase_gate_override("allow phase modification"));
+        assert!(is_phase_gate_override("allow phase modifications"));
+    }
+
+    #[test]
+    fn phase_gate_override_does_not_match_unrelated() {
+        // Generic "override" without phase/skill naming should not match
+        assert!(!is_phase_gate_override("override hygiene"));
+        assert!(!is_phase_gate_override("override doppler"));
+        assert!(!is_phase_gate_override("override verification"));
+        // Unrelated mentions of "skills"
+        assert!(!is_phase_gate_override("good engineering skills"));
+        assert!(!is_phase_gate_override("the refactor team"));
     }
 }

@@ -37,7 +37,7 @@ pub struct SessionState {
     pub active: bool,
 
     /// Phase files that have been `Read()` by Claude, keyed by skill name.
-    /// E.g., `{"linear": ["claim.md", "fetch.md"], "steel": ["claim.md"]}`.
+    /// E.g., `{"linear": ["claim.md", "fetch.md"], "browserbase": ["setup.md"]}`.
     ///
     /// **Attack #50**: Was a global `Vec<String>` — reading skill A's `review.md`
     /// would satisfy checks for skill B's `review.md`. Now per-skill.
@@ -643,7 +643,7 @@ mod tests {
         state.record_phase_read("linear", "claim.md");
         assert_eq!(state.phases_read_count(), 1);
         assert!(state.has_phase_been_read("linear", "claim.md"));
-        assert!(!state.has_phase_been_read("steel", "claim.md")); // per-skill isolation
+        assert!(!state.has_phase_been_read("browserbase", "claim.md")); // per-skill isolation
 
         // Idempotent — recording same file twice doesn't duplicate
         state.record_phase_read("linear", "claim.md");

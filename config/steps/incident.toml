@@ -62,7 +62,7 @@ description = "Check recent config changes (Doppler, env vars)"
 
 [[phases.steps]]
 id = "2.6"
-description = "Take Steel screenshot of error state"
+description = "Take Browserbase screenshot of error state"
 
 [[phases.steps]]
 id = "2.7"
@@ -162,7 +162,7 @@ description = "Deploy fix to staging"
 
 [[phases.steps]]
 id = "5.7"
-description = "Verify fix on staging (Steel smoke test)"
+description = "Verify fix on staging (Browserbase smoke test)"
 blocker = true
 
 [[phases.steps]]

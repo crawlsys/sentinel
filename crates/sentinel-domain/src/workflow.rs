@@ -376,13 +376,13 @@ pub struct SkillWorkflow {
     pub phases: Vec<WorkflowPhase>,
 
     /// Tool name prefixes to block when this workflow is active.
-    /// E.g., `["mcp__cdp__"]` blocks all CDP tools when steel workflow is active.
+    /// E.g., `["mcp__cdp__"]` blocks all CDP tools when browserbase workflow is active.
     /// This prevents using equivalent MCP servers to bypass phase enforcement.
     #[serde(default)]
     pub blocked_tool_prefixes: Vec<String>,
 
     /// Bash command patterns (regex strings) to block when this workflow is active.
-    /// E.g., `["steel-mcp", "chrome.*--remote-debugging"]` blocks CLI escape attempts.
+    /// E.g., `["browserbase-mcp", "chrome.*--remote-debugging"]` blocks CLI escape attempts.
     #[serde(default)]
     pub blocked_bash_patterns: Vec<String>,
 
@@ -603,7 +603,7 @@ impl WorkflowState {
 
         // ── Blocked tool prefix check ─────────────────────────────────
         // Block equivalent MCP tools regardless of phase progress.
-        // E.g., mcp__cdp__* is always blocked when steel workflow is active.
+        // E.g., mcp__cdp__* is always blocked when browserbase workflow is active.
         if !workflow.blocked_tool_prefixes.is_empty() {
             for prefix in &workflow.blocked_tool_prefixes {
                 if tool_name.starts_with(prefix.as_str()) {

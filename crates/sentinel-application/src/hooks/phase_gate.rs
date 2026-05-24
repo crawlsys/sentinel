@@ -236,8 +236,9 @@ pub fn process(
 
     // **Attack #200 fix**: MCP tools with write/exec capabilities MUST go through
     // phase gate enforcement. Previously ALL mcp__ tools were auto-allowed, letting
-    // any MCP server (codex, steel, etc.) bypass workflow restrictions by writing
-    // files, running commands, or applying patches through their own tools.
+    // any MCP server (codex, browserbase, cdp, legacy steel, etc.) bypass workflow
+    // restrictions by writing files, running commands, or applying patches through
+    // their own tools.
     //
     // Dangerous MCP tool suffixes — any mcp__*__<suffix> matching these is treated
     // as a non-safe tool and subject to the same gate enforcement as Bash/Edit/Write.
@@ -315,11 +316,36 @@ pub fn process(
 
                     let canonical_key = format!("{}/{}", info.skill, info.file);
                     if let Err(tamper_msg) = state.record_phase_file_hash(&canonical_key, &hash) {
-                        eprintln!("[sentinel] SECURITY: {}", tamper_msg);
-                        return block_with_context(
-                            input,
-                            format!(
-                                "+============================================================+\n\
+                        // Phase-gate override escape hatch: when an HMAC-signed
+                        // phase-gate override token is active (Gary said
+                        // "override phase gate" / "refactor skills" within the
+                        // last 60s), accept the new hash and proceed. This is
+                        // for legitimate marketplace-wide skill refactors where
+                        // phase file content must change mid-session.
+                        let session_id = input.session_id.as_deref().unwrap_or("unknown");
+                        let override_path = super::hygiene_override::phase_gate_override_path(
+                            fs, session_id,
+                        );
+                        if super::hygiene_override::is_signed_override_active(
+                            fs,
+                            &override_path,
+                            "phase-gate",
+                            session_id,
+                        ) {
+                            eprintln!(
+                                "[sentinel] phase_gate_override: accepting new hash for '{canonical_key}' (was tampering)",
+                            );
+                            // Force-update the recorded hash so subsequent reads
+                            // in this session see the new content as canonical.
+                            state
+                                .phase_file_hashes
+                                .insert(canonical_key.clone(), hash.clone());
+                        } else {
+                            eprintln!("[sentinel] SECURITY: {}", tamper_msg);
+                            return block_with_context(
+                                input,
+                                format!(
+                                    "+============================================================+\n\
                              |  BLOCKED: Phase File Tampering Detected                    |\n\
                              +============================================================+\n\
                              |  {:<57}|\n\
@@ -330,9 +356,10 @@ pub fn process(
                              |                                                            |\n\
                              |  Session must be restarted to proceed.                     |\n\
                              +============================================================+",
-                                canonical_key
-                            ),
-                        );
+                                    canonical_key
+                                ),
+                            );
+                        }
                     }
                 }
 
@@ -463,8 +490,9 @@ pub fn process(
 ///
 /// **Layer 1 — Obfuscation detection**: Catch shell tricks that defeat regex
 /// matching: `eval`, `base64 -d`, `$'\xHH'` hex escapes, variable-based
-/// command construction (`cmd="steel"; $cmd-mcp`). If detected AND a
-/// workflow with blocked patterns or an allowlist is active, hard-deny.
+/// command construction (e.g. `cmd="browserbase"; $cmd-mcp` or the legacy
+/// `cmd="steel"; $cmd-mcp` attack pattern). If detected AND a workflow with
+/// blocked patterns or an allowlist is active, hard-deny.
 ///
 /// **Layer 2 — Allowlist (nuclear option)**: If ANY active workflow has a
 /// non-empty `bash_allowlist`, the command MUST match at least one allowlist
@@ -547,7 +575,8 @@ fn check_blocked_bash_patterns(
                     Regex::new(r"\$'\\[0-7]{3}").unwrap(),
                 ),
                 // Variable-based command construction + execution:
-                // cmd="steel-mcp"; $cmd  OR  cmd+="mcp"; $cmd
+                // cmd="browserbase-mcp"; $cmd  OR  cmd+="mcp"; $cmd
+                // (legacy: cmd="steel-mcp" — still caught defensively)
                 (
                     "variable command execution",
                     Regex::new(r#";\s*\$\w+"#).unwrap(),
@@ -1090,6 +1119,24 @@ fn check_protected_path_write(
                         return None; // Allow: editing a non-active skill's SKILL.md
                     }
                 }
+            }
+        }
+
+        // Phase-gate override escape hatch (HMAC-signed, 60s TTL).
+        // Only suppresses the two skill/phase reasons — sentinel
+        // config/state, settings.json, and hooks.toml remain protected
+        // even with an active override.
+        if reason == "phase file modification" || reason == "skill definition file" {
+            let session_id = input.session_id.as_deref().unwrap_or("unknown");
+            let override_path = super::hygiene_override::phase_gate_override_path(fs, session_id);
+            if super::hygiene_override::is_signed_override_active_with_ttl(
+                fs,
+                &override_path,
+                "phase-gate",
+                session_id,
+                super::hygiene_override::PHASE_GATE_OVERRIDE_TTL_SECS,
+            ) {
+                return None; // Allow: valid phase-gate override token present
             }
         }
 

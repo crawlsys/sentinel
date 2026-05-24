@@ -12,7 +12,7 @@ use sentinel_domain::state::SessionState;
 use sentinel_domain::workflow::{SkillSteps, SkillWorkflow};
 
 use sentinel_domain::capability::VendorClass;
-use sentinel_domain::ports::{AuditorPort, LlmPort, ReversibilityClassifierPort, VectorStorePort};
+use sentinel_domain::ports::{AuditorPort, LlmPort, VectorStorePort};
 use sentinel_infrastructure::ba_config::BaEnforcementConfig;
 use sentinel_infrastructure::capability_router::TomlCapabilityRouter;
 use sentinel_infrastructure::dry_run_auditor::RigAuditor;
@@ -21,9 +21,6 @@ use sentinel_infrastructure::memory_mcp_client::MemoryMcpClient;
 use sentinel_infrastructure::provenance_store::JsonlProvenanceStore;
 use sentinel_infrastructure::requirement_matrix::FilesystemRequirementMatrix;
 use sentinel_infrastructure::reversibility::LayeredReversibilityClassifier;
-use sentinel_infrastructure::spec_challenge_config::SpecChallengeConfig;
-use sentinel_infrastructure::spec_challenge_scorer::LlmSpecChallengeScorer;
-use sentinel_infrastructure::spec_challenge_store::FilesystemSpecChallengeStore;
 use std::sync::Arc;
 
 pub async fn run(event: &str, matcher: Option<&str>, standalone: bool) -> Result<()> {
@@ -185,42 +182,6 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
             LayeredReversibilityClassifier::empty()
         });
 
-    // Constitution gate (Item K) — load per-project rules from
-    // `~/.claude/sentinel/config/constitution-gate.toml`. Missing
-    // file → empty rule list → gate is inert. Parse failures log
-    // at warn and degrade to inert so a typo in the config
-    // doesn't take down the daemon's PreToolUse path.
-    let constitution_rules: Vec<sentinel_application::constitution_gate_runtime::Rule> = (|| {
-        let home = dirs::home_dir()?;
-        let path = home
-            .join(".claude")
-            .join("sentinel")
-            .join("config")
-            .join("constitution-gate.toml");
-        let raw = std::fs::read_to_string(&path).ok()?;
-        match sentinel_application::constitution_gate_runtime::ConstitutionGateConfig::from_toml_str(
-            &raw,
-        ) {
-            Ok(cfg) => {
-                tracing::info!(
-                    rules = cfg.rules.len(),
-                    "constitution_gate: loaded operator rules from {}",
-                    path.display(),
-                );
-                Some(cfg.rules)
-            },
-            Err(err) => {
-                tracing::warn!(
-                    ?err,
-                    "constitution_gate: failed to parse {} — gate inert this run",
-                    path.display(),
-                );
-                None
-            },
-        }
-    })()
-    .unwrap_or_default();
-
     // A2 Phase 4: construct the capability router from shipped
     // defaults + optional operator overrides at
     // `~/.claude/sentinel/config/agents.toml`. Load failures degrade
@@ -232,17 +193,18 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
             .join("config")
             .join("agents.toml")
     });
-    let capability_router =
-        match TomlCapabilityRouter::with_shipped_and_overrides(agents_overrides_path.as_deref()) {
-            Ok(r) => r,
-            Err(err) => {
-                tracing::warn!(
-                    ?err,
-                    "failed to load agents.toml; capability router empty, A2 substrate inert"
-                );
-                TomlCapabilityRouter::from_profiles(Vec::new())
-            }
-        };
+    let capability_router = match TomlCapabilityRouter::with_shipped_and_overrides(
+        agents_overrides_path.as_deref(),
+    ) {
+        Ok(r) => r,
+        Err(err) => {
+            tracing::warn!(
+                ?err,
+                "failed to load agents.toml; capability router empty, A2 substrate inert"
+            );
+            TomlCapabilityRouter::from_profiles(Vec::new())
+        }
+    };
 
     // A3 Phase 4 + A2 Phase 4: construct the dry-run auditor. Two
     // paths in priority order:
@@ -344,59 +306,6 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
                 "ba-enforcement.toml load failed; falling back to ObserveOnly for both BA hooks"
             );
             BaEnforcementConfig::observe_only()
-        }
-    };
-
-    // A13 Phase 5: spec-challenge gate plumbing. Three optional
-    // adapters; the hook degrades gracefully when any are absent.
-    // - FilesystemSpecChallengeStore writes challenge artifacts to
-    //   ~/.claude/sentinel/state/spec-challenges/{work_id}.json so
-    //   the proof chain can re-verify "what did the agent challenge
-    //   before it acted?" later.
-    // - LlmSpecChallengeScorer is opt-in via SENTINEL_SPEC_CHALLENGE_SCORER_*
-    //   env vars; absent → Catastrophic-class challenges fall through
-    //   to allow() (the hook denies if mode is blocking + class needs
-    //   scoring + no scorer, surfacing operator-facing guidance).
-    // - SpecChallengeConfig loads mode + threshold from shipped
-    //   defaults overridden by ~/.claude/sentinel/config/spec-challenge.toml.
-    let spec_challenge_store: Option<Arc<FilesystemSpecChallengeStore>> =
-        match FilesystemSpecChallengeStore::with_default_path() {
-            Ok(s) => Some(Arc::new(s)),
-            Err(err) => {
-                tracing::info!(
-                    ?err,
-                    "FilesystemSpecChallengeStore::with_default_path failed; A13 audit lift inert"
-                );
-                None
-            }
-        };
-    let spec_challenge_scorer: Option<Arc<LlmSpecChallengeScorer>> =
-        match LlmSpecChallengeScorer::from_env() {
-            Ok(s) => Some(Arc::new(s)),
-            Err(err) => {
-                tracing::info!(
-                    ?err,
-                    "LlmSpecChallengeScorer::from_env failed; A13 Catastrophic-class semantic scoring inert"
-                );
-                None
-            }
-        };
-    let spec_challenge_config_overrides_path = dirs::home_dir().map(|h| {
-        h.join(".claude")
-            .join("sentinel")
-            .join("config")
-            .join("spec-challenge.toml")
-    });
-    let spec_challenge_config = match SpecChallengeConfig::with_shipped_and_overrides(
-        spec_challenge_config_overrides_path.as_deref(),
-    ) {
-        Ok(c) => c,
-        Err(err) => {
-            tracing::warn!(
-                ?err,
-                "spec-challenge.toml load failed; falling back to ObserveOnly"
-            );
-            SpecChallengeConfig::observe_only()
         }
     };
 
@@ -676,13 +585,14 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
             // ba-enforcement.toml; shipped default is ObserveOnly (no
             // blocking; telemetry only).
             if let Some(ref provenance_arc) = provenance_store {
-                let prov_output = time_and_record(ctx.fs, &mk_ctx("provenance_validate"), || {
-                    hooks::provenance_validate::process(
-                        &input,
-                        provenance_arc.as_ref(),
-                        ba_enforcement.provenance_validate_mode,
-                    )
-                });
+                let prov_output =
+                    time_and_record(ctx.fs, &mk_ctx("provenance_validate"), || {
+                        hooks::provenance_validate::process(
+                            &input,
+                            provenance_arc.as_ref(),
+                            ba_enforcement.provenance_validate_mode,
+                        )
+                    });
                 output.merge(&prov_output);
             }
 
@@ -701,39 +611,6 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
                         )
                     });
                 output.merge(&trace_output);
-            }
-
-            // A13 spec-challenge gate — fires for ALL tools but the hook
-            // itself short-circuits to allow() for TriviallyReversible.
-            // Class is derived from the same reversibility classifier the
-            // A3 / tool_usage gates consult, so all four gates agree on the
-            // class for any given (tool_name, tool_input).
-            {
-                let tool_name = input.tool_name.as_deref().unwrap_or("");
-                let tool_input_owned = input
-                    .tool_input
-                    .clone()
-                    .unwrap_or_else(|| serde_json::json!({}));
-                let class = reversibility_classifier.classify(tool_name, &tool_input_owned);
-                let store_ref: Option<&dyn sentinel_domain::ports::SpecChallengeStorePort> =
-                    spec_challenge_store.as_deref().map(|s| s as _);
-                let scorer_ref: Option<&dyn sentinel_domain::ports::SpecChallengeScorerPort> =
-                    spec_challenge_scorer.as_deref().map(|s| s as _);
-                let challenge_output =
-                    time_and_record(ctx.fs, &mk_ctx("spec_challenge_gate"), || {
-                        hooks::spec_challenge_gate::process_with_threshold(
-                            &input,
-                            class,
-                            store_ref,
-                            scorer_ref,
-                            spec_challenge_config.mode,
-                            spec_challenge_config.catastrophic_axis_threshold,
-                        )
-                    });
-                output.merge(&challenge_output);
-                if challenge_output.blocked == Some(true) {
-                    state.record_blocked();
-                }
             }
 
             // A3 dry-run-then-commit gate — fires for ALL tools (the hook
@@ -763,9 +640,10 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
 
                 // tasks.md auto-block guard — block edits/writes that would
                 // mutate the SENTINEL:TASKS auto block (owned by task_persist).
-                let tasks_guard_output = time_and_record(ctx.fs, &mk_ctx("tasks_md_guard"), || {
-                    hooks::tasks_md_guard::process(&input, &ctx)
-                });
+                let tasks_guard_output =
+                    time_and_record(ctx.fs, &mk_ctx("tasks_md_guard"), || {
+                        hooks::tasks_md_guard::process(&input, &ctx)
+                    });
                 output.merge(&tasks_guard_output);
 
                 // Tool usage gate — require sequential thinking + task creation.
@@ -782,22 +660,6 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
                     )
                 });
                 output.merge(&usage_output);
-
-                // Catastrophic-escalation hook — signals Catastrophic-class
-                // tool calls upstream to the operator's consul via the
-                // legatus escalation path AND denies locally pending
-                // voice-attested authorization. Orthogonal to
-                // tool_usage_gate's local-blast-radius logic; both run on
-                // PreToolUse and merge.
-                let catastrophic_output =
-                    time_and_record(ctx.fs, &mk_ctx("catastrophic_escalation"), || {
-                        hooks::catastrophic_escalation::process(
-                            &input,
-                            &reversibility_classifier,
-                            &hooks::catastrophic_escalation::DaemonApprovalChecker,
-                        )
-                    });
-                output.merge(&catastrophic_output);
             }
 
             // Doppler/Auth0 gate — block mutation tools (any tool type)
@@ -805,16 +667,6 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
                 hooks::doppler_auth0_gate::process(&input, &ctx)
             });
             output.merge(&doppler_output);
-
-            // Constitution gate (Item K) — enforce per-project
-            // "protected path × banned pattern" rules from the
-            // operator's TOML config. Empty config = no-op; the
-            // gate ships inert by default so machines that haven't
-            // authored their own rules see no behaviour change.
-            let constitution_output = time_and_record(ctx.fs, &mk_ctx("constitution_gate"), || {
-                hooks::constitution_gate::process(&input, &constitution_rules)
-            });
-            output.merge(&constitution_output);
 
             // Pre-commit verification — block git commit/push without test evidence (Bash only)
             if matches!(input.tool_name.as_deref(), Some("Bash")) {
@@ -831,12 +683,12 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
                     });
                 output.merge(&msg_output);
 
-                // Pre-push Steel test — block git push without Steel test (Bash only)
-                let steel_output =
+                // Pre-push browser test — block git push without a browser test (Bash only)
+                let browser_test_output =
                     time_and_record(ctx.fs, &mk_ctx("pre_push_browser_test"), || {
                         hooks::pre_push_browser_test::process(&input, &ctx)
                     });
-                output.merge(&steel_output);
+                output.merge(&browser_test_output);
 
                 // PR merge gate — block gh pr merge without confirmation (Bash only)
                 let pr_output = time_and_record(ctx.fs, &mk_ctx("pr_merge_gate"), || {
@@ -858,7 +710,8 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
             // that emit a structured `provenance_audit` field; silently
             // skips otherwise. Observational (always allows).
             if let Some(ref provenance_arc) = provenance_store {
-                let audit_output = hooks::audit_extract::process(&input, provenance_arc.as_ref());
+                let audit_output =
+                    hooks::audit_extract::process(&input, provenance_arc.as_ref());
                 output.merge(&audit_output);
             }
 
@@ -891,21 +744,16 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
             let evidence_output = hooks::evidence_collector::process(&input, None);
             output.merge(&evidence_output);
 
-            // Mid-execution prompt-injection nudge — scan tool result for
-            // injection-shaped strings (e.g. "ignore previous instructions")
-            // and inject a "treat as untrusted data" warning when one fires.
-            // Conservative, defense-in-depth layer; downstream destructive
-            // gates remain the hard backstop.
-            let injection_nudge_output = hooks::prompt_injection_nudge::process(&input, &ctx);
-            output.merge(&injection_nudge_output);
-
             // Activity tracker — log every tool call to activity-log.jsonl
             let activity_output = hooks::activity_tracker::process_post_tool(&input, &ctx);
             output.merge(&activity_output);
 
-            // Steel test recorder — write state file on successful session release
-            let steel_output = hooks::pre_push_browser_test::process_post_tool(&input, &ctx);
-            output.merge(&steel_output);
+            // Browser test recorder — write state file on successful session release
+            // (mcp__browserbase__release_session, mcp__cdp__close_instance, or legacy
+            // mcp__steel__release_session)
+            let browser_test_post_output =
+                hooks::pre_push_browser_test::process_post_tool(&input, &ctx);
+            output.merge(&browser_test_post_output);
 
             // Plan organizer — inject plan file organization instructions (ExitPlanMode only)
             if matches!(input.tool_name.as_deref(), Some("ExitPlanMode")) {

@@ -67,7 +67,7 @@ id = "qa-handoff"
 file = "qa-handoff.md"
 required = true
 judge = "opus"
-description = "QA testing on staging, Steel smoke test"
+description = "QA testing on staging, Browserbase smoke test"
 
 [[workflows.phases]]
 id = "cleanup"
@@ -113,7 +113,7 @@ id = "validate"
 file = "validate.md"
 required = true
 judge = "opus"
-description = "Poll health endpoint, Steel smoke test, verify deployment"
+description = "Poll health endpoint, Browserbase smoke test, verify deployment"
 
 [[workflows.phases]]
 id = "report"
@@ -267,9 +267,11 @@ required = false
 judge = "haiku"
 description = "Update docs, log changes, notify team"
 
-# --- steel (6 phases) ---
+# --- browserbase (6 phases) ---
+# Renamed from 'steel' — Browserbase is the cloud product, "Steel" was just our
+# nickname for it. Phase files live in ~/.claude/skills/browserbase/phases/.
 [[workflows]]
-skill = "steel"
+skill = "browserbase"
 
 [[workflows.phases]]
 id = "setup"
@@ -1477,16 +1479,18 @@ required = false
 judge = "haiku"
 description = "Stop tunnel, release resources, report URL used"
 
-# --- steel-tester (8 phases) ---
+# --- browserbase-tester (8 phases) ---
+# Renamed from 'steel-tester'. Localhost runs via CDP (mcp__cdp__*);
+# remote URLs (staging, production) run via Browserbase MCP.
 [[workflows]]
-skill = "steel-tester"
+skill = "browserbase-tester"
 
 [[workflows.phases]]
 id = "setup"
 file = "setup.md"
 required = true
 judge = "haiku"
-description = "Determine target, load config, get credentials, create Steel session"
+description = "Determine target, load config, get credentials, create browser session (CDP for localhost, Browserbase for remote)"
 
 [[workflows.phases]]
 id = "crawl"
@@ -1535,7 +1539,7 @@ id = "cleanup"
 file = "cleanup.md"
 required = true
 judge = "haiku"
-description = "Release Steel session, kill Cloudflare tunnel"
+description = "Release Browserbase session (remote mode) or close CDP instance (local mode)"
 
 # --- telemetry (2 phases) ---
 [[workflows]]

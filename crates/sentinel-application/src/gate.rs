@@ -81,7 +81,7 @@ pub fn evaluate(
     //      fall through to incomplete workflow check
     //
     // Cases 2 and 3 both search for previously-activated incomplete workflows.
-    // This prevents: activate steel → say "hello" (clears skill) → all tools pass.
+    // This prevents: activate browserbase → say "hello" (clears skill) → all tools pass.
     let (workflow, workflow_state, effective_skill) = match &state.active_skill {
         Some(skill_name) => match workflows.get(skill_name.as_str()) {
             Some(wf) => match state.workflows.get(skill_name.as_str()) {

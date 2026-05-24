@@ -404,7 +404,7 @@ pub fn infer_category(name: &str) -> String {
                 "sentinel",
                 "sequential-thinking",
                 "ssh",
-                "steel",
+                "browserbase",
                 "browserbase-tester",
                 "tailscale",
                 "traffic-light",
@@ -1238,7 +1238,7 @@ pub struct ExtendedCounts {
     pub scripts: usize,
     pub docs: usize,
     pub templates: usize,
-    pub steel_tools: usize,
+    pub browserbase_tools: usize,
 }
 
 /// Count extended marketplace components (core + local extras).
@@ -1247,14 +1247,14 @@ pub fn count_extended(root_dir: &Path) -> ExtendedCounts {
     let scripts = count_files_with_ext(&root_dir.join("scripts"), ".js");
     let docs = count_files_with_ext(&root_dir.join("docs"), ".md");
     let templates = count_all_non_hidden(&root_dir.join("templates"));
-    let steel_tools = parse_steel_tools(root_dir);
+    let browserbase_tools = parse_browserbase_tools(root_dir);
 
     ExtendedCounts {
         core,
         scripts,
         docs,
         templates,
-        steel_tools,
+        browserbase_tools,
     }
 }
 
@@ -1270,8 +1270,8 @@ fn count_all_non_hidden(dir: &Path) -> usize {
         .unwrap_or(0)
 }
 
-/// Parse steel tool count from marketplace.json MCP description.
-fn parse_steel_tools(root_dir: &Path) -> usize {
+/// Parse Browserbase tool count from marketplace.json MCP description.
+fn parse_browserbase_tools(root_dir: &Path) -> usize {
     let mp_path = root_dir.join("marketplace.json");
     let Ok(content) = fs::read_to_string(&mp_path) else {
         return 48; // default
@@ -1283,10 +1283,14 @@ fn parse_steel_tools(root_dir: &Path) -> usize {
     data.get("mcp")
         .and_then(|v| v.as_array())
         .and_then(|arr| {
-            arr.iter()
-                .find(|m| m.get("name").and_then(|n| n.as_str()) == Some("steel"))
+            arr.iter().find(|m| {
+                matches!(
+                    m.get("name").and_then(|n| n.as_str()),
+                    Some("browserbase") | Some("steel")
+                )
+            })
         })
-        .and_then(|steel| steel.get("description").and_then(|d| d.as_str()))
+        .and_then(|entry| entry.get("description").and_then(|d| d.as_str()))
         .and_then(|desc| {
             let re = regex::Regex::new(r"(\d+)\s*tools").ok()?;
             re.captures(desc).and_then(|cap| cap[1].parse().ok())
@@ -1331,12 +1335,12 @@ pub fn sync_counts(root_dir: &Path, dry_run: bool) -> SyncCountsReport {
             format!("{} MCP servers", c.mcp_servers),
         ),
         (
-            regex::Regex::new(r"Steel MCP \(\d+ tools\)").unwrap(),
-            format!("Steel MCP ({} tools)", ext.steel_tools),
+            regex::Regex::new(r"Browserbase MCP \(\d+ tools\)").unwrap(),
+            format!("Browserbase MCP ({} tools)", ext.browserbase_tools),
         ),
         (
             regex::Regex::new(r"browser automation \(\d+ MCP tools\)").unwrap(),
-            format!("browser automation ({} MCP tools)", ext.steel_tools),
+            format!("browser automation ({} MCP tools)", ext.browserbase_tools),
         ),
     ];
 

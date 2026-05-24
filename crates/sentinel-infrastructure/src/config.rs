@@ -47,11 +47,15 @@ struct WorkflowToml {
     skill: String,
     phases: Vec<PhaseToml>,
     /// Tool name prefixes to block when this workflow is active.
-    /// E.g., ["`mcp__cdp`__", "`mcp__edge_cdp`__"] blocks CDP tools when steel is active.
+    /// E.g., a workflow that wants local browser only could block
+    /// `mcp__browserbase__` to force CDP usage.
     #[serde(default)]
     blocked_tool_prefixes: Vec<String>,
     /// Bash command patterns (regex) to block when this workflow is active.
-    /// E.g., ["steel-mcp", "chrome.*--remote-debugging"] blocks CLI escape attempts.
+    /// E.g., ["chrome.*--remote-debugging"] blocks CLI escape attempts that
+    /// would bypass the controlled CDP MCP. Legacy `steel-mcp` patterns are
+    /// still accepted here even though the steel binary is gone (defense
+    /// in depth).
     #[serde(default)]
     blocked_bash_patterns: Vec<String>,
     /// Bash command allowlist (regex). When non-empty, ONLY matching commands pass.

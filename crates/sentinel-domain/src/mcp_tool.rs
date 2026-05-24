@@ -13,7 +13,7 @@
 ///
 /// Match is exact (case-insensitive). The list intentionally includes a
 /// few specific multi-word suffixes (e.g. `wait_for_selector`) that are
-/// common Steel/CDP read paths — generic prefix matching alone would
+/// common Browserbase/CDP read paths — generic prefix matching alone would
 /// over-match and a dedicated entry is more readable.
 pub const SAFE_METHOD_SUFFIXES: &[&str] = &[
     "get",

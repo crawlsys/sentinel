@@ -4,7 +4,7 @@ Reference for the 22 steps in `config/steps/linear.toml` under `[[phases]] id = 
 
 ## Why six layers, not one
 
-Each layer catches a different class of defect, and the layers are *ordered by cost*: cheapest checks fire first, expensive ones (Codex, CodeRabbit, Steel UI tests) only run on code that already passed the cheap ones. The point isn't redundancy; it's that **a failure at a later layer is rare enough to be alarming and cheap enough to act on**.
+Each layer catches a different class of defect, and the layers are *ordered by cost*: cheapest checks fire first, expensive ones (Codex, CodeRabbit, browser UI tests via CDP for local and Browserbase for preview) only run on code that already passed the cheap ones. The point isn't redundancy; it's that **a failure at a later layer is rare enough to be alarming and cheap enough to act on**.
 
 | Layer | Catches | Typical failure rate at this stage |
 |-------|---------|------------------------------------|
