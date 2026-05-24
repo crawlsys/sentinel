@@ -277,11 +277,18 @@ pub async fn run_connect_hosted(
         }
     }
 
-    let exit_reason: Option<&'static str> = loop {
+    // Loop exit classifier:
+    //   `Cancelled`        — `cancel.notified()` fired; this is the
+    //                        ONLY clean exit. Wrapper returns Ok(()).
+    //   `TransportFailed`  — WS send/recv error, stream end, or
+    //                        consulate-initiated close. Wrapper sees
+    //                        Err(Transport) and reconnects with
+    //                        exponential backoff.
+    let exit_reason: ExitReason = loop {
         tokio::select! {
             () = cancel.notified() => {
                 info!(%session_id, "legatus cancelled; sending SessionCompleted");
-                break Some("cancelled");
+                break ExitReason::Cancelled;
             },
             escalation = runtime.escalation_rx.recv() => {
                 let Some(item) = escalation else {
@@ -347,7 +354,7 @@ pub async fn run_connect_hosted(
                     &msg,
                 ).await {
                     warn!(?err, "escalation send failed; closing");
-                    break None;
+                    break ExitReason::TransportFailed(format!("escalation send: {err}"));
                 }
                 // Successful WS send → remove the head from the
                 // outbox (if persistent). Disk and consul-receipt
@@ -377,7 +384,7 @@ pub async fn run_connect_hosted(
                     &msg,
                 ).await {
                     warn!(?err, "heartbeat send failed; closing");
-                    break None;
+                    break ExitReason::TransportFailed(format!("heartbeat send: {err}"));
                 }
                 local_seq += 1;
             },
@@ -395,7 +402,9 @@ pub async fn run_connect_hosted(
                     },
                     Some(Ok(WsMessage::Close(frame))) => {
                         debug!(?frame, "consulate sent close");
-                        break None;
+                        break ExitReason::TransportFailed(
+                            "consulate sent WS close frame".to_owned(),
+                        );
                     },
                     Some(Ok(WsMessage::Ping(_) | WsMessage::Pong(_))) => {
                         // tokio-tungstenite auto-handles pings.
@@ -406,30 +415,60 @@ pub async fn run_connect_hosted(
                     Some(Ok(WsMessage::Frame(_))) => {},
                     Some(Err(err)) => {
                         warn!(?err, "websocket recv error; closing");
-                        break None;
+                        break ExitReason::TransportFailed(format!("WS recv: {err}"));
                     },
                     None => {
                         debug!("websocket stream ended");
-                        break None;
+                        break ExitReason::TransportFailed(
+                            "WS stream ended (peer dropped)".to_owned(),
+                        );
                     },
                 }
             },
         }
     };
 
-    if exit_reason.is_some() {
-        let completed = ConsularMessage::SessionCompleted(SessionCompleted {
-            session_id,
-            completed_at_ms: now_ms(),
-            summary: Some("legatus cancelled".to_owned()),
-        });
-        if let Err(err) =
-            send_signed(&mut sink, &outbound_key, session_id, local_seq, &completed).await
-        {
-            warn!(?err, "SessionCompleted send failed");
+    match exit_reason {
+        ExitReason::Cancelled => {
+            // Cancel path: WS is presumed healthy — send a clean
+            // SessionCompleted so consul records the orderly
+            // shutdown. If the WS is actually dead at this point
+            // the send fails harmlessly and we still return Ok(()).
+            let completed = ConsularMessage::SessionCompleted(SessionCompleted {
+                session_id,
+                completed_at_ms: now_ms(),
+                summary: Some("legatus cancelled".to_owned()),
+            });
+            if let Err(err) =
+                send_signed(&mut sink, &outbound_key, session_id, local_seq, &completed).await
+            {
+                warn!(?err, "SessionCompleted send failed");
+            }
+            Ok(())
+        }
+        ExitReason::TransportFailed(reason) => {
+            // WS-side exit (peer close, send/recv error, stream
+            // end). Return Err(Transport) so the reconnect wrapper
+            // backs off and retries. The dead WS can't carry a
+            // SessionCompleted anyway, so skip that send.
+            warn!(%session_id, %reason, "legatus session exited via transport failure; surfacing as Err for reconnect");
+            Err(LegatusError::Transport(reason))
         }
     }
-    Ok(())
+}
+
+/// Why the in-session loop in [`run_connect_hosted`] terminated.
+///
+/// The wrapper [`run_connect_hosted_with_reconnect`] discriminates
+/// `Cancelled` (Ctrl-C, operator shutdown — clean exit, do not
+/// reconnect) from `TransportFailed` (network drop, peer close,
+/// recv/send error — transient, retry with backoff).
+enum ExitReason {
+    /// Cancel `Notify` fired; surface to caller as `Ok(())`.
+    Cancelled,
+    /// WS-side exit. Carries the underlying reason for logging.
+    /// Surfaced to caller as `Err(LegatusError::Transport(...))`.
+    TransportFailed(String),
 }
 
 fn now_ms() -> u64 {
@@ -1285,6 +1324,52 @@ mod tests {
         assert!(
             MAX_RECONNECT_BACKOFF > INITIAL_RECONNECT_BACKOFF,
             "max must exceed initial for the doubling cap to mean anything"
+        );
+    }
+
+    #[tokio::test]
+    async fn reconnect_loop_keeps_retrying_after_repeated_transport_failure() {
+        // Regression test for the silent-exit bug: prior to the
+        // `ExitReason` refactor, `run_connect_hosted` returned
+        // `Ok(())` on transport-side exits (peer close, recv error,
+        // stream end, connect refused). The wrapper then treated
+        // that as "session exited cleanly" and short-circuited
+        // without reconnecting — auto-reconnect was effectively dead
+        // for the most common real-world failure mode (network drop,
+        // consulate restart). Now those paths return
+        // `Err(LegatusError::Transport(_))` so the wrapper actually
+        // backs off and tries again.
+        //
+        // This test pins that behavior: against a guaranteed-refused
+        // address, the wrapper must NOT exit on its own — the only
+        // way out is the cancel signal.
+        let (_handle, runtime) = crate::handle::make_pair();
+        let cancel = std::sync::Arc::new(Notify::new());
+        let cancel_for_signal = std::sync::Arc::clone(&cancel);
+
+        let task = tokio::spawn(async move {
+            run_connect_hosted_with_reconnect(reconnect_test_config(), cancel, runtime).await
+        });
+
+        // 1.5s is well past the first attempt (connect-refused is
+        // ~ms) AND past the first 1s backoff sleep. If the wrapper
+        // exited after the first failure (the pre-fix bug), the task
+        // would be finished by now.
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        assert!(
+            !task.is_finished(),
+            "reconnect wrapper exited prematurely — should still be in retry loop after 1.5s"
+        );
+
+        // Now confirm it does exit cleanly on cancel.
+        cancel_for_signal.notify_waiters();
+        let result = tokio::time::timeout(Duration::from_secs(3), task)
+            .await
+            .expect("cancel should unblock backoff sleep")
+            .expect("task joined cleanly");
+        assert!(
+            result.is_ok(),
+            "cancel after retry loop should still return Ok(())"
         );
     }
 

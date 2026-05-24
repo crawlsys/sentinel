@@ -47,6 +47,7 @@ use consulate::escalation_bus::{EscalationEnvelope, EscalationEvent};
 use pretty_assertions::assert_eq;
 use sentinel_legatus::client::{run_connect_hosted, ConnectConfig};
 use sentinel_legatus::handle::{make_pair, EscalationKind};
+use sentinel_legatus::LegatusError;
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, oneshot, Notify};
 
@@ -643,4 +644,81 @@ async fn t1_catastrophic_ack_replay_is_rejected() {
 
     cancel.notify_one();
     let _ = tokio::time::timeout(Duration::from_secs(2), legatus_task).await;
+}
+
+/// Regression test for the `ExitReason::TransportFailed` fix.
+///
+/// Before the fix, `run_connect_hosted` returned `Ok(())` when the
+/// consulate-side WebSocket closed mid-session (peer close, recv
+/// error, stream end). The reconnect wrapper interpreted that as a
+/// clean exit and short-circuited — auto-reconnect was effectively
+/// dead for the most common production failure mode (network drop,
+/// consulate restart).
+///
+/// This test pins the new behaviour: after a clean handshake +
+/// registration, the consulate-side task immediately drops the
+/// transport. The sentinel-side `run_connect_hosted` must surface
+/// that as `Err(LegatusError::Transport(_))`.
+#[tokio::test]
+async fn run_connect_hosted_surfaces_transport_failure_on_remote_close() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("ws://{}", listener.local_addr().unwrap());
+    let registry = Arc::new(build_registry().await);
+
+    // Drop-the-WS consulate: accept, handshake, register — then
+    // let the transport drop on scope exit so the legatus loop
+    // sees `source.next() == None` (stream ended) on the very next
+    // poll.
+    tokio::spawn(async move {
+        let (stream, _peer) = listener.accept().await.unwrap();
+        let transport = websocket::accept(stream).await.unwrap();
+        let _registered = consulate::handshake::run_registration_handshake(
+            &transport,
+            &TEST_BOOTSTRAP_SECRET,
+            registry.as_ref(),
+        )
+        .await
+        .unwrap();
+        // Intentional: do NOT enter session_loop. Drop `transport`
+        // here so the legatus WS sees the peer close.
+        drop(transport);
+    });
+
+    let cancel = Arc::new(Notify::new());
+    let cancel_for_task = cancel.clone();
+    let (_handle, mut runtime) = make_pair();
+    let legatus_task = tokio::spawn(async move {
+        run_connect_hosted(sentinel_config(url), cancel_for_task, &mut runtime).await
+    });
+
+    // The legatus loop should observe the peer close within a few
+    // hundred ms (one heartbeat tick at most, given the 75ms
+    // interval in `sentinel_config`). Allow generous slack for CI.
+    let result = tokio::time::timeout(Duration::from_secs(5), legatus_task)
+        .await
+        .expect("legatus should exit within 5s of remote close")
+        .expect("task joined cleanly");
+
+    match result {
+        Err(LegatusError::Transport(reason)) => {
+            // The reason should mention which path detected the
+            // failure (WS recv, stream end, etc.) — useful for
+            // operators tailing logs. Don't pin the exact string,
+            // just that one of the expected transport paths fired.
+            assert!(
+                reason.contains("WS")
+                    || reason.contains("transport")
+                    || reason.contains("close")
+                    || reason.contains("peer dropped"),
+                "transport-failure reason should describe the WS path, got: {reason}"
+            );
+        }
+        Ok(()) => panic!(
+            "run_connect_hosted returned Ok(()) on remote close — the pre-fix bug. \
+             Wrapper would not reconnect."
+        ),
+        Err(other) => panic!(
+            "expected LegatusError::Transport on remote close, got: {other:?}"
+        ),
+    }
 }
