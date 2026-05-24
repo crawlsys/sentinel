@@ -47,7 +47,7 @@ use consulate::escalation_bus::{EscalationEnvelope, EscalationEvent};
 use pretty_assertions::assert_eq;
 use sentinel_legatus::client::{run_connect_hosted, ConnectConfig};
 use sentinel_legatus::handle::{make_pair, EscalationKind};
-use sentinel_legatus::LegatusError;
+use sentinel_legatus::{ConnectionStatus, LegatusError};
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, oneshot, Notify};
 
@@ -182,7 +182,7 @@ async fn consulate_dispatches_then_observes_ack_result_completed() {
     let cancel_for_task = cancel.clone();
     let (handle, mut runtime) = make_pair();
     let legatus_task = tokio::spawn(async move {
-        run_connect_hosted(sentinel_config(url), cancel_for_task, &mut runtime).await
+        run_connect_hosted(sentinel_config(url), cancel_for_task, &mut runtime, &ConnectionStatus::new()).await
     });
 
     // Phase 1: consulate observes handshake + registration.
@@ -307,7 +307,7 @@ async fn instruction_outcome_failure_round_trips_with_error_body() {
     let cancel_for_task = cancel.clone();
     let (handle, mut runtime) = make_pair();
     let _legatus_task = tokio::spawn(async move {
-        run_connect_hosted(sentinel_config(url), cancel_for_task, &mut runtime).await
+        run_connect_hosted(sentinel_config(url), cancel_for_task, &mut runtime, &ConnectionStatus::new()).await
     });
 
     let session_id = tokio::time::timeout(Duration::from_secs(5), session_id_rx)
@@ -422,7 +422,7 @@ async fn t1_catastrophic_ack_round_trips_into_approval_cache() {
         .with_approval_cache(approval_cache.clone())
         .with_spent_nonce_log(spent_nonces);
     let legatus_task = tokio::spawn(async move {
-        run_connect_hosted(sentinel_config(url), cancel_for_task, &mut runtime).await
+        run_connect_hosted(sentinel_config(url), cancel_for_task, &mut runtime, &ConnectionStatus::new()).await
     });
 
     let session_id = tokio::time::timeout(Duration::from_secs(5), session_id_rx)
@@ -562,7 +562,7 @@ async fn t1_catastrophic_ack_replay_is_rejected() {
         .with_approval_cache(approval_cache.clone())
         .with_spent_nonce_log(spent_nonces.clone());
     let legatus_task = tokio::spawn(async move {
-        run_connect_hosted(sentinel_config(url), cancel_for_task, &mut runtime).await
+        run_connect_hosted(sentinel_config(url), cancel_for_task, &mut runtime, &ConnectionStatus::new()).await
     });
 
     let session_id = tokio::time::timeout(Duration::from_secs(5), session_id_rx)
@@ -688,7 +688,7 @@ async fn run_connect_hosted_surfaces_transport_failure_on_remote_close() {
     let cancel_for_task = cancel.clone();
     let (_handle, mut runtime) = make_pair();
     let legatus_task = tokio::spawn(async move {
-        run_connect_hosted(sentinel_config(url), cancel_for_task, &mut runtime).await
+        run_connect_hosted(sentinel_config(url), cancel_for_task, &mut runtime, &ConnectionStatus::new()).await
     });
 
     // The legatus loop should observe the peer close within a few

@@ -18,7 +18,7 @@ use axum::{Json, Router};
 use sentinel_domain::state::SessionState;
 use sentinel_legatus::{
     default_inbox_path, default_outbox_path, make_pair, make_pair_with_persistence,
-    ConnectConfig, EscalationKind, LegatusHandle, PersistentEscalationOutbox,
+    ConnectConfig, ConnectionStatus, EscalationKind, LegatusHandle, PersistentEscalationOutbox,
     PersistentInbox, RuntimeKind, BOOTSTRAP_SECRET_LEN,
 };
 use tokio::sync::{Notify, RwLock};
@@ -313,6 +313,11 @@ pub async fn run(port: u16, legatus: LegatusOptions) -> Result<()> {
 pub struct LegatusRouteState {
     pub handle: LegatusHandle,
     pub approval_cache: Arc<sentinel_legatus::CatastrophicApprovalCache>,
+    /// Lock-free observable handle on the reconnect wrapper's
+    /// current state. Cloned from the canonical one constructed at
+    /// daemon startup; the wrapper task writes, the
+    /// `GET /legatus/health` handler reads.
+    pub connection_status: ConnectionStatus,
 }
 
 async fn start_legatus_if_configured(
@@ -490,13 +495,23 @@ async fn start_legatus_if_configured(
     };
     let cancel = Arc::new(Notify::new());
     info!(url = %consulate_url, "daemon hosting legatus");
+    // Canonical connection-status handle. One clone goes to the
+    // reconnect wrapper (writer); another to LegatusRouteState
+    // (read by GET /legatus/health). Cheap to clone — internally
+    // an Arc<AtomicU8>.
+    let connection_status = ConnectionStatus::new();
+    let status_for_wrapper = connection_status.clone();
     tokio::spawn(async move {
         // Reconnect wrapper: transient transport / heartbeat failures
         // trigger exponential backoff (1s → 30s cap) with cancel-honor.
         // VersionMismatch surfaces as fatal — restarting won't help.
-        if let Err(err) =
-            sentinel_legatus::client::run_connect_hosted_with_reconnect(config, cancel, runtime)
-                .await
+        if let Err(err) = sentinel_legatus::client::run_connect_hosted_with_reconnect(
+            config,
+            cancel,
+            runtime,
+            status_for_wrapper,
+        )
+        .await
         {
             warn!(?err, "hosted legatus reconnect loop exited with fatal error");
         }
@@ -504,17 +519,18 @@ async fn start_legatus_if_configured(
     Ok(Some(LegatusRouteState {
         handle,
         approval_cache,
+        connection_status,
     }))
 }
 
 fn legatus_routes(state: LegatusRouteState) -> Router {
-    // Two layered routers because the escalate/inbox/pending routes
-    // were originally stated on `LegatusHandle`; the new
-    // catastrophic-acks route is stated on `Arc<ApprovalCache>`.
-    // axum supports merging routers with different State types as
-    // long as nothing depends across the seam.
+    // Three layered routers because each set of routes is stated on
+    // a different cheaply-cloneable handle. axum supports merging
+    // routers with different State types as long as nothing depends
+    // across the seam.
     let handle_state = state.handle.clone();
     let cache_state = state.approval_cache.clone();
+    let status_state = state.connection_status.clone();
     let handle_routes: Router = Router::new()
         .route("/legatus/escalate", post(handle_legatus_escalate))
         .route("/legatus/inbox/next", get(handle_legatus_inbox_next))
@@ -526,7 +542,26 @@ fn legatus_routes(state: LegatusRouteState) -> Router {
             get(handle_consume_catastrophic_ack),
         )
         .with_state(cache_state);
-    handle_routes.merge(cache_routes)
+    let health_routes: Router = Router::new()
+        .route("/legatus/health", get(handle_legatus_health))
+        .with_state(status_state);
+    handle_routes.merge(cache_routes).merge(health_routes)
+}
+
+/// `GET /legatus/health`
+///
+/// Reports the reconnect wrapper's current connection state to
+/// operators / dashboards / smoke tests. Lock-free read on an
+/// `AtomicU8` — safe to poll at any rate.
+///
+/// Response shape:
+/// ```json
+/// { "status": "connected" | "connecting" | "reconnecting" | "disconnected" }
+/// ```
+async fn handle_legatus_health(State(status): State<ConnectionStatus>) -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "status": status.get().as_str(),
+    }))
 }
 
 /// `GET /legatus/catastrophic-acks/:session_id/:action_class`

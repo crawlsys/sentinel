@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added
+- **Legatus connection-status observability + `GET /legatus/health` + shell smoke test** (2026-05-24). Operators (and the new smoke test) can now see whether the daemon's hosted legatus is actually connected to consul without grepping logs. Three pieces:
+
+  1. **`ConnectionStatus` type** (`crates/sentinel-legatus/src/connection_status.rs`) — clone-cheap handle wrapping an `Arc<AtomicU8>` that encodes one of `Disconnected` / `Connecting` / `Connected` / `Reconnecting`. Lock-free reads + writes so the HTTP handler never blocks the hot WebSocket loop. Defensive `from_u8` decodes unknown bytes to `Disconnected` and never panics. 5 unit tests pin defaults, round-trip, clone-sharing semantics, unknown-byte handling, and the JSON wire strings.
+
+  2. **Wrapper publishes transitions** — `run_connect_hosted` writes `Connecting` on entry and `Connected` after handshake + registration. `run_connect_hosted_with_reconnect` writes `Reconnecting` between failed attempts and `Disconnected` on terminal exit (cancel, fatal `VersionMismatch`). A new `client::tests::reconnect_loop_observes_status_transitions` unit test pins the externally-observable transitions: fresh → `Disconnected`, after first failure → `Reconnecting`, after cancel → `Disconnected`.
+
+  3. **`GET /legatus/health`** on the daemon — bearer-authed JSON endpoint returning `{ "status": "connected" | ... }`. Added as a third state-typed sub-router merged into the existing legatus route surface so dashboards / smoke tests can poll it directly. Mounted on the same daemon port as `/legatus/escalate` etc.
+
+  4. **`scripts/smoke-sentinel-consul-roundtrip.sh`** — end-to-end shell smoke that builds + drives a real `sentinel daemon` against a real `consulate` over real WebSocket on ephemeral ports, polls `/legatus/health` until `connected`, kills the consulate to verify the daemon transitions to `reconnecting`, restarts it to verify it goes back to `connected`. Cleans up via EXIT trap. The smallest possible end-to-end proof that the two binaries actually talk on the wire, beyond the in-process Rust tests.
+
+  **API change**: `run_connect_hosted` and `run_connect_hosted_with_reconnect` now require a `ConnectionStatus` argument (the former by `&`, the latter by-value clone). All in-tree callers updated; the standalone `run_connect` constructs a fresh one and discards it (no observer). Workspace tests still all-green (~2461 tests, +6 new).
+
 ### Fixed
 - **Sentinel-legatus auto-reconnect was a no-op for in-loop transport failures** (2026-05-24). The reconnect wrapper added yesterday only retried on handshake / encode errors — the actual common failure modes (consulate-initiated WS close, recv error, stream end, mid-session send failure) all `break None` inside the loop and returned `Ok(())`, which the wrapper read as "session exited cleanly; do not reconnect." So a real TCP drop / consulate restart / network blip produced exactly one connection attempt and then the daemon went silent. Refactor: introduced `ExitReason::{Cancelled, TransportFailed(String)}` to discriminate the cancel path (returns `Ok(())`, sends graceful `SessionCompleted`) from every transport-side exit (returns `Err(LegatusError::Transport(reason))`, skips the doomed `SessionCompleted` send). The reconnect wrapper now actually reconnects on the failure modes it was supposed to handle. Two new regression tests pin this:
   1. **Unit:** `client::tests::reconnect_loop_keeps_retrying_after_repeated_transport_failure` — runs the wrapper against a guaranteed-refused address, asserts it has NOT exited after 1.5s (one attempt + one full backoff + one more attempt), then asserts cancel still produces `Ok(())`.

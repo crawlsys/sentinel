@@ -33,6 +33,7 @@ use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 use tracing::{debug, info, warn};
 
+use crate::connection_status::{ConnectionState, ConnectionStatus};
 use crate::error::LegatusError;
 use crate::handle::{EscalationKind, LegatusRuntime};
 
@@ -120,9 +121,12 @@ pub async fn run_connect(
     // Standalone path — give the loop a runtime whose handle is
     // dropped immediately. Received instructions are still logged;
     // pushes to inbox_tx and pulls from escalation_rx silently
-    // no-op (the channel ends are gone).
+    // no-op (the channel ends are gone). A fresh `ConnectionStatus`
+    // is constructed and discarded — the standalone CLI doesn't
+    // expose it to anyone.
     let (_handle, mut runtime) = crate::handle::make_pair();
-    run_connect_hosted(config, cancel, &mut runtime).await
+    let status = ConnectionStatus::new();
+    run_connect_hosted(config, cancel, &mut runtime, &status).await
 }
 
 /// Hosted variant: caller supplies the [`LegatusRuntime`] half of a
@@ -138,8 +142,13 @@ pub async fn run_connect_hosted(
     config: ConnectConfig,
     cancel: std::sync::Arc<Notify>,
     runtime: &mut LegatusRuntime,
+    status: &ConnectionStatus,
 ) -> Result<(), LegatusError> {
     info!(url = %config.consulate_url, "legatus connecting");
+    // The wrapper may have us at Disconnected (first attempt) or
+    // Reconnecting (between retries). Either way, we're now actively
+    // attempting; surface that to the observer.
+    status.set(ConnectionState::Connecting);
     let (ws, _) = tokio_tungstenite::connect_async(&config.consulate_url)
         .await
         .map_err(|err| {
@@ -218,6 +227,10 @@ pub async fn run_connect_hosted(
         KeyEpoch::INITIAL,
     );
     info!(%session_id, %display_name, "legatus registered");
+    // Handshake + registration complete — the session loop will run
+    // until cancel or a transport failure. Observers (HTTP /health)
+    // see us as healthy from this point on.
+    status.set(ConnectionState::Connected);
 
     // Operator-facing handshake-complete banner. Goes to stderr so it
     // is visible regardless of RUST_LOG filter (default is `warn`).
@@ -887,6 +900,7 @@ pub async fn run_connect_hosted_with_reconnect(
     config: ConnectConfig,
     cancel: std::sync::Arc<Notify>,
     mut runtime: LegatusRuntime,
+    status: ConnectionStatus,
 ) -> Result<(), LegatusError> {
     let mut backoff = INITIAL_RECONNECT_BACKOFF;
     let mut attempt: u64 = 0;
@@ -900,12 +914,13 @@ pub async fn run_connect_hosted_with_reconnect(
         let cancel_clone = std::sync::Arc::clone(&cancel);
         // Borrow runtime mutably for this attempt; channels paired
         // with the caller's LegatusHandle persist across iterations.
-        match run_connect_hosted(config.clone(), cancel_clone, &mut runtime).await {
+        match run_connect_hosted(config.clone(), cancel_clone, &mut runtime, &status).await {
             Ok(()) => {
                 info!(
                     attempt,
                     "legatus session exited cleanly; reconnect-loop returning Ok"
                 );
+                status.set(ConnectionState::Disconnected);
                 return Ok(());
             }
             Err(LegatusError::VersionMismatch {
@@ -914,6 +929,7 @@ pub async fn run_connect_hosted_with_reconnect(
             }) => {
                 // Protocol-level incompatibility; reconnecting
                 // won't help. Surface to caller.
+                status.set(ConnectionState::Disconnected);
                 return Err(LegatusError::VersionMismatch {
                     accepted_min,
                     accepted_max,
@@ -926,6 +942,12 @@ pub async fn run_connect_hosted_with_reconnect(
                     backoff_secs = backoff.as_secs(),
                     "legatus session failed; reconnecting after backoff"
                 );
+                // Distinct from Connecting: this is the visible
+                // "we were Connected, we just lost it, we'll be
+                // back" state. Observers (HTTP /health) want to
+                // see this — a Connecting blip across reconnects
+                // would falsely suggest a fresh first attempt.
+                status.set(ConnectionState::Reconnecting);
             }
         }
 
@@ -942,6 +964,7 @@ pub async fn run_connect_hosted_with_reconnect(
                     attempt,
                     "legatus reconnect cancelled during backoff window"
                 );
+                status.set(ConnectionState::Disconnected);
                 return Ok(());
             }
         }
@@ -1293,7 +1316,7 @@ mod tests {
         let cancel_for_signal = std::sync::Arc::clone(&cancel);
 
         let task = tokio::spawn(async move {
-            run_connect_hosted_with_reconnect(reconnect_test_config(), cancel, runtime).await
+            run_connect_hosted_with_reconnect(reconnect_test_config(), cancel, runtime, ConnectionStatus::new()).await
         });
 
         // Let the first attempt fail (connect refused is fast) and
@@ -1348,7 +1371,7 @@ mod tests {
         let cancel_for_signal = std::sync::Arc::clone(&cancel);
 
         let task = tokio::spawn(async move {
-            run_connect_hosted_with_reconnect(reconnect_test_config(), cancel, runtime).await
+            run_connect_hosted_with_reconnect(reconnect_test_config(), cancel, runtime, ConnectionStatus::new()).await
         });
 
         // 1.5s is well past the first attempt (connect-refused is
@@ -1370,6 +1393,65 @@ mod tests {
         assert!(
             result.is_ok(),
             "cancel after retry loop should still return Ok(())"
+        );
+    }
+
+    #[tokio::test]
+    async fn reconnect_loop_observes_status_transitions() {
+        // The reconnect wrapper must write to the shared
+        // ConnectionStatus so the /legatus/health route handler can
+        // see what's happening. Against a refused address, the
+        // wrapper goes Disconnected (initial) -> Connecting
+        // (first attempt) -> Reconnecting (after first failure) ->
+        // Disconnected (on cancel).
+        //
+        // We can't reliably catch the brief Connecting phase from
+        // outside the task (connect-refused is fast), but we CAN
+        // assert the post-failure state is Reconnecting and the
+        // post-cancel state is Disconnected. That's the contract
+        // the dashboard / smoke test cares about.
+        let (_handle, runtime) = crate::handle::make_pair();
+        let cancel = std::sync::Arc::new(Notify::new());
+        let cancel_for_signal = std::sync::Arc::clone(&cancel);
+        let status = ConnectionStatus::new();
+        assert_eq!(
+            status.get(),
+            ConnectionState::Disconnected,
+            "fresh ConnectionStatus must start Disconnected"
+        );
+        let status_for_wrapper = status.clone();
+
+        let task = tokio::spawn(async move {
+            run_connect_hosted_with_reconnect(
+                reconnect_test_config(),
+                cancel,
+                runtime,
+                status_for_wrapper,
+            )
+            .await
+        });
+
+        // 500ms: first connect attempt has long since failed; the
+        // wrapper has set Reconnecting and is in backoff sleep.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert_eq!(
+            status.get(),
+            ConnectionState::Reconnecting,
+            "after the first failed connect, wrapper must publish Reconnecting"
+        );
+
+        // Cancel; wrapper should set Disconnected as part of its
+        // clean-exit path.
+        cancel_for_signal.notify_waiters();
+        let result = tokio::time::timeout(Duration::from_secs(3), task)
+            .await
+            .expect("cancel should unblock wrapper")
+            .expect("task joined cleanly");
+        assert!(result.is_ok(), "cancel returns Ok(())");
+        assert_eq!(
+            status.get(),
+            ConnectionState::Disconnected,
+            "on clean exit, wrapper must publish Disconnected"
         );
     }
 
