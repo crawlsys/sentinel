@@ -7,6 +7,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 ## [Unreleased]
 
 ### Added
+- **Tier 3 production hardening: TLS docs + Prometheus + multi-consulate failover + token-rotation surface** (2026-05-24). Four production-quality additions on top of the reliable-connection foundation:
+
+  1. **`GET /legatus/metrics`** — Prometheus text-exposition format endpoint, no external scrape crate needed (3 metric families, hand-rolled). Surfaces `legatus_connection_state` (gauge 0-3), `legatus_connection_attempts_total` (counter), `legatus_outbox_pending` (gauge). Same bearer-auth path as the rest of the dashboard API. Mounted on the daemon at `/legatus/metrics` alongside `/legatus/health`. The outbox-depth read is offloaded to `spawn_blocking` so a contended mutex never stalls the axum runtime.
+
+  2. **Multi-consulate failover** — new `--legatus-consulate-failover-url` (repeatable) on `sentinel daemon`. The reconnect wrapper now iterates `[primary, ...failover]` in priority order each attempt before backing off. New `ConnectConfig.failover_urls: Vec<String>` field carries the list. Failover preference is **not** persisted across attempts — every new attempt restarts from primary so a transient primary outage doesn't permanently demote the primary. `VersionMismatch` becomes fatal only when it fires on the LAST URL (any failover gets a chance first). All four existing tests + one new test still green.
+
+  3. **`PraefectusClientError::TokenInvalid`** — new error variant distinct from `Verification`. 401 from `HttpPraefectusClient` now produces `TokenInvalid(body)` instead of being lumped with cryptographic verification failures. The `PraefectusClientWitnessVerifier` adapter logs `TokenInvalid` at `warn!` with an operator-actionable message ("Praefectus rejected the bearer token. Rotate LEGATUS_PRAEFECTUS_TOKEN and restart sentinel daemon"); other errors stay at `debug!` to avoid log noise per-witness. Operators tailing logs see exactly when their token has expired vs. when a witness is actually invalid.
+
+  4. **TLS / wss:// support** — documented production path. tokio-tungstenite is built with `rustls-tls-webpki-roots` so `wss://` URLs work out of the box against any publicly-trusted certificate (Let's Encrypt, AWS ACM, etc.). Two patterns documented in the operator runbook: (a) consulate terminates TLS directly, (b) reverse-proxied via nginx/Caddy/Cloudflare. **Custom-CA injection (self-signed dev certs)** is flagged as a Tier 3 follow-up — requires adding `rustls` + `rustls-pemfile` direct deps + `connect_async_tls_with_config` plumbing.
+
+  Runbook gained TLS + multi-consulate failover + voice-loop verification sections (manual operator procedure + which automated tests cover which parts of the catastrophic-ack flow). Workspace tests still all-green (~2466 tests).
+
+### Added
 - **Daemon ergonomics: PID file + `sentinel stop` + launchd template + `sentinel legatus init` + `sentinel legatus status` + connection-event JSONL log** (2026-05-24). Four operator-facing improvements that together make the daemon usable as a long-lived service instead of a one-off process:
 
   1. **PID file + `sentinel stop`** (Unix-only). Daemon now writes `~/.claude/sentinel/daemon-pid` at startup and refuses to start if an existing PID is alive (prevents accidental double-up on the same token file; stale PIDs are silently overwritten). New `sentinel stop --wait-secs <N>` shells out to `/bin/kill -TERM`, polls for process exit, and cleans up both the PID file and the `daemon-token` file as a belt-and-suspenders measure (tokio's default SIGTERM handler aborts the runtime before the daemon's post-serve cleanup code can run, so a stop-side cleanup is required to leave a clean slate). Uses `/bin/kill` shell-out rather than `libc::kill` so the workspace's `unsafe_code = "forbid"` lint stays intact.

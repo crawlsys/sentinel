@@ -40,9 +40,30 @@ pub struct EscalationRef(pub String);
 /// Errors returned by [`PraefectusClient`] operations.
 #[derive(Debug, thiserror::Error)]
 pub enum PraefectusClientError {
-    /// Verification failed for the named reason.
+    /// Verification failed for the named reason. Use this for
+    /// cryptographic / payload-shape failures (the witness payload
+    /// itself is invalid). For "the bearer token Sentinel sent is
+    /// no longer accepted by Praefectus", prefer
+    /// [`Self::TokenInvalid`] — operators rotate the token, they
+    /// don't try a different witness.
     #[error("verification failed: {0}")]
     Verification(String),
+
+    /// The bearer token in `--legatus-praefectus-token` /
+    /// `LEGATUS_PRAEFECTUS_TOKEN` is no longer accepted by
+    /// Praefectus (typically: expired, revoked, or rotated on the
+    /// Praefectus side without updating sentinel's env). Distinct
+    /// from `Verification` so operators see a clear "rotate your
+    /// token" message instead of debugging a witness that may
+    /// actually be fine.
+    ///
+    /// Carries the body Praefectus returned (often empty for 401)
+    /// for diagnostics.
+    #[error(
+        "praefectus rejected the bearer token (401): {0} \
+         — rotate LEGATUS_PRAEFECTUS_TOKEN and restart `sentinel daemon`"
+    )]
+    TokenInvalid(String),
 
     /// Praefectus is unreachable (process down, network partition, etc).
     /// Sentinel's Catastrophic gate treats this as a deny — fail closed.
@@ -273,9 +294,14 @@ impl PraefectusClient for HttpPraefectusClient {
             .map_err(|e| PraefectusClientError::Unreachable(e.to_string()))?;
         match resp.status().as_u16() {
             200 => Ok(()),
-            401 => Err(PraefectusClientError::Verification(
-                "auth rejected by Praefectus".into(),
-            )),
+            401 => {
+                // Surface as a dedicated variant so the witness
+                // verifier adapter can log "rotate your token" at
+                // warn instead of treating it like any other
+                // verification failure.
+                let body = resp.text().await.unwrap_or_default();
+                Err(PraefectusClientError::TokenInvalid(body))
+            }
             422 => {
                 let body = resp.text().await.unwrap_or_else(|_| "no body".into());
                 Err(PraefectusClientError::Verification(body))

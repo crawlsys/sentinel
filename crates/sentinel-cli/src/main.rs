@@ -68,6 +68,16 @@ enum Commands {
         #[arg(long, value_name = "URL")]
         legatus_consulate_url: Option<String>,
 
+        /// Additional consulate URL(s) to try after
+        /// `--legatus-consulate-url` fails on the current attempt.
+        /// Repeatable; URLs are tried in order. Empty by default.
+        /// The reconnect wrapper restarts every attempt from the
+        /// primary URL — failover order is not persisted across
+        /// attempts so a transient primary outage doesn't
+        /// permanently demote the primary.
+        #[arg(long = "legatus-consulate-failover-url", value_name = "URL", action = clap::ArgAction::Append)]
+        legatus_consulate_failover_urls: Vec<String>,
+
         /// 32-byte bootstrap secret as 64 hex chars. Required
         /// when `--legatus-consulate-url` is set.
         #[arg(long, value_name = "HEX64", env = "CONSULATE_BOOTSTRAP_SECRET", hide_env_values = true)]
@@ -916,6 +926,7 @@ async fn main() -> anyhow::Result<()> {
         Commands::Daemon {
             port,
             legatus_consulate_url,
+            legatus_consulate_failover_urls,
             legatus_bootstrap_secret,
             legatus_suggested_name,
             legatus_working_dir,
@@ -952,6 +963,7 @@ async fn main() -> anyhow::Result<()> {
                 port,
                 daemon_cmd::LegatusOptions {
                     consulate_url: legatus_consulate_url,
+                    failover_urls: legatus_consulate_failover_urls,
                     bootstrap_secret_hex: legatus_bootstrap_secret,
                     suggested_name: legatus_suggested_name,
                     working_dir: legatus_working_dir,

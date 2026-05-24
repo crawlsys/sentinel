@@ -128,6 +128,7 @@ async fn spawn_consulate() -> SpawnedConsulate {
 fn sentinel_config(url: String) -> ConnectConfig {
     ConnectConfig {
         consulate_url: url,
+        failover_urls: Vec::new(),
         bootstrap_secret: TEST_BOOTSTRAP_SECRET,
         suggested_name: "sentinel-roundtrip".into(),
         runtime: RuntimeKind::ClaudeCode,

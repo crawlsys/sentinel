@@ -32,6 +32,9 @@ pub async fn run_connect(
 
     let config = ConnectConfig {
         consulate_url: consulate_url.to_owned(),
+        // Standalone CLI is single-URL; failover is a daemon-only
+        // ergonomic for long-running deployments.
+        failover_urls: Vec::new(),
         bootstrap_secret,
         suggested_name: suggested_name.to_owned(),
         working_dir,

@@ -32,6 +32,10 @@ use tracing::{info, warn};
 pub struct LegatusOptions {
     /// `--legatus-consulate-url`.
     pub consulate_url: Option<String>,
+    /// `--legatus-consulate-failover-url` (repeatable). URLs tried
+    /// in order after `consulate_url` fails on the current attempt.
+    /// Empty by default.
+    pub failover_urls: Vec<String>,
     /// `--legatus-bootstrap-secret` / `CONSULATE_BOOTSTRAP_SECRET`.
     pub bootstrap_secret_hex: Option<String>,
     /// `--legatus-suggested-name`.
@@ -492,6 +496,11 @@ async fn start_legatus_if_configured(
     };
     let config = ConnectConfig {
         consulate_url: consulate_url.clone(),
+        // Operator-supplied failover URLs (repeatable
+        // --legatus-consulate-failover-url). Empty by default.
+        // The reconnect wrapper tries primary first, then each
+        // failover in order, before backing off.
+        failover_urls: options.failover_urls.clone(),
         bootstrap_secret,
         suggested_name: options.suggested_name,
         working_dir,
@@ -696,7 +705,56 @@ fn legatus_routes(state: LegatusRouteState) -> Router {
     let health_routes: Router = Router::new()
         .route("/legatus/health", get(handle_legatus_health))
         .with_state(status_state);
-    handle_routes.merge(cache_routes).merge(health_routes)
+    // /legatus/metrics serves the same data in Prometheus text
+    // exposition format. State is the full LegatusRouteState so
+    // the handler can read both connection_status (state + attempt
+    // counter) and handle.outbox (queue depth).
+    let metrics_routes: Router = Router::new()
+        .route("/legatus/metrics", get(handle_legatus_metrics))
+        .with_state(state.clone());
+    handle_routes
+        .merge(cache_routes)
+        .merge(health_routes)
+        .merge(metrics_routes)
+}
+
+/// `GET /legatus/metrics` — Prometheus text-format exposition for
+/// the legatus connection. No external scrape-format crate needed:
+/// 3 metric families, hand-written. Scraping cadence is fine at
+/// any rate (atomic loads + a single Arc<Mutex<Vec>>.len() call).
+async fn handle_legatus_metrics(State(state): State<LegatusRouteState>) -> Response {
+    let connection_state = state.connection_status.get();
+    let state_num = connection_state as u8;
+    let attempt = state.connection_status.attempt();
+    // outbox.len() acquires a Mutex; offload to a blocking task so
+    // we don't stall the axum runtime if the lock is contended.
+    let handle = state.handle.clone();
+    let outbox_depth = tokio::task::spawn_blocking(move || {
+        handle.persistent_outbox().map(|o| o.len()).unwrap_or(0)
+    })
+    .await
+    .unwrap_or(0);
+
+    let body = format!(
+        "# HELP legatus_connection_state Current legatus connection state \
+         (0=disconnected, 1=connecting, 2=connected, 3=reconnecting).\n\
+         # TYPE legatus_connection_state gauge\n\
+         legatus_connection_state {state_num}\n\
+         # HELP legatus_connection_attempts_total Total connection attempts \
+         since daemon startup; increments on every entry into run_connect_hosted.\n\
+         # TYPE legatus_connection_attempts_total counter\n\
+         legatus_connection_attempts_total {attempt}\n\
+         # HELP legatus_outbox_pending Escalations queued on the persistent \
+         outbox awaiting an acknowledged WS send.\n\
+         # TYPE legatus_outbox_pending gauge\n\
+         legatus_outbox_pending {outbox_depth}\n"
+    );
+
+    Response::builder()
+        .status(axum::http::StatusCode::OK)
+        .header(axum::http::header::CONTENT_TYPE, "text/plain; version=0.0.4")
+        .body(axum::body::Body::from(body))
+        .unwrap_or_else(|_| Response::new(axum::body::Body::empty()))
 }
 
 /// `GET /legatus/health`

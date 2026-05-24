@@ -46,8 +46,18 @@ pub const DEFAULT_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(20);
 /// Configuration for one `legatus connect` invocation.
 #[derive(Clone, Debug)]
 pub struct ConnectConfig {
-    /// Consulate WebSocket URL (e.g. `ws://127.0.0.1:9000`).
+    /// Consulate WebSocket URL (e.g. `ws://127.0.0.1:9000`). When
+    /// [`Self::failover_urls`] is non-empty, this is tried first on
+    /// every attempt — failover URLs are tried in order only if the
+    /// primary refuses.
     pub consulate_url: String,
+    /// Additional consulate URLs tried after `consulate_url` fails
+    /// on the current attempt. Empty by default (single-consulate
+    /// mode). Operators list these in priority order; the wrapper
+    /// does **not** persist a "last successful" preference — every
+    /// new attempt restarts from `consulate_url` so a transiently-
+    /// down primary doesn't permanently demote itself.
+    pub failover_urls: Vec<String>,
     /// 32-byte bootstrap secret shared with consulate.
     pub bootstrap_secret: [u8; BOOTSTRAP_SECRET_LEN],
     /// Operator-chosen suggestion for the human-readable session
@@ -92,6 +102,7 @@ impl ConnectConfig {
     ) -> Self {
         Self {
             consulate_url: consulate_url.into(),
+            failover_urls: Vec::new(),
             bootstrap_secret,
             suggested_name: suggested_name.into(),
             working_dir: working_dir.into(),
@@ -910,72 +921,111 @@ pub async fn run_connect_hosted_with_reconnect(
 ) -> Result<(), LegatusError> {
     let mut backoff = INITIAL_RECONNECT_BACKOFF;
     loop {
-        // Bump the shared attempt counter so Connecting / Connected
-        // events inside run_connect_hosted carry the right number,
-        // and so HTTP /health can surface "this daemon has survived
-        // N reconnects."
+        // Try the primary first, then each failover in order, before
+        // backing off. The bumped attempt counter is shared across
+        // the URL list for this iteration — observers see "attempt 3
+        // failed against ws://primary, then against ws://failover1,
+        // then we slept 4s." This matches operator mental model
+        // ("attempt 3" = round 3 of trying all known URLs) and
+        // avoids exploding the counter on every failover.
         let attempt = status.bump_attempt();
-        info!(
-            attempt,
-            url = %config.consulate_url,
-            "legatus connecting (with reconnect)"
-        );
-        let cancel_clone = std::sync::Arc::clone(&cancel);
-        // Borrow runtime mutably for this attempt; channels paired
-        // with the caller's LegatusHandle persist across iterations.
-        match run_connect_hosted(config.clone(), cancel_clone, &mut runtime, &status).await {
-            Ok(()) => {
-                info!(
-                    attempt,
-                    "legatus session exited cleanly; reconnect-loop returning Ok"
-                );
-                status.set(ConnectionState::Disconnected);
-                if let Some(log) = status.event_log() {
-                    log.record_disconnected(attempt, None);
-                }
-                return Ok(());
-            }
-            Err(LegatusError::VersionMismatch {
-                accepted_min,
-                accepted_max,
-            }) => {
-                // Protocol-level incompatibility; reconnecting
-                // won't help. Surface to caller.
-                status.set(ConnectionState::Disconnected);
-                if let Some(log) = status.event_log() {
-                    log.record_disconnected(
+        let url_list = std::iter::once(config.consulate_url.clone())
+            .chain(config.failover_urls.iter().cloned())
+            .collect::<Vec<_>>();
+
+        let mut last_err: Option<LegatusError> = None;
+        for (idx, url) in url_list.iter().enumerate() {
+            info!(
+                attempt,
+                url = %url,
+                rank = idx,
+                "legatus connecting (with reconnect)"
+            );
+            let mut url_config = config.clone();
+            url_config.consulate_url = url.clone();
+            let cancel_clone = std::sync::Arc::clone(&cancel);
+            match run_connect_hosted(url_config, cancel_clone, &mut runtime, &status).await {
+                Ok(()) => {
+                    info!(
                         attempt,
-                        Some(format!(
-                            "VersionMismatch: accepted_min={accepted_min:?} \
-                             accepted_max={accepted_max:?}"
-                        )),
+                        url = %url,
+                        "legatus session exited cleanly; reconnect-loop returning Ok"
                     );
+                    status.set(ConnectionState::Disconnected);
+                    if let Some(log) = status.event_log() {
+                        log.record_disconnected(attempt, None);
+                    }
+                    return Ok(());
                 }
-                return Err(LegatusError::VersionMismatch {
+                Err(LegatusError::VersionMismatch {
                     accepted_min,
                     accepted_max,
-                });
-            }
-            Err(err) => {
-                let reason = format!("{err}");
-                warn!(
-                    attempt,
-                    ?err,
-                    backoff_secs = backoff.as_secs(),
-                    "legatus session failed; reconnecting after backoff"
-                );
-                // Distinct from Connecting: this is the visible
-                // "we were Connected, we just lost it, we'll be
-                // back" state. Observers (HTTP /health) want to
-                // see this — a Connecting blip across reconnects
-                // would falsely suggest a fresh first attempt.
-                status.set(ConnectionState::Reconnecting);
-                if let Some(log) = status.event_log() {
-                    log.record_reconnecting(attempt, reason);
+                }) => {
+                    // Protocol-level incompatibility — reconnecting
+                    // against THIS url won't help, but maybe a
+                    // failover is on a compatible version. Surface
+                    // as fatal ONLY when there's no next URL to try.
+                    if idx + 1 < url_list.len() {
+                        warn!(
+                            attempt,
+                            url = %url,
+                            ?accepted_min,
+                            ?accepted_max,
+                            "version mismatch on this consulate; trying next failover URL"
+                        );
+                        last_err = Some(LegatusError::VersionMismatch {
+                            accepted_min,
+                            accepted_max,
+                        });
+                        continue;
+                    }
+                    status.set(ConnectionState::Disconnected);
+                    if let Some(log) = status.event_log() {
+                        log.record_disconnected(
+                            attempt,
+                            Some(format!(
+                                "VersionMismatch on every consulate URL: \
+                                 accepted_min={accepted_min:?} \
+                                 accepted_max={accepted_max:?}"
+                            )),
+                        );
+                    }
+                    return Err(LegatusError::VersionMismatch {
+                        accepted_min,
+                        accepted_max,
+                    });
+                }
+                Err(err) => {
+                    warn!(
+                        attempt,
+                        url = %url,
+                        ?err,
+                        "legatus url failed; trying next failover (if any)"
+                    );
+                    last_err = Some(err);
                 }
             }
         }
-
+        // Belt-and-suspenders: if we exit the loop without a return,
+        // we've exhausted the URL list without a clean exit. Fall
+        // through to the backoff sleep. last_err is guaranteed Some
+        // (the loop above wrote to it on every Err arm).
+        let reason = last_err
+            .map(|e| format!("{e}"))
+            .unwrap_or_else(|| "no urls configured".to_owned());
+        warn!(
+            attempt,
+            urls = url_list.len(),
+            backoff_secs = backoff.as_secs(),
+            reason = %reason,
+            "all consulate URLs failed this round; backing off"
+        );
+        // Distinct from Connecting: this is the visible "we were
+        // Connected, we just lost it, we'll be back" state.
+        status.set(ConnectionState::Reconnecting);
+        if let Some(log) = status.event_log() {
+            log.record_reconnecting(attempt, reason);
+        }
         // Sleep with cancel-honor; on wake, grow backoff and retry
         // with the SAME runtime (its handle-paired channels are still
         // hot, so escalations queued during the outage drain on the

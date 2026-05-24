@@ -80,9 +80,25 @@ impl WitnessVerifierPort for PraefectusClientWitnessVerifier {
 
         match result {
             Ok(Ok(())) => Ok(()),
-            Ok(Err(e)) => Err(WitnessVerificationError {
-                reason: format!("praefectus rejected witness: {e}"),
-            }),
+            Ok(Err(e)) => {
+                // TokenInvalid is operator-actionable (rotate the
+                // bearer token); log at warn so it surfaces clearly
+                // in tailed logs. Other errors stay at debug since
+                // they fire per-witness and would be noisy.
+                if matches!(e, crate::praefectus_client::PraefectusClientError::TokenInvalid(_)) {
+                    tracing::warn!(
+                        operator_id = %operator,
+                        error = %e,
+                        "Praefectus rejected the bearer token. Rotate \
+                         LEGATUS_PRAEFECTUS_TOKEN and restart `sentinel daemon`."
+                    );
+                } else {
+                    tracing::debug!(operator_id = %operator, ?e, "witness rejected");
+                }
+                Err(WitnessVerificationError {
+                    reason: format!("praefectus rejected witness: {e}"),
+                })
+            }
             Err(_) => Err(WitnessVerificationError {
                 reason: format!("praefectus verify timed out after {:?}", self.timeout),
             }),
