@@ -45,7 +45,10 @@ pub use spent_nonce_log::{
 pub use witness_verifier::{
     AlwaysAccept, AlwaysReject, WitnessVerificationError, WitnessVerifierPort,
 };
-pub use client::{run_connect, run_connect_hosted, ConnectConfig};
+pub use client::{
+    run_connect, run_connect_hosted, run_connect_hosted_with_reconnect, ConnectConfig,
+    INITIAL_RECONNECT_BACKOFF, MAX_RECONNECT_BACKOFF,
+};
 pub use error::LegatusError;
 pub use handle::{
     make_pair, make_pair_with_inbox, make_pair_with_persistence, EscalationKind,
@@ -60,6 +63,7 @@ pub use persistent_outbox::{
 // sentinel-application) can configure a legatus / build a
 // RelayInstruction without a direct path-dep on consul-protocol
 // / consul-domain.
+pub use consul_domain::identity::republic::OperatorId;
 pub use consul_domain::identity::{InstructionId, SessionId};
 pub use consul_protocol::keys::BOOTSTRAP_SECRET_LEN;
 pub use consul_protocol::messages::{

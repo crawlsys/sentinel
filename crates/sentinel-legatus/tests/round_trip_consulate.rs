@@ -134,6 +134,7 @@ fn sentinel_config(url: String) -> ConnectConfig {
         branch: Some("test".into()),
         task_description: Some("round-trip integration test".into()),
         heartbeat_interval: Duration::from_millis(75),
+        operator_id: None,
     }
 }
 
@@ -178,9 +179,9 @@ async fn consulate_dispatches_then_observes_ack_result_completed() {
     // Spawn sentinel-legatus runtime in the background.
     let cancel = Arc::new(Notify::new());
     let cancel_for_task = cancel.clone();
-    let (handle, runtime) = make_pair();
+    let (handle, mut runtime) = make_pair();
     let legatus_task = tokio::spawn(async move {
-        run_connect_hosted(sentinel_config(url), cancel_for_task, runtime).await
+        run_connect_hosted(sentinel_config(url), cancel_for_task, &mut runtime).await
     });
 
     // Phase 1: consulate observes handshake + registration.
@@ -303,9 +304,9 @@ async fn instruction_outcome_failure_round_trips_with_error_body() {
 
     let cancel = Arc::new(Notify::new());
     let cancel_for_task = cancel.clone();
-    let (handle, runtime) = make_pair();
+    let (handle, mut runtime) = make_pair();
     let _legatus_task = tokio::spawn(async move {
-        run_connect_hosted(sentinel_config(url), cancel_for_task, runtime).await
+        run_connect_hosted(sentinel_config(url), cancel_for_task, &mut runtime).await
     });
 
     let session_id = tokio::time::timeout(Duration::from_secs(5), session_id_rx)
@@ -416,11 +417,11 @@ async fn t1_catastrophic_ack_round_trips_into_approval_cache() {
     let (handle, runtime) = make_pair();
     let approval_cache = Arc::new(CatastrophicApprovalCache::new());
     let spent_nonces = Arc::new(SpentNonceLog::new());
-    let runtime = runtime
+    let mut runtime = runtime
         .with_approval_cache(approval_cache.clone())
         .with_spent_nonce_log(spent_nonces);
     let legatus_task = tokio::spawn(async move {
-        run_connect_hosted(sentinel_config(url), cancel_for_task, runtime).await
+        run_connect_hosted(sentinel_config(url), cancel_for_task, &mut runtime).await
     });
 
     let session_id = tokio::time::timeout(Duration::from_secs(5), session_id_rx)
@@ -556,11 +557,11 @@ async fn t1_catastrophic_ack_replay_is_rejected() {
     let (handle, runtime) = make_pair();
     let approval_cache = Arc::new(CatastrophicApprovalCache::new());
     let spent_nonces = Arc::new(SpentNonceLog::new());
-    let runtime = runtime
+    let mut runtime = runtime
         .with_approval_cache(approval_cache.clone())
         .with_spent_nonce_log(spent_nonces.clone());
     let legatus_task = tokio::spawn(async move {
-        run_connect_hosted(sentinel_config(url), cancel_for_task, runtime).await
+        run_connect_hosted(sentinel_config(url), cancel_for_task, &mut runtime).await
     });
 
     let session_id = tokio::time::timeout(Duration::from_secs(5), session_id_rx)

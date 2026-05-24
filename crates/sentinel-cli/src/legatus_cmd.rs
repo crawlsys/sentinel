@@ -39,6 +39,9 @@ pub async fn run_connect(
         task_description,
         runtime: RuntimeKind::ClaudeCode,
         heartbeat_interval: Duration::from_secs(heartbeat_secs.max(1)),
+        // Standalone `sentinel legatus connect` doesn't bind to an
+        // operator — sessions register as ROOT.
+        operator_id: None,
     };
 
     let cancel = Arc::new(Notify::new());

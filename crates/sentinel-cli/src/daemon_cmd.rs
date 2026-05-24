@@ -18,7 +18,7 @@ use axum::{Json, Router};
 use sentinel_domain::state::SessionState;
 use sentinel_legatus::{
     default_inbox_path, default_outbox_path, make_pair, make_pair_with_persistence,
-    run_connect_hosted, ConnectConfig, EscalationKind, LegatusHandle, PersistentEscalationOutbox,
+    ConnectConfig, EscalationKind, LegatusHandle, PersistentEscalationOutbox,
     PersistentInbox, RuntimeKind, BOOTSTRAP_SECRET_LEN,
 };
 use tokio::sync::{Notify, RwLock};
@@ -351,6 +351,14 @@ async fn start_legatus_if_configured(
         task_description: None,
         runtime: RuntimeKind::ClaudeCode,
         heartbeat_interval: Duration::from_secs(options.heartbeat_secs.max(1)),
+        // Carry operator identity in the RegisterSession so the
+        // consulate populates Session.owner and the voice-attested
+        // gate's resolver can route per-session escalations to the
+        // correct operator. `None` (the default) keeps the v0.1
+        // single-operator-as-ROOT scaffold semantics intact.
+        operator_id: options
+            .operator_id
+            .map(sentinel_legatus::OperatorId::from_uuid),
     };
 
     // Persistent inbox + outbox at ~/.claude/sentinel/state/.
@@ -414,17 +422,17 @@ async fn start_legatus_if_configured(
             );
         }
     }
-    // v0.1 single-operator scaffold per --legatus-operator-id.
-    // Logged at startup so the operator can confirm the daemon
-    // thinks it's bound to them. Real multi-operator routing
-    // (operator-id flowing through RegisterSession metadata,
-    // per-session lookup at gate-fire time) is consul-side
-    // coordination work (see SENTINEL-COORDINATION.md item C3).
+    // `--legatus-operator-id` flows into `ConnectConfig.operator_id`
+    // above; the consulate uses it on `RegisterSession` to populate
+    // `Session.owner`, and the voice-attested gate's
+    // `OperatorResolverPort` then routes per-session escalations to
+    // the correct operator's voice gate. Logged at startup so the
+    // operator can confirm the daemon thinks it's bound to them.
     if let Some(op_id) = options.operator_id {
-        info!(operator_id = %op_id, "daemon bound to single operator (scaffold)");
-        eprintln!("[daemon] operator binding (scaffold): {op_id}");
+        info!(operator_id = %op_id, "daemon bound to operator");
+        eprintln!("[daemon] operator binding: {op_id}");
     } else {
-        info!("no --legatus-operator-id set; operator identity will not be carried in PhaseProof.actor");
+        info!("no --legatus-operator-id set; sessions register as OperatorId::ROOT");
     }
     let runtime = runtime.with_approval_cache(approval_cache.clone());
     // Spent-nonce log: replay protection on inbound CatastrophicAcks.
@@ -483,8 +491,14 @@ async fn start_legatus_if_configured(
     let cancel = Arc::new(Notify::new());
     info!(url = %consulate_url, "daemon hosting legatus");
     tokio::spawn(async move {
-        if let Err(err) = run_connect_hosted(config, cancel, runtime).await {
-            warn!(?err, "hosted legatus exited with error");
+        // Reconnect wrapper: transient transport / heartbeat failures
+        // trigger exponential backoff (1s → 30s cap) with cancel-honor.
+        // VersionMismatch surfaces as fatal — restarting won't help.
+        if let Err(err) =
+            sentinel_legatus::client::run_connect_hosted_with_reconnect(config, cancel, runtime)
+                .await
+        {
+            warn!(?err, "hosted legatus reconnect loop exited with fatal error");
         }
     });
     Ok(Some(LegatusRouteState {
