@@ -277,6 +277,15 @@ pub fn load_graph_with(conn: &Connection, opts: GraphOpts) -> Result<GraphRespon
         });
     }
 
+    // Mirror the hook-hide policy in the ticker: if the graph isn't
+    // showing hook nodes, drop hook-level events too. Tool-call
+    // events already carry n_hooks + outcomes, so nothing is lost.
+    if !opts.include_hooks {
+        recent_events.retain(|ev| {
+            ev.kind != kind::HOOK_INGESTED && ev.kind != kind::HOOK_DENIED
+        });
+    }
+
     // Compute the visible event tail (matches what the ticker will show).
     let events_limit_for_window = (limit * 6).max(600);
     let events_tail_for_window: &[RecentEvent] = if recent_events.len() > events_limit_for_window {
@@ -285,10 +294,16 @@ pub fn load_graph_with(conn: &Connection, opts: GraphOpts) -> Result<GraphRespon
         &recent_events[..]
     };
 
-    // Expand kept_ids to cover every node referenced by an event the
-    // ticker will actually render, so click-to-pan never targets a
-    // node missing from the graph. Plan gotcha #8.
-    for ev in events_tail_for_window {
+    // Expand kept_ids ONLY for the freshest events the user is likely
+    // to click on. Pulling in every node referenced by the full 600-
+    // event tail bloats the canvas (each tool_call event has a
+    // unique id, so the expansion is unbounded). Cap at 60 — the
+    // ticker's first viewport-worth of rows.
+    let expand_cap = 60.min(events_tail_for_window.len());
+    let expand_from = events_tail_for_window
+        .len()
+        .saturating_sub(expand_cap);
+    for ev in &events_tail_for_window[expand_from..] {
         if let Some(s) = ev.payload.get("session_id").and_then(|v| v.as_str()) {
             for n in nodes.values() {
                 if n.kind == node_kind::SESSION
