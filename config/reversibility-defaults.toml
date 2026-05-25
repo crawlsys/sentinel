@@ -151,6 +151,16 @@ update_step = "ReversibleWithEffort"
 regenerate_claude_md = "ReversibleWithEffort"
 edit_claude_md_template = "ReversibleWithEffort"
 restart_all_mcps = "ReversibleWithEffort"
+# Added: mcp-router management trio + step-granularity tools (were missing,
+# so the unknown-MCP default gated mcp_health_check etc. as Irreversible).
+mcp_health_check = "TriviallyReversible"
+mcp_list_servers = "TriviallyReversible"
+mcp_restart_server = "ReversibleWithEffort"
+get_step_chain = "TriviallyReversible"
+get_step_proof = "TriviallyReversible"
+get_active_step = "TriviallyReversible"
+submit_step_complete = "ReversibleWithEffort"
+submit_linear_step = "ReversibleWithEffort"
 
 # Sequential-thinking — pure in-context reasoning. The single tool only
 # records a thought into the model's own reasoning buffer; zero external
