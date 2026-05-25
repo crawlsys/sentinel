@@ -15,12 +15,14 @@ use crate::health;
 use crate::model::{ActivityResponse, GraphResponse};
 use crate::naming::{self, NamingState};
 use crate::sse;
+use crate::summary::{self, SummaryKind, SummaryState};
 
 pub struct AppState {
     pub db_path: PathBuf,
     pub window_limit: usize,
     pub started_at: Instant,
     pub naming: NamingState,
+    pub summary: SummaryState,
     /// Snapshot cache keyed by opts. Avoids re-scanning 90k events
     /// on every refresh when the store hasn't advanced. Holds at most
     /// a few entries — one per unique (limit, since_secs, include_hooks).
@@ -60,6 +62,7 @@ pub fn router(state: Arc<AppState>) -> axum::Router {
         .route("/api/graph", get(graph_endpoint))
         .route("/api/activity/{session_id}", get(activity_endpoint))
         .route("/api/name-session/{session_id}", get(name_session_endpoint))
+        .route("/api/summary/{session_id}", get(summary_endpoint))
         .route("/api/stream", get(sse::stream))
         .layer(cors)
         .with_state(state)
@@ -70,6 +73,23 @@ async fn name_session_endpoint(
     Path(session_id): Path<String>,
 ) -> axum::Json<naming::NameResponse> {
     axum::Json(naming::name_session(&state.naming, &session_id).await)
+}
+
+#[derive(Deserialize)]
+pub struct SummaryQuery {
+    pub kind: Option<String>,
+    pub at_ts: Option<String>,
+}
+
+async fn summary_endpoint(
+    State(state): State<Arc<AppState>>,
+    Path(session_id): Path<String>,
+    Query(q): Query<SummaryQuery>,
+) -> Result<axum::Json<summary::SummaryResponse>, (StatusCode, String)> {
+    let kind = SummaryKind::from_str(q.kind.as_deref().unwrap_or("card"))
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, "kind must be card|wait|narrative".into()))?;
+    let r = summary::summarize(&state.summary, &session_id, kind, q.at_ts.as_deref()).await;
+    Ok(axum::Json(r))
 }
 
 #[derive(Deserialize)]

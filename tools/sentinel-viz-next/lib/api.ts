@@ -62,3 +62,27 @@ export async function fetchSessionName(
   if (!res.ok) throw new Error(`name-session: ${res.status}`);
   return res.json();
 }
+
+export interface SummaryResponse {
+  session_id: string;
+  kind: string;
+  at_ts: string | null;
+  text: string | null;
+  source: string;
+  cached: boolean;
+}
+
+export async function fetchSummary(
+  sessionId: string,
+  opts: { kind?: "card" | "wait" | "narrative"; atTs?: string } = {},
+  signal?: AbortSignal,
+): Promise<SummaryResponse> {
+  const params = new URLSearchParams();
+  if (opts.kind) params.set("kind", opts.kind);
+  if (opts.atTs) params.set("at_ts", opts.atTs);
+  const qs = params.toString();
+  const url = `${apiBase()}/api/summary/${encodeURIComponent(sessionId)}${qs ? `?${qs}` : ""}`;
+  const res = await fetch(url, { signal });
+  if (!res.ok) throw new Error(`summary: ${res.status}`);
+  return res.json();
+}

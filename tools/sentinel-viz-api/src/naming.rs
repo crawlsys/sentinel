@@ -22,6 +22,7 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
+use crate::llm::{self, ModelConfig};
 use crate::transcript;
 
 const CACHE_TTL_SECS: u64 = 24 * 3600;
@@ -58,42 +59,12 @@ pub struct NamingState {
     pub model: Option<ModelConfig>,
 }
 
-#[derive(Debug, Clone)]
-pub enum ModelConfig {
-    OpenAi { model: String, api_key: String },
-    LocalOllama { model: String, base_url: String },
-}
-
 impl NamingState {
     pub fn from_env() -> Self {
-        let raw = std::env::var("SENTINEL_VIZ_NAMING_MODEL").ok();
-        let model = match raw.as_deref() {
-            None | Some("") | Some("none") => None,
-            Some(s) if s.starts_with("openai:") => {
-                let m = s.trim_start_matches("openai:").to_string();
-                match std::env::var("OPENAI_API_KEY") {
-                    Ok(k) if !k.is_empty() => Some(ModelConfig::OpenAi { model: m, api_key: k }),
-                    _ => {
-                        tracing::warn!("SENTINEL_VIZ_NAMING_MODEL=openai:{} but OPENAI_API_KEY is unset; disabling", m);
-                        None
-                    }
-                }
-            }
-            Some(s) if s.starts_with("local:") => {
-                let m = s.trim_start_matches("local:").to_string();
-                let base = std::env::var("OLLAMA_URL")
-                    .unwrap_or_else(|_| "http://127.0.0.1:11434".to_string());
-                Some(ModelConfig::LocalOllama { model: m, base_url: base })
-            }
-            Some(other) => {
-                tracing::warn!("unknown SENTINEL_VIZ_NAMING_MODEL value '{other}'; disabling");
-                None
-            }
-        };
         Self {
             cache: RwLock::new(HashMap::new()),
             recent_calls: RwLock::new(Vec::new()),
-            model,
+            model: ModelConfig::from_env(),
         }
     }
 
@@ -200,7 +171,18 @@ pub async fn name_session(state: &NamingState, session_id: &str) -> NameResponse
     state.record_call();
 
     let prompt_blob = format_prompt_blob(&first_prompt, &first_tools);
-    let name = match call_llm(model, &prompt_blob).await {
+    let name = match llm::chat(
+        model,
+        llm::ChatRequest {
+            system: SYSTEM_PROMPT,
+            user: &prompt_blob,
+            max_tokens: 20,
+            temperature: 0.3,
+            timeout_secs: 15,
+        },
+    )
+    .await
+    {
         Ok(s) => sanitize_name(&s),
         Err(e) => {
             tracing::warn!(error = %e, "naming LLM call failed");
@@ -213,15 +195,8 @@ pub async fn name_session(state: &NamingState, session_id: &str) -> NameResponse
     NameResponse {
         session_id: session_id.to_string(),
         name,
-        source: source_label(model),
+        source: model.label(),
         cached: false,
-    }
-}
-
-fn source_label(m: &ModelConfig) -> String {
-    match m {
-        ModelConfig::OpenAi { model, .. } => format!("openai:{model}"),
-        ModelConfig::LocalOllama { model, .. } => format!("local:{model}"),
     }
 }
 
@@ -313,87 +288,6 @@ pub fn sanitize_name(raw: &str) -> Option<String> {
         return None;
     }
     Some(out)
-}
-
-async fn call_llm(model: &ModelConfig, prompt_blob: &str) -> anyhow::Result<String> {
-    match model {
-        ModelConfig::OpenAi { model, api_key } => {
-            #[derive(Serialize)]
-            struct Msg<'a> { role: &'a str, content: &'a str }
-            #[derive(Serialize)]
-            struct Req<'a> {
-                model: &'a str,
-                messages: Vec<Msg<'a>>,
-                max_tokens: u32,
-                temperature: f32,
-            }
-            #[derive(Deserialize)]
-            struct Resp { choices: Vec<Choice> }
-            #[derive(Deserialize)]
-            struct Choice { message: RespMsg }
-            #[derive(Deserialize)]
-            struct RespMsg { content: String }
-
-            let client = reqwest::Client::builder()
-                .timeout(Duration::from_secs(15))
-                .build()?;
-            let req = Req {
-                model,
-                messages: vec![
-                    Msg { role: "system", content: SYSTEM_PROMPT },
-                    Msg { role: "user", content: prompt_blob },
-                ],
-                max_tokens: 20,
-                temperature: 0.3,
-            };
-            let resp: Resp = client
-                .post("https://api.openai.com/v1/chat/completions")
-                .bearer_auth(api_key)
-                .json(&req)
-                .send()
-                .await?
-                .error_for_status()?
-                .json()
-                .await?;
-            let text = resp.choices.into_iter().next()
-                .map(|c| c.message.content)
-                .unwrap_or_default();
-            Ok(text)
-        }
-        ModelConfig::LocalOllama { model, base_url } => {
-            #[derive(Serialize)]
-            struct Req<'a> {
-                model: &'a str,
-                prompt: String,
-                stream: bool,
-                options: Opts,
-            }
-            #[derive(Serialize)]
-            struct Opts { temperature: f32, num_predict: u32 }
-            #[derive(Deserialize)]
-            struct Resp { response: String }
-
-            let prompt = format!("{SYSTEM_PROMPT}\n\n{prompt_blob}");
-            let req = Req {
-                model,
-                prompt,
-                stream: false,
-                options: Opts { temperature: 0.3, num_predict: 20 },
-            };
-            let client = reqwest::Client::builder()
-                .timeout(Duration::from_secs(30))
-                .build()?;
-            let resp: Resp = client
-                .post(format!("{base_url}/api/generate"))
-                .json(&req)
-                .send()
-                .await?
-                .error_for_status()?
-                .json()
-                .await?;
-            Ok(resp.response)
-        }
-    }
 }
 
 #[cfg(test)]

@@ -34,6 +34,7 @@ async fn main() -> Result<()> {
         cache: std::sync::RwLock::new(Vec::new()),
         activity_cache: std::sync::RwLock::new(Vec::new()),
         naming: sentinel_viz_api::naming::NamingState::from_env(),
+        summary: sentinel_viz_api::summary::SummaryState::from_env(),
     });
 
     let app = sentinel_viz_api::server::router(state);

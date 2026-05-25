@@ -4,7 +4,7 @@ import { useEffect } from "react";
 import { useQuery } from "@tanstack/react-query";
 
 import type { Node } from "../types/api";
-import { fetchActivity } from "../lib/api";
+import { fetchActivity, fetchSummary } from "../lib/api";
 import { indexActivity } from "../lib/activity-cache";
 import { categoryColor, categoryLabel, relTime, statusColor } from "../lib/format";
 
@@ -77,6 +77,15 @@ export function PanelInspector({ node, anchorTs, onClose }: Props) {
   useEffect(() => {
     if (sessionId && activityQ.data) indexActivity(sessionId, activityQ.data);
   }, [sessionId, activityQ.data]);
+
+  const summaryKind: "wait" | "card" = node?.session_status === "awaiting_user" ? "wait" : "card";
+  const summaryQ = useQuery({
+    queryKey: ["summary", sessionId, anchorTs ?? null, summaryKind],
+    queryFn: ({ signal }) =>
+      fetchSummary(sessionId!, { kind: summaryKind, atTs: anchorTs ?? undefined }, signal),
+    enabled: !!sessionId,
+    staleTime: 60_000,
+  });
 
   if (!node) {
     return (
@@ -152,7 +161,14 @@ export function PanelInspector({ node, anchorTs, onClose }: Props) {
 
       {sessionId ? (
         <div className="mt-4 border-t border-[#30363d] pt-3">
-          <h4 className="text-[10px] uppercase tracking-wider text-[#6e7681] mb-2 flex justify-between">
+          <SummaryCard
+            kind={summaryKind}
+            text={summaryQ.data?.text ?? null}
+            source={summaryQ.data?.source ?? null}
+            loading={summaryQ.isPending}
+            error={summaryQ.error ? "summary unavailable" : null}
+          />
+          <h4 className="text-[10px] uppercase tracking-wider text-[#6e7681] mb-2 flex justify-between mt-4">
             <span>{anchorTs ? "activity ± 60s" : "recent activity"}</span>
             {anchorTs ? <span className="text-[#58a6ff]">@ {anchorTs.slice(11, 19)}</span> : null}
           </h4>
@@ -243,6 +259,45 @@ function Row({ k, v }: { k: string; v: string }) {
     <div className="flex justify-between gap-2">
       <span className="text-[#6e7681]">{k}</span>
       <span className="text-[#58a6ff] truncate">{v}</span>
+    </div>
+  );
+}
+
+interface SummaryCardProps {
+  kind: "card" | "wait";
+  text: string | null;
+  source: string | null;
+  loading: boolean;
+  error: string | null;
+}
+
+function SummaryCard({ kind, text, source, loading, error }: SummaryCardProps) {
+  const label = kind === "wait" ? "what it's waiting on" : "ai summary";
+  const accent = kind === "wait" ? "#d29922" : "#58a6ff";
+  // Hide the card entirely when naming is disabled — no value in
+  // showing an empty stub. Show it as soon as we have ANY signal.
+  if (!loading && !error && !text && source === "disabled") return null;
+  return (
+    <div
+      data-testid="ai-summary"
+      className="p-2 rounded mb-3 border-l-2"
+      style={{ borderLeftColor: accent, backgroundColor: "#0d1117" }}
+    >
+      <div className="flex justify-between items-baseline text-[10px] uppercase tracking-wider mb-1">
+        <span style={{ color: accent }}>{label}</span>
+        {source ? <span className="text-[#484f58]">{source}</span> : null}
+      </div>
+      {loading ? (
+        <div className="text-[10px] text-[#6e7681] italic">generating…</div>
+      ) : error ? (
+        <div className="text-[10px] text-[#f85149]">{error}</div>
+      ) : text ? (
+        <div className="text-[11px] text-[#c9d1d9] whitespace-pre-wrap leading-relaxed">{text}</div>
+      ) : (
+        <div className="text-[10px] text-[#6e7681] italic">
+          (no summary — naming model disabled or activity empty)
+        </div>
+      )}
     </div>
   );
 }
