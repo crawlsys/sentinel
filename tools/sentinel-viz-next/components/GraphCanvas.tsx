@@ -3,7 +3,7 @@
 import * as d3Force from "d3-force";
 import * as d3Zoom from "d3-zoom";
 import { select } from "d3-selection";
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import type { Edge, GraphResponse, Node } from "../types/api";
 import { nodeColor, statusColor } from "../lib/format";
@@ -28,10 +28,42 @@ interface Props {
   onSelectNode: (nodeId: string | null) => void;
 }
 
+interface ViewportSize {
+  width: number;
+  height: number;
+}
+
 export function GraphCanvas({ graph, selectedNodeId, onSelectNode }: Props) {
   const svgRef = useRef<SVGSVGElement | null>(null);
   const gRef = useRef<SVGGElement | null>(null);
   const simRef = useRef<d3Force.Simulation<SimNode, SimLink> | null>(null);
+  const [viewport, setViewport] = useState<ViewportSize>({ width: 0, height: 0 });
+
+  useEffect(() => {
+    const svg = svgRef.current;
+    if (!svg) return;
+
+    const updateViewport = () => {
+      const rect = svg.getBoundingClientRect();
+      setViewport((prev) => {
+        if (Math.round(prev.width) === Math.round(rect.width) && Math.round(prev.height) === Math.round(rect.height)) {
+          return prev;
+        }
+        return { width: rect.width, height: rect.height };
+      });
+    };
+
+    updateViewport();
+
+    if (typeof ResizeObserver === "undefined") {
+      window.addEventListener("resize", updateViewport);
+      return () => window.removeEventListener("resize", updateViewport);
+    }
+
+    const observer = new ResizeObserver(updateViewport);
+    observer.observe(svg);
+    return () => observer.disconnect();
+  }, []);
 
   // Map graph data to sim nodes/links (stable identity by id).
   const { simNodes, simLinks, nodeById } = useMemo(() => {
@@ -57,6 +89,12 @@ export function GraphCanvas({ graph, selectedNodeId, onSelectNode }: Props) {
   // Build / update the d3 simulation.
   useEffect(() => {
     if (!svgRef.current || !gRef.current) return;
+
+    const width = viewport.width || svgRef.current.clientWidth || 800;
+    const height = viewport.height || svgRef.current.clientHeight || 600;
+    const centerX = Math.max(width / 2, 0);
+    const centerY = Math.max(height / 2, 0);
+
     const sim = d3Force
       .forceSimulation<SimNode, SimLink>(simNodes)
       .force("charge", d3Force.forceManyBody<SimNode>().strength(-120))
@@ -109,7 +147,7 @@ export function GraphCanvas({ graph, selectedNodeId, onSelectNode }: Props) {
           .text((d) => {
             if (d.kind === "SentinelSession") {
               const sid = typeof d.ref.data?.session_id === "string" ? (d.ref.data.session_id as string) : d.id;
-              return sid.length > 12 ? `${sid.slice(0, 8)}…` : sid;
+              return sid.length > 12 ? `${sid.slice(0, 8)}...` : sid;
             }
             return "";
           });
@@ -127,20 +165,21 @@ export function GraphCanvas({ graph, selectedNodeId, onSelectNode }: Props) {
       node.attr("transform", (d) => `translate(${d.x ?? 0}, ${d.y ?? 0})`);
     });
 
-    // Zoom & pan
+    // Zoom & pan. Center the simulation in the actual SVG viewport so fixed
+    // side panels cannot push the graph outside a narrow canvas.
     const zoom = d3Zoom
       .zoom<SVGSVGElement, unknown>()
       .scaleExtent([0.2, 4])
       .on("zoom", (event) => {
         g.attr("transform", event.transform.toString());
       });
-    svg.call(zoom).call(zoom.transform, d3Zoom.zoomIdentity.translate(400, 300));
+    svg.call(zoom).call(zoom.transform, d3Zoom.zoomIdentity.translate(centerX, centerY));
 
     return () => {
       sim.stop();
       svg.on(".zoom", null);
     };
-  }, [simNodes, simLinks, onSelectNode]);
+  }, [simNodes, simLinks, onSelectNode, viewport.width, viewport.height]);
 
   // Highlight the selected node.
   useEffect(() => {
