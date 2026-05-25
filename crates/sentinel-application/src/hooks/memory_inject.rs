@@ -27,6 +27,11 @@ use super::{run_async, FileSystemPort, MemoryMcpPort};
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
 struct InjectedMemoryEntry {
     id: String,
+    /// Retrieval-event id from memory_search for this atom. Threaded back to
+    /// memory_record_outcome by memory_feedback so the outcome attaches to the
+    /// exact retrieval event (not the atom id, which the log isn't keyed by).
+    #[serde(default)]
+    event_id: Option<String>,
     name: String,
     score: f64,
 }
@@ -56,6 +61,7 @@ fn write_injected_state(fs: &dyn FileSystemPort, hits: &[UnifiedHit], user_promp
             .iter()
             .map(|h| InjectedMemoryEntry {
                 id: h.atom_id.clone(),
+                event_id: h.event_id.clone(),
                 name: format!("{}/{}={}", h.subject, h.predicate, h.value),
                 score: h.final_score,
             })
@@ -77,6 +83,8 @@ fn write_injected_state(fs: &dyn FileSystemPort, hits: &[UnifiedHit], user_promp
 #[derive(serde::Deserialize, Debug, Clone)]
 struct UnifiedHit {
     atom_id: String,
+    #[serde(default)]
+    event_id: Option<String>,
     subject: String,
     predicate: String,
     value: String,
@@ -337,6 +345,7 @@ mod tests {
     fn test_render_context_single_hit() {
         let hits = vec![UnifiedHit {
             atom_id: "abc".to_string(),
+            event_id: Some("evt-1".to_string()),
             subject: "user".to_string(),
             predicate: "likes".to_string(),
             value: "rust".to_string(),
@@ -382,6 +391,7 @@ mod tests {
         let state = InjectedState {
             memories: vec![InjectedMemoryEntry {
                 id: "atom-1".to_string(),
+                event_id: Some("evt-1".to_string()),
                 name: "user/likes=rust".to_string(),
                 score: 0.9,
             }],

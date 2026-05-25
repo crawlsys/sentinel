@@ -25,6 +25,11 @@ use super::{FileSystemPort, HookContext, MemoryMcpPort};
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct InjectedMemory {
     id: String,
+    /// Retrieval-event id captured by memory_inject from memory_search. This —
+    /// not `id` (the atom id) — is what memory_record_outcome expects, since
+    /// the retrieval log is keyed by event id.
+    #[serde(default)]
+    event_id: Option<String>,
     name: String,
     score: f64,
 }
@@ -145,6 +150,13 @@ fn record_outcomes_unified(
 
     let mut outcomes: Vec<(String, &'static str)> = Vec::with_capacity(injected.len());
     for memory in injected {
+        // The outcome must attach to the retrieval EVENT, not the atom. If
+        // memory_inject didn't capture an event_id (e.g. an older state file),
+        // there's no event to record against — skip rather than send an atom
+        // id the retrieval log can't resolve.
+        let Some(event_id) = memory.event_id.clone() else {
+            continue;
+        };
         let label = if used_ids.contains(memory.id.as_str()) {
             "used"
         } else if correction_detected {
@@ -152,7 +164,7 @@ fn record_outcomes_unified(
         } else {
             "ignored"
         };
-        outcomes.push((memory.id.clone(), label));
+        outcomes.push((event_id, label));
     }
 
     // Fire-and-forget: outcomes are best-effort. A transient memory-mcp
@@ -262,11 +274,13 @@ mod tests {
         let memories = vec![
             InjectedMemory {
                 id: "id1".to_string(),
+                event_id: None,
                 name: "Firefly Pro CRM".to_string(),
                 score: 0.85,
             },
             InjectedMemory {
                 id: "id2".to_string(),
+                event_id: None,
                 name: "Sentinel Hook Engine".to_string(),
                 score: 0.75,
             },
@@ -282,6 +296,7 @@ mod tests {
     fn test_detect_used_memories_none() {
         let memories = vec![InjectedMemory {
             id: "id1".to_string(),
+            event_id: None,
             name: "Firefly Pro CRM".to_string(),
             score: 0.85,
         }];
@@ -296,6 +311,7 @@ mod tests {
         // Names <= 3 chars should be skipped to avoid false positives
         let memories = vec![InjectedMemory {
             id: "id1".to_string(),
+            event_id: None,
             name: "api".to_string(),
             score: 0.80,
         }];
@@ -309,6 +325,7 @@ mod tests {
     fn test_detect_used_memories_case_insensitive() {
         let memories = vec![InjectedMemory {
             id: "id1".to_string(),
+            event_id: None,
             name: "Qdrant Vector Database".to_string(),
             score: 0.90,
         }];

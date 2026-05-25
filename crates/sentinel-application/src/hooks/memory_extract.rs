@@ -1,253 +1,20 @@
-//! Memory Extract Hook — sync flat-file memories to Qdrant
+//! Memory Session-Index Hook — periodic session-transcript re-indexing.
 //!
-//! Fires on Stop. Detects memory files that changed since the last sync
-//! (tracked via a state file, not a time window) and upserts them to Qdrant.
+//! Fires on Stop. Every ~50 tool calls, indexes the last ~10 substantive
+//! exchanges into the `claude-sessions` Qdrant collection so long-running
+//! sessions stay searchable.
 //!
-//! Claude decides what to remember → writes .md file → this hook syncs to Qdrant.
-//!
-//! **Periodic session re-index:** Every 50 tool calls, indexes the last ~10
-//! substantive exchanges to keep long-running sessions searchable.
+//! NOTE: the legacy flat-`.md` memory-file sync path that used to live here
+//! has been removed. Memories are now captured directly from conversation
+//! turns by `memory_turn_capture` (LLM extraction → dual-judge
+//! `memory_capture`). This hook only owns session-transcript indexing.
 
-use super::{FileSystemPort, MemoryMcpPort, VectorPoint, VectorStorePort};
+use super::{FileSystemPort, VectorPoint, VectorStorePort};
 use sentinel_domain::constants;
 use sentinel_domain::events::{HookInput, HookOutput};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
 use std::path::PathBuf;
 use tracing::{debug, info, warn};
-
-// ---------------------------------------------------------------------------
-// Last-synced state tracking (replaces 30s time window)
-// ---------------------------------------------------------------------------
-
-/// State file: maps file path -> last synced mtime (as unix timestamp)
-fn sync_state_path(fs: &dyn FileSystemPort) -> Option<PathBuf> {
-    fs.home_dir().map(|h| {
-        h.join(".claude")
-            .join("sentinel")
-            .join("state")
-            .join("memory-sync-state.json")
-    })
-}
-
-fn load_sync_state(fs: &dyn FileSystemPort) -> HashMap<String, u64> {
-    let path = match sync_state_path(fs) {
-        Some(p) => p,
-        None => return HashMap::new(),
-    };
-    let content = match fs.read_to_string(&path) {
-        Ok(c) => c,
-        Err(_) => return HashMap::new(),
-    };
-    serde_json::from_str(&content).unwrap_or_default()
-}
-
-fn save_sync_state(fs: &dyn FileSystemPort, state: &HashMap<String, u64>) {
-    let path = match sync_state_path(fs) {
-        Some(p) => p,
-        None => return,
-    };
-    if let Some(parent) = path.parent() {
-        let _ = fs.create_dir_all(parent);
-    }
-    if let Ok(json) = serde_json::to_string(state) {
-        let _ = fs.write(&path, json.as_bytes());
-    }
-}
-
-/// Get mtime as unix timestamp for a file
-fn file_mtime(fs: &dyn FileSystemPort, path: &std::path::Path) -> Option<u64> {
-    fs.metadata(path)
-        .ok()?
-        .modified()
-        .ok()?
-        .duration_since(std::time::SystemTime::UNIX_EPOCH)
-        .ok()
-        .map(|d| d.as_secs())
-}
-
-/// Find memory files that have changed since last sync
-fn find_unsynced_memories(fs: &dyn FileSystemPort) -> Vec<PathBuf> {
-    let home = match fs.home_dir() {
-        Some(h) => h,
-        None => return vec![],
-    };
-
-    let projects_dir = home.join(".claude").join("projects");
-    if !fs.is_dir(&projects_dir) {
-        return vec![];
-    }
-
-    let state = load_sync_state(fs);
-    let mut unsynced = Vec::new();
-
-    if let Ok(entries) = fs.read_dir(&projects_dir) {
-        for entry in entries {
-            let memory_dir = entry.join("memory");
-            if !fs.is_dir(&memory_dir) {
-                continue;
-            }
-            if let Ok(files) = fs.read_dir(&memory_dir) {
-                for path in files {
-                    let name = path
-                        .file_name()
-                        .map(|n| n.to_string_lossy().to_string())
-                        .unwrap_or_default();
-                    if !name.ends_with(".md") || name == "MEMORY.md" {
-                        continue;
-                    }
-                    let key = path.to_string_lossy().to_string();
-                    let current_mtime = file_mtime(fs, &path).unwrap_or(0);
-                    let last_synced = state.get(&key).copied().unwrap_or(0);
-
-                    if current_mtime > last_synced {
-                        unsynced.push(path);
-                    }
-                }
-            }
-        }
-    }
-
-    unsynced
-}
-
-// ---------------------------------------------------------------------------
-// Frontmatter parsing
-// ---------------------------------------------------------------------------
-
-/// Parse frontmatter from a memory file
-fn parse_frontmatter(content: &str) -> Option<(String, String, String, String)> {
-    let content = content.trim();
-    if !content.starts_with("---") {
-        return None;
-    }
-    let rest = &content[3..];
-    let end = rest.find("---")?;
-    let frontmatter = &rest[..end];
-    let body = rest[end + 3..].trim().to_string();
-
-    let mut name = String::new();
-    let mut description = String::new();
-    let mut mem_type = String::new();
-
-    for line in frontmatter.lines() {
-        let line = line.trim();
-        if let Some(val) = line.strip_prefix("name:") {
-            name = val.trim().to_string();
-        } else if let Some(val) = line.strip_prefix("description:") {
-            description = val.trim().to_string();
-        } else if let Some(val) = line.strip_prefix("type:") {
-            mem_type = val.trim().to_string();
-        }
-    }
-
-    if name.is_empty() && description.is_empty() {
-        return None;
-    }
-
-    Some((name, description, mem_type, body))
-}
-
-// ---------------------------------------------------------------------------
-// Memory-engine capture path (memory-mcp memory_capture)
-// ---------------------------------------------------------------------------
-
-/// Read a flat-file memory, project it into the Memory engine's
-/// subject/predicate/value shape, and submit via `memory_capture` through
-/// the MemoryMcpPort. Returns true when the server accepted the write
-/// (committed OR reinforced OR amended OR quarantined — anything except
-/// dropped).
-fn capture_memory_via_mcp(
-    fs: &dyn FileSystemPort,
-    memory_mcp: &dyn MemoryMcpPort,
-    path: &PathBuf,
-) -> bool {
-    let content = match fs.read_to_string(path) {
-        Ok(c) => c,
-        Err(_) => return false,
-    };
-    let (name, description, mem_type, body) = match parse_frontmatter(&content) {
-        Some(fm) => fm,
-        None => return false,
-    };
-
-    // Project memory_extract's shape (name/description/memory_type/body)
-    // into memory_capture's shape (subject/predicate/value/project). The
-    // mapping is lossy-but-principled:
-    //   - subject   = name            (the fact's head entity)
-    //   - predicate = memory_type     (falls back to "describes")
-    //   - value     = description     (+ first 500 chars of body)
-    //   - project   = "auto-extract"  (same as legacy default)
-    // If either side's schema evolves, revisit here first.
-    let subject = if name.is_empty() {
-        path.file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("unnamed")
-            .to_string()
-    } else {
-        name
-    };
-    let predicate = if mem_type.is_empty() {
-        "describes".to_string()
-    } else {
-        mem_type
-    };
-    let value = if body.is_empty() {
-        description
-    } else {
-        // Cap the value at a reasonable payload size — the MCP input
-        // validator imposes 64 KiB, but atoms shouldn't be prose dumps.
-        let body_excerpt: String = body.chars().take(500).collect();
-        format!("{description}\n\n{body_excerpt}")
-    };
-
-    let mut args = serde_json::Map::new();
-    args.insert("subject".into(), serde_json::Value::String(subject));
-    args.insert("predicate".into(), serde_json::Value::String(predicate));
-    args.insert("value".into(), serde_json::Value::String(value));
-    args.insert(
-        "project".into(),
-        serde_json::Value::String("auto-extract".into()),
-    );
-    // Tag the qualifier with the source file path so memory_audit can
-    // correlate atoms back to the .md they came from.
-    let source_path = path.to_string_lossy().to_string();
-    args.insert(
-        "qualifier".into(),
-        serde_json::Value::String(format!("source_file={source_path}")),
-    );
-
-    // run_async returns Option's Default — None — on timeout or error.
-    let out: Option<serde_json::Value> = super::run_async(async move {
-        match memory_mcp.call_tool("memory_capture", args).await {
-            Ok(v) => Some(v),
-            Err(e) => {
-                warn!(error = %e, "memory_capture via port returned error");
-                None
-            }
-        }
-    });
-
-    let out = match out {
-        Some(v) => v,
-        None => {
-            warn!(file = %path.display(), "memory_capture returned no payload — treating as failure");
-            return false;
-        }
-    };
-
-    // Response shape: `{ "branch": "written"|"reinforced"|"superseded"|
-    //                             "quarantined"|"dropped", "atom_id"?: "..." }`
-    // `dropped` (both judges rejected) is still a successful sync — it
-    // means the file has been seen and judged; we just don't write an
-    // atom. Return true so the sync-state advances past it and we don't
-    // re-submit on every cron cycle.
-    let branch = out.get("branch").and_then(|v| v.as_str()).unwrap_or("");
-    matches!(
-        branch,
-        "written" | "reinforced" | "superseded" | "quarantined" | "dropped"
-    )
-}
 
 // ---------------------------------------------------------------------------
 // Periodic session re-index — every ~50 tool calls
@@ -536,72 +303,17 @@ pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
 
     save_session_index_state(fs, &index_state);
 
-    // --- Memory file sync (state-tracked, replaces 30s window) ---
-    let unsynced = find_unsynced_memories(fs);
-    if unsynced.is_empty() {
-        return HookOutput::allow();
-    }
-
-    debug!(count = unsynced.len(), "Found unsynced memory files");
-
-    // Sync each changed file via the Memory engine's `memory_capture` MCP
-    // tool — every write goes through the dual-judge gate. No direct Qdrant
-    // upsert path; the legacy `upsert_memory` helper and the
-    // MEMORY_ENGINE_UNIFIED env flag were removed in the migration that
-    // made memory-mcp the only path.
-    let mut state = load_sync_state(fs);
-    let mut synced = 0;
-    for path in &unsynced {
-        if capture_memory_via_mcp(fs, ctx.memory_mcp, path) {
-            synced += 1;
-            let key = path.to_string_lossy().to_string();
-            let mtime = file_mtime(fs, path).unwrap_or(0);
-            state.insert(key, mtime);
-            debug!(file = %path.display(), "Synced memory via memory-mcp");
-        }
-    }
-
-    if synced > 0 {
-        save_sync_state(fs, &state);
-        info!(
-            synced,
-            total = unsynced.len(),
-            "Memory files synced to Qdrant"
-        );
-    }
-
+    // Flat-`.md` memory ingest has been removed. Memories are now captured
+    // directly from conversation turns by `memory_turn_capture` (LLM
+    // extraction → dual-judge `memory_capture`), so there is no longer a
+    // file-scanning sync path here. This hook now only owns periodic session
+    // transcript re-indexing (handled above).
     HookOutput::allow()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_parse_frontmatter_valid() {
-        let content = "---\nname: test\ndescription: desc\ntype: feedback\n---\nBody";
-        let (name, desc, typ, body) = parse_frontmatter(content).unwrap();
-        assert_eq!(name, "test");
-        assert_eq!(desc, "desc");
-        assert_eq!(typ, "feedback");
-        assert_eq!(body, "Body");
-    }
-
-    #[test]
-    fn test_parse_frontmatter_invalid() {
-        assert!(parse_frontmatter("no frontmatter").is_none());
-    }
-
-    #[test]
-    fn test_process_no_recent_files() {
-        let input = HookInput {
-            cwd: Some("/nonexistent".to_string()),
-            ..Default::default()
-        };
-        let ctx = crate::hooks::test_support::stub_ctx();
-        let output = process(&input, &ctx);
-        assert!(output.blocked.is_none());
-    }
 
     #[test]
     fn test_is_substantive_exchange() {
@@ -696,12 +408,4 @@ mod tests {
         assert_eq!(extract_text_content(&val), "");
     }
 
-    #[test]
-    fn test_sync_state_roundtrip() {
-        let mut state = HashMap::new();
-        state.insert("/path/to/file.md".to_string(), 1234567890u64);
-        let json = serde_json::to_string(&state).unwrap();
-        let loaded: HashMap<String, u64> = serde_json::from_str(&json).unwrap();
-        assert_eq!(loaded.get("/path/to/file.md"), Some(&1234567890));
-    }
 }

@@ -156,9 +156,11 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
     let real_process = sentinel_infrastructure::process::RealProcess;
     let real_env = sentinel_infrastructure::env::RealEnv;
 
-    // Construct LLM adapter (None if no Anthropic key)
+    // Construct LLM adapter. STANDARDIZED on Rig + OpenRouter
+    // (`OPENROUTER_API_KEY`) — the same gateway the adversarial judge uses.
+    // No direct-vendor SDK path. `None` if the key is unset.
     let llm: Option<Arc<dyn LlmPort>> =
-        sentinel_infrastructure::anthropic::AnthropicClient::from_env()
+        sentinel_infrastructure::openrouter_llm::OpenRouterLlm::from_env()
             .ok()
             .map(|c| Arc::new(c) as Arc<dyn LlmPort>);
 
@@ -1050,9 +1052,15 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
             let task_persist_output = hooks::task_persist::process(&input, &ctx);
             output.merge(&task_persist_output);
 
-            // Memory extract — sync recently modified memory files to Qdrant
+            // Memory extract — periodic session transcript re-indexing.
+            // (Flat-.md capture path is removed; turn-capture below replaces it.)
             let memory_extract_output = hooks::memory_extract::process(&input, &ctx);
             output.merge(&memory_extract_output);
+
+            // Memory turn-capture — LLM extracts atoms from this turn and
+            // routes them through the dual-judge memory_capture gate.
+            let memory_turn_output = hooks::memory_turn_capture::process(&input, &ctx);
+            output.merge(&memory_turn_output);
 
             // Memory feedback — boost used memories, flag corrections
             let memory_feedback_output = hooks::memory_feedback::process(&input, &ctx);
