@@ -151,6 +151,16 @@ update_step = "ReversibleWithEffort"
 regenerate_claude_md = "ReversibleWithEffort"
 edit_claude_md_template = "ReversibleWithEffort"
 restart_all_mcps = "ReversibleWithEffort"
+# Added: mcp-router management trio + step-granularity tools (were missing,
+# so the unknown-MCP default gated mcp_health_check etc. as Irreversible).
+mcp_health_check = "TriviallyReversible"
+mcp_list_servers = "TriviallyReversible"
+mcp_restart_server = "ReversibleWithEffort"
+get_step_chain = "TriviallyReversible"
+get_step_proof = "TriviallyReversible"
+get_active_step = "TriviallyReversible"
+submit_step_complete = "ReversibleWithEffort"
+submit_linear_step = "ReversibleWithEffort"
 
 # Sequential-thinking — pure in-context reasoning. The single tool only
 # records a thought into the model's own reasoning buffer; zero external
@@ -161,6 +171,21 @@ restart_all_mcps = "ReversibleWithEffort"
 # contradiction; this entry breaks the cycle.
 [mcp.sequential-thinking]
 sequentialthinking = "TriviallyReversible"
+
+# Memory engine (memory-mcp) — atom store reads + capture. Reads are
+# pure observation; capture goes through the dual-judge accept/reject gate
+# and is recoverable (atoms can be superseded/archived), so ReversibleWithEffort.
+# Without these, the conservative unknown-MCP default (Irreversible) strands
+# every memory tool at the A3 dry-run gate (the _intent/_reasoning/_expected_effect
+# fields can't be passed through the MCP tool schema — unbreakable deadlock,
+# same class as the PowerShell + sequential-thinking fixes).
+[mcp.memory-mcp]
+memory_search = "TriviallyReversible"
+memory_why = "TriviallyReversible"
+memory_audit = "TriviallyReversible"
+memory_stats = "TriviallyReversible"
+memory_capture = "ReversibleWithEffort"
+memory_record_outcome = "ReversibleWithEffort"
 
 # ---------------------------------------------------------------------------
 # Layer 3: Bash command patterns

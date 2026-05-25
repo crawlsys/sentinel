@@ -175,7 +175,7 @@ pub fn load_workflows(config_path: &Path) -> Result<Vec<SkillWorkflow>> {
                 required: p.required,
                 judge: match p.judge.as_str() {
                     "opus" => JudgeModel::Opus,
-                    "haiku" => JudgeModel::Haiku,
+                    "codex" => JudgeModel::Codex,
                     _ => JudgeModel::Sonnet,
                 },
                 description: p.description,
@@ -272,6 +272,10 @@ struct StepToml {
     /// continue to load unchanged.
     #[serde(default)]
     baseline_threshold: u64,
+    /// Per-step judge tier (#73). See `WorkflowStep::judge`. None = use the
+    /// default tier. TOML: `judge = "codex" | "kimi" | "sonnet" | "opus"`.
+    #[serde(default)]
+    judge: Option<sentinel_domain::judge::JudgeModel>,
     /// Per-step timeout (M4.4). See `WorkflowStep::timeout_ms`. None = no timeout.
     #[serde(default)]
     timeout_ms: Option<u64>,
@@ -380,6 +384,7 @@ pub fn load_skill_steps(config_path: &Path, skill: &str) -> Result<Option<SkillS
                         description: s.description,
                         blocker: s.blocker,
                         baseline_threshold: s.baseline_threshold,
+                        judge: s.judge,
                         timeout_ms: s.timeout_ms,
                         retry_policy: s.retry_policy,
                         circuit_breaker: s.circuit_breaker,

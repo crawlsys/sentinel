@@ -147,7 +147,10 @@ pub enum StepJudgeOutcome {
 /// Resolve `(phase_id, step_description, baseline_threshold)` for a given
 /// `step_id` within a skill's step config. Returns `None` if the step
 /// isn't found in any phase.
-fn locate_step<'a>(skill_steps: &'a SkillSteps, step_id: &str) -> Option<(&'a str, &'a str, u64)> {
+fn locate_step<'a>(
+    skill_steps: &'a SkillSteps,
+    step_id: &str,
+) -> Option<(&'a str, &'a str, u64, Option<JudgeModel>)> {
     for phase in &skill_steps.phases {
         for step in &phase.steps {
             if step.id == step_id {
@@ -155,6 +158,7 @@ fn locate_step<'a>(skill_steps: &'a SkillSteps, step_id: &str) -> Option<(&'a st
                     phase.phase_id.as_str(),
                     step.description.as_str(),
                     step.baseline_threshold,
+                    step.judge,
                 ));
             }
         }
@@ -275,9 +279,9 @@ pub async fn process(
         None => return (HookOutput::allow(), StepJudgeOutcome::NoStepConfig),
     };
 
-    let (phase_id, step_description, baseline_threshold) =
+    let (phase_id, step_description, baseline_threshold, step_judge_model) =
         match locate_step(skill_steps, &step_ref.step_id) {
-            Some((p, d, t)) => (p.to_string(), d.to_string(), t),
+            Some((p, d, t, j)) => (p.to_string(), d.to_string(), t, j),
             None => {
                 return (
                     HookOutput::allow(),
@@ -291,10 +295,11 @@ pub async fn process(
 
     let evidence = gather_evidence(input);
 
-    // Judge model selection: until #73 lands the per-step `judge:` field,
-    // step-level eval defaults to `Sonnet` (the standard tier). When #73
-    // ships, this picks from step config metadata.
-    let model = JudgeModel::Sonnet;
+    // Judge model selection (#73): the step's `judge:` config field if set,
+    // else the balanced `Sonnet` tier (claude-sonnet-4.6, $3/$15). A
+    // routine step that doesn't pin a `judge:` uses Sonnet; cheap bulk can
+    // opt to `kimi`, and a critical step opts up to `opus` explicitly.
+    let model = step_judge_model.unwrap_or(JudgeModel::Sonnet);
 
     let result = judge
         .evaluate_step(
@@ -327,6 +332,19 @@ pub async fn process(
                 &phase_id,
                 &step_ref.step_id,
                 verdict.sufficient,
+            );
+
+            // Persist the INDEPENDENT verdict (#12 — close the self-certify
+            // gap). `submit_step_complete` reads this from the same per-session
+            // state so the judge's own verdict — not the caller-supplied one —
+            // gates the seal in warn/enforce mode. An agent can no longer
+            // grade its own homework by passing `verdict: sufficient=true`.
+            state.record_independent_verdict(
+                &step_ref.skill,
+                &phase_id,
+                &step_ref.step_id,
+                verdict.sufficient,
+                verdict.confidence,
             );
 
             if in_warmup {
@@ -465,6 +483,7 @@ mod tests {
                         description: "Open PR with Ref FPCRM-XXX".into(),
                         blocker: false,
                         baseline_threshold: 0,
+                        judge: None,
                         timeout_ms: None,
                         retry_policy: Default::default(),
                         circuit_breaker: Default::default(),
@@ -669,6 +688,7 @@ mod tests {
                         description: "Open PR with Ref FPCRM-XXX".into(),
                         blocker: false,
                         baseline_threshold: threshold,
+                        judge: None,
                         timeout_ms: None,
                         retry_policy: Default::default(),
                         circuit_breaker: Default::default(),

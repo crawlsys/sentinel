@@ -42,9 +42,9 @@ impl OpenRouterLlm {
     ///
     /// The memory/judge stack is standardized on **Opus 4.7 + Codex** over
     /// OpenRouter, so every tier resolves to one of those two (no Anthropic
-    /// Haiku, no Cerebras). The cheap tier maps to Codex (`gpt-5.5-pro`),
-    /// heavy tiers to Opus 4.7. Returned as literal IDs to keep this adapter
-    /// decoupled from the churning `JudgeModel` enum.
+    /// Haiku, no Sonnet, no Cerebras). The cheap tier maps to Codex
+    /// (`gpt-5.5-pro`), heavy tiers to Opus 4.7. Returned as literal IDs to
+    /// keep this adapter decoupled from the churning `JudgeModel` enum.
     fn model_id(model: LlmModel) -> &'static str {
         match model {
             LlmModel::Haiku => "openai/gpt-5.5-pro", // Codex tier

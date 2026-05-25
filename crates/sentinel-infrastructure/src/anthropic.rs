@@ -23,7 +23,7 @@ const API_VERSION: &str = "2023-06-01";
 /// this client is the fallback when `OPENROUTER_API_KEY` is unset.
 const fn model_id(model: JudgeModel) -> &'static str {
     match model {
-        JudgeModel::Haiku => "claude-haiku-4-5-20251001",
+        JudgeModel::Codex => "claude-haiku-4-5-20251001",
         // No Kimi on Anthropic — map to closest review-tier model. Caller
         // should prefer OpenRouter (rig_judge) for actual Kimi K2.6 routing.
         JudgeModel::Kimi | JudgeModel::Sonnet => "claude-sonnet-4-6",
@@ -143,7 +143,7 @@ impl AnthropicClient {
         let user_msg = format!("Candidates: {candidates_str}\n\nUser message: {message}");
 
         let response = self
-            .message(JudgeModel::Haiku, system, &user_msg, 50)
+            .message(JudgeModel::Codex, system, &user_msg, 50)
             .await?;
 
         let skill = response.trim().to_lowercase();
@@ -167,7 +167,7 @@ impl sentinel_application::classifier::AiClassifier for AnthropicClient {
 /// the existing `model_id()` mapping.
 const fn llm_to_judge(model: LlmModel) -> JudgeModel {
     match model {
-        LlmModel::Haiku => JudgeModel::Haiku,
+        LlmModel::Haiku => JudgeModel::Codex,
         LlmModel::Sonnet => JudgeModel::Sonnet,
         LlmModel::Opus => JudgeModel::Opus,
     }

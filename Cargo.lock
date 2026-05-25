@@ -2754,6 +2754,7 @@ dependencies = [
  "chrono-tz",
  "consul-domain",
  "dirs",
+ "ed25519-dalek",
  "fs2",
  "hex",
  "hmac",

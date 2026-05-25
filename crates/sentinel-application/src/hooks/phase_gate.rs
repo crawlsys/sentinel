@@ -1985,31 +1985,36 @@ mod tests {
 
     #[test]
     fn test_dangerous_mcp_tools_classified_correctly() {
-        // Write/exec tools are dangerous
+        // Untrusted exec servers (NOT on TRUSTED_MCP_SERVERS) — write/exec
+        // tools stay dangerous, fail-closed by verb.
         assert!(is_dangerous_mcp_tool("mcp__codex__shell"));
         assert!(is_dangerous_mcp_tool("mcp__codex__write_file"));
         assert!(is_dangerous_mcp_tool("mcp__codex__apply_patch"));
-        assert!(is_dangerous_mcp_tool("mcp__steel__click"));
-        assert!(is_dangerous_mcp_tool("mcp__steel__evaluate_js"));
-        assert!(is_dangerous_mcp_tool("mcp__steel__navigate"));
-        assert!(is_dangerous_mcp_tool("mcp__linear__create_issue"));
-        assert!(is_dangerous_mcp_tool("mcp__linear__update_issue"));
-        assert!(is_dangerous_mcp_tool("mcp__linear__delete_issue"));
         assert!(is_dangerous_mcp_tool("mcp__doppler__set_secret"));
 
-        // Read-only tools are safe
-        assert!(!is_dangerous_mcp_tool("mcp__linear__get_issue"));
-        assert!(!is_dangerous_mcp_tool("mcp__linear__list_issues"));
-        assert!(!is_dangerous_mcp_tool("mcp__linear__search"));
-        assert!(!is_dangerous_mcp_tool("mcp__steel__screenshot"));
+        // Trusted operator-registered servers (Gary: "MCPs are safe") — all
+        // their tools are trusted, including browser navigate/evaluate/click
+        // and linear mutations, because the operator controls these servers.
+        assert!(!is_dangerous_mcp_tool("mcp__steel__click"));
+        assert!(!is_dangerous_mcp_tool("mcp__steel__evaluate_js"));
+        assert!(!is_dangerous_mcp_tool("mcp__steel__navigate"));
+        assert!(!is_dangerous_mcp_tool("mcp__browserbase__evaluate"));
+        assert!(!is_dangerous_mcp_tool("mcp__browserbase__navigate"));
+        assert!(!is_dangerous_mcp_tool("mcp__cdp__evaluate"));
+        assert!(!is_dangerous_mcp_tool("mcp__linear__create_issue"));
+        assert!(!is_dangerous_mcp_tool("mcp__linear__delete_issue"));
+
+        // Read-only verbs on untrusted servers are still safe (verb-level).
         assert!(!is_dangerous_mcp_tool("mcp__codex__read_file"));
         assert!(!is_dangerous_mcp_tool("mcp__codex__list_dir"));
-        assert!(!is_dangerous_mcp_tool("mcp__sentinel__get_proof_chain"));
-        assert!(!is_dangerous_mcp_tool("mcp__sentinel__get_workflow_status"));
-        assert!(!is_dangerous_mcp_tool("mcp__sentinel__verify_chain"));
-        assert!(!is_dangerous_mcp_tool("mcp__sentinel__mcp_restart_server"));
+        assert!(!is_dangerous_mcp_tool("mcp__doppler__get_secret"));
 
-        // Unknown suffixes default to dangerous (fail-closed)
+        // Trusted-server reads (also covered by trust short-circuit).
+        assert!(!is_dangerous_mcp_tool("mcp__linear__get_issue"));
+        assert!(!is_dangerous_mcp_tool("mcp__sentinel__get_proof_chain"));
+        assert!(!is_dangerous_mcp_tool("mcp__sentinel__verify_chain"));
+
+        // Unknown/untrusted servers with unknown verbs default to dangerous.
         assert!(is_dangerous_mcp_tool("mcp__evil__pwn_system"));
         assert!(is_dangerous_mcp_tool("mcp__unknown__do_thing"));
     }

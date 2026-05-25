@@ -57,7 +57,7 @@ use crate::judge::{JudgeModel, JudgeVerdict};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum JudgeTrustTier {
-    /// Single Haiku judge — fast/cheap, routine phases.
+    /// Single Kimi judge — cheapest of the four pinned models, routine phases.
     Routine,
     /// Single Kimi K2-Thinking judge — the default review tier (Stage A
     /// behavior). OSS frontier, far cheaper than closed frontier for
@@ -90,7 +90,7 @@ impl JudgeTrustTier {
     #[must_use]
     pub fn judge_models(self) -> Vec<JudgeModel> {
         match self {
-            Self::Routine => vec![JudgeModel::Haiku],
+            Self::Routine => vec![JudgeModel::Kimi],
             Self::Review | Self::AuditGrade => vec![JudgeModel::Kimi],
             Self::Critical => vec![JudgeModel::Kimi, JudgeModel::Sonnet],
             Self::CriticalStrict => {
@@ -234,7 +234,7 @@ mod tests {
     fn judge_models_per_tier() {
         assert_eq!(
             JudgeTrustTier::Routine.judge_models(),
-            vec![JudgeModel::Haiku]
+            vec![JudgeModel::Kimi]
         );
         assert_eq!(
             JudgeTrustTier::Review.judge_models(),

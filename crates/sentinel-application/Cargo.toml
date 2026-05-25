@@ -10,6 +10,7 @@ rust-version.workspace = true
 
 [dependencies]
 sentinel-domain = { workspace = true }
+ed25519-dalek = { workspace = true }
 sentinel-legatus = { path = "../sentinel-legatus" }
 # Republic-of-Agents identity types (Fabrica ADR-003): praefectus_client
 # imports RoleBinding, VoiceprintWitness, OperatorId.
