@@ -1,133 +1,59 @@
-//! Memory Turn-Capture Hook — LLM extraction of atoms from the conversation.
+//! Memory Turn-Capture Hook — auto-capture atoms from the conversation.
 //!
-//! Fires on Stop. Replaces the legacy flat-`.md` ingest (`memory_extract`'s
-//! file-sync path): instead of the agent hand-writing `~/.claude/projects/*/
-//! memory/*.md` files for a separate hook to parse, this hook reads the turn
-//! itself, asks an LLM to extract candidate atomic facts, and routes each
-//! through the Memory engine's `memory_capture` dual-judge gate.
+//! Fires on Stop. Replaces the legacy flat-`.md` ingest: instead of the agent
+//! hand-writing memory files, this hook captures durable facts straight from
+//! the conversation turn.
 //!
-//! # Flow
+//! **Why it spawns a detached process instead of calling the LLM inline:**
+//! extraction uses Opus 4.7 (a reasoning model — 10-90s), but every sentinel
+//! hook runs under a hard 3s wall-clock budget (`run_async`). A slow LLM call
+//! can't complete in that window — it would always be cancelled and capture
+//! nothing. So the hook stays fast: it builds the turn text, gates on length,
+//! and fires `memory turn-capture` as a **detached** background process that
+//! runs the Opus extraction + dual-judge capture on its own time, outliving
+//! the hook. Fire-and-forget; never blocks the turn.
 //!
-//! 1. Build turn text from `prompt` (user) + `last_assistant_message`.
-//! 2. Gate cheaply: skip trivial/empty turns before spending an LLM call.
-//! 3. LLM extractor (`ctx.llm`) returns a JSON array of candidate atoms
-//!    `{subject, predicate, value, qualifier?, tags?}`.
-//! 4. Each candidate → `memory_capture` (dual-judge → write/quarantine/drop).
-//!
-//! Best-effort and non-blocking: every async call is wrapped in `run_async`
-//! (wall-clock timeout) and any failure degrades to "no capture this turn".
-//! Never returns anything but `HookOutput::allow()`.
+//! Flow: build turn → gate trivial turns → `spawn_detached("memory",
+//! ["turn-capture", "--project", P, "--prompt", U, "--response", A])`.
 
 use sentinel_domain::events::{HookInput, HookOutput};
-use sentinel_domain::ports::{LlmModel, LlmRequest};
-use tracing::{debug, warn};
+use tracing::debug;
 
-/// Minimum combined turn length (chars) worth sending to the extractor.
-/// Below this, a turn is almost certainly an ack / tool-noise with no fact.
+/// Minimum combined turn length (chars) worth extracting from. Below this, a
+/// turn is almost certainly an ack / tool-noise with no durable fact — skip it
+/// so we don't spawn an Opus call for nothing.
 const MIN_TURN_CHARS: usize = 200;
 
-/// Cap how much turn text we feed the extractor (cost + latency control).
+/// Cap turn text passed on the command line (the CLI re-caps for the LLM).
 const MAX_TURN_CHARS: usize = 12_000;
 
-/// Max candidate atoms accepted from one turn (defensive against a runaway
-/// extractor flooding the judge gate).
-const MAX_CANDIDATES: usize = 8;
-
-/// A candidate atom proposed by the LLM extractor.
-#[derive(Debug, serde::Deserialize)]
-struct CandidateAtom {
-    subject: String,
-    predicate: String,
-    value: String,
-    #[serde(default)]
-    qualifier: Option<String>,
-    #[serde(default)]
-    tags: Option<Vec<String>>,
-}
-
-/// The extraction prompt. Asks for STRICT JSON so parsing is deterministic.
-fn build_extraction_prompt(turn: &str) -> String {
-    format!(
-        "You extract durable, reusable facts from a coding-assistant conversation \
-turn and emit them as atomic memories. Only extract facts worth remembering \
-across future sessions: user preferences, project decisions, constraints, \
-non-obvious environment quirks, corrections the user made. Do NOT extract \
-transient chatter, restated context, or anything trivially re-derivable.\n\n\
-Return ONLY a JSON array (no prose, no code fence) of objects with fields:\n\
-  subject   (string, the head entity — kebab or short noun)\n\
-  predicate (string, the relation — e.g. prefers, requires, is, decided)\n\
-  value     (string, the fact)\n\
-  qualifier (optional string, scope/condition)\n\
-  tags      (optional array of strings)\n\n\
-If nothing is worth remembering, return []. Maximum {MAX_CANDIDATES} items.\n\n\
-CONVERSATION TURN:\n{turn}"
-    )
-}
-
-/// Parse the LLM response into candidate atoms. Tolerant of a stray code
-/// fence or leading prose: extracts the first top-level JSON array.
-fn parse_candidates(raw: &str) -> Vec<CandidateAtom> {
-    let trimmed = raw.trim();
-    // Strip a ```json ... ``` fence if present.
-    let body = trimmed
-        .strip_prefix("```json")
-        .or_else(|| trimmed.strip_prefix("```"))
-        .map(|s| s.trim_end_matches("```").trim())
-        .unwrap_or(trimmed);
-
-    // Find the first '[' ... matching ']' span to be robust to leading prose.
-    let start = match body.find('[') {
-        Some(i) => i,
-        None => return Vec::new(),
-    };
-    let end = match body.rfind(']') {
-        Some(i) if i > start => i,
-        _ => return Vec::new(),
-    };
-    let slice = &body[start..=end];
-
-    match serde_json::from_str::<Vec<CandidateAtom>>(slice) {
-        Ok(v) => v,
-        Err(e) => {
-            warn!(error = %e, "memory_turn_capture: failed to parse extractor JSON");
-            Vec::new()
-        }
-    }
-}
-
-/// Build the turn text from the hook input. Returns `None` if there isn't
-/// enough substance to bother extracting.
-fn build_turn_text(input: &HookInput) -> Option<String> {
-    let prompt = input.prompt.as_deref().unwrap_or("").trim();
-    let assistant = input.last_assistant_message.as_deref().unwrap_or("").trim();
+/// Build the turn text components (user, assistant) if there's enough
+/// substance to bother extracting.
+fn build_turn(input: &HookInput) -> Option<(String, String)> {
+    let prompt = input.prompt.as_deref().unwrap_or("").trim().to_string();
+    let assistant = input
+        .last_assistant_message
+        .as_deref()
+        .unwrap_or("")
+        .trim()
+        .to_string();
 
     if prompt.is_empty() && assistant.is_empty() {
         return None;
     }
-
-    let mut turn = String::new();
-    if !prompt.is_empty() {
-        turn.push_str("USER:\n");
-        turn.push_str(prompt);
-        turn.push_str("\n\n");
-    }
-    if !assistant.is_empty() {
-        turn.push_str("ASSISTANT:\n");
-        turn.push_str(assistant);
-    }
-
-    if turn.len() < MIN_TURN_CHARS {
+    if prompt.len() + assistant.len() < MIN_TURN_CHARS {
         return None;
     }
-
-    // Cap length — keep the head (where decisions/corrections usually land).
-    if turn.len() > MAX_TURN_CHARS {
-        turn.truncate(MAX_TURN_CHARS);
-    }
-    Some(turn)
+    let cap = |mut s: String| {
+        if s.len() > MAX_TURN_CHARS {
+            s.truncate(MAX_TURN_CHARS);
+        }
+        s
+    };
+    Some((cap(prompt), cap(assistant)))
 }
 
-/// Derive a project label from cwd (basename), defaulting to "global".
+/// Derive a project label from cwd basename (defaults to "global").
 fn project_label(cwd: &str) -> String {
     std::path::Path::new(cwd)
         .file_name()
@@ -136,121 +62,61 @@ fn project_label(cwd: &str) -> String {
         .unwrap_or_else(|| "global".to_string())
 }
 
-/// Send one candidate to the dual-judge `memory_capture` gate.
-/// Returns true if the engine accepted (written/reinforced/superseded).
-fn capture_candidate(
-    memory_mcp: &dyn sentinel_domain::ports::MemoryMcpPort,
-    c: &CandidateAtom,
-    project: &str,
-) -> bool {
-    let mut args = serde_json::Map::new();
-    args.insert("subject".into(), serde_json::Value::String(c.subject.clone()));
-    args.insert(
-        "predicate".into(),
-        serde_json::Value::String(c.predicate.clone()),
-    );
-    args.insert("value".into(), serde_json::Value::String(c.value.clone()));
-    args.insert(
-        "project".into(),
-        serde_json::Value::String(project.to_string()),
-    );
-    if let Some(q) = &c.qualifier {
-        args.insert("qualifier".into(), serde_json::Value::String(q.clone()));
+/// Locate the `memory` CLI binary. Prefers `~/.cargo/bin`, falls back to the
+/// dev release build. Returns the command string for `spawn_detached`.
+fn memory_bin() -> Option<String> {
+    let home = dirs::home_dir()?;
+    let cargo_bin = home.join(".cargo").join("bin").join("memory.exe");
+    if cargo_bin.exists() {
+        return Some(cargo_bin.to_string_lossy().to_string());
     }
-    if let Some(ts) = &c.tags {
-        args.insert(
-            "tags".into(),
-            serde_json::Value::Array(
-                ts.iter()
-                    .map(|t| serde_json::Value::String(t.clone()))
-                    .collect(),
-            ),
-        );
+    let cargo_bin_unix = home.join(".cargo").join("bin").join("memory");
+    if cargo_bin_unix.exists() {
+        return Some(cargo_bin_unix.to_string_lossy().to_string());
     }
-
-    let out: Option<serde_json::Value> = super::run_async(async move {
-        match memory_mcp.call_tool("memory_capture", args).await {
-            Ok(v) => Some(v),
-            Err(e) => {
-                warn!(error = %e, "memory_turn_capture: memory_capture port error");
-                None
-            }
-        }
-    });
-
-    match out {
-        Some(v) => {
-            let status = v
-                .get("status")
-                .and_then(|s| s.as_str())
-                .unwrap_or("unknown");
-            debug!(subject = %c.subject, status, "memory_turn_capture: capture result");
-            status == "ok"
-        }
-        None => false,
+    let dev = home
+        .join("Documents")
+        .join("GitHub")
+        .join("memory")
+        .join("target")
+        .join("release")
+        .join("memory.exe");
+    if dev.exists() {
+        return Some(dev.to_string_lossy().to_string());
     }
+    None
 }
 
-/// Stop-hook entry point. Always returns `allow()` — never blocks the turn.
+/// Stop-hook entry point. Fast: spawns the detached extractor and returns.
+/// Always `allow()` — never blocks the turn.
 pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
-    // No LLM configured → nothing to extract with. Silent no-op.
-    let llm = match ctx.llm {
-        Some(l) => l,
-        None => return HookOutput::allow(),
-    };
-
-    let turn = match build_turn_text(input) {
-        Some(t) => t,
-        None => return HookOutput::allow(),
-    };
-
-    let prompt = build_extraction_prompt(&turn);
-    let req = LlmRequest {
-        model: LlmModel::Opus, // Opus 4.7 via OpenRouter — standardized memory LLM path
-        prompt,
-        max_tokens: 1024,
-    };
-
-    // Extract (timeout-guarded). On any failure, degrade to no capture.
-    let raw: String = super::run_async(async move {
-        match llm.complete(req).await {
-            Ok(text) => text,
-            Err(e) => {
-                warn!(error = %e, "memory_turn_capture: extractor LLM call failed");
-                String::new()
-            }
-        }
-    });
-
-    if raw.trim().is_empty() {
+    let Some((prompt, response)) = build_turn(input) else {
         return HookOutput::allow();
-    }
+    };
 
-    let mut candidates = parse_candidates(&raw);
-    if candidates.is_empty() {
+    let Some(bin) = memory_bin() else {
+        debug!("memory_turn_capture: memory CLI not found — skipping");
         return HookOutput::allow();
-    }
-    candidates.truncate(MAX_CANDIDATES);
+    };
 
-    let project = project_label(input.cwd.as_deref().unwrap_or("."));
-    let mut accepted = 0usize;
-    for c in &candidates {
-        // Skip obviously empty candidates.
-        if c.subject.trim().is_empty() || c.value.trim().is_empty() {
-            continue;
-        }
-        if capture_candidate(ctx.memory_mcp, c, &project) {
-            accepted += 1;
-        }
-    }
+    let cwd = input.cwd.as_deref().unwrap_or(".");
+    let project = project_label(cwd);
 
-    if accepted > 0 {
-        debug!(
-            accepted,
-            proposed = candidates.len(),
-            project = %project,
-            "memory_turn_capture: atoms captured from turn"
-        );
+    // Fire-and-forget: the detached process runs Opus extraction + dual-judge
+    // capture on its own time (no 3s hook budget). Errors there are logged by
+    // the CLI, not here.
+    let args = [
+        "turn-capture",
+        "--project",
+        &project,
+        "--prompt",
+        &prompt,
+        "--response",
+        &response,
+    ];
+    match ctx.process.spawn_detached(&bin, &args) {
+        Ok(()) => debug!(project = %project, "memory_turn_capture: spawned detached extractor"),
+        Err(e) => debug!(error = %e, "memory_turn_capture: spawn failed"),
     }
 
     HookOutput::allow()
@@ -259,77 +125,43 @@ pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sentinel_domain::events::HookInput;
 
     #[test]
-    fn parse_plain_array() {
-        let raw = r#"[{"subject":"gary","predicate":"prefers","value":"autopilot mode"}]"#;
-        let c = parse_candidates(raw);
-        assert_eq!(c.len(), 1);
-        assert_eq!(c[0].subject, "gary");
-        assert_eq!(c[0].predicate, "prefers");
-    }
-
-    #[test]
-    fn parse_fenced_array() {
-        let raw = "```json\n[{\"subject\":\"x\",\"predicate\":\"is\",\"value\":\"y\"}]\n```";
-        let c = parse_candidates(raw);
-        assert_eq!(c.len(), 1);
-        assert_eq!(c[0].value, "y");
-    }
-
-    #[test]
-    fn parse_with_leading_prose() {
-        let raw = "Here are the facts:\n[{\"subject\":\"a\",\"predicate\":\"b\",\"value\":\"c\"}]";
-        let c = parse_candidates(raw);
-        assert_eq!(c.len(), 1);
-    }
-
-    #[test]
-    fn parse_empty_array() {
-        assert!(parse_candidates("[]").is_empty());
-    }
-
-    #[test]
-    fn parse_garbage_is_empty() {
-        assert!(parse_candidates("no json here").is_empty());
-        assert!(parse_candidates("").is_empty());
-    }
-
-    #[test]
-    fn parse_with_optional_fields() {
-        let raw = r#"[{"subject":"s","predicate":"p","value":"v","qualifier":"when X","tags":["t1","t2"]}]"#;
-        let c = parse_candidates(raw);
-        assert_eq!(c.len(), 1);
-        assert_eq!(c[0].qualifier.as_deref(), Some("when X"));
-        assert_eq!(c[0].tags.as_ref().unwrap().len(), 2);
-    }
-
-    #[test]
-    fn turn_text_skips_trivial() {
+    fn skips_trivial_turn() {
         let input = HookInput {
             prompt: Some("ok".into()),
             last_assistant_message: Some("done".into()),
             ..Default::default()
         };
-        assert!(build_turn_text(&input).is_none());
+        assert!(build_turn(&input).is_none());
     }
 
     #[test]
-    fn turn_text_builds_substantial() {
-        let long = "x".repeat(300);
+    fn builds_substantial_turn() {
         let input = HookInput {
-            prompt: Some(long.clone()),
-            last_assistant_message: Some("reply".into()),
+            prompt: Some("x".repeat(150)),
+            last_assistant_message: Some("y".repeat(100)),
             ..Default::default()
         };
-        let t = build_turn_text(&input).expect("should build");
-        assert!(t.contains("USER:"));
-        assert!(t.contains("ASSISTANT:"));
+        let (u, a) = build_turn(&input).expect("should build");
+        assert_eq!(u.len(), 150);
+        assert_eq!(a.len(), 100);
+    }
+
+    #[test]
+    fn empty_turn_is_none() {
+        let input = HookInput {
+            prompt: Some("".into()),
+            last_assistant_message: Some("".into()),
+            ..Default::default()
+        };
+        assert!(build_turn(&input).is_none());
     }
 
     #[test]
     fn project_label_from_cwd() {
-        assert_eq!(project_label("/c/Users/x/Documents/GitHub/memory"), "memory");
+        assert_eq!(project_label("/c/Users/x/GitHub/memory"), "memory");
         assert_eq!(project_label(""), "global");
     }
 }
