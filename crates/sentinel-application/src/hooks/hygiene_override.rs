@@ -111,13 +111,20 @@ fn now_secs() -> u64 {
 /// Shorter window limits exposure from accidental or social-engineered overrides.
 const OVERRIDE_TTL_SECS: u64 = sentinel_domain::constants::OVERRIDE_TTL_SECS;
 
-/// Phase-gate override TTL — extended to 10 minutes (600s).
+/// Phase-gate override TTL — 1 hour (3600s).
 /// Phase-gate overrides are explicitly invoked for marketplace-wide skill
-/// refactors which involve many sequential file edits. 60s is too tight for
-/// that workflow. Phase-gate overrides are also strictly scoped (only
-/// SKILL.md + phase files; sentinel config/state/settings remain protected),
-/// so the longer window is a smaller blast radius than the hygiene override.
-pub const PHASE_GATE_OVERRIDE_TTL_SECS: u64 = 600;
+/// refactors which involve many sequential file edits AND spawned subagents
+/// that don't naturally share the parent's session_id. The original 600s
+/// ceiling was too tight: a single skill standardization sweep (Sprint 2–7
+/// of the 75-skill marketplace audit) runs 30–60 min continuous. Multiple
+/// re-triggers per sweep created a poor operator experience and lost work
+/// when subagents hit expired tokens mid-write.
+///
+/// Phase-gate overrides are strictly scoped (only SKILL.md + phase files;
+/// sentinel config/state/settings remain protected), so the longer window
+/// is a smaller blast radius than the hygiene override and the trade-off
+/// favors completion of legitimate authoring work.
+pub const PHASE_GATE_OVERRIDE_TTL_SECS: u64 = 3600;
 
 // Override-phrase predicates have moved to `sentinel_domain::override_phrase`
 // where the patterns are reviewable + tested in isolation. The hook is still
