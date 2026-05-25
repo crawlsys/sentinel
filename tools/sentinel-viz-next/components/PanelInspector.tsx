@@ -1,9 +1,11 @@
 "use client";
 
+import { useEffect } from "react";
 import { useQuery } from "@tanstack/react-query";
 
 import type { Node } from "../types/api";
 import { fetchActivity } from "../lib/api";
+import { indexActivity } from "../lib/activity-cache";
 import { categoryColor, categoryLabel, relTime, statusColor } from "../lib/format";
 
 function friendlyTitle(node: Node): string {
@@ -70,6 +72,11 @@ export function PanelInspector({ node, anchorTs, onClose }: Props) {
     enabled: !!sessionId,
     staleTime: 5_000,
   });
+
+  // Feed the activity-cache for the EventTicker label join.
+  useEffect(() => {
+    if (sessionId && activityQ.data) indexActivity(sessionId, activityQ.data);
+  }, [sessionId, activityQ.data]);
 
   if (!node) {
     return (
@@ -158,6 +165,10 @@ export function PanelInspector({ node, anchorTs, onClose }: Props) {
               {activityQ.data.segments.slice(-12).reverse().map((s, i) => {
                 const sty = segmentStyle(s.kind, !!s.had_error, s.tools ?? []);
                 const hasText = !!s.text && s.text.trim().length > 0;
+                // user_input segments only populate `preview`, not `text`.
+                // Render whichever has content.
+                const bodyText = hasText ? s.text! : (s.preview?.trim() ?? "");
+                const hasBody = bodyText.length > 0;
                 const calls = s.tool_calls ?? [];
                 return (
                   <li
@@ -171,9 +182,9 @@ export function PanelInspector({ node, anchorTs, onClose }: Props) {
                       </span>
                       <span className="text-[#6e7681] whitespace-nowrap">{relTime(s.ts)}</span>
                     </div>
-                    {hasText ? (
+                    {hasBody ? (
                       <div className="text-[10px] text-[#c9d1d9] opacity-90 whitespace-pre-wrap break-words mb-1">
-                        {s.text}
+                        {bodyText}
                       </div>
                     ) : null}
                     {calls.length > 0 ? (
@@ -209,8 +220,10 @@ export function PanelInspector({ node, anchorTs, onClose }: Props) {
                           </li>
                         ))}
                       </ul>
-                    ) : !hasText ? (
-                      <div className="text-[10px] text-[#6e7681] italic">(no content)</div>
+                    ) : !hasBody ? (
+                      <div className="text-[10px] text-[#6e7681] italic">
+                        (empty event — likely Stop or hook artefact)
+                      </div>
                     ) : null}
                   </li>
                 );

@@ -218,6 +218,23 @@ Feature: Sentinel viz delivers live agent activity at a glance
     Given the same event has aged > 24 hours
     Then the timestamp reads "<weekday> HH:MM" (e.g. "Mon 14:30")
 
+  Scenario: API drops activity segments with no text AND no tool_calls
+    Given a session whose JSONL contains an assistant message with empty content
+    When /api/activity/{sid} returns
+    Then no segment in the response has both empty `text` AND empty `tool_calls`
+    And no segment's `preview` is exactly "{}" or whitespace-only
+
+  Scenario: Inspector falls back to preview when text field is absent
+    Given an activity segment of kind "user_input" with a non-empty `preview` but no `text`
+    Then the segment renders the `preview` content, NOT the "(empty event)" placeholder
+    And the placeholder is only shown for segments with no text, preview, OR tool_calls
+
+  Scenario: Ticker labels gain tool args once activity has been loaded
+    Given a ticker row whose tool is "Bash" in session "sess-a" at minute "2026-05-25T13:25"
+    When the inspector loads activity for that session, which includes a Bash tool_use with summary "ls -la /tmp"
+    Then the corresponding ticker row label updates to "Bash · ls -la /tmp"
+    And the augmentation is truncated to 80 characters when the underlying summary is longer
+
   Scenario: Stuck sessions surface a STUCK badge in the status bar
     Given the graph contains 1 session whose status is "awaiting_user" with last_activity_age_s > 900
     Then the status bar shows a "STUCK: 1" badge with red border

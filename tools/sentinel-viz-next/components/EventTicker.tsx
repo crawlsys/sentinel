@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 
 import type { NodeCategory, RecentEvent } from "../types/api";
+import { lookup as lookupActivityCache, subscribe as subscribeActivityCache } from "../lib/activity-cache";
 import { categoryColor, categoryLabel, tickerTime } from "../lib/format";
 
 interface Props {
@@ -25,6 +26,9 @@ interface TickerRow {
   sessionId: string | null;
   sentinelEvent: string;
   label: string;
+  /** Optional " · <snippet>" rendered after the label when the
+   *  activity-cache has matched this event's tool input. */
+  augment?: string;
   toolCallId: string | null;
   outcome: string | null;
   category: NodeCategory;
@@ -32,7 +36,6 @@ interface TickerRow {
 }
 
 export function EventTicker({ events, onSelectNode }: Props) {
-  const rows = useMemo(() => buildRows(events), [events]);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   // Force a 5s re-render so "30s ago" rolls forward in quiet periods.
   const [now, setNow] = useState(() => Date.now());
@@ -40,6 +43,30 @@ export function EventTicker({ events, onSelectNode }: Props) {
     const id = window.setInterval(() => setNow(Date.now()), 5_000);
     return () => window.clearInterval(id);
   }, []);
+
+  // Subscribe to the activity-cache so richer labels appear as the
+  // inspector pulls JSONL detail. Bumping `cacheTick` triggers a
+  // re-render; we don't need the value itself.
+  const [cacheTick, setCacheTick] = useState(0);
+  useEffect(() => subscribeActivityCache(() => setCacheTick((n) => n + 1)), []);
+
+  const rows = useMemo(() => buildRows(events), [events]);
+  // Augment each row from the activity cache (cheap O(rows) lookup).
+  // Recompute on cache updates via the cacheTick dep.
+  const augmentedRows = useMemo(
+    () =>
+      rows.map((r) => {
+        if (!r.sessionId) return r;
+        const lookupTool = r.label === "user prompt" ? "" : r.label;
+        if (!lookupTool) return r;
+        const tc = lookupActivityCache(r.sessionId, lookupTool, r.ts);
+        if (!tc || !tc.summary) return r;
+        const trimmed = tc.summary.length > 80 ? `${tc.summary.slice(0, 78)}…` : tc.summary;
+        return { ...r, augment: trimmed };
+      }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [rows, cacheTick],
+  );
 
   function toggle(key: string) {
     setExpanded((prev) => {
@@ -60,7 +87,7 @@ export function EventTicker({ events, onSelectNode }: Props) {
         <span>{rows.length} rows · {events.length} raw</span>
       </header>
       <ul className="overflow-y-auto flex-1" data-testid="ticker-rows">
-        {rows.map((row) => {
+        {augmentedRows.map((row) => {
           const isOpen = expanded.has(row.key);
           const focus = () => {
             if (row.toolCallId) onSelectNode(row.toolCallId, row.ts);
@@ -94,7 +121,12 @@ export function EventTicker({ events, onSelectNode }: Props) {
                     ×{row.members.length} {isOpen ? "▾" : "▸"}
                   </button>
                 ) : null}
-                <span className="truncate flex-1">{row.label}</span>
+                <span className="truncate flex-1">
+                  {row.label}
+                  {row.augment ? (
+                    <span className="text-[#6e7681] ml-1">· {row.augment}</span>
+                  ) : null}
+                </span>
               </div>
               <div className="text-[10px] text-[#6e7681] truncate pl-4">
                 {row.sessionId ? `s:${row.sessionId.slice(0, 8)}…` : ""} {row.sentinelEvent}

@@ -107,6 +107,15 @@ pub fn session_activity(
             v
         }
     }
+    // Defence-in-depth filter for empty segments that slipped through
+    // the per-handler filters. A segment is empty if it has no text
+    // AND no tool_calls AND no preview content the UI could render.
+    segments.retain(|s| {
+        let has_text = s.text.as_deref().map(|t| !t.trim().is_empty()).unwrap_or(false);
+        let has_calls = !s.tool_calls.is_empty();
+        let has_preview = !s.preview.trim().is_empty() && s.preview.trim() != "(empty)";
+        has_text || has_calls || has_preview
+    });
     let total = out.len();
     let total_segs = segments.len();
     ActivityResponse {
@@ -131,9 +140,15 @@ fn handle_user(
 ) {
     let Some(content) = msg.get("content") else { return };
     if let Some(text) = content.as_str() {
-        if text.starts_with("<local-command-caveat>")
-            || text.starts_with("<system-reminder>")
-            || text.starts_with("Caveat:")
+        let trimmed = text.trim();
+        // Filter injected envelope blocks Claude Code prepends to
+        // every user message (caveats, reminders, command tags).
+        // Also skip empty / whitespace-only inputs.
+        if trimmed.is_empty()
+            || trimmed.starts_with("<local-command-caveat>")
+            || trimmed.starts_with("<system-reminder>")
+            || trimmed.starts_with("<command-name>")
+            || trimmed.starts_with("Caveat:")
         {
             return;
         }
@@ -297,6 +312,14 @@ fn handle_assistant(
     } else {
         Some(trim(&accumulated_text, 600))
     };
+    // Drop genuinely-empty assistant turns: no text AND no tool
+    // calls. These come from JSONL entries whose `content` was an
+    // empty array, a stop-only message, or tool_result-only blocks
+    // we already handle on the user side. Surfacing them in the
+    // inspector renders blank cards.
+    if seg.tool_calls.is_empty() && accumulated_text.trim().is_empty() {
+        return;
+    }
     segments.push(seg);
 }
 
