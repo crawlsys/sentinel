@@ -1,3 +1,8 @@
+// WORKSTREAM: sentinel-viz-api — every type below is a hand-mirror
+// of a Rust struct in `tools/sentinel-viz-api/src/model.rs`. Rename
+// in lockstep. The two trees are intended to peel off into a single
+// `sentinel-viz` repo so they live together regardless.
+
 export type SessionStatus =
   | "firing"
   | "busy"

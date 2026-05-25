@@ -2,6 +2,10 @@ import type { ActivityResponse, GraphResponse, HealthResponse } from "../types/a
 
 const DEFAULT_BASE = "http://127.0.0.1:8082";
 
+/// WORKSTREAM: sentinel-viz-api — this is the ONLY cross-boundary
+/// URL the web app uses. All data flows through this base. Keeping
+/// every server call funnelled through here is what makes the web
+/// crate cleanly peelable from the rest of the Sentinel repo.
 export function apiBase(): string {
   if (typeof process !== "undefined" && process.env?.NEXT_PUBLIC_VIZ_API) {
     return process.env.NEXT_PUBLIC_VIZ_API;

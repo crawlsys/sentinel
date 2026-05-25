@@ -6,6 +6,11 @@ use rusqlite::{Connection, OpenFlags};
 use crate::model::Event;
 
 /// Default location of the bridge's SQLite store, overridable via env.
+///
+/// WORKSTREAM: sentinel-bridge — this path is owned by
+/// `tools/sentinel-viz/sentinel_bridge.py`, which writes the file.
+/// The viz crate opens READ-ONLY. If the bridge moves, override
+/// `SENTINEL_VIZ_DB` rather than hard-coding a new default here.
 pub const DEFAULT_DB_ENV: &str = "SENTINEL_VIZ_DB";
 const DEFAULT_DB_REL: &str = ".agents/scratch/activegraph-bridge/sentinel.db";
 

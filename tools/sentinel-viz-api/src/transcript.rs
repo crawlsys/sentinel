@@ -2,6 +2,12 @@ use std::path::{Path, PathBuf};
 
 /// Locate the conversation transcript JSONL for a session, across
 /// both Claude homes. Mirrors `find_transcript()` in viz_server.py.
+///
+/// WORKSTREAM: claude-code — both `~/.claude/projects/` and
+/// `~/.claude-sentinel/projects/` are owned by Claude Code itself
+/// (and the sandboxed Claude Code respectively). The viz crate only
+/// reads JSONL files; never writes. If Claude Code ever changes the
+/// transcript layout, this function is the touchpoint to update.
 pub fn find_transcript(session_id: &str) -> Option<PathBuf> {
     if session_id.is_empty() {
         return None;
