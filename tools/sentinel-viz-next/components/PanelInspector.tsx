@@ -157,6 +157,8 @@ export function PanelInspector({ node, anchorTs, onClose }: Props) {
             <ul className="space-y-2" data-testid="activity-segments">
               {activityQ.data.segments.slice(-12).reverse().map((s, i) => {
                 const sty = segmentStyle(s.kind, !!s.had_error, s.tools ?? []);
+                const hasText = !!s.text && s.text.trim().length > 0;
+                const calls = s.tool_calls ?? [];
                 return (
                   <li
                     key={`${s.ts}-${i}`}
@@ -169,9 +171,47 @@ export function PanelInspector({ node, anchorTs, onClose }: Props) {
                       </span>
                       <span className="text-[#6e7681] whitespace-nowrap">{relTime(s.ts)}</span>
                     </div>
-                    <div className="text-[10px] text-[#c9d1d9] opacity-90 whitespace-pre-wrap break-words">
-                      {s.preview}
-                    </div>
+                    {hasText ? (
+                      <div className="text-[10px] text-[#c9d1d9] opacity-90 whitespace-pre-wrap break-words mb-1">
+                        {s.text}
+                      </div>
+                    ) : null}
+                    {calls.length > 0 ? (
+                      <ul className="space-y-1 mt-1">
+                        {calls.map((tc, j) => (
+                          <li
+                            key={`${tc.id || j}`}
+                            className="text-[10px] pl-2 border-l border-[#30363d]"
+                          >
+                            <div className="flex justify-between gap-2">
+                              <span className="font-mono text-[#3fb950]">{tc.tool}</span>
+                              {tc.error ? (
+                                <span className="text-[#f85149]">error</span>
+                              ) : tc.result_preview ? (
+                                <span className="text-[#6e7681]">ok</span>
+                              ) : (
+                                <span className="text-[#6e7681]">pending</span>
+                              )}
+                            </div>
+                            <div className="text-[10px] text-[#c9d1d9] opacity-90 whitespace-pre-wrap break-words">
+                              {tc.summary && tc.summary !== `(${tc.tool})` ? tc.summary : (
+                                <span className="opacity-50">(no args)</span>
+                              )}
+                            </div>
+                            {tc.result_preview ? (
+                              <div
+                                className="text-[10px] mt-0.5 opacity-70 italic"
+                                style={{ color: tc.error ? "#f85149" : "#6e7681" }}
+                              >
+                                → {tc.result_preview}
+                              </div>
+                            ) : null}
+                          </li>
+                        ))}
+                      </ul>
+                    ) : !hasText ? (
+                      <div className="text-[10px] text-[#6e7681] italic">(no content)</div>
+                    ) : null}
                   </li>
                 );
               })}

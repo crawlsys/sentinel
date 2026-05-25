@@ -53,17 +53,25 @@ export function useGraphStream(): {
 
     const es = new EventSource(streamUrl());
     sourceRef.current = es;
+    let lastMessageAt = 0;
     es.onopen = () => {
       if (!cancelled) setConnected(true);
     };
     es.onerror = () => {
-      if (!cancelled) {
+      // EventSource fires onerror for transient hiccups even when it
+      // auto-reconnects successfully on the next tick. Only mark
+      // disconnected if we haven't seen a message in the last 30s.
+      if (cancelled) return;
+      const since = Date.now() - lastMessageAt;
+      if (lastMessageAt === 0 || since > 30_000) {
         setConnected(false);
-        setError("stream disconnected - auto-reconnecting...");
+        setError("stream reconnecting…");
       }
     };
     es.onmessage = (e) => {
       if (cancelled) return;
+      lastMessageAt = Date.now();
+      setConnected(true);
       try {
         const data = JSON.parse(e.data) as GraphResponse;
         setGraph(data);

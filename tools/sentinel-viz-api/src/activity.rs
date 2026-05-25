@@ -309,7 +309,7 @@ pub fn tool_summary(name: &str, inp: &Value) -> String {
             .map(|s| s.to_string())
             .unwrap_or_default()
     };
-    match name {
+    let summary = match name {
         "Bash" => trim(&s("command"), 200),
         "Read" | "Write" => trim(&s("file_path"), 200),
         "Edit" => format!(
@@ -329,11 +329,37 @@ pub fn tool_summary(name: &str, inp: &Value) -> String {
             )
         ),
         "Glob" => trim(&s("pattern"), 200),
-        "TaskCreate" | "TaskUpdate" => {
-            let filtered: serde_json::Map<String, Value> = dict
-                .map(|m| m.iter().filter(|(k, _)| k.as_str() != "metadata").map(|(k, v)| (k.clone(), v.clone())).collect())
-                .unwrap_or_default();
-            trim(&serde_json::to_string(&filtered).unwrap_or_default(), 200)
+        "TaskList" => "list current tasks".to_string(),
+        "TaskCreate" => {
+            let subj = s("subject");
+            if !subj.is_empty() {
+                format!("create: {}", trim(&subj, 180))
+            } else {
+                "create task".to_string()
+            }
+        }
+        "TaskUpdate" => {
+            let id = s("taskId");
+            let status = s("status");
+            match (id.as_str(), status.as_str()) {
+                ("", "") => "update task".to_string(),
+                (id, "") => format!("update task #{id}"),
+                ("", st) => format!("set status: {st}"),
+                (id, st) => format!("task #{id} → {st}"),
+            }
+        }
+        "TaskGet" => format!("get task #{}", s("taskId")),
+        "TaskStop" => format!("stop task #{}", s("taskId")),
+        "TaskOutput" => format!("read output #{}", s("taskId")),
+        "ScheduleWakeup" => {
+            let reason = s("reason");
+            let secs = dict.and_then(|m| m.get("delaySeconds")).and_then(|v| v.as_f64());
+            match (reason.as_str(), secs) {
+                ("", Some(s)) => format!("wake in {}s", s as i64),
+                (r, Some(s)) => format!("wake in {}s — {}", s as i64, trim(r, 160)),
+                (r, None) if !r.is_empty() => trim(r, 200),
+                _ => "schedule wakeup".to_string(),
+            }
         }
         "WebFetch" => trim(&s("url"), 200),
         "WebSearch" => trim(&s("query"), 200),
@@ -346,10 +372,43 @@ pub fn tool_summary(name: &str, inp: &Value) -> String {
                     }
                 }
             }
-            String::new()
+            "ask user".to_string()
         }
-        "Agent" => trim(&format!("{} · {}", s("description"), s("subagent_type")), 200),
-        _ => trim(&serde_json::to_string(inp).unwrap_or_default(), 200),
+        "Agent" => {
+            let desc = s("description");
+            let kind = s("subagent_type");
+            match (desc.as_str(), kind.as_str()) {
+                ("", "") => "agent".to_string(),
+                (d, "") => trim(d, 200),
+                ("", k) => format!("agent · {k}"),
+                (d, k) => trim(&format!("{d} · {k}"), 200),
+            }
+        }
+        "ExitPlanMode" | "EnterPlanMode" | "Plan" => name.to_string(),
+        "Stop" => "stop".to_string(),
+        "NotebookEdit" | "MultiEdit" => trim(&s("file_path"), 200),
+        _ => {
+            // Generic fallback. Strip metadata and `{}` noise.
+            if dict.map(|m| m.is_empty()).unwrap_or(true) {
+                format!("({name})")
+            } else {
+                let filtered: serde_json::Map<String, Value> = dict
+                    .map(|m| {
+                        m.iter()
+                            .filter(|(k, _)| k.as_str() != "metadata")
+                            .map(|(k, v)| (k.clone(), v.clone()))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                trim(&serde_json::to_string(&filtered).unwrap_or_default(), 200)
+            }
+        }
+    };
+
+    if summary.is_empty() || summary == "{}" {
+        format!("({name})")
+    } else {
+        summary
     }
 }
 
