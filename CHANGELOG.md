@@ -6,6 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Changed
+- **Judge promoted to full audit-grade enforce + mandatory signing (#15)** (2026-05-25). After observing warn mode (#13) on real work, flipped the deployment to audit-grade: `SENTINEL_JUDGE_ENFORCEMENT` `warn`→`enforce` (a non-sufficient independent verdict now hard-blocks `submit_step_complete` from sealing, per `mcp_handler.rs` — the structural gate, not a warning), plus `SENTINEL_SIGNING_REQUIRED=1` with a freshly-generated 32-byte Ed25519 seed in `SENTINEL_SIGNING_KEY` so every sealed proof is cryptographically attested and the engine refuses to seal without a key. Config-only (`~/.claude/sentinel/config/settings.json` env block) — the enforce gate (#9/#12) and signing (#4) already shipped. Verified the enforce gate is fail-open on missing verdicts (falls back to the caller-supplied `sufficient:true` for completed steps), so normal workflow is unaffected — only genuinely-insufficient evidence blocks. Takes effect on the next Claude Code restart (the `sentinel-mcp` server reads these env vars at process startup).
+
 ### Added
 - **Ed25519 proof signing wired into the seal path (#4)** (2026-05-25). Proof signing existed (`step_proof::sign_with`, `SENTINEL_SIGNING_KEY` config) but was never called — proofs were SHA-chain only, never cryptographically attested. `ProofEngine` now signs every sealed `StepProof` over its `combined_hash` when a key is configured, via a `.with_signing(key, required)` builder (the CLI loads `SENTINEL_SIGNING_KEY` + `SENTINEL_SIGNING_REQUIRED`). Mandatory posture: with `SENTINEL_SIGNING_REQUIRED` set and no key, sealing is REFUSED (error, chain unmutated) rather than writing an un-attestable proof — the audit-grade guarantee. 1898 tests green.
 
