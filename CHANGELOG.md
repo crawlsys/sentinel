@@ -6,6 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added
+- **Self-certify gap closed + registered MCP servers trusted** (2026-05-25). (1) `submit_step_complete` trusted the caller-supplied `verdict` arg, letting an agent self-certify; now the `step_judge` PostToolUse hook persists an INDEPENDENT verdict into `SessionState` (new `independent_verdicts` map, loaded by `with_session_state` from the same disk store) and `submit_step_complete` prefers it over the supplied one — in `enforce` mode an insufficient independent verdict refuses the seal regardless of the caller's claim. (2) `is_dangerous_mcp_tool` was deny-by-default on verb suffix, flagging `mcp__browserbase__navigate`/`evaluate`, `mcp__cdp__*`, linear mutations etc. as dangerous and applying workflow-gate enforcement; added `TRUSTED_MCP_SERVERS` (browserbase, cdp, steel, sequential-thinking, memory-mcp, sentinel, linear, qdrant, skills, agents) whose tools are trusted regardless of verb, while raw-exec servers not on the list (e.g. `codex` shell/write_file/apply_patch) stay verb-gated. 1895 domain+application tests green.
+
 ### Changed
 - **Judge models pinned to the operator's four-model set** (2026-05-25). Renamed the `JudgeModel::Haiku` tier to `Codex` and pinned all four slugs to the exact OpenRouter models specified: `Codex` → `openai/gpt-5.5-pro`, `Kimi` → `moonshotai/kimi-k2.6`, `Sonnet` → `anthropic/claude-sonnet-4.6`, `Opus` → `anthropic/claude-opus-4.7`. Added per-step judge routing (#73): `WorkflowStep`/`StepToml` gain an optional `judge:` field (TOML `judge = "codex"|"kimi"|"sonnet"|"opus"`); `step_judge` honors it, defaulting routine steps to `Sonnet`; `multi_judge` Routine tier → `Kimi`. 565 domain tests green.
 
