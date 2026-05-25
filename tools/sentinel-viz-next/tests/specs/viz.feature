@@ -188,6 +188,22 @@ Feature: Sentinel viz delivers live agent activity at a glance
 
   # ---------- USER ROUND-4 PUNCH LIST ----------
 
+  Scenario: Selected node renders a one-shot click-burst pulse
+    Given the graph is populated and idle
+    When I click any node
+    Then within 100ms the clicked node contains a <g class="click-burst"> child
+    And the burst's <circle> radius animates from ~6 to ~48 over 700ms
+    And the burst <g> is removed from the DOM within 1 second
+    And re-clicking the same node spawns a fresh burst (no stale duplicates)
+
+  Scenario: Active sessions show a continuous liveness ring
+    Given the graph contains at least one session whose status is "firing" or "busy" or "awaiting_user"
+    Then each such SentinelSession node contains a <circle class="pulse-ring"> child
+    And the ring is animated (CSS computed `animation-name` is not "none")
+    And inactive sessions (idle/dormant/dead) hide the pulse-ring via CSS
+
+
+
   Scenario: Activity segments are never literally "{}" or blank
     Given the inspector has activity segments for a session that called TaskList
     Then no segment's preview text reads exactly "{}"

@@ -201,7 +201,8 @@ export function GraphCanvas({ graph, selectedNodeId, onSelectNode }: Props) {
             .attr("data-kind", (d) => d.kind)
             .style("cursor", "pointer")
             .on("click", (_, d) => onSelectRef.current(d.id));
-          // Pulse animation: circle scales from 1.5× → 1× via radius transition.
+          // Primary circle. Per-status liveness pulses are CSS-driven
+          // off the `data-status` attribute (see globals.css).
           grp
             .append("circle")
             .attr("r", (d) =>
@@ -221,6 +222,14 @@ export function GraphCanvas({ graph, selectedNodeId, onSelectNode }: Props) {
             )
             .attr("stroke", "#0d1117")
             .attr("stroke-width", 1.5);
+          // Concentric pulse ring — hidden by CSS unless data-status
+          // is firing / busy / awaiting_user. Animation defined in
+          // globals.css (`ring-expand-*` keyframes).
+          grp
+            .append("circle")
+            .attr("class", "pulse-ring")
+            .attr("r", 12)
+            .attr("fill", "none");
           grp
             .append("text")
             .attr("x", 12)
@@ -268,14 +277,28 @@ export function GraphCanvas({ graph, selectedNodeId, onSelectNode }: Props) {
     initialPanRef.current = true;
   }, [viewport.width, viewport.height, desired]);
 
-  // Highlight + pan to the selected node.
+  // Highlight + pan to the selected node, plus one-shot click-burst.
   useEffect(() => {
     if (!gRef.current || !svgRef.current) return;
     select(gRef.current)
       .selectAll<SVGGElement, SimNode>("g.node")
-      .select("circle")
-      .attr("stroke", (d) => (d.id === selectedNodeId ? "#58a6ff" : "#0d1117"))
-      .attr("stroke-width", (d) => (d.id === selectedNodeId ? 3 : 1.5));
+      .each(function (d) {
+        const grp = select(this);
+        // Primary circle (first <circle> only — second is the pulse-ring).
+        grp
+          .select<SVGCircleElement>("circle:not(.pulse-ring)")
+          .attr("stroke", d.id === selectedNodeId ? "#58a6ff" : "#0d1117")
+          .attr("stroke-width", d.id === selectedNodeId ? 3 : 1.5);
+        // Drop any prior burst — only the freshest click animates.
+        grp.selectAll<SVGGElement, unknown>(":scope > g.click-burst").remove();
+        if (d.id === selectedNodeId) {
+          const burst = grp.append("g").attr("class", "click-burst");
+          burst.append("circle").attr("cx", 0).attr("cy", 0);
+          // CSS animation runs 700ms; clean up afterward so we don't
+          // accumulate DOM nodes when the same node is re-clicked.
+          window.setTimeout(() => burst.remove(), 800);
+        }
+      });
 
     if (!selectedNodeId || !zoomRef.current) return;
     const target = nodesRef.current.find((n) => n.id === selectedNodeId);

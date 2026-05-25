@@ -385,6 +385,66 @@ test("tab-visibility-no-jump", async ({ page }, testInfo) => {
 
 // ---------- PERF ----------
 
+test("selected-node-click-burst", async ({ page }, testInfo) => {
+  const ev = fresh("selected-node-click-burst");
+  await page.goto("/");
+  await page.getByTestId("loading-overlay").waitFor({ state: "hidden", timeout: 15_000 }).catch(() => {});
+
+  // Wait for at least one node.
+  await page.waitForFunction(() => document.querySelectorAll('svg[data-testid="graph-canvas"] g.node').length > 0,
+    { timeout: 8_000 }).catch(() => {});
+
+  const firstNode = page.locator('svg[data-testid="graph-canvas"] g.node').first();
+  if (await firstNode.count() === 0) {
+    ev.notes.push("no nodes rendered");
+    writeReport(ev);
+    return;
+  }
+  await firstNode.click();
+  // Sample immediately after click.
+  await page.waitForTimeout(80);
+  ev.dom.burstPresent = await page.locator('svg[data-testid="graph-canvas"] g.click-burst').count();
+  await page.screenshot({ path: `${OUT_DIR}/click-burst-mid.png` });
+  ev.shots.mid = `${OUT_DIR}/click-burst-mid.png`;
+  // After animation completes, the burst must be gone.
+  await page.waitForTimeout(900);
+  ev.dom.burstCleanedUp = (await page.locator('svg[data-testid="graph-canvas"] g.click-burst').count()) === 0;
+  writeReport(ev);
+  testInfo.attach("evidence", { body: JSON.stringify(ev, null, 2), contentType: "application/json" });
+});
+
+test("active-session-pulse-ring", async ({ page }, testInfo) => {
+  const ev = fresh("active-session-pulse-ring");
+  await page.goto("/");
+  await page.getByTestId("loading-overlay").waitFor({ state: "hidden", timeout: 15_000 }).catch(() => {});
+  await page.waitForFunction(
+    () => document.querySelectorAll('svg[data-testid="graph-canvas"] g.node[data-kind="SentinelSession"]').length > 0,
+    { timeout: 8_000 },
+  ).catch(() => {});
+
+  const sample = await page.evaluate(() => {
+    const out: Array<{ status: string; hasRing: boolean; ringAnim: string }> = [];
+    for (const g of Array.from(document.querySelectorAll('svg[data-testid="graph-canvas"] g.node[data-kind="SentinelSession"]'))) {
+      const status = (g as Element).getAttribute("data-status") ?? "";
+      const ring = g.querySelector("circle.pulse-ring");
+      const anim = ring ? getComputedStyle(ring).animationName : "";
+      out.push({ status, hasRing: !!ring, ringAnim: anim });
+    }
+    return out;
+  });
+  ev.dom.sessions = sample;
+  ev.dom.activeWithAnimation = sample.filter(
+    (s) => ["firing", "busy", "awaiting_user"].includes(s.status) && s.ringAnim !== "none",
+  ).length;
+  ev.dom.inactiveSuppressed = sample.filter(
+    (s) => !["firing", "busy", "awaiting_user"].includes(s.status) && s.ringAnim === "none",
+  ).length;
+  await page.screenshot({ path: `${OUT_DIR}/pulse-rings.png` });
+  ev.shots.shot = `${OUT_DIR}/pulse-rings.png`;
+  writeReport(ev);
+  testInfo.attach("evidence", { body: JSON.stringify(ev, null, 2), contentType: "application/json" });
+});
+
 test("api-graph-warm-latency", async ({ request }, testInfo) => {
   const ev = fresh("api-graph-warm-latency");
   // Warm

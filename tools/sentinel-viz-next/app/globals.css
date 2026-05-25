@@ -1,26 +1,99 @@
 @import "tailwindcss";
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --background: #0d1117;
+  --foreground: #c9d1d9;
+  --accent: #58a6ff;
+  --ok: #3fb950;
+  --ask: #d29922;
+  --deny: #f85149;
+  --session: #bc8cff;
+  --muted: #6e7681;
 }
 
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
 }
 
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+/* ---------- graph node pulses (port of viz_server.py liveness ring) ---------- */
+
+/* Continuous per-status pulse on the node's primary circle. */
+@keyframes node-pulse-firing {
+  0%, 100% { stroke: var(--accent); stroke-width: 2px; filter: drop-shadow(0 0 3px var(--accent)); }
+  50%      { stroke: var(--accent); stroke-width: 3px; filter: drop-shadow(0 0 12px var(--accent)) drop-shadow(0 0 22px var(--accent)); }
+}
+@keyframes node-pulse-busy {
+  0%, 100% { stroke: var(--session); stroke-width: 1.5px; filter: drop-shadow(0 0 2px var(--session)); }
+  50%      { stroke: var(--session); stroke-width: 2px;   filter: drop-shadow(0 0 8px var(--session)); }
+}
+@keyframes node-pulse-awaiting {
+  0%, 100% { stroke: var(--ask); stroke-width: 2px; filter: drop-shadow(0 0 4px var(--ask)); }
+  50%      { stroke: var(--ask); stroke-width: 3px; filter: drop-shadow(0 0 14px var(--ask)) drop-shadow(0 0 24px var(--ask)); }
+}
+
+g.node[data-status="firing"] > circle:first-of-type {
+  animation: node-pulse-firing 1.4s ease-in-out infinite;
+}
+g.node[data-status="busy"] > circle:first-of-type {
+  animation: node-pulse-busy 2.6s ease-in-out infinite;
+}
+g.node[data-status="awaiting_user"] > circle:first-of-type {
+  animation: node-pulse-awaiting 1.6s ease-in-out infinite;
+}
+g.node[data-status="dormant"] { opacity: 0.55; }
+g.node[data-status="dead"]    { opacity: 0.30; filter: grayscale(0.6); }
+
+/* Concentric ring radiating outward from active session nodes. */
+@keyframes ring-expand-firing {
+  0%   { r: 12; opacity: 0.7; }
+  100% { r: 28; opacity: 0; }
+}
+@keyframes ring-expand-busy {
+  0%   { r: 12; opacity: 0.45; }
+  100% { r: 22; opacity: 0; }
+}
+@keyframes ring-expand-await {
+  0%   { r: 12; opacity: 0.85; }
+  100% { r: 32; opacity: 0; }
+}
+
+g.node circle.pulse-ring {
+  fill: none;
+  pointer-events: none;
+}
+g.node[data-status="firing"] circle.pulse-ring {
+  stroke: var(--accent); stroke-width: 1.5px;
+  animation: ring-expand-firing 1.4s ease-out infinite;
+}
+g.node[data-status="busy"] circle.pulse-ring {
+  stroke: var(--session); stroke-width: 1px;
+  animation: ring-expand-busy 2.6s ease-out infinite;
+}
+g.node[data-status="awaiting_user"] circle.pulse-ring {
+  stroke: var(--ask); stroke-width: 2px;
+  animation: ring-expand-await 1.6s ease-out infinite;
+}
+g.node:not([data-status="firing"]):not([data-status="busy"]):not([data-status="awaiting_user"]) circle.pulse-ring {
+  display: none;
+}
+
+/* ---------- click-burst pulse (one-shot when user selects a node) ---------- */
+
+@keyframes click-burst {
+  0%   { r: 6;  opacity: 0.9; stroke-width: 3px; }
+  100% { r: 48; opacity: 0;   stroke-width: 0.5px; }
+}
+g.click-burst circle {
+  fill: none;
+  stroke: var(--accent);
+  pointer-events: none;
+  animation: click-burst 0.7s ease-out forwards;
 }
