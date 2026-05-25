@@ -14,10 +14,10 @@ use crate::model::{
 use crate::transcript;
 
 /// Window strategy constants. Per user feedback 2026-05-25:
-/// "max 4 in-progress sessions; each gets at least 12 nodes; the
-/// currently-selected/active session shows up to 36."
-const K_SESSIONS: usize = 4;
-const PER_SESSION_CAP_DEFAULT: usize = 12;
+/// "support up to 5 concurrent sessions, 20 most-recent events from
+/// each aggregated into active view (100 datapoints total)."
+const K_SESSIONS: usize = 5;
+const PER_SESSION_CAP_DEFAULT: usize = 20;
 const PER_SESSION_CAP_FOCUSED: usize = 36;
 
 /// Liveness thresholds (seconds). Match `viz_server.py:574-578`.
@@ -593,12 +593,33 @@ pub fn load_graph_with(conn: &Connection, opts: GraphOpts) -> Result<GraphRespon
         n.last_activity_age_s = if last_activity > 0.0 { Some(age as i64) } else { None };
     }
 
-    // Ticker tail
-    let events_limit = (limit * 6).max(600);
-    let events_tail = if recent_events.len() > events_limit {
-        recent_events[recent_events.len() - events_limit..].to_vec()
-    } else {
-        recent_events
+    // Ticker tail. Per user direction 2026-05-25: up to 5 sessions
+    // × 20 events each = 100 datapoints in the active view. We
+    // walk newest-first and keep at most 20 per session_id.
+    let events_tail = {
+        let mut per_sid_count: HashMap<String, usize> = HashMap::new();
+        let mut kept: Vec<RecentEvent> = Vec::with_capacity(100);
+        for ev in recent_events.into_iter().rev() {
+            if kept.len() >= 100 {
+                break;
+            }
+            let sid = ev
+                .payload
+                .get("session_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let count = per_sid_count.entry(sid.clone()).or_insert(0);
+            if *count >= PER_SESSION_CAP_DEFAULT {
+                continue;
+            }
+            *count += 1;
+            kept.push(ev);
+        }
+        // We walked newest-first; flip back to chronological so the
+        // ticker's "newest at top" reverse-loop in JS still works.
+        kept.reverse();
+        kept
     };
 
     let stats = GraphStats {

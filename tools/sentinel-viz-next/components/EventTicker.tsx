@@ -9,6 +9,8 @@ import { categoryColor, categoryLabel, tickerTime } from "../lib/format";
 interface Props {
   events: RecentEvent[];
   onSelectNode: (nodeId: string, eventTs?: string) => void;
+  /** sid → color. From session-colors.sessionColorMap(graph). */
+  sessionColors?: Map<string, string>;
 }
 
 interface TickerMember {
@@ -35,7 +37,7 @@ interface TickerRow {
   members: TickerMember[];
 }
 
-export function EventTicker({ events, onSelectNode }: Props) {
+export function EventTicker({ events, onSelectNode, sessionColors }: Props) {
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   // Force a 5s re-render so "30s ago" rolls forward in quiet periods.
   const [now, setNow] = useState(() => Date.now());
@@ -93,15 +95,27 @@ export function EventTicker({ events, onSelectNode }: Props) {
             if (row.toolCallId) onSelectNode(row.toolCallId, row.ts);
             else if (row.sessionId) onSelectNode(`SentinelSession#${row.sessionId}`, row.ts);
           };
+          const sessionColor = row.sessionId && sessionColors
+            ? sessionColors.get(row.sessionId) ?? null
+            : null;
           return (
             <li
               key={row.key}
-              className={`px-3 py-1 border-b border-[#21262d] hover:bg-[#1f6feb22] ${
-                row.outcome === "deny" || row.outcome === "denied"
-                  ? "border-l-2 border-l-[#f85149]"
-                  : ""
-              }`}
+              className="pl-0 pr-3 py-1 border-b border-[#21262d] hover:bg-[#1f6feb22] flex"
             >
+              {/* Session-color tab — 4px wide, full row height, matches
+                  the same color as that session's node in the graph. */}
+              <span
+                className="shrink-0 self-stretch"
+                style={{
+                  width: "4px",
+                  backgroundColor: sessionColor ?? "#21262d",
+                  marginRight: "8px",
+                  borderLeft: row.outcome === "deny" || row.outcome === "denied" ? "2px solid #f85149" : undefined,
+                }}
+                title={sessionColor ? `session ${row.sessionId?.slice(0, 8)}` : ""}
+              />
+              <div className="flex-1 min-w-0">
               <div className="flex gap-2 items-baseline cursor-pointer" onClick={focus}>
                 <span
                   className="inline-block w-2 h-2 rounded-full shrink-0"
@@ -146,6 +160,7 @@ export function EventTicker({ events, onSelectNode }: Props) {
                   ))}
                 </ul>
               ) : null}
+              </div>
             </li>
           );
         })}

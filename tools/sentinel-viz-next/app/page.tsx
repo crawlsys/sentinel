@@ -8,6 +8,7 @@ import { PanelInspector } from "../components/PanelInspector";
 import { SessionConsole } from "../components/SessionConsole";
 import { SettingsModal } from "../components/SettingsModal";
 import { StatusBar } from "../components/StatusBar";
+import { sessionColorMap } from "../lib/session-colors";
 import { useGraphStream } from "../lib/sse";
 import { maybeFireStuckAlert, stuckSessions } from "../lib/stuck";
 
@@ -43,6 +44,7 @@ export default function Page() {
   }, [selectedSessionId]);
 
   const stuck = useMemo(() => stuckSessions(graph), [graph]);
+  const sessionColors = useMemo(() => sessionColorMap(graph), [graph]);
 
   useEffect(() => {
     maybeFireStuckAlert(stuck.length, stuck);
@@ -76,6 +78,7 @@ export default function Page() {
             graph={graph}
             selectedNodeId={selectedNodeId}
             onSelectNode={(id) => selectNode(id)}
+            sessionColors={sessionColors}
           />
           {!graph ? (
             <div
@@ -97,6 +100,7 @@ export default function Page() {
         <EventTicker
           events={graph?.events ?? []}
           onSelectNode={(id, ts) => selectNode(id, ts)}
+          sessionColors={sessionColors}
         />
       </div>
       <SessionConsole graph={graph} />

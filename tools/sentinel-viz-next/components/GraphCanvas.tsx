@@ -59,6 +59,7 @@ interface Props {
   graph: GraphResponse | null;
   selectedNodeId: string | null;
   onSelectNode: (nodeId: string | null) => void;
+  sessionColors?: Map<string, string>;
 }
 
 interface ViewportSize {
@@ -137,7 +138,7 @@ function annotateChainRanks(nodes: SimNode[], links: SimLink[]): void {
   }
 }
 
-export function GraphCanvas({ graph, selectedNodeId, onSelectNode }: Props) {
+export function GraphCanvas({ graph, selectedNodeId, onSelectNode, sessionColors }: Props) {
   const svgRef = useRef<SVGSVGElement | null>(null);
   const gRef = useRef<SVGGElement | null>(null);
   const simRef = useRef<d3Force.Simulation<SimNode, SimLink> | null>(null);
@@ -411,11 +412,13 @@ export function GraphCanvas({ graph, selectedNodeId, onSelectNode }: Props) {
             .attr("r", (d) =>
               (d.kind === "SentinelSession" ? 9 : d.kind === "SentinelToolCall" ? 6 : 4) * 1.5,
             )
-            .attr("fill", (d) =>
-              d.kind === "SentinelSession"
-                ? statusColor(d.session_status)
-                : nodeColor(d.kind, d.outcome, d.category),
-            )
+            .attr("fill", (d) => {
+              if (d.kind === "SentinelSession") {
+                const sc = d.sid ? sessionColors?.get(d.sid) : undefined;
+                return sc ?? statusColor(d.session_status);
+              }
+              return nodeColor(d.kind, d.outcome, d.category);
+            })
             .attr("stroke", "#58a6ff")
             .attr("stroke-width", 2)
             .transition()
@@ -452,11 +455,13 @@ export function GraphCanvas({ graph, selectedNodeId, onSelectNode }: Props) {
             .attr("data-status", (d) => d.session_status ?? "")
             .attr("opacity", (d) => chainOpacity(d));
           update.select("circle:not(.pulse-ring)")
-            .attr("fill", (d) =>
-              d.kind === "SentinelSession"
-                ? statusColor(d.session_status)
-                : nodeColor(d.kind, d.outcome, d.category),
-            );
+            .attr("fill", (d) => {
+              if (d.kind === "SentinelSession") {
+                const sc = d.sid ? sessionColors?.get(d.sid) : undefined;
+                return sc ?? statusColor(d.session_status);
+              }
+              return nodeColor(d.kind, d.outcome, d.category);
+            });
           // Refresh label text — names may have arrived from the
           // naming API; chain ranks may have shifted on SSE update.
           update

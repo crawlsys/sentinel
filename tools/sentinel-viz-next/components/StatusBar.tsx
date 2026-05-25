@@ -1,6 +1,7 @@
 "use client";
 
 import type { GraphResponse } from "../types/api";
+import { KpiBar } from "./KpiBar";
 
 interface Props {
   graph: GraphResponse | null;
@@ -34,28 +35,31 @@ export function StatusBar({ graph, connected, error, stuckCount = 0, onStuckClic
       ) : (
         <span>waiting on first snapshot…</span>
       )}
-      {stuckCount > 0 ? (
+      <div className="ml-auto flex items-center gap-2">
+        <KpiBar />
+        {stuckCount > 0 ? (
+          <button
+            type="button"
+            onClick={onStuckClick}
+            data-testid="stuck-badge"
+            className="px-2 py-0.5 rounded bg-[#3a0f0f] border border-[#f85149] text-[#f85149] font-bold animate-pulse hover:bg-[#5a1717]"
+            title="Sessions awaiting you for >15min — click to focus"
+          >
+            STUCK: {stuckCount}
+          </button>
+        ) : null}
+        {error ? <span className="text-[#f85149]">{error}</span> : null}
         <button
           type="button"
-          onClick={onStuckClick}
-          data-testid="stuck-badge"
-          className="ml-auto px-2 py-0.5 rounded bg-[#3a0f0f] border border-[#f85149] text-[#f85149] font-bold animate-pulse hover:bg-[#5a1717]"
-          title="Sessions awaiting you for >15min — click to focus"
+          onClick={onOpenSettings}
+          data-testid="open-settings"
+          aria-label="open settings"
+          title="settings"
+          className="text-[#6e7681] hover:text-[#c9d1d9] text-[14px] leading-none"
         >
-          STUCK: {stuckCount}
+          ⚙
         </button>
-      ) : null}
-      {error ? <span className={`text-[#f85149] ${stuckCount > 0 ? "ml-2" : "ml-auto"}`}>{error}</span> : null}
-      <button
-        type="button"
-        onClick={onOpenSettings}
-        data-testid="open-settings"
-        aria-label="open settings"
-        title="settings"
-        className={`${stuckCount === 0 && !error ? "ml-auto " : "ml-2 "}text-[#6e7681] hover:text-[#c9d1d9] text-[14px] leading-none`}
-      >
-        ⚙
-      </button>
+      </div>
     </div>
   );
 }

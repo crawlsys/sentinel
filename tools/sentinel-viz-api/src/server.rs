@@ -65,6 +65,7 @@ pub fn router(state: Arc<AppState>) -> axum::Router {
         .route("/api/name-session/{session_id}", get(name_session_endpoint))
         .route("/api/summary/{session_id}", get(summary_endpoint))
         .route("/api/config", get(get_config).post(set_config))
+        .route("/api/kpis", get(kpis_endpoint))
         .route("/api/stream", get(sse::stream))
         .layer(cors)
         .with_state(state)
@@ -124,6 +125,33 @@ pub struct SetConfigBody {
     pub openai_api_key: Option<String>,
     /// Optional Ollama URL override (defaults to existing or http://127.0.0.1:11434).
     pub ollama_url: Option<String>,
+}
+
+async fn kpis_endpoint(
+    State(state): State<Arc<AppState>>,
+) -> Result<axum::Json<crate::kpis::Kpis>, (StatusCode, String)> {
+    // Reuse the cached default graph snapshot when present to avoid
+    // rebuilding 90k events for each KPI poll.
+    let cur_seq = db::open_ro(&state.db_path)
+        .ok()
+        .and_then(|c| db::peek_max_seq(&c).ok())
+        .unwrap_or(0);
+    let key = (state.window_limit, Some(6 * 3600_i64), false);
+    let cached_graph = {
+        let cache = state.cache.read().unwrap();
+        cache
+            .iter()
+            .find(|e| e.key == key && e.last_seq == cur_seq)
+            .map(|e| Arc::clone(&e.graph))
+    };
+    let graph_arc: Arc<crate::model::GraphResponse> = if let Some(g) = cached_graph {
+        g
+    } else {
+        let conn = db::open_ro(&state.db_path).map_err(internal)?;
+        let g = graph::load_graph_with(&conn, GraphOpts::default()).map_err(internal)?;
+        Arc::new(g)
+    };
+    Ok(axum::Json(crate::kpis::compute(&graph_arc)))
 }
 
 async fn set_config(
