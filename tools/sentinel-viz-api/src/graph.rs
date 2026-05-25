@@ -22,7 +22,12 @@ const FIRING_THRESHOLD: f64 = 30.0;
 const BUSY_THRESHOLD: f64 = 90.0;
 const IDLE_THRESHOLD: f64 = 300.0;
 const DORMANT_THRESHOLD: f64 = 1800.0;
-const AWAIT_FRESHNESS_SECS: f64 = 3600.0;
+/// Maximum age (seconds) for a session to remain flagged as
+/// `awaiting_user`. Tuned to 24h so sessions stuck overnight still
+/// surface in the STUCK badge — the original 1h Python value was
+/// "user walked away, forget it" which loses sight of multi-hour
+/// blocked work. Past this window the session falls to `dead`.
+const AWAIT_FRESHNESS_SECS: f64 = 86_400.0;
 
 /// Knobs the HTTP layer can override per-request.
 #[derive(Debug, Clone, Copy)]
