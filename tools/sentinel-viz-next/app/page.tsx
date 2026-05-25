@@ -11,11 +11,17 @@ import { useGraphStream } from "../lib/sse";
 export default function Page() {
   const { graph, error, connected } = useGraphStream();
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+  const [anchorTs, setAnchorTs] = useState<string | null>(null);
 
   const selectedNode = useMemo(() => {
     if (!graph || !selectedNodeId) return null;
     return graph.nodes.find((n) => n.id === selectedNodeId) ?? null;
   }, [graph, selectedNodeId]);
+
+  function selectNode(nodeId: string | null, ts?: string) {
+    setSelectedNodeId(nodeId);
+    setAnchorTs(ts ?? null);
+  }
 
   return (
     <main className="flex flex-col h-screen">
@@ -25,7 +31,7 @@ export default function Page() {
           <GraphCanvas
             graph={graph}
             selectedNodeId={selectedNodeId}
-            onSelectNode={setSelectedNodeId}
+            onSelectNode={(id) => selectNode(id)}
           />
           {!graph ? (
             <div
@@ -39,10 +45,14 @@ export default function Page() {
             </div>
           ) : null}
         </div>
-        <PanelInspector node={selectedNode} onClose={() => setSelectedNodeId(null)} />
+        <PanelInspector
+          node={selectedNode}
+          anchorTs={anchorTs}
+          onClose={() => selectNode(null)}
+        />
         <EventTicker
           events={graph?.events ?? []}
-          onSelectNode={(id) => setSelectedNodeId(id)}
+          onSelectNode={(id, ts) => selectNode(id, ts)}
         />
       </div>
     </main>

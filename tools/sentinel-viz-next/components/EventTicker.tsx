@@ -7,7 +7,7 @@ import { categoryColor, categoryLabel, shortTime } from "../lib/format";
 
 interface Props {
   events: RecentEvent[];
-  onSelectNode: (nodeId: string) => void;
+  onSelectNode: (nodeId: string, eventTs?: string) => void;
 }
 
 interface TickerMember {
@@ -54,8 +54,8 @@ export function EventTicker({ events, onSelectNode }: Props) {
         {rows.map((row) => {
           const isOpen = expanded.has(row.key);
           const focus = () => {
-            if (row.toolCallId) onSelectNode(row.toolCallId);
-            else if (row.sessionId) onSelectNode(`SentinelSession#${row.sessionId}`);
+            if (row.toolCallId) onSelectNode(row.toolCallId, row.ts);
+            else if (row.sessionId) onSelectNode(`SentinelSession#${row.sessionId}`, row.ts);
           };
           return (
             <li
@@ -96,7 +96,7 @@ export function EventTicker({ events, onSelectNode }: Props) {
                   {row.members.map((m, i) => (
                     <li
                       key={`${row.key}-m-${i}`}
-                      onClick={() => m.toolCallId && onSelectNode(m.toolCallId)}
+                      onClick={() => m.toolCallId && onSelectNode(m.toolCallId, m.ts)}
                       className="py-0.5 text-[10px] text-[#c9d1d9] hover:text-[#58a6ff] cursor-pointer"
                     >
                       <span className="text-[#6e7681] mr-2">{shortTime(m.ts)}</span>

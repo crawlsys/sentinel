@@ -23,30 +23,50 @@ function friendlyTitle(node: Node): string {
   }
 }
 
-function segmentStyle(kind: string, hadError: boolean): {
-  border: string;
-  label: string;
-} {
-  if (hadError) return { border: "#f85149", label: "#f85149" };
-  if (kind === "user_input") return { border: "#58a6ff", label: "#58a6ff" };
-  if (kind === "assistant_turn") return { border: "#bc8cff", label: "#bc8cff" };
-  return { border: "#30363d", label: "#3fb950" };
+const TC_TOOLS = new Set(["Bash", "Read", "Write", "Edit", "Grep", "Glob", "NotebookEdit", "MultiEdit"]);
+const PLANNING_TOOLS = new Set(["TaskCreate", "TaskUpdate", "TaskList", "TaskGet", "TaskStop", "TaskOutput", "WebFetch", "WebSearch", "Plan", "ExitPlanMode", "EnterPlanMode"]);
+const COMMUNICATION_TOOLS = new Set(["Agent", "AskUserQuestion", "Stop", "ToolSearch"]);
+
+function segmentStyle(
+  kind: string,
+  hadError: boolean,
+  tools: string[],
+): { border: string; label: string; bg: string } {
+  if (hadError) return { border: "#f85149", label: "#f85149", bg: "#3a0f0f" };
+  if (kind === "user_input") return { border: "#58a6ff", label: "#58a6ff", bg: "#0d1f3a" };
+  // Assistant turn — color by the dominant tool category within the turn.
+  if (tools.length > 0) {
+    const t = tools[0];
+    if (TC_TOOLS.has(t)) return { border: "#3fb950", label: "#3fb950", bg: "#0d1f0d" };
+    if (PLANNING_TOOLS.has(t)) return { border: "#d29922", label: "#d29922", bg: "#1f1a08" };
+    if (COMMUNICATION_TOOLS.has(t)) return { border: "#bc8cff", label: "#bc8cff", bg: "#1a0f24" };
+  }
+  // Text-only assistant turn (no tool use).
+  return { border: "#bc8cff", label: "#bc8cff", bg: "#1a0f24" };
 }
 
 interface Props {
   node: Node | null;
+  /** Anchor timestamp from the ticker click. When set, activity is
+   * fetched as a ±60s window around it instead of just the tail. */
+  anchorTs?: string | null;
   onClose: () => void;
 }
 
-export function PanelInspector({ node, onClose }: Props) {
+export function PanelInspector({ node, anchorTs, onClose }: Props) {
   const sessionId =
     node?.type === "SentinelSession"
       ? (node.data?.session_id as string | undefined)
       : (node?.data?.session_id as string | undefined);
 
   const activityQ = useQuery({
-    queryKey: ["activity", sessionId],
-    queryFn: ({ signal }) => fetchActivity(sessionId!, { limit: 10 }, signal),
+    queryKey: ["activity", sessionId, anchorTs ?? null],
+    queryFn: ({ signal }) =>
+      fetchActivity(
+        sessionId!,
+        anchorTs ? { limit: 30, atTs: anchorTs, windowSecs: 60 } : { limit: 10 },
+        signal,
+      ),
     enabled: !!sessionId,
     staleTime: 5_000,
   });
@@ -125,8 +145,9 @@ export function PanelInspector({ node, onClose }: Props) {
 
       {sessionId ? (
         <div className="mt-4 border-t border-[#30363d] pt-3">
-          <h4 className="text-[10px] uppercase tracking-wider text-[#6e7681] mb-2">
-            recent activity
+          <h4 className="text-[10px] uppercase tracking-wider text-[#6e7681] mb-2 flex justify-between">
+            <span>{anchorTs ? "activity ± 60s" : "recent activity"}</span>
+            {anchorTs ? <span className="text-[#58a6ff]">@ {anchorTs.slice(11, 19)}</span> : null}
           </h4>
           {activityQ.isPending ? (
             <p className="text-[#6e7681]">loading…</p>
@@ -134,17 +155,17 @@ export function PanelInspector({ node, onClose }: Props) {
             <p className="text-[#f85149]">activity error</p>
           ) : activityQ.data?.segments.length ? (
             <ul className="space-y-2" data-testid="activity-segments">
-              {activityQ.data.segments.slice(-8).reverse().map((s, i) => {
-                const sty = segmentStyle(s.kind, !!s.had_error);
+              {activityQ.data.segments.slice(-12).reverse().map((s, i) => {
+                const sty = segmentStyle(s.kind, !!s.had_error, s.tools ?? []);
                 return (
                   <li
                     key={`${s.ts}-${i}`}
-                    className="p-2 rounded bg-[#0d1117] border-l-2"
-                    style={{ borderLeftColor: sty.border }}
+                    className="p-2 rounded border-l-2"
+                    style={{ borderLeftColor: sty.border, backgroundColor: sty.bg }}
                   >
                     <div className="flex justify-between items-baseline text-[10px] mb-1 gap-2">
                       <span className="font-bold truncate" style={{ color: sty.label }}>
-                        {s.kind === "user_input" ? "user" : s.label}
+                        {s.kind === "user_input" ? "user input" : s.label}
                       </span>
                       <span className="text-[#6e7681] whitespace-nowrap">{relTime(s.ts)}</span>
                     </div>

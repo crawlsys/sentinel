@@ -87,7 +87,7 @@ describe("EventTicker", () => {
     const rows = screen.getByTestId("ticker-rows").children;
     // Click the "Bash ×2" row (last in display order, freshest first → newest is user prompt, second is denied hook, third is Bash).
     fireEvent.click(rows[2].querySelector(".cursor-pointer")!);
-    expect(spy).toHaveBeenCalledWith("SentinelToolCall#tc1");
+    expect(spy).toHaveBeenCalledWith("SentinelToolCall#tc1", expect.any(String));
   });
 
   it("clicking the ×N badge expands the group without firing onSelectNode", () => {

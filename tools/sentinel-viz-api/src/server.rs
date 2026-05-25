@@ -2,10 +2,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
-use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
-use axum::response::IntoResponse;
 use axum::routing::get;
 use serde::Deserialize;
 use tower_http::cors::{Any, CorsLayer};
@@ -25,6 +23,10 @@ pub struct AppState {
     /// on every refresh when the store hasn't advanced. Holds at most
     /// a few entries — one per unique (limit, since_secs, include_hooks).
     pub cache: RwLock<Vec<CacheEntry>>,
+    /// `/api/activity` cache, keyed by (sid, at_ts, window, limit).
+    /// Short TTL — transcript JSONLs are small and the bridge appends
+    /// to them out-of-band, so we expire eagerly.
+    pub activity_cache: RwLock<Vec<ActivityCacheEntry>>,
 }
 
 pub struct CacheEntry {
@@ -37,6 +39,14 @@ pub struct CacheEntry {
     /// directly so it can be re-serialised with `data: ` framing.
     pub graph: Arc<GraphResponse>,
 }
+
+pub struct ActivityCacheEntry {
+    pub key: (String, Option<String>, i64, usize),
+    pub built_at: Instant,
+    pub body: Arc<Vec<u8>>,
+}
+
+const ACTIVITY_TTL_SECS: u64 = 6;
 
 pub fn router(state: Arc<AppState>) -> axum::Router {
     let cors = CorsLayer::new()
@@ -134,14 +144,55 @@ pub struct ActivityQuery {
 }
 
 async fn activity_endpoint(
-    State(_state): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
     Path(session_id): Path<String>,
     Query(q): Query<ActivityQuery>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    use axum::http::header;
+    use axum::response::IntoResponse;
+
     let limit = q.limit.unwrap_or(80);
     let window = q.window.unwrap_or(30);
-    let a: ActivityResponse = activity::session_activity(&session_id, limit, q.at_ts.as_deref(), window);
-    Json(a)
+    let key = (session_id.clone(), q.at_ts.clone(), window, limit);
+
+    // TTL cache.
+    {
+        let cache = state.activity_cache.read().unwrap();
+        for e in cache.iter() {
+            if e.key == key && e.built_at.elapsed().as_secs() < ACTIVITY_TTL_SECS {
+                return (
+                    [(header::CONTENT_TYPE, "application/json")],
+                    (*e.body).clone(),
+                )
+                    .into_response();
+            }
+        }
+    }
+
+    let a: ActivityResponse =
+        activity::session_activity(&session_id, limit, q.at_ts.as_deref(), window);
+    let body = serde_json::to_vec(&a).unwrap_or_default();
+    let body_arc = Arc::new(body);
+    {
+        let mut cache = state.activity_cache.write().unwrap();
+        cache.retain(|e| {
+            e.key != key && e.built_at.elapsed().as_secs() < ACTIVITY_TTL_SECS * 4
+        });
+        cache.push(ActivityCacheEntry {
+            key,
+            built_at: Instant::now(),
+            body: Arc::clone(&body_arc),
+        });
+        if cache.len() > 32 {
+            let drop_n = cache.len() - 32;
+            cache.drain(0..drop_n);
+        }
+    }
+    (
+        [(header::CONTENT_TYPE, "application/json")],
+        (*body_arc).clone(),
+    )
+        .into_response()
 }
 
 fn internal(e: anyhow::Error) -> (StatusCode, String) {

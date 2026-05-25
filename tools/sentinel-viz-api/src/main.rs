@@ -32,6 +32,7 @@ async fn main() -> Result<()> {
         window_limit,
         started_at: Instant::now(),
         cache: std::sync::RwLock::new(Vec::new()),
+        activity_cache: std::sync::RwLock::new(Vec::new()),
     });
 
     let app = sentinel_viz_api::server::router(state);
