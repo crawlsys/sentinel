@@ -162,7 +162,7 @@ pub fn load_graph(conn: &Connection, limit: usize) -> Result<GraphResponse> {
     for sid in &top_sids {
         if let Some(invs) = inv_by_session.get(sid) {
             let mut sorted: Vec<&&Node> = invs.iter().collect();
-            sorted.sort_by(|a, b| b.seq.cmp(&a.seq));
+            sorted.sort_by_key(|n| std::cmp::Reverse(n.seq));
             for n in sorted.into_iter().take(PER_SESSION_CAP) {
                 kept_inv_ids.insert(n.id.clone());
             }
@@ -190,10 +190,10 @@ pub fn load_graph(conn: &Connection, limit: usize) -> Result<GraphResponse> {
     for ev in events_tail_for_window {
         if let Some(s) = ev.payload.get("session_id").and_then(|v| v.as_str()) {
             for n in nodes.values() {
-                if n.kind == node_kind::SESSION {
-                    if n.data.get("session_id").and_then(|v| v.as_str()) == Some(s) {
-                        kept_ids.insert(n.id.clone());
-                    }
+                if n.kind == node_kind::SESSION
+                    && n.data.get("session_id").and_then(|v| v.as_str()) == Some(s)
+                {
+                    kept_ids.insert(n.id.clone());
                 }
             }
         }

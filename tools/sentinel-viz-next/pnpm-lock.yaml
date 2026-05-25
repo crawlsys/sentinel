@@ -14,6 +14,9 @@ importers:
       d3-force:
         specifier: ^3.0.0
         version: 3.0.0
+      d3-selection:
+        specifier: ^3.0.0
+        version: 3.0.0
       d3-zoom:
         specifier: ^3.0.0
         version: 3.0.0
@@ -45,6 +48,9 @@ importers:
       '@types/d3-force':
         specifier: ^3.0.10
         version: 3.0.10
+      '@types/d3-selection':
+        specifier: ^3.0.11
+        version: 3.0.11
       '@types/d3-zoom':
         specifier: ^3.0.8
         version: 3.0.8

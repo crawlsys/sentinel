@@ -1,36 +1,52 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# sentinel-viz-next
 
-## Getting Started
+Next.js 16 / React 19 viewer for the Sentinel activity graph.
 
-First, run the development server:
+Replaces the inline-HTML viewer baked into the Python
+`tools/sentinel-viz/viz_server.py`. The Python server keeps running on
+`:8081` until this stack reaches behavioural parity and the user kills
+it. See `~/.agents/plans/sentinel-viz-next.md`.
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+## Components
+
+- `components/GraphCanvas.tsx` — SVG + `d3-force` simulation. Pan / zoom
+  via `d3-zoom`. Click a node → `onSelectNode`.
+- `components/EventTicker.tsx` — right-rail ticker. Groups consecutive
+  events by `(session_id, type, tool_call_id, outcome)` (plan
+  gotcha #9). Click a row → focus the referenced node.
+- `components/PanelInspector.tsx` — middle-rail node inspector. Pulls
+  `/api/activity/{session_id}` via TanStack Query, shows the last 8
+  segments.
+- `components/StatusBar.tsx` — top bar. Connection state, window /
+  corpus counts, current `max_seq`.
+
+## Run
+
+The Rust API on `:8082` is canonical. The Next.js dev server reaches it
+via `NEXT_PUBLIC_VIZ_API`:
+
+```
+# terminal 1
+cd ../sentinel-viz-api && cargo run
+
+# terminal 2
+NEXT_PUBLIC_VIZ_API=http://127.0.0.1:8082 pnpm dev -p 8083
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+## Tests
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+```
+pnpm test          # vitest — unit + component (happy-dom)
+pnpm test:e2e      # playwright smoke (needs both servers running)
+pnpm build         # full prod build + TypeScript check
+```
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+Component specs live under `tests/components/`; pure utility specs
+under `tests/lib/`; the single e2e smoke under `tests/e2e/`. The plan
+treats vitest as the per-commit gate; playwright is a phase-exit gate.
 
-## Learn More
+## Data shapes
 
-To learn more about Next.js, take a look at the following resources:
-
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+See `types/api.ts` — these are hand-mirrored from the Rust
+`crates::model` types. If the Rust side changes a field, update both
+sides in the same PR.
