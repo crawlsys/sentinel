@@ -103,7 +103,7 @@ export default function Page() {
           sessionColors={sessionColors}
         />
       </div>
-      <SessionConsole graph={graph} />
+      <SessionConsole graph={graph} sessionColors={sessionColors} />
       <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} />
     </main>
   );
