@@ -4,6 +4,7 @@ pub mod db;
 pub mod graph;
 pub mod health;
 pub mod model;
+pub mod naming;
 pub mod server;
 pub mod sse;
 pub mod transcript;

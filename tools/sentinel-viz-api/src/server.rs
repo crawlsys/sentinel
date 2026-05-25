@@ -13,12 +13,14 @@ use crate::db;
 use crate::graph::{self, GraphOpts};
 use crate::health;
 use crate::model::{ActivityResponse, GraphResponse};
+use crate::naming::{self, NamingState};
 use crate::sse;
 
 pub struct AppState {
     pub db_path: PathBuf,
     pub window_limit: usize,
     pub started_at: Instant,
+    pub naming: NamingState,
     /// Snapshot cache keyed by opts. Avoids re-scanning 90k events
     /// on every refresh when the store hasn't advanced. Holds at most
     /// a few entries — one per unique (limit, since_secs, include_hooks).
@@ -57,9 +59,17 @@ pub fn router(state: Arc<AppState>) -> axum::Router {
         .route("/api/healthz", get(health::healthz))
         .route("/api/graph", get(graph_endpoint))
         .route("/api/activity/{session_id}", get(activity_endpoint))
+        .route("/api/name-session/{session_id}", get(name_session_endpoint))
         .route("/api/stream", get(sse::stream))
         .layer(cors)
         .with_state(state)
+}
+
+async fn name_session_endpoint(
+    State(state): State<Arc<AppState>>,
+    Path(session_id): Path<String>,
+) -> axum::Json<naming::NameResponse> {
+    axum::Json(naming::name_session(&state.naming, &session_id).await)
 }
 
 #[derive(Deserialize)]

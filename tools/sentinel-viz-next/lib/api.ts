@@ -45,3 +45,20 @@ export async function fetchHealth(signal?: AbortSignal): Promise<HealthResponse>
 export function streamUrl(): string {
   return `${apiBase()}/api/stream`;
 }
+
+export interface NameResponse {
+  session_id: string;
+  name: string | null;
+  source: string;
+  cached: boolean;
+}
+
+export async function fetchSessionName(
+  sessionId: string,
+  signal?: AbortSignal,
+): Promise<NameResponse> {
+  const url = `${apiBase()}/api/name-session/${encodeURIComponent(sessionId)}`;
+  const res = await fetch(url, { signal });
+  if (!res.ok) throw new Error(`name-session: ${res.status}`);
+  return res.json();
+}

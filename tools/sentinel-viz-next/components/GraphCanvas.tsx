@@ -8,6 +8,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 
 import type { Edge, GraphResponse, Node } from "../types/api";
 import { nodeColor, statusColor } from "../lib/format";
+import { ensureName, subscribe as subscribeSessionNames } from "../lib/session-names";
 
 interface SimNode extends d3Force.SimulationNodeDatum {
   id: string;
@@ -35,6 +36,19 @@ interface ViewportSize {
   height: number;
 }
 
+/** Label rendered next to a SentinelSession node. Asks the
+ *  naming subsystem for a cached human name; falls back to UUID
+ *  slice when naming is disabled or hasn't returned yet. */
+function sessionLabel(d: SimNode): string {
+  if (d.kind !== "SentinelSession") return "";
+  const sid = typeof d.ref.data?.session_id === "string" ? (d.ref.data.session_id as string) : d.id;
+  if (!sid) return "";
+  const named = ensureName(sid);
+  if (typeof named === "string" && named.length > 0) return named;
+  // Fall back to UUID slice (8 chars).
+  return sid.length > 12 ? `${sid.slice(0, 8)}…` : sid;
+}
+
 export function GraphCanvas({ graph, selectedNodeId, onSelectNode }: Props) {
   const svgRef = useRef<SVGSVGElement | null>(null);
   const gRef = useRef<SVGGElement | null>(null);
@@ -45,6 +59,9 @@ export function GraphCanvas({ graph, selectedNodeId, onSelectNode }: Props) {
   const onSelectRef = useRef(onSelectNode);
   onSelectRef.current = onSelectNode;
   const [viewport, setViewport] = useState<ViewportSize>({ width: 0, height: 0 });
+  // Bump on every session-name arrival so labels redraw.
+  const [, setNameTick] = useState(0);
+  useEffect(() => subscribeSessionNames(() => setNameTick((n) => n + 1)), []);
 
   // Track viewport size.
   useEffect(() => {
@@ -236,26 +253,23 @@ export function GraphCanvas({ graph, selectedNodeId, onSelectNode }: Props) {
             .attr("y", 4)
             .attr("font-size", 9)
             .attr("fill", "#c9d1d9")
-            .text((d) => {
-              if (d.kind === "SentinelSession") {
-                const sid = typeof d.ref.data?.session_id === "string" ? (d.ref.data.session_id as string) : d.id;
-                return sid.length > 12 ? `${sid.slice(0, 8)}…` : sid;
-              }
-              return "";
-            });
+            .text((d) => sessionLabel(d));
           return grp;
         },
         (update) => {
           // Re-paint in place — colours / status may have changed.
           update
             .attr("data-category", (d) => d.category ?? "")
-            .attr("data-status", (d) => d.session_status ?? "")
-            .select("circle")
+            .attr("data-status", (d) => d.session_status ?? "");
+          update.select("circle:not(.pulse-ring)")
             .attr("fill", (d) =>
               d.kind === "SentinelSession"
                 ? statusColor(d.session_status)
                 : nodeColor(d.kind, d.outcome, d.category),
             );
+          // Refresh label text — the name may have arrived from the
+          // naming API since the node was created.
+          update.select("text").text((d) => sessionLabel(d));
           return update;
         },
         (exit) => exit.remove(),

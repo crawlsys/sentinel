@@ -218,6 +218,25 @@ Feature: Sentinel viz delivers live agent activity at a glance
     Given the same event has aged > 24 hours
     Then the timestamp reads "<weekday> HH:MM" (e.g. "Mon 14:30")
 
+  Scenario: Session galaxies show a human name when naming is enabled
+    Given SENTINEL_VIZ_NAMING_MODEL is "openai:gpt-4o-mini" with OPENAI_API_KEY set
+    When the GraphCanvas renders a SentinelSession node it hasn't seen before
+    Then /api/name-session/{id} is called exactly once per id
+    And within 10s the node's text label updates to the model's 2-3 word name
+    And the label is lowercased and stripped of punctuation/quotes
+
+  Scenario: Session label falls back to UUID slice when naming is disabled
+    Given SENTINEL_VIZ_NAMING_MODEL is "none" or unset
+    Then /api/name-session/{id} returns {name: null, source: "disabled"}
+    And the GraphCanvas renders the UUID slice (first 8 chars + ellipsis)
+    And no fetch is made beyond the initial one (cached null doesn't re-fetch)
+
+  Scenario: Naming endpoint rate-limits to 10 calls per minute
+    Given 10 distinct sessions are requested within 60 seconds
+    When an 11th request fires within the same minute
+    Then the 11th response has source "rate-limited" and name null
+    And the frontend renders the UUID fallback for that session
+
   Scenario: API drops activity segments with no text AND no tool_calls
     Given a session whose JSONL contains an assistant message with empty content
     When /api/activity/{sid} returns
