@@ -449,7 +449,7 @@ fn remove_lifecycle_under_lock(mut file: &File, kind: LifecycleKind, at_ms: u64)
     removed
 }
 
-fn event_matches_lifecycle(event: &EscalationKind, kind: LifecycleKind) -> bool {
+const fn event_matches_lifecycle(event: &EscalationKind, kind: LifecycleKind) -> bool {
     matches!(
         (event, kind),
         (EscalationKind::Blocked { .. }, LifecycleKind::Blocked)

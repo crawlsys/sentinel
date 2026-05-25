@@ -1,11 +1,11 @@
 //! OpenRouter-backed `LlmPort` — the standardized LLM path for hooks.
 //!
 //! Every hook that needs an LLM completion (`ctx.llm`) goes through this
-//! adapter, which routes to OpenRouter via Rig — the same gateway and auth
+//! adapter, which routes to `OpenRouter` via Rig — the same gateway and auth
 //! surface (`OPENROUTER_API_KEY`) the adversarial judge uses (`rig_judge.rs`).
 //! This is the single standardized path: no direct-vendor SDK clients.
 //!
-//! `LlmModel` tiers map to OpenRouter model IDs via
+//! `LlmModel` tiers map to `OpenRouter` model IDs via
 //! [`JudgeModel::openrouter_model_id`]:
 //!   - `Opus`   → `anthropic/claude-opus-4.7`
 //!   - `Sonnet` → `openai/gpt-5.5`
@@ -38,14 +38,14 @@ impl OpenRouterLlm {
         })
     }
 
-    /// Map a domain `LlmModel` tier to its OpenRouter model ID.
+    /// Map a domain `LlmModel` tier to its `OpenRouter` model ID.
     ///
     /// The memory/judge stack is standardized on **Opus 4.7 + Codex** over
-    /// OpenRouter, so every tier resolves to one of those two (no Anthropic
+    /// `OpenRouter`, so every tier resolves to one of those two (no Anthropic
     /// Haiku, no Sonnet, no Cerebras). The cheap tier maps to Codex
     /// (`gpt-5.5-pro`), heavy tiers to Opus 4.7. Returned as literal IDs to
     /// keep this adapter decoupled from the churning `JudgeModel` enum.
-    fn model_id(model: LlmModel) -> &'static str {
+    const fn model_id(model: LlmModel) -> &'static str {
         match model {
             LlmModel::Haiku => "openai/gpt-5.5-pro", // Codex tier
             LlmModel::Sonnet => "anthropic/claude-opus-4.7", // no Sonnet in policy → Opus

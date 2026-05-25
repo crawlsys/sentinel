@@ -168,7 +168,7 @@ pub fn run(
             v.failed.to_string().red(),
         );
     } else {
-        eprintln!("{} Validation: all {} checks passed", "✓".green(), v.passed,);
+        eprintln!("{} Validation: all {} checks passed", "✓".green(), v.passed);
     }
 
     Ok(())

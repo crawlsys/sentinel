@@ -140,8 +140,7 @@ fn is_metrics_jsonl(path: &Path) -> bool {
     let is_jsonl = path
         .extension()
         .and_then(|e| e.to_str())
-        .map(|e| e == "jsonl")
-        .unwrap_or(false);
+        .is_some_and(|e| e == "jsonl");
     in_metrics && is_jsonl
 }
 
@@ -156,7 +155,7 @@ fn is_metrics_jsonl(path: &Path) -> bool {
 ///   `accounts-application/src/trace.rs::TRACE_ID_ENV_VAR` (public). If
 ///   one ever changes, both must.
 /// - Empty/whitespace value is treated as unset.
-/// - Fallback is a fresh UUIDv4 string in 8-4-4-4-12 hex with version
+/// - Fallback is a fresh `UUIDv4` string in 8-4-4-4-12 hex with version
 ///   bits 4 and RFC 4122 variant bits set. accounts-application uses
 ///   `mint_token_lineage` (inline format); sentinel uses the `uuid`
 ///   crate's `Uuid::new_v4().to_string()`. Same wire shape.
@@ -166,7 +165,7 @@ fn is_metrics_jsonl(path: &Path) -> bool {
 ///   user-initiated operation).
 const TRACE_ID_ENV_VAR: &str = "CLAUDE_TRACE_ID";
 
-/// Read `CLAUDE_TRACE_ID` from the env, or mint a fresh UUIDv4 if absent.
+/// Read `CLAUDE_TRACE_ID` from the env, or mint a fresh `UUIDv4` if absent.
 /// Wrapped in a one-line helper so the append path can call it without
 /// every caller knowing about the env-var contract.
 fn current_trace_id() -> String {
@@ -200,7 +199,7 @@ fn stamp_trace_id_if_missing(content: &[u8]) -> Vec<u8> {
     stamp_trace_id_if_missing_with(content, current_trace_id)
 }
 
-/// Pure-function variant for testing. The caller supplies the trace_id
+/// Pure-function variant for testing. The caller supplies the `trace_id`
 /// generator so tests can pass deterministic ids without mutating
 /// process-global env (`unsafe_code = forbid` in this workspace).
 fn stamp_trace_id_if_missing_with<F: Fn() -> String>(content: &[u8], gen_id: F) -> Vec<u8> {
@@ -270,8 +269,7 @@ pub fn rotate_metrics_log_if_oversized(path: &Path) {
     }
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0);
+        .map_or(0, |d| d.as_millis() as u64);
     let archive_name = format!(
         "{}.archive.{ts}",
         path.file_name()

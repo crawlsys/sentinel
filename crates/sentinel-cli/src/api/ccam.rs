@@ -102,7 +102,7 @@ fn load_accounts() -> serde_json::Value {
             .get("claudeAiOauth")
             .cloned()
             .unwrap_or(serde_json::json!({}));
-        let expires_at = oauth.get("expiresAt").and_then(|v| v.as_u64()).unwrap_or(0);
+        let expires_at = oauth.get("expiresAt").and_then(serde_json::Value::as_u64).unwrap_or(0);
         let subscription_type = oauth
             .get("subscriptionType")
             .and_then(|v| v.as_str())
@@ -134,7 +134,7 @@ fn load_accounts() -> serde_json::Value {
         let cooldown_reason = cooldown_entry
             .and_then(|e| e.get("reason"))
             .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
+            .map(std::string::ToString::to_string);
 
         accounts.push(serde_json::json!({
             "name": name,
@@ -319,7 +319,7 @@ async fn get_rotation() -> Json<serde_json::Value> {
     let mut cooldowns = serde_json::Map::new();
     if let Some(cd_map) = raw.get("cooldowns").and_then(|v| v.as_object()) {
         for (profile, entry) in cd_map {
-            let until = entry.get("until").and_then(|v| v.as_u64()).unwrap_or(0);
+            let until = entry.get("until").and_then(serde_json::Value::as_u64).unwrap_or(0);
             let hours_remaining = if until > now {
                 ((until - now) as f64 / 1000.0 / 3600.0).ceil() as u64
             } else {

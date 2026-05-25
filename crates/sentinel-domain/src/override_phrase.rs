@@ -77,8 +77,9 @@ pub fn is_doppler_override(prompt: &str) -> bool {
 }
 
 /// True if `prompt` matches any pattern in [`PHASE_GATE_OVERRIDE_PATTERNS`].
-/// When true, the hygiene_override hook will write a signed phase-gate
-/// override token; phase_gate.rs will let writes to skill files through
+///
+/// When true, the `hygiene_override` hook will write a signed phase-gate
+/// override token; `phase_gate.rs` will let writes to skill files through
 /// for the override TTL (60s).
 #[must_use]
 pub fn is_phase_gate_override(prompt: &str) -> bool {
@@ -91,7 +92,7 @@ pub fn is_phase_gate_override(prompt: &str) -> bool {
 fn matches_any(prompt: &str, patterns: &[&str]) -> bool {
     patterns
         .iter()
-        .any(|p| Regex::new(p).map(|re| re.is_match(prompt)).unwrap_or(false))
+        .any(|p| Regex::new(p).is_ok_and(|re| re.is_match(prompt)))
 }
 
 #[cfg(test)]

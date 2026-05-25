@@ -7,7 +7,7 @@
 //! [`ProofEntry`](crate::proof::ProofEntry) so a chain can interleave coarse
 //! phase boundaries and fine step boundaries without breaking continuity.
 //!
-//! # Trust model (mirrors PhaseProof)
+//! # Trust model (mirrors `PhaseProof`)
 //!
 //! Each step proof commits to:
 //! - the step identity (`skill`, `phase_id`, `step_id`)
@@ -16,10 +16,10 @@
 //! - the previous chain head's `combined_hash` (or [`GENESIS_HASH`])
 //! - an artifact JSON value — the *typed handoff* that downstream steps
 //!   consume as input. This is the "Apollo `@key`" of our federation: the
-//!   chain of typed StepProof artifacts is the chain of trust between
+//!   chain of typed `StepProof` artifacts is the chain of trust between
 //!   composed steps.
 //!
-//! # Step-specific extensions over PhaseProof
+//! # Step-specific extensions over `PhaseProof`
 //!
 //! - `artifact`: arbitrary JSON value carrying the typed handoff. Empty by
 //!   default (e.g. for steps that only verify state and produce no payload).
@@ -66,7 +66,7 @@ pub struct StepProof {
     /// Collected evidence for this step (tool inputs, outputs, files, etc).
     pub evidence: Evidence,
 
-    /// SHA-256 of the serialized evidence — same algorithm as PhaseProof.
+    /// SHA-256 of the serialized evidence — same algorithm as `PhaseProof`.
     pub evidence_hash: String,
 
     // ── Apollo Federation: typed handoff artifact ──
@@ -96,8 +96,8 @@ pub struct StepProof {
     /// 32-byte hashes.
     pub previous_hash: String,
 
-    /// SHA-256 over (step_id || phase_id || skill || evidence_hash ||
-    /// artifact_hash || previous_hash). The "tessera" — what the next entry
+    /// SHA-256 over (`step_id` || `phase_id` || skill || `evidence_hash` ||
+    /// `artifact_hash` || `previous_hash`). The "tessera" — what the next entry
     /// will reference as its `previous_hash`.
     pub combined_hash: String,
 
@@ -209,13 +209,13 @@ impl StepProof {
     /// Mutates `self.signature` to contain the hex-encoded 64-byte
     /// Ed25519 signature over the bytes of `combined_hash`. Idempotent:
     /// signing a proof that's already signed re-signs it (the signature
-    /// is a deterministic function of the key + combined_hash).
+    /// is a deterministic function of the key + `combined_hash`).
     ///
     /// **Mandatory chain integrity stays SHA-256.** Signing is the
     /// enterprise compliance opt-in: when `SENTINEL_SIGNING_KEY` is
-    /// configured upstream, every StepProof gets signed at write time,
+    /// configured upstream, every `StepProof` gets signed at write time,
     /// and verifiers can confirm "this chain entry was authored by the
-    /// holder of <public_key>" — closing the residual "did sentinel
+    /// holder of <`public_key`>" — closing the residual "did sentinel
     /// really write this?" question that hash-only chains can't answer.
     ///
     /// Caller owns the key material. sentinel-domain stays pure — no
@@ -251,7 +251,7 @@ impl StepProof {
         sig_array.copy_from_slice(&sig_bytes);
         let signature = Signature::from_bytes(&sig_array);
         key.verify(self.combined_hash.as_bytes(), &signature)
-            .map(|_| true)
+            .map(|()| true)
             .map_err(|_| SignatureError::VerificationFailed)
     }
 

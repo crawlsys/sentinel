@@ -244,7 +244,7 @@ pub fn load_workflows(config_path: &Path) -> Result<Vec<SkillWorkflow>> {
 #[derive(Debug, Deserialize)]
 struct StepsConfig {
     /// Federation version (M2.7). Defaults to "1" for pre-M2.7 configs.
-    /// Bumped on breaking changes — see SkillSteps::federation_version.
+    /// Bumped on breaking changes — see `SkillSteps::federation_version`.
     #[serde(default = "default_federation_version_str")]
     federation_version: String,
     phases: Vec<StepsPhaseToml>,

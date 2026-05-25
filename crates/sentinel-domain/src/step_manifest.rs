@@ -108,14 +108,14 @@ pub struct StepConfigManifest {
 
 const MANIFEST_VERSION: u32 = 1;
 
-fn default_manifest_version() -> u32 {
+const fn default_manifest_version() -> u32 {
     MANIFEST_VERSION
 }
 
 impl StepConfigManifest {
     /// Empty manifest with the current schema version.
     #[must_use]
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             version: MANIFEST_VERSION,
             public_key: None,
@@ -241,7 +241,7 @@ impl StepConfigManifest {
                 sig_array.copy_from_slice(&sig_bytes);
                 let signature = Signature::from_bytes(&sig_array);
                 key.verify(entry.hash.as_bytes(), &signature)
-                    .map(|_| ManifestCheck::SignedOk)
+                    .map(|()| ManifestCheck::SignedOk)
                     .map_err(|_| ManifestError::Signature(SignatureError::VerificationFailed))
             }
         }

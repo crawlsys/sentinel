@@ -178,7 +178,7 @@ impl LayeredReversibilityClassifier {
             .bash
             .pattern
             .into_iter()
-            .chain(overrides_config.bash.pattern.into_iter())
+            .chain(overrides_config.bash.pattern)
         {
             let regex = Regex::new(&rule.pattern).with_context(|| {
                 format!("failed to compile bash pattern regex `{}`", rule.pattern)
@@ -241,7 +241,7 @@ impl LayeredReversibilityClassifier {
 /// agent at A3 because `dry_run_then_commit` demands
 /// `_intent`/`_reasoning`/`_expected_effect` on tool calls that
 /// pure-read or only mutate in-conversation state. Observed deadlock
-/// pre-fix: skill_gate requires `Skill(...)` before `Bash`, but
+/// pre-fix: `skill_gate` requires `Skill(...)` before `Bash`, but
 /// `dry_run_then_commit` refused `Skill(...)` (and `ToolSearch`,
 /// `AskUserQuestion`) as Irreversible, blocking the agent from
 /// loading the skill the gate demanded. Keep this list comprehensive;

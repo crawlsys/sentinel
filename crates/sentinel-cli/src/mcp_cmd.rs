@@ -561,7 +561,7 @@ pub async fn run() -> Result<()> {
     let signing_key = load_signing_key_from_env();
     let signing_required = matches!(
         std::env::var("SENTINEL_SIGNING_REQUIRED").ok().as_deref(),
-        Some("1") | Some("true") | Some("TRUE") | Some("yes")
+        Some("1" | "true" | "TRUE" | "yes")
     );
     let proof_engine = Arc::new(
         ProofEngine::new(state.clone(), judge.clone())

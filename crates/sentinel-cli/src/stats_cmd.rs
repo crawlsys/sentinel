@@ -133,7 +133,7 @@ pub fn run_hooks(limit: usize, hours: u32) -> Result<()> {
             .and_then(|v| v.as_str())
             .unwrap_or("?")
             .to_string();
-        let dur = row.get("duration_us").and_then(|v| v.as_u64()).unwrap_or(0);
+        let dur = row.get("duration_us").and_then(serde_json::Value::as_u64).unwrap_or(0);
 
         *by_hook_count.entry(hook.clone()).or_insert(0) += 1;
         *by_hook_duration.entry(hook.clone()).or_insert(0) += u128::from(dur);

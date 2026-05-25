@@ -1,4 +1,4 @@
-//! Request shape limits — content size + rate limiting (M4.6, ContextForge pattern).
+//! Request shape limits — content size + rate limiting (M4.6, `ContextForge` pattern).
 //!
 //! Two failure modes that production MCP servers consistently get bitten by:
 //!
@@ -23,7 +23,7 @@
 //!
 //! `step_judge::process` calls [`enforce_limits`] on the gathered evidence
 //! and artifact *before* dispatching to the AI judge. If a limit fires,
-//! the hook emits a StepProof with `JudgeVerdict::insufficient` and the
+//! the hook emits a `StepProof` with `JudgeVerdict::insufficient` and the
 //! `LimitError` reason, skipping the judge invocation entirely. The denial
 //! is loud (it lands in the proof chain) and cheap (no judge tokens spent).
 
@@ -48,6 +48,7 @@ pub const DEFAULT_MAX_EVIDENCE_BYTES: usize = 1_048_576;
 pub const DEFAULT_MAX_ARTIFACT_BYTES: usize = 262_144;
 
 /// Default rate limit: 60 calls per minute per step coordinate.
+///
 /// One call per second on average is fast enough for any human-in-the-loop
 /// flow and slow enough that retry storms get caught. Configurable per
 /// limit policy.
@@ -130,6 +131,7 @@ impl std::fmt::Display for LimitError {
 impl std::error::Error for LimitError {}
 
 /// Sliding-window call history for a single (skill, phase, step) coordinate.
+///
 /// The hook layer owns one of these per coordinate via `SessionState`;
 /// this module owns the eviction + check logic so policy stays pure.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

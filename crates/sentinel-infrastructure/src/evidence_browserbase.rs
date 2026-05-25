@@ -5,7 +5,7 @@
 //! caller-supplied Browserbase session metadata. This is the
 //! "judge evidence" pattern: the agent runs a browser smoke test
 //! through the Browserbase MCP server (remote URLs) or the CDP MCP
-//! server (localhost), collects the session_id + screenshot count +
+//! server (localhost), collects the `session_id` + screenshot count +
 //! console-error count + any artifact URLs,
 //! and passes that context through `submit_step_complete`'s
 //! `evidence_claim` arg. This adapter then validates the shape
@@ -25,7 +25,7 @@
 //! credential-managed) collects the artifacts; this adapter
 //! validates them and seals the receipt.
 //!
-//! A future enhancement can add a second "browserbase_remote"
+//! A future enhancement can add a second "`browserbase_remote`"
 //! adapter that DOES phone home — that's the M7.1 multi-adapter
 //! pattern (#69 cross-vendor verification). For #70 we ship
 //! the metadata-shape version because it's the entry point that
@@ -117,11 +117,11 @@ impl BrowserbaseAdapter {
         let screenshot_count = claim
             .context
             .get("screenshot_count")
-            .and_then(|v| v.as_u64());
+            .and_then(serde_json::Value::as_u64);
         let console_errors = claim
             .context
             .get("console_errors")
-            .and_then(|v| v.as_u64());
+            .and_then(serde_json::Value::as_u64);
         let recording_url = claim
             .context
             .get("recording_url")
@@ -158,12 +158,12 @@ impl BrowserbaseAdapter {
         let screenshot_count = claim
             .context
             .get("screenshot_count")
-            .and_then(|v| v.as_u64())
+            .and_then(serde_json::Value::as_u64)
             .unwrap_or(0);
         let console_errors = claim
             .context
             .get("console_errors")
-            .and_then(|v| v.as_u64())
+            .and_then(serde_json::Value::as_u64)
             .unwrap_or(0);
         let recording_url = claim
             .context

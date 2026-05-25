@@ -134,7 +134,7 @@ fn walk_for_skills(dir: &Path, depth: usize, max_depth: usize, skills: &mut Vec<
     };
 
     for entry in entries.filter_map(std::result::Result::ok) {
-        if !entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
+        if !entry.file_type().is_ok_and(|ft| ft.is_dir()) {
             continue;
         }
         let name = entry.file_name().to_string_lossy().to_string();

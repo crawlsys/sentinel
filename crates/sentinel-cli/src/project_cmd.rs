@@ -113,7 +113,7 @@ impl Report {
             for p in &self.created {
                 println!(
                     "    {}",
-                    p.strip_prefix(root).map(|s| s.display().to_string()).unwrap_or_else(|_| p.display().to_string())
+                    p.strip_prefix(root).map_or_else(|_| p.display().to_string(), |s| s.display().to_string())
                 );
             }
         }
@@ -123,7 +123,7 @@ impl Report {
             for p in &self.overwrote {
                 println!(
                     "    {}",
-                    p.strip_prefix(root).map(|s| s.display().to_string()).unwrap_or_else(|_| p.display().to_string())
+                    p.strip_prefix(root).map_or_else(|_| p.display().to_string(), |s| s.display().to_string())
                 );
             }
         }
@@ -133,7 +133,7 @@ impl Report {
             for p in &self.skipped_existing {
                 println!(
                     "    {}",
-                    p.strip_prefix(root).map(|s| s.display().to_string()).unwrap_or_else(|_| p.display().to_string())
+                    p.strip_prefix(root).map_or_else(|_| p.display().to_string(), |s| s.display().to_string())
                 );
             }
         }
@@ -339,7 +339,7 @@ When a plan crosses the threshold from "scratchpad" to "design doc," move it her
 Plans answer "why," PRs answer "what." Both live in version control once the work matures.
 "#;
 
-const HANDOVERS_README: &str = r#"# `.sentinel/handovers/`
+const HANDOVERS_README: &str = r"# `.sentinel/handovers/`
 
 Per-session summaries written when a session ends with non-trivial state to carry forward.
 
@@ -383,7 +383,7 @@ Free-form Markdown. Suggested sections (use what's relevant, omit what isn't):
 ## Pointers
 <files, commits, task IDs, docs>
 ```
-"#;
+";
 
 const LESSONS_README: &str = r#"# `.sentinel/lessons/`
 
@@ -541,7 +541,7 @@ fn find_repo_root(cwd: &Path) -> Option<PathBuf> {
 
 /// Today's date as `YYYY-MM-DD` in the local timezone. The dependency
 /// chain (chrono is already a workspace dep for the time-of-day work in
-/// session_init) means no new deps for the date format.
+/// `session_init`) means no new deps for the date format.
 fn current_date_string() -> String {
     chrono::Local::now().format("%Y-%m-%d").to_string()
 }

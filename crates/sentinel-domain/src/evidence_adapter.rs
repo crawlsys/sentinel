@@ -18,7 +18,7 @@
 //! evidence — it asks the adapter registry: "I'm claiming `git.pr_opened`;
 //! here's my context; produce a receipt." The adapter calls out to where
 //! the truth lives and returns an [`EvidenceReceipt`] that gets folded into
-//! the StepProof's `Evidence.custom`.
+//! the `StepProof`'s `Evidence.custom`.
 //!
 //! # The provenance hash
 //!
@@ -85,7 +85,7 @@ impl EvidenceClaim {
     /// provenance hash so the receipt binds to the claim shape, not
     /// just the claim type.
     ///
-    /// Determinism note: relies on `serde_json`'s default BTreeMap
+    /// Determinism note: relies on `serde_json`'s default `BTreeMap`
     /// object key ordering. Same caveat as elsewhere in the chain —
     /// don't enable `preserve_order`.
     #[must_use]
@@ -128,8 +128,8 @@ pub struct EvidenceReceipt {
     /// >24h old").
     pub fetched_at: DateTime<Utc>,
 
-    /// Hash binding (adapter_name, claim_type, claim_context_hash,
-    /// payload_hash). Verifiers re-derive and compare to detect
+    /// Hash binding (`adapter_name`, `claim_type`, `claim_context_hash`,
+    /// `payload_hash`). Verifiers re-derive and compare to detect
     /// silent receipt swaps. Computed via [`compute_provenance_hash`].
     pub provenance_hash: String,
 }

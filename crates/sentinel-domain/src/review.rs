@@ -120,7 +120,7 @@ impl MultiLensReview {
     ///
     /// - **overall**: highest-rank outcome across all lenses
     ///   (`Fail` > `Concern` > `Pass`). Empty input → `Pass`.
-    /// - **overall_severity**: highest-rank severity across all
+    /// - **`overall_severity`**: highest-rank severity across all
     ///   lenses (`Critical` > `High` > `Medium` > `Low` > `Info`).
     ///   Empty input → `Info`.
     /// - **summary**: counts of each outcome ("3 lenses: 1 fail, 2

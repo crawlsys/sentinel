@@ -1,7 +1,7 @@
 //! `CatastrophicApprovalCache` -- in-process map of
 //! `(SessionId, action_class)` -> approval entry, populated by the
 //! inbound `CatastrophicAck` handler and consumed by the
-//! `catastrophic_escalation` PreToolUse hook on retry.
+//! `catastrophic_escalation` `PreToolUse` hook on retry.
 //!
 //! # Architectural fit
 //!
@@ -14,9 +14,9 @@
 //!
 //! # Semantics
 //!
-//! - One approval per `(SessionId, action_class)`. The action_class
+//! - One approval per `(SessionId, action_class)`. The `action_class`
 //!   v0.1 is loose: derived from the witness transcript by parsing
-//!   "approve <action_class>, code <nonce>".
+//!   "approve <`action_class`>, code <nonce>".
 //! - Single-use: `consume` removes the entry on read so the same
 //!   approval cannot authorize two retries.
 //! - TTL-evicted: entries older than `DEFAULT_TTL` are dropped on
@@ -102,7 +102,7 @@ pub struct CatastrophicApprovalCache {
     inner: Arc<Mutex<HashMap<(SessionId, String), ApprovalEntry>>>,
     ttl: Duration,
     /// When `Some(path)`, every mutation snapshots the full
-    /// HashMap to `path` (write + advisory exclusive lock). When
+    /// `HashMap` to `path` (write + advisory exclusive lock). When
     /// `None`, behaves as an in-memory cache (the v0.1 default).
     persistence_path: Option<PathBuf>,
 }
@@ -263,7 +263,7 @@ impl CatastrophicApprovalCache {
 }
 
 /// Read + parse the JSON snapshot file. Missing file -> empty
-/// HashMap. Malformed file -> error (caller logs + starts empty).
+/// `HashMap`. Malformed file -> error (caller logs + starts empty).
 fn load_snapshot(
     path: &Path,
 ) -> Result<HashMap<(SessionId, String), ApprovalEntry>, std::io::Error> {
@@ -348,7 +348,7 @@ fn normalize(s: &str) -> String {
 }
 
 /// Parse `action_class` out of a witness transcript shaped like
-/// "approve <action_class>, code <nonce>" (case-insensitive,
+/// "approve <`action_class`>, code <nonce>" (case-insensitive,
 /// flexible whitespace). Returns `None` if the transcript doesn't
 /// match the expected shape. Used by the inbound `CatastrophicAck`
 /// handler to decide which `(session, action_class)` slot to

@@ -13,12 +13,13 @@ use crate::judge::JudgeModel;
 // ============================================================================
 
 /// **Retry policy (M4.4 — Apollo runtime resilience)**.
+///
 /// Configures automatic retry behavior for a single step. Consumed by
 /// skills-mcp (M2) at execution time — sentinel-domain just carries the
 /// declared policy.
 ///
-/// `Default::default()` returns the no-retry policy (max_attempts=1,
-/// backoff_ms=100, no retry_on filter). The `#[serde(default = ...)]`
+/// `Default::default()` returns the no-retry policy (`max_attempts=1`,
+/// `backoff_ms=100`, no `retry_on` filter). The `#[serde(default = ...)]`
 /// attributes on individual fields apply to deserialization only —
 /// the manual `Default` impl below ensures `Default::default()` matches
 /// the deserialization behavior.
@@ -31,7 +32,7 @@ pub struct RetryPolicy {
     pub max_attempts: u32,
 
     /// Initial backoff in milliseconds. Exponential growth between
-    /// attempts: backoff_ms, backoff_ms*2, backoff_ms*4, ...
+    /// attempts: `backoff_ms`, `backoff_ms`*2, `backoff_ms`*4, ...
     /// Default 100ms.
     #[serde(default = "default_backoff_ms")]
     pub backoff_ms: u64,
@@ -45,10 +46,10 @@ pub struct RetryPolicy {
     pub retry_on: Vec<String>,
 }
 
-fn default_max_attempts() -> u32 {
+const fn default_max_attempts() -> u32 {
     1
 }
-fn default_backoff_ms() -> u64 {
+const fn default_backoff_ms() -> u64 {
     100
 }
 
@@ -63,11 +64,11 @@ impl Default for RetryPolicy {
 }
 
 impl RetryPolicy {
-    /// Returns true if this policy actually retries (max_attempts > 1).
-    /// Steps without a retry_policy in TOML get the default which is
+    /// Returns true if this policy actually retries (`max_attempts` > 1).
+    /// Steps without a `retry_policy` in TOML get the default which is
     /// "no retry" — `should_retry()` short-circuits cleanly for them.
     #[must_use]
-    pub fn enabled(&self) -> bool {
+    pub const fn enabled(&self) -> bool {
         self.max_attempts > 1
     }
 
@@ -87,6 +88,7 @@ impl RetryPolicy {
 }
 
 /// **Circuit breaker (M4.4 — Apollo runtime resilience)**.
+///
 /// After N consecutive failures of this step, the skill MCP is
 /// circuit-broken: subsequent invocations short-circuit to a "circuit
 /// open" error without running the step body. The router can then fall
@@ -95,7 +97,7 @@ impl RetryPolicy {
 /// (success) or re-trips it (failure).
 ///
 /// `Default::default()` returns the disabled breaker
-/// (failure_threshold=0, cooldown_ms=30000). Manual impl ensures the
+/// (`failure_threshold=0`, `cooldown_ms=30000`). Manual impl ensures the
 /// cooldown matches the serde-default value.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CircuitBreaker {
@@ -110,7 +112,7 @@ pub struct CircuitBreaker {
     pub cooldown_ms: u64,
 }
 
-fn default_cooldown_ms() -> u64 {
+const fn default_cooldown_ms() -> u64 {
     30_000
 }
 
@@ -124,9 +126,9 @@ impl Default for CircuitBreaker {
 }
 
 impl CircuitBreaker {
-    /// Returns true if this breaker is configured (failure_threshold > 0).
+    /// Returns true if this breaker is configured (`failure_threshold` > 0).
     #[must_use]
-    pub fn enabled(&self) -> bool {
+    pub const fn enabled(&self) -> bool {
         self.failure_threshold > 0
     }
 }
@@ -152,7 +154,7 @@ pub struct WorkflowStep {
     /// over-strict negatives.
     ///
     /// Default `0` means "enforce immediately" — right for high-stakes
-    /// steps (deploy_prod, prod_migration) where we'd rather refuse a
+    /// steps (`deploy_prod`, `prod_migration`) where we'd rather refuse a
     /// real action than let unproven evidence through. Routine steps
     /// can set this to `5` or `10` so first-runs in fresh skills don't
     /// hit cold-start false-positives.
@@ -176,13 +178,13 @@ pub struct WorkflowStep {
     pub timeout_ms: Option<u64>,
 
     /// **Retry policy (M4.4)**. See [`RetryPolicy`]. Default is the
-    /// no-retry policy (max_attempts=1) — opt-in for steps where
+    /// no-retry policy (`max_attempts=1`) — opt-in for steps where
     /// transient failures are expected.
     #[serde(default)]
     pub retry_policy: RetryPolicy,
 
     /// **Circuit breaker (M4.4)**. See [`CircuitBreaker`]. Default
-    /// (failure_threshold=0) means no breaker — opt-in for skills
+    /// (`failure_threshold=0`) means no breaker — opt-in for skills
     /// that may degrade and need fallback routing.
     #[serde(default)]
     pub circuit_breaker: CircuitBreaker,
@@ -193,7 +195,7 @@ pub struct WorkflowStep {
     // All four are optional; existing TOML configs without them load
     // unchanged. Future federation compose validation passes consult
     // these to verify cross-skill contracts hold.
-    /// **`@provides`** — artifact types this step's StepProof exposes
+    /// **`@provides`** — artifact types this step's `StepProof` exposes
     /// for downstream consumers. Strings are skill-namespaced (e.g.
     /// `"linear.ticket_id"`, `"git.pr_url"`). When other skills declare
     /// `requires` of the same string, federation compose can verify
@@ -289,7 +291,7 @@ pub struct PhaseSteps {
     pub steps: Vec<WorkflowStep>,
 }
 
-/// Default federation version for SkillSteps configs that pre-date M2.7.
+/// Default federation version for `SkillSteps` configs that pre-date M2.7.
 /// Pre-M2.7 configs have no `federation_version` field; serde fills in
 /// `"1"` so they keep loading and the rest of the system can assume the
 /// field is always present.

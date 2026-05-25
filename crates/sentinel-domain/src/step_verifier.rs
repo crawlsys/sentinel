@@ -10,20 +10,20 @@
 //!
 //! ## Why a separate layer
 //!
-//! The existing `step_gate` hook fires at PreToolUse on the tool
+//! The existing `step_gate` hook fires at `PreToolUse` on the tool
 //! name, before the step runs. The verifier check fires at
 //! `submit_step_complete`, after the step runs but before the
 //! proof seals. Both layers are useful:
 //!
-//! - **step_gate**: "you didn't run the prior step at all" → blocks
+//! - **`step_gate`**: "you didn't run the prior step at all" → blocks
 //!   the *attempt* to fire the next step's tool.
-//! - **step_verifier**: "you ran the prior step but its evidence
+//! - **`step_verifier`**: "you ran the prior step but its evidence
 //!   doesn't carry the required receipt" → blocks the *seal* of
 //!   the next step's proof.
 //!
 //! Defense in depth: a misconfigured tool dispatcher can bypass
-//! step_gate (it's enforced at the Claude Code layer), but it
-//! can't bypass step_verifier because the proof engine refuses to
+//! `step_gate` (it's enforced at the Claude Code layer), but it
+//! can't bypass `step_verifier` because the proof engine refuses to
 //! seal without the receipt regardless of how the call arrived.
 //!
 //! ## Shape
@@ -46,7 +46,7 @@
 use serde::{Deserialize, Serialize};
 
 /// One step-level verifier requirement. Composed into a registry
-/// at handler-construction time and consulted in submit_step_complete.
+/// at handler-construction time and consulted in `submit_step_complete`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StepVerifierRequirement {
     /// Skill the requirement applies to (e.g. `"linear"`).
@@ -141,7 +141,7 @@ impl StepVerifierRequirement {
         if self.verified_only {
             let verified = receipt
                 .get("verified")
-                .and_then(|v| v.as_bool())
+                .and_then(serde_json::Value::as_bool)
                 .ok_or_else(|| VerifierError::MalformedReceipt {
                     detail: "receipt missing 'verified' field (required when verified_only=true)"
                         .to_string(),

@@ -8,7 +8,7 @@
 //! Hook input `session_id` is the harness wrapper ID, which does **not**
 //! match the on-disk `{sessionId}.jsonl` filename Claude Code writes
 //! (an internal `G8.sessionId`). Searching the transcript directory by the
-//! hook's session_id never finds the right file, so transcript-based
+//! hook's `session_id` never finds the right file, so transcript-based
 //! verification falsely blocks every commit/push.
 //!
 //! Sentinel sees the same `session_id` on both `PostToolUse` (when the
@@ -28,7 +28,7 @@ use std::path::{Path, PathBuf};
 /// Test/build command patterns that count as verification evidence.
 ///
 /// Source of truth for both the recorder (`test_evidence_recorder` hook,
-/// PostToolUse) and the reader (`pre_commit_verification`, PreToolUse).
+/// `PostToolUse`) and the reader (`pre_commit_verification`, `PreToolUse`).
 /// Keeping the list in the domain layer ensures both sides agree on what
 /// "running tests" means.
 pub const TEST_COMMAND_PATTERNS: &[&str] = &[

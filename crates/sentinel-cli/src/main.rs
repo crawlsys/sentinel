@@ -96,19 +96,19 @@ enum Commands {
         #[arg(long, default_value_t = 20)]
         legatus_heartbeat_secs: u64,
 
-        /// Witness verification mode for inbound CatastrophicAck
+        /// Witness verification mode for inbound `CatastrophicAck`
         /// messages.
         ///
         /// - `none` (default): no verifier installed; the daemon
         ///   trusts every ack on receipt. Matches the v0.1
         ///   daemon-local trust model.
-        /// - `in-memory`: wraps an InMemoryPraefectusClient.
+        /// - `in-memory`: wraps an `InMemoryPraefectusClient`.
         ///   Dev / demo mode -- exercises the verification surface
         ///   end-to-end without a real Praefectus.
-        /// - `http`: wraps an HttpPraefectusClient pointing at the
+        /// - `http`: wraps an `HttpPraefectusClient` pointing at the
         ///   operator's reachable Praefectus. Requires
         ///   --legatus-praefectus-url + --legatus-praefectus-token
-        ///   (or LEGATUS_PRAEFECTUS_TOKEN in env). Production
+        ///   (or `LEGATUS_PRAEFECTUS_TOKEN` in env). Production
         ///   cryptographic verification path.
         #[arg(long, default_value = "none", value_parser = ["none", "in-memory", "http"])]
         legatus_witness_verify: String,
@@ -119,7 +119,7 @@ enum Commands {
         legatus_praefectus_url: Option<String>,
 
         /// Bearer token for the Praefectus HTTP endpoint. Reads
-        /// LEGATUS_PRAEFECTUS_TOKEN from env so it's not exposed
+        /// `LEGATUS_PRAEFECTUS_TOKEN` from env so it's not exposed
         /// in process listings. Required when
         /// --legatus-witness-verify=http.
         #[arg(long, env = "LEGATUS_PRAEFECTUS_TOKEN", hide_env_values = true)]
@@ -129,7 +129,7 @@ enum Commands {
         /// daemon logs the binding at startup so operators can
         /// confirm the daemon is bound to them. Multi-operator
         /// routing (per-session operator lookup, identity flowing
-        /// through RegisterSession metadata) is consul-side
+        /// through `RegisterSession` metadata) is consul-side
         /// coordination work; for now this is a declarative
         /// breadcrumb.
         #[arg(long)]
@@ -422,8 +422,8 @@ enum Commands {
     },
 
     /// BA-orchestrator surface. Produces the verifiable
-    /// recommendation envelope (citations + requirement_refs +
-    /// spec_challenge) that sentinel's BA1 / BA3 / A13 gates verify
+    /// recommendation envelope (citations + `requirement_refs` +
+    /// `spec_challenge`) that sentinel's BA1 / BA3 / A13 gates verify
     /// downstream. Phase 3 ships the `draft` subcommand.
     Ba {
         #[command(subcommand)]
@@ -496,7 +496,7 @@ enum BaAction {
     /// `draft()` use case via the Anthropic LLM adapter
     /// (`ANTHROPIC_API_KEY` required), returns a structured
     /// [`BaRecommendation`] containing the recommendation body,
-    /// citations, requirement_refs, and a complete A13 spec
+    /// citations, `requirement_refs`, and a complete A13 spec
     /// challenge. The resulting envelope is exactly what sentinel's
     /// BA1 / BA3 / A13 gates verify when it's serialized into a
     /// downstream tool's `extra` payload.
@@ -636,7 +636,7 @@ enum LegatusAction {
     /// Connect to a consul supervisor and run a legatus session
     /// loop. Opens the Consular Protocol WebSocket, registers
     /// this sentinel as a session, sends heartbeats, logs any
-    /// inbound RelayInstructions, and emits SessionCompleted on
+    /// inbound `RelayInstructions`, and emits `SessionCompleted` on
     /// Ctrl-C. No Claude Code injection yet — that's the next
     /// commit in this series.
     Connect {
@@ -744,7 +744,7 @@ enum ProjectAction {
 /// `sentinel cleanup` subcommands.
 #[derive(Subcommand)]
 enum CleanupAction {
-    /// Prune orphan project_hash buckets under
+    /// Prune orphan `project_hash` buckets under
     /// `~/.claude/sentinel/persistent-tasks/` whose cwd no longer exists.
     /// Default mode is dry-run; pass `--apply` to actually remove them.
     PersistentTasks {
@@ -754,14 +754,14 @@ enum CleanupAction {
         apply: bool,
     },
     /// Prune orphan session task directories under `~/.claude/tasks/`
-    /// whose session_id (the directory name) does not appear as a
+    /// whose `session_id` (the directory name) does not appear as a
     /// `.jsonl` transcript file under any project in
     /// `~/.claude/projects/`. Older-than gating defends against active
     /// sessions whose transcript hasn't been written yet.
     Tasks {
         /// Minimum age in days for a directory to be considered for
         /// cleanup. Defaults to 30 — only directories older than this
-        /// are candidates, regardless of whether their session_id is
+        /// are candidates, regardless of whether their `session_id` is
         /// orphan. Younger orphans are kept (the transcript may be
         /// about to write).
         #[arg(long, default_value = "30")]
@@ -887,7 +887,7 @@ enum DeployFreqAction {
         /// Pipeline duration in seconds (optional).
         #[arg(long)]
         duration_s: Option<u64>,
-        /// RFC3339 timestamp; defaults to now() when omitted.
+        /// RFC3339 timestamp; defaults to `now()` when omitted.
         #[arg(long)]
         timestamp: Option<String>,
     },
@@ -1097,14 +1097,12 @@ async fn main() -> anyhow::Result<()> {
                 dry_run,
             } => {
                 let cfg = config.unwrap_or_else(|| {
-                    dirs::home_dir()
-                        .map(|h| {
+                    dirs::home_dir().map_or_else(|| std::path::PathBuf::from("slas.toml"), |h| {
                             h.join(".claude")
                                 .join("sentinel")
                                 .join("config")
                                 .join("slas.toml")
                         })
-                        .unwrap_or_else(|| std::path::PathBuf::from("slas.toml"))
                 });
                 sla_cmd::run_check(cfg, subjects, dry_run)
             }

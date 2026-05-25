@@ -45,7 +45,7 @@ pub struct LegatusOptions {
     /// `--legatus-heartbeat-secs`.
     pub heartbeat_secs: u64,
     /// `--legatus-witness-verify` (one of `none`, `in-memory`).
-    /// Controls how inbound CatastrophicAck witnesses are verified
+    /// Controls how inbound `CatastrophicAck` witnesses are verified
     /// before recording an approval in the daemon's cache:
     ///
     /// - `none` (default): no verifier installed; the daemon trusts
@@ -63,27 +63,27 @@ pub struct LegatusOptions {
     /// for single-operator deployments. When set, the daemon logs
     /// the binding at startup so operators can confirm the daemon
     /// is talking to "their" Praefectus. v0.2 will propagate this
-    /// through RegisterSession metadata so the consulate can route
+    /// through `RegisterSession` metadata so the consulate can route
     /// per-operator (multi-operator support); for now it's a
     /// declarative breadcrumb that records intent + surfaces in
     /// the startup banner.
     pub operator_id: Option<uuid::Uuid>,
 }
 
-/// Verifier wiring mode for inbound CatastrophicAck witnesses.
+/// Verifier wiring mode for inbound `CatastrophicAck` witnesses.
 /// Surfaced through `--legatus-witness-verify`.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum WitnessVerifyMode {
     /// No verifier installed; daemon trusts on receipt. Default.
     #[default]
     None,
-    /// Wrap an InMemoryPraefectusClient. Dev / test mode -- the
+    /// Wrap an `InMemoryPraefectusClient`. Dev / test mode -- the
     /// in-memory client accepts every witness unless test toggles
     /// force a fail.
     InMemory,
-    /// Wrap an HttpPraefectusClient pointing at the operator's
+    /// Wrap an `HttpPraefectusClient` pointing at the operator's
     /// reachable Praefectus. Production mode -- every inbound
-    /// CatastrophicAck witness is verified cryptographically
+    /// `CatastrophicAck` witness is verified cryptographically
     /// against a live Praefectus before the approval is recorded.
     Http {
         /// Base URL of the Praefectus HTTP endpoint
@@ -370,7 +370,7 @@ fn is_pid_alive(pid: i32) -> bool {
         .unwrap_or(false)
 }
 #[cfg(not(unix))]
-fn is_pid_alive(_pid: i32) -> bool {
+const fn is_pid_alive(_pid: i32) -> bool {
     true
 }
 
@@ -454,7 +454,7 @@ pub fn run_stop(_wait_secs: u64) -> Result<()> {
 
 /// Bundle returned by [`start_legatus_if_configured`] -- the handle
 /// (for outbound escalations) plus the approval cache that the
-/// inbound CatastrophicAck handler writes to and the new HTTP
+/// inbound `CatastrophicAck` handler writes to and the new HTTP
 /// route reads from.
 #[derive(Clone)]
 pub struct LegatusRouteState {
@@ -567,7 +567,7 @@ async fn start_legatus_if_configured(
     // in-memory-only if HOME is unresolvable (degenerate hosts).
     let approval_cache = Arc::new(
         sentinel_legatus::CatastrophicApprovalCache::default_persistent()
-            .unwrap_or_else(sentinel_legatus::CatastrophicApprovalCache::new),
+            .unwrap_or_default(),
     );
     if let Some(path) = sentinel_legatus::default_approval_cache_path() {
         let count = approval_cache.len();
@@ -599,7 +599,7 @@ async fn start_legatus_if_configured(
     // security property is non-optional).
     let spent_nonces = Arc::new(
         sentinel_legatus::SpentNonceLog::default_persistent()
-            .unwrap_or_else(sentinel_legatus::SpentNonceLog::new),
+            .unwrap_or_default(),
     );
     let runtime = runtime.with_spent_nonce_log(spent_nonces);
     // Optional witness verifier per --legatus-witness-verify. None
@@ -653,12 +653,9 @@ async fn start_legatus_if_configured(
     // LegatusRouteState (read by GET /legatus/health). Cheap to
     // clone — internally Arc<AtomicU8> + Arc<AtomicU64> +
     // Option<ConnectionEventLog>.
-    let connection_status = match ConnectionEventLog::default_path() {
-        Some(p) => ConnectionStatus::new().with_event_log(ConnectionEventLog::at_path(p)),
-        None => {
-            warn!("no resolvable home dir; legatus connection-event log disabled");
-            ConnectionStatus::new()
-        }
+    let connection_status = if let Some(p) = ConnectionEventLog::default_path() { ConnectionStatus::new().with_event_log(ConnectionEventLog::at_path(p)) } else {
+        warn!("no resolvable home dir; legatus connection-event log disabled");
+        ConnectionStatus::new()
     };
     let status_for_wrapper = connection_status.clone();
     tokio::spawn(async move {
@@ -711,7 +708,7 @@ fn legatus_routes(state: LegatusRouteState) -> Router {
     // counter) and handle.outbox (queue depth).
     let metrics_routes: Router = Router::new()
         .route("/legatus/metrics", get(handle_legatus_metrics))
-        .with_state(state.clone());
+        .with_state(state);
     handle_routes
         .merge(cache_routes)
         .merge(health_routes)
@@ -721,7 +718,7 @@ fn legatus_routes(state: LegatusRouteState) -> Router {
 /// `GET /legatus/metrics` — Prometheus text-format exposition for
 /// the legatus connection. No external scrape-format crate needed:
 /// 3 metric families, hand-written. Scraping cadence is fine at
-/// any rate (atomic loads + a single Arc<Mutex<Vec>>.len() call).
+/// any rate (atomic loads + a single Arc<Mutex<Vec>>.`len()` call).
 async fn handle_legatus_metrics(State(state): State<LegatusRouteState>) -> Response {
     let connection_state = state.connection_status.get();
     let state_num = connection_state as u8;
@@ -730,7 +727,7 @@ async fn handle_legatus_metrics(State(state): State<LegatusRouteState>) -> Respo
     // we don't stall the axum runtime if the lock is contended.
     let handle = state.handle.clone();
     let outbox_depth = tokio::task::spawn_blocking(move || {
-        handle.persistent_outbox().map(|o| o.len()).unwrap_or(0)
+        handle.persistent_outbox().map_or(0, sentinel_legatus::PersistentEscalationOutbox::len)
     })
     .await
     .unwrap_or(0);

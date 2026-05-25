@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 /// set — Codex / Sonnet / Opus / Kimi — one per vendor for cross-distribution
 /// diversity. Routing (operator-specified 2026-05-25):
 ///
-/// - `Codex` → `openai/gpt-5.5-pro` (OpenAI; the model that powers Codex)
+/// - `Codex` → `openai/gpt-5.5-pro` (`OpenAI`; the model that powers Codex)
 /// - `Kimi` → `moonshotai/kimi-k2.6` (Moonshot; OSS frontier, Eastern
 ///   training distribution for adversarial diversity)
 /// - `Sonnet` → `anthropic/claude-sonnet-4.6` (Anthropic; balanced daily tier)
@@ -26,21 +26,21 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum JudgeModel {
-    /// Codex tier — OpenAI GPT-5.5-pro via OpenRouter (the model that powers
+    /// Codex tier — `OpenAI` GPT-5.5-pro via `OpenRouter` (the model that powers
     /// Codex). Operator-pinned per the four-model judge set
     /// (Codex / Sonnet / Opus / Kimi).
     Codex,
-    /// Review tier (DEFAULT) — Moonshot Kimi K2-Thinking via OpenRouter. The
+    /// Review tier (DEFAULT) — Moonshot Kimi K2-Thinking via `OpenRouter`. The
     /// callable Kimi variant (`kimi-k2.6` 404s on the operator's provider
     /// routing). Eastern training distribution adds diversity vs the Western
     /// closed-model trio for adversarial review.
     Kimi,
-    /// Cross-vendor verification — OpenAI GPT-5.5 via OpenRouter (newest
+    /// Cross-vendor verification — `OpenAI` GPT-5.5 via `OpenRouter` (newest
     /// frontier; #1 reasoning, 2.8s live). Pairs with Kimi at the `critical`
     /// trust tier so disagreement signals are real (different model families,
     /// different blind spots). Was the stale `gpt-5.4`.
     Sonnet,
-    /// Critical-strict tier — Anthropic Claude Opus 4.7 via OpenRouter. Third
+    /// Critical-strict tier — Anthropic Claude Opus 4.7 via `OpenRouter`. Third
     /// leg of the trio for highest-stakes audit-grade work.
     Opus,
 }
@@ -60,13 +60,13 @@ impl JudgeModel {
     /// Default judge for skill phases that don't specify a tier explicitly.
     /// Lands on Kimi K2-Thinking — Eastern-distribution diversity at a
     /// fraction of the closed-frontier price, and (unlike `kimi-k2.6`)
-    /// actually callable on the operator's OpenRouter key.
+    /// actually callable on the operator's `OpenRouter` key.
     #[must_use]
     pub const fn default_review_tier() -> Self {
         Self::Kimi
     }
 
-    /// OpenRouter model identifier for this tier — what the API expects in
+    /// `OpenRouter` model identifier for this tier — what the API expects in
     /// the `model` field of a chat-completion request. Every slug here was
     /// confirmed to resolve + respond by live probe (see the type docs).
     #[must_use]

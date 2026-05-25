@@ -232,7 +232,7 @@ impl HookTier {
 /// across the 54 hooks that inject context.
 ///
 /// `name` is the short hook identifier shown in brackets (e.g. `Skill Router`,
-/// `Worktree Reminder`). Use Title Case with spaces, not the snake_case file
+/// `Worktree Reminder`). Use Title Case with spaces, not the `snake_case` file
 /// name — it's user-facing.
 #[derive(Debug, Clone)]
 pub struct HookEnvelope {

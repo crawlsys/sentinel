@@ -1,7 +1,7 @@
 //! Adversarial AI Judge via `OpenRouter`
 //!
 //! Pluggable judge backend that routes every `JudgeModel` tier to the
-//! corresponding model on OpenRouter — single gateway, single auth surface,
+//! corresponding model on `OpenRouter` — single gateway, single auth surface,
 //! automatic provider failover. The judge should never be the same model
 //! as the defendant: the `JudgeModel` enum lives in `sentinel-domain` so
 //! step configs declare their tier, and this layer dispatches by enum
@@ -26,7 +26,7 @@ use tracing::{debug, info};
 use sentinel_domain::evidence::Evidence;
 use sentinel_domain::judge::{JudgeModel, JudgeVerdict};
 
-/// Type-erased prompt function: (model_id, system, `user_msg`) -> response text.
+/// Type-erased prompt function: (`model_id`, system, `user_msg`) -> response text.
 /// The model id is now a runtime parameter so a single provider serves every
 /// `JudgeModel` tier.
 type PromptFn =
@@ -88,7 +88,7 @@ impl JudgeProvider {
     }
 }
 
-/// Adversarial judge dispatching every `JudgeModel` tier through OpenRouter.
+/// Adversarial judge dispatching every `JudgeModel` tier through `OpenRouter`.
 ///
 /// Default tier is Kimi K2-Thinking (Moonshot, OSS frontier) — different
 /// family from the Anthropic models that typically generate the work, plus

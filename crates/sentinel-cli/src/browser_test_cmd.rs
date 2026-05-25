@@ -2,7 +2,7 @@
 //!
 //! Used by Claude Code to mark a browser test as passed when the test was run
 //! via CDP, Puppeteer, Playwright, or any method other than an MCP server
-//! that already has its own PostToolUse recorder.
+//! that already has its own `PostToolUse` recorder.
 //!
 //! The `pre_push_browser_test` hook checks for a state file written by this
 //! command (or by the `PostToolUse` handler for

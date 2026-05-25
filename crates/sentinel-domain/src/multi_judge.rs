@@ -1,7 +1,7 @@
 //! Multi-judge verdict types — Stage B of pluggable judges
 //! (#82, follow-up to commit 2089896 which shipped Stage A).
 //!
-//! Stage A made the `JudgeModel` enum drive OpenRouter dispatch
+//! Stage A made the `JudgeModel` enum drive `OpenRouter` dispatch
 //! (one tier → one model). Stage B turns "one judge" into "N judges
 //! with disagreement detection" so the `critical` and
 //! `critical-strict` trust tiers can run multiple model families in
@@ -56,12 +56,14 @@ use crate::judge::{JudgeModel, JudgeVerdict};
 /// [`JudgeTrustTier::judge_models`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
+#[derive(Default)]
 pub enum JudgeTrustTier {
     /// Single Kimi judge — cheapest of the four pinned models, routine phases.
     Routine,
     /// Single Kimi K2-Thinking judge — the default review tier (Stage A
     /// behavior). OSS frontier, far cheaper than closed frontier for
     /// comparable adversarial-judge quality; callable on the operator's key.
+    #[default]
     Review,
     /// Kimi + Sonnet in parallel. Cross-vendor pair: Eastern OSS +
     /// Western closed = different blind spots, real disagreement
@@ -70,18 +72,13 @@ pub enum JudgeTrustTier {
     /// Kimi + Sonnet + Opus trio. Highest-stakes work; majority
     /// vote when judges disagree.
     CriticalStrict,
-    /// Single Kimi judge BUT records OpenRouter's resolved
-    /// `model_id` + `provider` in the StepProof for audit-replay.
+    /// Single Kimi judge BUT records `OpenRouter`'s resolved
+    /// `model_id` + `provider` in the `StepProof` for audit-replay.
     /// EU AI Act Article 12 compliance: "prove which model judged
     /// this" over a 10-year retention window.
     AuditGrade,
 }
 
-impl Default for JudgeTrustTier {
-    fn default() -> Self {
-        Self::Review
-    }
-}
 
 impl JudgeTrustTier {
     /// The list of judges to run for this tier. Order is stable —
@@ -99,7 +96,7 @@ impl JudgeTrustTier {
         }
     }
 
-    /// Whether this tier records the resolved provider in StepProof
+    /// Whether this tier records the resolved provider in `StepProof`
     /// for audit-grade replay. Only `AuditGrade` does today.
     #[must_use]
     pub const fn records_provider(self) -> bool {
@@ -123,13 +120,13 @@ pub struct JudgeRun {
     pub model: JudgeModel,
     pub verdict: JudgeVerdict,
     /// Cost in USD for this single judge call. `None` when pricing
-    /// accounting is disabled or the OpenRouter response didn't
+    /// accounting is disabled or the `OpenRouter` response didn't
     /// include cost headers. Sums across the parallel set in
     /// [`MultiJudgeVerdict::total_cost_usd`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_usd: Option<f64>,
     /// Resolved provider (e.g. `parasail-fp8`, `deepinfra/fp16`)
-    /// from OpenRouter's response. `None` when not audit-grade.
+    /// from `OpenRouter`'s response. `None` when not audit-grade.
     /// Audit-grade replay needs this to identify the exact
     /// inference path that produced the verdict.
     #[serde(default, skip_serializing_if = "Option::is_none")]

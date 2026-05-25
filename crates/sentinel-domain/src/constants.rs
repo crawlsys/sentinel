@@ -140,7 +140,7 @@ pub const DEP_CHECK_CACHE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 pub const PLAN_FILE_FRESH_WINDOW: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
 /// How old a session-events directory must be before
-/// `channel_events::cleanup_stale_sessions` removes it during SessionStart.
+/// `channel_events::cleanup_stale_sessions` removes it during `SessionStart`.
 /// One day matches `DEP_CHECK_CACHE_TTL` numerically but the meanings are
 /// independent — kept distinct so they can drift apart later.
 pub const STALE_SESSION_EVENTS_AGE: Duration = Duration::from_secs(24 * 60 * 60);

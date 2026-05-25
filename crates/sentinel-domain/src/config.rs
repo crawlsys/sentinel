@@ -1,5 +1,5 @@
 //! Pydantic-style fail-fast config validation (M4.8 / task #26,
-//! ContextForge pattern).
+//! `ContextForge` pattern).
 //!
 //! `SentinelConfig` is the canonical top-level config struct that
 //! every component shares — request limits, SSRF policy, judge tier,
@@ -34,6 +34,7 @@ use crate::ssrf::SsrfPolicy;
 /// The top-level Sentinel config. All sub-configs are composable
 /// — drop in a new `Default` and the parent picks it up.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Default)]
 pub struct SentinelConfig {
     #[serde(default)]
     pub request_limits: RequestLimits,
@@ -47,17 +48,6 @@ pub struct SentinelConfig {
     pub signing: SigningConfig,
 }
 
-impl Default for SentinelConfig {
-    fn default() -> Self {
-        Self {
-            request_limits: RequestLimits::default(),
-            ssrf: SsrfPolicy::default(),
-            judge: JudgeConfig::default(),
-            proof_archive: ProofArchiveConfig::default(),
-            signing: SigningConfig::default(),
-        }
-    }
-}
 
 impl SentinelConfig {
     /// Run every sub-validator and return the complete punch list.
@@ -98,7 +88,7 @@ pub struct JudgeConfig {
     pub default_tier: JudgeModel,
 }
 
-fn default_judge_tier() -> JudgeModel {
+const fn default_judge_tier() -> JudgeModel {
     JudgeModel::default_review_tier()
 }
 
@@ -275,7 +265,7 @@ fn is_valid_hostlike(s: &str) -> bool {
     !s.is_empty() && !s.chars().any(|c| c.is_whitespace() || c.is_control())
 }
 
-fn validate_judge(_j: &JudgeConfig, _errors: &mut Vec<ConfigError>) {
+const fn validate_judge(_j: &JudgeConfig, _errors: &mut Vec<ConfigError>) {
     // `JudgeModel` is an enum — invalid variants are caught by serde
     // at deserialization time. Nothing further to validate today.
     // Future: when multi-judge tiers land (#82 Stage B), validate

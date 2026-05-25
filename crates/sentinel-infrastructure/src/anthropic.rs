@@ -19,7 +19,7 @@ const API_VERSION: &str = "2023-06-01";
 ///
 /// This client talks directly to Anthropic and has no access to non-Anthropic
 /// models — Kimi K2.6 maps to Sonnet 4.6 here as the closest review-tier
-/// substitute. The canonical Kimi path is OpenRouter via `rig_judge.rs`;
+/// substitute. The canonical Kimi path is `OpenRouter` via `rig_judge.rs`;
 /// this client is the fallback when `OPENROUTER_API_KEY` is unset.
 const fn model_id(model: JudgeModel) -> &'static str {
     match model {

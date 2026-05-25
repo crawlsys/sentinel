@@ -211,7 +211,7 @@ pub async fn run_connect_hosted(
         }
         ConsularMessage::VersionMismatch(vm) => {
             return Err(LegatusError::VersionMismatch {
-                accepted_min: Some(format!("{:?}", vm)),
+                accepted_min: Some(format!("{vm:?}")),
                 accepted_max: None,
             });
         }
@@ -444,7 +444,7 @@ pub async fn run_connect_hosted(
                                 continue;
                             },
                         };
-                        handle_inbound(&msg, session_id, &runtime);
+                        handle_inbound(&msg, session_id, runtime);
                     },
                     Some(Ok(WsMessage::Close(frame))) => {
                         debug!(?frame, "consulate sent close");
@@ -548,7 +548,7 @@ async fn send_signed(
     let bytes = envelope
         .encode_cbor()
         .map_err(|err| LegatusError::Encode(err.to_string()))?;
-    sink.send(WsMessage::Binary(bytes.into()))
+    sink.send(WsMessage::Binary(bytes))
         .await
         .map_err(|err| LegatusError::Transport(format!("send: {err}")))
 }
@@ -837,8 +837,8 @@ fn handle_inbound(msg: &ConsularMessage, session_id: SessionId, runtime: &Legatu
                         let cache = cache.clone();
                         let witness = ack.voiceprint_witness.clone();
                         let key = ack.key.clone();
-                        let action_class_owned = action_class.clone();
-                        let transcript_owned = transcript.clone();
+                        let action_class_owned = action_class;
+                        let transcript_owned = transcript;
                         tokio::spawn(async move {
                             match verifier.verify(&witness, &key).await {
                                 Ok(()) => {
@@ -1026,9 +1026,7 @@ pub async fn run_connect_hosted_with_reconnect(
         // we've exhausted the URL list without a clean exit. Fall
         // through to the backoff sleep. last_err is guaranteed Some
         // (the loop above wrote to it on every Err arm).
-        let reason = last_err
-            .map(|e| format!("{e}"))
-            .unwrap_or_else(|| "no urls configured".to_owned());
+        let reason = last_err.map_or_else(|| "no urls configured".to_owned(), |e| format!("{e}"));
         warn!(
             attempt,
             urls = url_list.len(),

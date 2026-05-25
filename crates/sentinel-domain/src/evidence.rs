@@ -151,7 +151,7 @@ impl EvidenceCollector {
         }
         let key = if key.len() > 128 { &key[..128] } else { key };
         // Cap serialized value at 8KB
-        let serialized_len = serde_json::to_string(&value).map(|s| s.len()).unwrap_or(0);
+        let serialized_len = serde_json::to_string(&value).map_or(0, |s| s.len());
         if serialized_len > 8192 {
             eprintln!(
                 "[sentinel] WARNING: Custom evidence '{key}' exceeds 8KB ({serialized_len} bytes), truncating to null"

@@ -156,10 +156,10 @@ pub struct LegatusRuntime {
     /// writes to. Set on the daemon path via
     /// [`LegatusRuntime::with_approval_cache`] before the runtime
     /// is handed to `run_connect_hosted`. Standalone CLI builds
-    /// leave it `None` (CatastrophicAcks are logged-only).
+    /// leave it `None` (`CatastrophicAcks` are logged-only).
     pub(crate) approval_cache: Option<std::sync::Arc<crate::approval_cache::CatastrophicApprovalCache>>,
     /// Optional cryptographic witness verifier consulted by
-    /// `handle_inbound` BEFORE recording a CatastrophicAck approval
+    /// `handle_inbound` BEFORE recording a `CatastrophicAck` approval
     /// in the cache. `None` (default) preserves the v0.1 daemon-
     /// local trust model: every ack is recorded unconditionally.
     /// `Some(...)` enforces verification: failures are logged and
@@ -167,8 +167,8 @@ pub struct LegatusRuntime {
     /// [`LegatusRuntime::with_witness_verifier`].
     pub(crate) witness_verifier:
         Option<std::sync::Arc<dyn crate::witness_verifier::WitnessVerifierPort>>,
-    /// Optional spent-nonce log consulted by handle_inbound BEFORE
-    /// any other verification. Rejects CatastrophicAcks whose
+    /// Optional spent-nonce log consulted by `handle_inbound` BEFORE
+    /// any other verification. Rejects `CatastrophicAcks` whose
     /// `voiceprint_witness.challenge_nonce` was already seen.
     /// `None` (default) skips replay protection. Wired by the
     /// daemon via [`LegatusRuntime::with_spent_nonce_log`].
@@ -191,7 +191,7 @@ impl LegatusRuntime {
     }
 
     /// Install a [`WitnessVerifierPort`]. When set, the inbound
-    /// CatastrophicAck handler verifies the witness BEFORE writing
+    /// `CatastrophicAck` handler verifies the witness BEFORE writing
     /// to the approval cache; failed verifications are logged and
     /// the approval is dropped. When unset (default), every ack
     /// records an approval (the v0.1 daemon-local trust model).
@@ -204,7 +204,7 @@ impl LegatusRuntime {
     }
 
     /// Install a [`SpentNonceLog`] for replay protection. When set,
-    /// the inbound CatastrophicAck handler checks-and-spends the
+    /// the inbound `CatastrophicAck` handler checks-and-spends the
     /// witness's `challenge_nonce` BEFORE any other processing.
     /// Already-spent nonces yield rejection without verifier
     /// invocation or cache write. When unset, replay protection

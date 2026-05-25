@@ -136,7 +136,7 @@ pub enum ProofEntry {
     Phase(PhaseProof),
     Step(StepProof),
     /// Multi-judge disagreement marker (#82 Stage B). Appended right
-    /// after the StepProof that triggered the disagreement so chain
+    /// after the `StepProof` that triggered the disagreement so chain
     /// walkers can find disagreements by filtering on the variant.
     Disagreement(crate::disagreement::DisagreementMarker),
 }
@@ -186,7 +186,7 @@ impl ProofEntry {
     /// `Disagreement` markers use `recorded_at` for both — they're a
     /// point-in-time annotation, not a span.
     #[must_use]
-    pub fn started_at(&self) -> DateTime<Utc> {
+    pub const fn started_at(&self) -> DateTime<Utc> {
         match self {
             Self::Phase(p) => p.started_at,
             Self::Step(s) => s.started_at,
@@ -196,7 +196,7 @@ impl ProofEntry {
 
     /// `completed_at` timestamp for cross-entry temporal ordering checks.
     #[must_use]
-    pub fn completed_at(&self) -> DateTime<Utc> {
+    pub const fn completed_at(&self) -> DateTime<Utc> {
         match self {
             Self::Phase(p) => p.completed_at,
             Self::Step(s) => s.completed_at,
@@ -260,7 +260,7 @@ impl ProofChain {
     /// Get the hash that the next proof must reference as `previous_hash`.
     ///
     /// Resolution order: tail of `entries` (mixed chain), else tail of
-    /// `proofs` (legacy phase-only chain), else GENESIS_HASH. This keeps
+    /// `proofs` (legacy phase-only chain), else `GENESIS_HASH`. This keeps
     /// chains that were started in phase-only mode working when callers
     /// later switch to step-level appends — the next step's `previous_hash`
     /// correctly references the last phase's `combined_hash`.
@@ -346,7 +346,7 @@ impl ProofChain {
     /// Append a `DisagreementMarker` to the chain (#82 Stage B).
     /// Behaves like `add_step_proof` — capacity check, link check,
     /// internal-hash check — but for the multi-judge disagreement
-    /// entry. Producers call this right after a StepProof when the
+    /// entry. Producers call this right after a `StepProof` when the
     /// per-step `MultiJudgeVerdict.disagreement` is `true`.
     ///
     /// # Errors

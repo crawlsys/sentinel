@@ -76,13 +76,13 @@ pub struct SessionState {
     /// **Agent revocation kill switch (AEGIS pattern)**: agent IDs that
     /// have been explicitly revoked via `sentinel agent revoke <id>` or
     /// auto-revoked by the violation policy. Tool calls bearing these
-    /// agent_ids in `HookInput.agent_id` are denied at PreToolUse with
+    /// `agent_ids` in `HookInput.agent_id` are denied at `PreToolUse` with
     /// a `[Sentinel-Authority]` message.
     ///
-    /// Per-session today; revocation does NOT persist across SessionStart
+    /// Per-session today; revocation does NOT persist across `SessionStart`
     /// because a fresh session is the natural place to give an agent
     /// another chance. Operators who want durable revocations can
-    /// re-issue `sentinel agent revoke` at SessionStart via a hook.
+    /// re-issue `sentinel agent revoke` at `SessionStart` via a hook.
     #[serde(default)]
     pub revoked_agents: HashSet<String>,
 
@@ -104,12 +104,12 @@ pub struct SessionState {
     #[serde(default)]
     pub step_baselines: HashMap<String, BaselineCounter>,
 
-    /// Independent step verdicts produced by the `step_judge` PostToolUse
+    /// Independent step verdicts produced by the `step_judge` `PostToolUse`
     /// hook, keyed by `skill:phase_id:step_id` (#12 — close the self-certify
     /// gap). `submit_step_complete` reads these to enforce the judge's OWN
     /// verdict over the caller-supplied one: an agent can pass any `verdict`
     /// arg, but the independently-judged verdict here is what gates the seal
-    /// in warn/enforce mode. The hook persists this to disk via state_store;
+    /// in warn/enforce mode. The hook persists this to disk via `state_store`;
     /// the MCP handler sees it because `with_session_state` loads the same
     /// per-session state before running the tool.
     #[serde(default)]
@@ -117,7 +117,7 @@ pub struct SessionState {
 }
 
 /// Counter tracking successful judgements for a single
-/// `(skill, phase_id, step_id)` tuple. Used by step_judge to decide
+/// `(skill, phase_id, step_id)` tuple. Used by `step_judge` to decide
 /// whether the step has cleared its cold-start window.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct BaselineCounter {
@@ -160,7 +160,7 @@ impl BaselineCounter {
     /// enforcement to engage. `threshold == 0` means "enforce
     /// immediately" — return true even on a fresh counter.
     #[must_use]
-    pub fn cleared(&self, threshold: u64) -> bool {
+    pub const fn cleared(&self, threshold: u64) -> bool {
         self.successful_count >= threshold
     }
 }
@@ -257,7 +257,7 @@ impl SessionState {
     }
 
     /// Revoke an agent — every subsequent tool call carrying this
-    /// `agent_id` will be denied at PreToolUse. Idempotent (revoking
+    /// `agent_id` will be denied at `PreToolUse`. Idempotent (revoking
     /// an already-revoked agent is a no-op).
     pub fn revoke_agent(&mut self, agent_id: impl Into<String>) {
         self.revoked_agents.insert(agent_id.into());
@@ -269,14 +269,14 @@ impl SessionState {
         self.revoked_agents.remove(agent_id)
     }
 
-    /// Check whether an agent_id has been revoked.
+    /// Check whether an `agent_id` has been revoked.
     #[must_use]
     pub fn is_agent_revoked(&self, agent_id: &str) -> bool {
         self.revoked_agents.contains(agent_id)
     }
 
     /// Build the `(skill, phase_id, step_id)` baseline key. Static helper
-    /// so both step_judge and the persistence layer compute keys
+    /// so both `step_judge` and the persistence layer compute keys
     /// identically.
     #[must_use]
     pub fn baseline_key(skill: &str, phase_id: &str, step_id: &str) -> String {
@@ -284,7 +284,7 @@ impl SessionState {
     }
 
     /// Record a step judgement against the cold-start baseline.
-    /// Called by step_judge after every verdict — both passing and failing
+    /// Called by `step_judge` after every verdict — both passing and failing
     /// judgements bump their respective counters so telemetry shows
     /// warmup-time false-positive rates.
     ///
@@ -589,7 +589,7 @@ impl SessionState {
             Some(_) => Ok(()), // Same hash — no change
             None => {
                 self.phase_file_hashes
-                    .insert(canonical_path.to_string(), content_hash.to_string());
+                    .insert(canonical_path.clone(), content_hash.to_string());
                 Ok(())
             }
         }

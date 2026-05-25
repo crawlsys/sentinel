@@ -1,13 +1,13 @@
 //! `SpentNonceLog` -- in-process (+ optional disk-persistent) set
-//! of ChallengeNonce values that have already authorized at least
-//! one CatastrophicAck. handle_inbound consults the log BEFORE
-//! recording approval; if the witness's challenge_nonce is already
+//! of `ChallengeNonce` values that have already authorized at least
+//! one `CatastrophicAck`. `handle_inbound` consults the log BEFORE
+//! recording approval; if the witness's `challenge_nonce` is already
 //! in the spent set, the ack is rejected as a replay.
 //!
 //! # Threat model
 //!
 //! Without this log, an attacker who intercepts a valid
-//! CatastrophicAck on the wire (or replays one from disk via a
+//! `CatastrophicAck` on the wire (or replays one from disk via a
 //! daemon-restart oracle) could re-present it to authorize a
 //! second action. The Praefectus 6-step verification includes a
 //! replay check (step 5: spend ledger), but sentinel SHOULD enforce
@@ -20,12 +20,12 @@
 //! - `insert(nonce)` returns `true` when newly spent (first time),
 //!   `false` when already spent (replay). The caller treats `false`
 //!   as a rejection.
-//! - TTL-evicted. Default 5 min matches the CatastrophicApprovalCache
+//! - TTL-evicted. Default 5 min matches the `CatastrophicApprovalCache`
 //!   TTL: a witness whose approval has already expired can't
 //!   authorize anything anyway, so retaining its nonce record adds
 //!   no security.
 //! - Persistent variant survives daemon restart: an attacker who
-//!   stashes a CatastrophicAck and replays it after restart still
+//!   stashes a `CatastrophicAck` and replays it after restart still
 //!   hits the spent set (the JSONL snapshot was rehydrated).
 
 #![allow(clippy::missing_const_for_fn, clippy::incompatible_msrv)]

@@ -173,4 +173,4 @@ fn colorize_count(n: u64) -> colored::ColoredString {
 }
 
 #[allow(dead_code)]
-fn _ensure_record_in_scope(_b: &BreachRecord) {}
+const fn _ensure_record_in_scope(_b: &BreachRecord) {}

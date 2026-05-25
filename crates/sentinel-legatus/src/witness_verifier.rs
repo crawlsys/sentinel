@@ -11,8 +11,8 @@
 //! Praefectus check) lives in sentinel-application. The daemon
 //! (sentinel-cli) owns the wiring: it constructs an adapter
 //! implementing this port that delegates to the
-//! sentinel-application PraefectusClient, and hands the Arc to
-//! the LegatusRuntime via
+//! sentinel-application `PraefectusClient`, and hands the Arc to
+//! the `LegatusRuntime` via
 //! [`crate::handle::LegatusRuntime::with_witness_verifier`].
 //!
 //! # Default behavior when no verifier is wired
@@ -22,12 +22,12 @@
 //! verifier is similarly optional:
 //!
 //! - **No verifier installed** (`approval_cache.verifier ==
-//!   None`): handle_inbound records the approval unconditionally.
+//!   None`): `handle_inbound` records the approval unconditionally.
 //!   Preserves v0.1 daemon-local trust semantics (the cache lives
 //!   in-process behind bearer-auth on localhost; the threat model
 //!   is "anyone with shell access" which already owns the
 //!   machine).
-//! - **Verifier installed**: handle_inbound calls
+//! - **Verifier installed**: `handle_inbound` calls
 //!   `verifier.verify(&witness, escalation_ref)` BEFORE recording.
 //!   On `Err`, the approval is dropped + logged.
 //!   On `Ok`, the approval is recorded.
@@ -70,7 +70,7 @@ impl std::error::Error for WitnessVerificationError {}
 /// Pluggable verifier for inbound `CatastrophicAck` witnesses.
 ///
 /// Async because production adapters need to round-trip to a
-/// remote Praefectus. The default sentinel-legatus handle_inbound
+/// remote Praefectus. The default sentinel-legatus `handle_inbound`
 /// invocation pattern spawns the verifier as a `tokio::spawn`
 /// task so the synchronous WS recv loop isn't blocked while a
 /// verification is in flight; the record-into-cache step happens
@@ -112,7 +112,7 @@ impl WitnessVerifierPort for AlwaysAccept {
 /// reason. Use as a circuit-breaker when a Praefectus is
 /// configured-but-unreachable, or in security-sensitive
 /// deployments that haven't yet wired a real verifier and want
-/// to ensure no CatastrophicAcks auto-allow retries.
+/// to ensure no `CatastrophicAcks` auto-allow retries.
 #[derive(Debug, Clone)]
 pub struct AlwaysReject {
     reason: String,

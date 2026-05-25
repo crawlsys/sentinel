@@ -139,7 +139,7 @@ pub fn run(binary: Option<String>) -> Result<()> {
         size,
         &hash[..16],
     );
-    eprintln!("[sentinel] Hash file: {}", hash_file.display(),);
+    eprintln!("[sentinel] Hash file: {}", hash_file.display());
     eprintln!("[sentinel] Next hook invocation will consume the staged binary.");
 
     Ok(())

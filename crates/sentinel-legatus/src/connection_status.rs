@@ -106,7 +106,7 @@ impl ConnectionStatus {
     /// record transitions; callers who only want the live state
     /// can ignore.
     #[must_use]
-    pub fn event_log(&self) -> Option<&crate::connection_event_log::ConnectionEventLog> {
+    pub const fn event_log(&self) -> Option<&crate::connection_event_log::ConnectionEventLog> {
         self.event_log.as_ref()
     }
 
