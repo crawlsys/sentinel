@@ -196,6 +196,40 @@ Feature: Sentinel viz delivers live agent activity at a glance
     And the burst <g> is removed from the DOM within 1 second
     And re-clicking the same node spawns a fresh burst (no stale duplicates)
 
+  Scenario: Click-to-pan does NOT reset zoom when target is already visible
+    Given I have manually zoomed in to k=2.0 and a node is near viewport centre
+    When I click that node
+    Then the d3-zoom transform's `k` remains 2.0 (the user's zoom is preserved)
+    And no pan transition runs (the node is already visible and centred-ish)
+
+  Scenario: Click-to-pan eases over 700ms when the node is offscreen
+    Given a node lies outside the current viewport (more than EDGE_PAD from each edge)
+    When I click that node
+    Then the d3-zoom transform animates over ~700ms with ease-out-quad
+    And after the animation the node sits within 22% of viewport centre
+
+  Scenario: Ticker timestamps progress from "Ns ago" to absolute over time
+    Given a ticker row whose underlying event happened 30 seconds ago
+    Then the timestamp reads "30s ago"
+    Given the same event has aged 5 minutes
+    Then the timestamp reads "5m ago"
+    Given the same event has aged 95 minutes
+    Then the timestamp reads as an absolute "HH:MM" in the user's TZ
+    Given the same event has aged > 24 hours
+    Then the timestamp reads "<weekday> HH:MM" (e.g. "Mon 14:30")
+
+  Scenario: Stuck sessions surface a STUCK badge in the status bar
+    Given the graph contains 1 session whose status is "awaiting_user" with last_activity_age_s > 900
+    Then the status bar shows a "STUCK: 1" badge with red border
+    When the count rises to 3 sessions meeting the same criteria
+    Then the badge updates to "STUCK: 3"
+    And exactly one Notification fires that names the freshest 3 stuck sessions
+
+  Scenario: Stuck-badge click focuses the first stuck session
+    Given the STUCK badge is visible with N>0
+    When I click it
+    Then the inspector opens populated with the first stuck session's awaiting_question
+
   Scenario: Active sessions show a continuous liveness ring
     Given the graph contains at least one session whose status is "firing" or "busy" or "awaiting_user"
     Then each such SentinelSession node contains a <circle class="pulse-ring"> child

@@ -1,12 +1,13 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import { EventTicker } from "../components/EventTicker";
 import { GraphCanvas } from "../components/GraphCanvas";
 import { PanelInspector } from "../components/PanelInspector";
 import { StatusBar } from "../components/StatusBar";
 import { useGraphStream } from "../lib/sse";
+import { maybeFireStuckAlert, stuckSessions } from "../lib/stuck";
 
 export default function Page() {
   const { graph, error, connected } = useGraphStream();
@@ -18,14 +19,33 @@ export default function Page() {
     return graph.nodes.find((n) => n.id === selectedNodeId) ?? null;
   }, [graph, selectedNodeId]);
 
+  const stuck = useMemo(() => stuckSessions(graph), [graph]);
+
+  useEffect(() => {
+    maybeFireStuckAlert(stuck.length, stuck);
+  }, [stuck]);
+
   function selectNode(nodeId: string | null, ts?: string) {
     setSelectedNodeId(nodeId);
     setAnchorTs(ts ?? null);
   }
 
+  function focusFirstStuck() {
+    if (stuck.length === 0) return;
+    const first = stuck[0];
+    const ts = typeof first.data?.started_at === "string" ? (first.data.started_at as string) : undefined;
+    selectNode(first.id, ts);
+  }
+
   return (
     <main className="flex flex-col h-screen">
-      <StatusBar graph={graph} connected={connected} error={error} />
+      <StatusBar
+        graph={graph}
+        connected={connected}
+        error={error}
+        stuckCount={stuck.length}
+        onStuckClick={focusFirstStuck}
+      />
       <div className="flex flex-1 min-h-0">
         <div className="flex-1 min-w-0 min-h-0 relative">
           <GraphCanvas

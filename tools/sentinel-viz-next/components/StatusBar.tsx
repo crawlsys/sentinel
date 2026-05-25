@@ -6,9 +6,11 @@ interface Props {
   graph: GraphResponse | null;
   connected: boolean;
   error: string | null;
+  stuckCount?: number;
+  onStuckClick?: () => void;
 }
 
-export function StatusBar({ graph, connected, error }: Props) {
+export function StatusBar({ graph, connected, error, stuckCount = 0, onStuckClick }: Props) {
   return (
     <div
       data-testid="status-bar"
@@ -31,7 +33,18 @@ export function StatusBar({ graph, connected, error }: Props) {
       ) : (
         <span>waiting on first snapshot…</span>
       )}
-      {error ? <span className="text-[#f85149] ml-auto">{error}</span> : null}
+      {stuckCount > 0 ? (
+        <button
+          type="button"
+          onClick={onStuckClick}
+          data-testid="stuck-badge"
+          className="ml-auto px-2 py-0.5 rounded bg-[#3a0f0f] border border-[#f85149] text-[#f85149] font-bold animate-pulse hover:bg-[#5a1717]"
+          title="Sessions awaiting you for >15min — click to focus"
+        >
+          STUCK: {stuckCount}
+        </button>
+      ) : null}
+      {error ? <span className={`text-[#f85149] ${stuckCount > 0 ? "ml-2" : "ml-auto"}`}>{error}</span> : null}
     </div>
   );
 }

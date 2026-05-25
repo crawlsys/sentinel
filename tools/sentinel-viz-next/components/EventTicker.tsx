@@ -1,9 +1,9 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import type { NodeCategory, RecentEvent } from "../types/api";
-import { categoryColor, categoryLabel, shortTime } from "../lib/format";
+import { categoryColor, categoryLabel, tickerTime } from "../lib/format";
 
 interface Props {
   events: RecentEvent[];
@@ -34,6 +34,12 @@ interface TickerRow {
 export function EventTicker({ events, onSelectNode }: Props) {
   const rows = useMemo(() => buildRows(events), [events]);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  // Force a 5s re-render so "30s ago" rolls forward in quiet periods.
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const id = window.setInterval(() => setNow(Date.now()), 5_000);
+    return () => window.clearInterval(id);
+  }, []);
 
   function toggle(key: string) {
     setExpanded((prev) => {
@@ -76,7 +82,7 @@ export function EventTicker({ events, onSelectNode }: Props) {
                   title={categoryLabel(row.category)}
                 />
                 <span className="text-[#6e7681] text-[10px] whitespace-nowrap">
-                  {shortTime(row.ts)}
+                  {tickerTime(row.ts, now)}
                 </span>
                 {row.members.length > 1 ? (
                   <button
@@ -102,7 +108,7 @@ export function EventTicker({ events, onSelectNode }: Props) {
                       onClick={() => m.toolCallId && onSelectNode(m.toolCallId, m.ts)}
                       className="py-0.5 text-[10px] text-[#c9d1d9] hover:text-[#58a6ff] cursor-pointer"
                     >
-                      <span className="text-[#6e7681] mr-2">{shortTime(m.ts)}</span>
+                      <span className="text-[#6e7681] mr-2">{tickerTime(m.ts, now)}</span>
                       {m.toolCallId ? m.toolCallId.replace("SentinelToolCall#", "TC#") : "(no tc id)"}
                     </li>
                   ))}

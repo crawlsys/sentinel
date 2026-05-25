@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 
-import { nodeColor, relTime, shortTime, statusColor } from "../../lib/format";
+import { nodeColor, relTime, shortTime, statusColor, tickerTime } from "../../lib/format";
 
 describe("format helpers", () => {
   it("relTime under one minute", () => {
@@ -21,6 +21,53 @@ describe("format helpers", () => {
     expect(statusColor()).toBe("#6e7681");
     expect(statusColor("firing")).toBe("#3fb950");
     expect(statusColor("awaiting_user")).toBe("#bc8cff");
+  });
+
+  describe("tickerTime buckets", () => {
+    // Pick a fixed "now" anchor so the relative buckets are deterministic.
+    const NOW = new Date("2026-05-25T12:00:00Z").getTime();
+    const at = (offsetSec: number) =>
+      new Date(NOW - offsetSec * 1000).toISOString();
+
+    it('< 5s reads "now"', () => {
+      expect(tickerTime(at(2), NOW)).toBe("now");
+    });
+
+    it("< 90s reads in seconds", () => {
+      expect(tickerTime(at(30), NOW)).toBe("30s ago");
+      expect(tickerTime(at(89), NOW)).toBe("89s ago");
+    });
+
+    it("< 1h reads in minutes", () => {
+      expect(tickerTime(at(120), NOW)).toBe("2m ago");
+      expect(tickerTime(at(3599), NOW)).toBe("59m ago");
+    });
+
+    it("< 90m reads in hours and minutes", () => {
+      expect(tickerTime(at(3600 + 1380), NOW)).toBe("1h 23m ago");
+    });
+
+    it(">= 90m falls back to absolute HH:MM (local TZ)", () => {
+      // 95min ago — should be absolute time string with a colon
+      const s = tickerTime(at(95 * 60), NOW);
+      expect(s).toMatch(/^\d{2}:\d{2}$/);
+    });
+
+    it(">= 24h prepends a weekday short name", () => {
+      // 26h ago
+      const s = tickerTime(at(26 * 3600), NOW);
+      expect(s).toMatch(/^(Mon|Tue|Wed|Thu|Fri|Sat|Sun) \d{2}:\d{2}$/);
+    });
+
+    it("handles bridge ts_sec (no Z suffix) as UTC", () => {
+      const noZ = "2026-05-25T11:58:00";
+      // 2 minutes before noon UTC anchor → "2m ago"
+      expect(tickerTime(noZ, NOW)).toBe("2m ago");
+    });
+
+    it("returns dash on unparseable input", () => {
+      expect(tickerTime("nope", NOW)).toBe("—");
+    });
   });
 
   it("nodeColor reflects denied outcome", () => {

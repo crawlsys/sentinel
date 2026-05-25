@@ -21,6 +21,45 @@ export function shortTime(ts: string): string {
   return new Date(t).toISOString().slice(11, 19);
 }
 
+/** Ticker time string — relative for the first 90 minutes, absolute
+ *  TZ-aware HH:MM after that, "Mon 14:30" beyond 24 hours.
+ *  Buckets:
+ *    < 5s    → "now"
+ *    < 90s   → "30s ago"
+ *    < 1h    → "12m ago"  (minute resolution)
+ *    < 90m   → "1h 23m ago"
+ *    < 24h   → "14:30"    (user's local TZ)
+ *    ≥ 24h   → "Mon 14:30"
+ *  The first 90 minutes is the working-context window; after that
+ *  absolute is more useful (precise enough to scan visually,
+ *  doesn't churn on every render). */
+export function tickerTime(ts: string, now: number = Date.now()): string {
+  if (!ts) return "—";
+  // Bridge writes ts_sec without a TZ marker. Treat it as UTC so
+  // the relative diff is correct (the bridge runs in UTC).
+  let parseable = ts;
+  if (/T\d{2}:\d{2}:\d{2}(\.\d+)?$/.test(ts)) {
+    parseable = `${ts}Z`;
+  }
+  const t = Date.parse(parseable);
+  if (Number.isNaN(t)) return "—";
+  const diff = (now - t) / 1000;
+  if (diff < 0) return "in future";
+  if (diff < 5) return "now";
+  if (diff < 90) return `${Math.round(diff)}s ago`;
+  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+  if (diff < 5400) {
+    const h = Math.floor(diff / 3600);
+    const m = Math.floor((diff % 3600) / 60);
+    return `${h}h ${m}m ago`;
+  }
+  const d = new Date(t);
+  const hhmm = d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", hour12: false });
+  if (diff < 86_400) return hhmm;
+  const day = d.toLocaleDateString(undefined, { weekday: "short" });
+  return `${day} ${hhmm}`;
+}
+
 export function shortSessionId(sid: string): string {
   if (sid.length <= 12) return sid;
   return `${sid.slice(0, 8)}…${sid.slice(-3)}`;
