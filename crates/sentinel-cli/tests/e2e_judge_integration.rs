@@ -27,6 +27,7 @@ fn demo_step_configs() -> HashMap<String, SkillSteps> {
             .to_string(),
         blocker: true,
         baseline_threshold: 0,
+        judge: None,
         timeout_ms: None,
         retry_policy: Default::default(),
         circuit_breaker: Default::default(),
