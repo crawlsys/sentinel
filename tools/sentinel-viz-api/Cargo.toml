@@ -1,0 +1,25 @@
+[workspace]
+
+[package]
+name = "sentinel-viz-api"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.83"
+license = "MIT"
+description = "Rust API serving the Sentinel activity-graph viz (replaces tools/sentinel-viz/viz_server.py)"
+
+[dependencies]
+axum = "0.8"
+tokio = { version = "1", features = ["full"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+dirs = "6"
+
+[dev-dependencies]
+insta = { version = "1", features = ["json"] }
