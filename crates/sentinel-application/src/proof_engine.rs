@@ -15,6 +15,7 @@ use sentinel_domain::judge::{JudgeModel, JudgeVerdict};
 use sentinel_domain::proof::{PhaseProof, ProofChain};
 use sentinel_domain::state::SessionState;
 use sentinel_domain::step_proof::StepProof;
+use ed25519_dalek::SigningKey;
 
 use crate::judge_service::JudgeService;
 use crate::praefectus_client::{InMemoryPraefectusClient, PraefectusClient};
@@ -33,6 +34,20 @@ pub struct ProofEngine {
     /// deployments call [`Self::with_praefectus`] to wire a real
     /// HTTP/IPC adapter against consul-app's Praefectus.
     praefectus: Arc<dyn PraefectusClient>,
+
+    /// Optional Ed25519 signing key (#4 — proof attestation). When present,
+    /// every sealed StepProof is signed over its `combined_hash`, so verifiers
+    /// can confirm "the holder of this key authored this chain entry" — beyond
+    /// the SHA-256 hash chain. Loaded from `SENTINEL_SIGNING_KEY` by the CLI
+    /// layer (sentinel-domain stays pure / key-agnostic). `None` = unsigned
+    /// (hash-chain integrity only), the back-compat default.
+    signing_key: Option<SigningKey>,
+
+    /// When true, sealing REFUSES to proceed without a signing key — the
+    /// mandatory-attestation posture for audit-grade deployments. Set from
+    /// `SENTINEL_SIGNING_REQUIRED`. With no key configured, every seal errors
+    /// rather than silently writing an unsigned (un-attestable) proof.
+    signing_required: bool,
 }
 
 impl ProofEngine {
@@ -41,6 +56,8 @@ impl ProofEngine {
             state,
             judge,
             praefectus: Arc::new(InMemoryPraefectusClient::new()),
+            signing_key: None,
+            signing_required: false,
         }
     }
 
@@ -52,6 +69,18 @@ impl ProofEngine {
     #[must_use]
     pub fn with_praefectus(mut self, praefectus: Arc<dyn PraefectusClient>) -> Self {
         self.praefectus = praefectus;
+        self
+    }
+
+    /// Wire an Ed25519 signing key + the mandatory-signing posture (#4).
+    /// When `key` is `Some`, every sealed StepProof is signed. When
+    /// `required` is true, sealing without a key is refused (error) — the
+    /// audit-grade attestation guarantee. Builder shape; existing callers
+    /// keep the unsigned default.
+    #[must_use]
+    pub fn with_signing(mut self, key: Option<SigningKey>, required: bool) -> Self {
+        self.signing_key = key;
+        self.signing_required = required;
         self
     }
 
@@ -327,7 +356,7 @@ impl ProofEngine {
                 combined_hash: combined_hash.clone(),
                 judge_model: judge_model.to_string(),
                 judge_verdict: verdict,
-                signature: None, // M1.7 (Ed25519 opt-in) wires this when configured
+                signature: None, // signed below via sign_with when a key is configured (#4)
                 trace_context: None, // M4.5 — exporter wiring lands separately
                 started_at,
                 completed_at,
@@ -336,6 +365,20 @@ impl ProofEngine {
                     .unsigned_abs(),
                 actor,
             };
+
+            // #4 — Ed25519 attestation. Mandatory-signing posture: refuse to
+            // seal an unsigned proof when signing is required but no key is
+            // configured (audit-grade must be attestable, never silently
+            // unsigned). Otherwise sign when a key is present; leave unsigned
+            // (hash-chain only) when neither key nor requirement is set.
+            let mut proof = proof;
+            match (&self.signing_key, self.signing_required) {
+                (Some(key), _) => proof.sign_with(key),
+                (None, true) => bail!(
+                    "SENTINEL_SIGNING_REQUIRED is set but no SENTINEL_SIGNING_KEY                      is configured — refusing to seal an unsigned StepProof for                      '{phase_id}.{step_id}' (skill '{skill}'). Provide a 32-byte                      hex Ed25519 seed in SENTINEL_SIGNING_KEY, or unset                      SENTINEL_SIGNING_REQUIRED."
+                ),
+                (None, false) => {}
+            }
 
             // Append to chain — creates a fresh ProofChain on first step.
             let session_id = state.session_id.clone();
@@ -520,6 +563,89 @@ mod step_evidence_tests {
             }
             _ => panic!("expected Step entry"),
         }
+    }
+
+    // #4 — Ed25519 attestation tests.
+
+    #[tokio::test]
+    async fn signing_key_present_produces_a_signature_on_the_sealed_proof() {
+        use ed25519_dalek::{SigningKey, VerifyingKey};
+        let key = SigningKey::from_bytes(&[7u8; 32]);
+        let verifying: VerifyingKey = key.verifying_key();
+        let eng = engine().with_signing(Some(key), false);
+        let proof = eng
+            .submit_step_evidence(
+                "linear",
+                "claim",
+                "1",
+                "step",
+                Evidence::default(),
+                JudgeVerdict::pass(0.95, "ok"),
+                JudgeModel::Opus,
+                serde_json::Value::Null,
+                None,
+                Utc::now(),
+            )
+            .await
+            .expect("seals with a key");
+        assert!(
+            proof.signature.is_some(),
+            "a configured signing key must produce a signature"
+        );
+        assert!(
+            proof.verify_signature(&verifying).expect("verify ok"),
+            "the signature must verify against the signing key's public key"
+        );
+    }
+
+    #[tokio::test]
+    async fn signing_required_without_a_key_refuses_to_seal() {
+        // Audit-grade posture: required + no key => hard error, never an
+        // unsigned (un-attestable) proof, and the chain stays unmutated.
+        let eng = engine().with_signing(None, true);
+        let result = eng
+            .submit_step_evidence(
+                "linear",
+                "claim",
+                "1",
+                "step",
+                Evidence::default(),
+                JudgeVerdict::pass(0.95, "ok"),
+                JudgeModel::Opus,
+                serde_json::Value::Null,
+                None,
+                Utc::now(),
+            )
+            .await;
+        assert!(result.is_err(), "required signing without a key must error");
+        let msg = format!("{:#}", result.unwrap_err());
+        assert!(
+            msg.contains("SENTINEL_SIGNING_REQUIRED") && msg.contains("unsigned"),
+            "error must explain the missing-key refusal: {msg}"
+        );
+        let state = eng.state.read().await;
+        assert!(
+            state.proof_chains.get("linear").is_none(),
+            "refused seal must not mutate the chain"
+        );
+    }
+
+    #[tokio::test]
+    async fn no_key_no_requirement_seals_unsigned_backcompat() {
+        let eng = engine(); // default: no key, not required
+        let proof = eng
+            .submit_step_evidence(
+                "linear", "claim", "1", "step",
+                Evidence::default(),
+                JudgeVerdict::pass(0.95, "ok"),
+                JudgeModel::Opus,
+                serde_json::Value::Null,
+                None,
+                Utc::now(),
+            )
+            .await
+            .expect("unsigned seal is the back-compat default");
+        assert!(proof.signature.is_none(), "no key => unsigned (hash-chain only)");
     }
 
     #[tokio::test]

@@ -49,6 +49,29 @@ use sentinel_infrastructure::mcp_transport::{JsonRpcRequest, JsonRpcResponse};
 /// Returns `None` if no transcripts exist — in that case the caller
 /// should surface an explicit "no active session" error rather than
 /// fabricating a timestamped id that won't match any real state.
+/// Load an Ed25519 signing key from `SENTINEL_SIGNING_KEY` (32-byte hex seed).
+/// Returns `None` when unset; logs a warning and returns `None` when set but
+/// malformed (the `signing_required` flag is what turns a missing key into a
+/// hard error at seal time — this loader stays lenient so a bad env var
+/// doesn't crash MCP startup).
+fn load_signing_key_from_env() -> Option<ed25519_dalek::SigningKey> {
+    let raw = std::env::var("SENTINEL_SIGNING_KEY").ok()?;
+    let bytes = match hex::decode(raw.trim()) {
+        Ok(b) => b,
+        Err(e) => {
+            warn!(error = %e, "SENTINEL_SIGNING_KEY is not valid hex — proofs will be unsigned");
+            return None;
+        }
+    };
+    if bytes.len() != 32 {
+        warn!(len = bytes.len(), "SENTINEL_SIGNING_KEY must be a 32-byte hex seed — proofs will be unsigned");
+        return None;
+    }
+    let mut seed = [0u8; 32];
+    seed.copy_from_slice(&bytes);
+    Some(ed25519_dalek::SigningKey::from_bytes(&seed))
+}
+
 fn detect_live_session_id() -> Option<String> {
     let home = std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
@@ -532,7 +555,18 @@ pub async fn run() -> Result<()> {
             Arc::new(FallbackJudge)
         }
     };
-    let proof_engine = Arc::new(ProofEngine::new(state.clone(), judge.clone()));
+    // #4 — load the optional Ed25519 signing key + mandatory-signing posture.
+    // SENTINEL_SIGNING_KEY = 32-byte hex Ed25519 seed; SENTINEL_SIGNING_REQUIRED
+    // = "1"/"true" makes sealing refuse to proceed without a key (audit-grade).
+    let signing_key = load_signing_key_from_env();
+    let signing_required = matches!(
+        std::env::var("SENTINEL_SIGNING_REQUIRED").ok().as_deref(),
+        Some("1") | Some("true") | Some("TRUE") | Some("yes")
+    );
+    let proof_engine = Arc::new(
+        ProofEngine::new(state.clone(), judge.clone())
+            .with_signing(signing_key, signing_required),
+    );
     // Wire cross-session proof archive backing (#39): query_proof_corpus
     // walks the index at ~/.claude/sentinel/proofs/index.jsonl in addition
     // to live state. Falls back to live-only when home_dir is unavailable.
