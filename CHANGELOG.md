@@ -6,6 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Fixed
+- **PowerShell + sequential-thinking reversibility deadlock** (2026-05-25). The `LayeredReversibilityClassifier` omitted the `PowerShell` tool from `builtin_class()`, so every PowerShell call fell through to the conservative `Irreversible` default and tripped the A3 `dry_run_then_commit` gate. That gate demands `_intent`/`_reasoning`/`_expected_effect` keys inside `tool_input`, but the PowerShell tool schema is `additionalProperties: false` and rejects them — an unbreakable deadlock on Windows, where PowerShell is the primary shell. A second deadlock compounded it: `tool_usage_gate` requires a `sequentialthinking` call before code edits, while the unknown-MCP-server default (`Irreversible`) blocked the `mcp__sequential-thinking` tool itself. Fix routes `PowerShell` through the shared Layer-3 command-pattern path (it carries the same `command` field as Bash), adds PowerShell destructive patterns (`Remove-Item -Recurse -Force`, `Format-Volume`, `Clear-Disk`, `Remove-Partition`, `Initialize-Disk`, registry-key deletes → Catastrophic), and adds `[mcp.sequential-thinking] sequentialthinking = "TriviallyReversible"`. 7 regression tests added; 329 infrastructure+application tests green.
+
 ### Added
 - **Tier 3 production hardening: TLS docs + Prometheus + multi-consulate failover + token-rotation surface** (2026-05-24). Four production-quality additions on top of the reliable-connection foundation:
 
