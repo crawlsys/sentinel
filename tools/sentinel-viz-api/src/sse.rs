@@ -9,12 +9,13 @@ use futures::stream::{self, Stream};
 use tokio::time;
 
 use crate::db;
-use crate::graph;
-use crate::server::AppState;
+use crate::graph::{self, GraphOpts};
+use crate::server::{AppState, CacheEntry};
 
-/// `/api/stream` — 250ms poll loop. Emits a full graph snapshot
-/// whenever `MAX(seq)` advances; emits a comment keep-alive otherwise.
-/// Matches the SSE behaviour of viz_server.py.
+/// `/api/stream` — 250ms `MAX(seq)` probe. Emits a full graph snapshot
+/// whenever the store advances; emits a keep-alive comment otherwise.
+/// Reuses the cache shared with `/api/graph` so repeated cold requests
+/// don't pay the ~7s build cost.
 pub async fn stream(
     State(state): State<Arc<AppState>>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
@@ -22,15 +23,42 @@ pub async fn stream(
         (state, -1_i64),
         |(state, mut last_seq)| async move {
             loop {
-                let cur = db::open_ro(&state.db_path)
-                    .ok()
-                    .and_then(|c| db::peek_max_seq(&c).ok())
-                    .unwrap_or(-1);
+                let conn = match db::open_ro(&state.db_path) {
+                    Ok(c) => c,
+                    Err(_) => {
+                        time::sleep(Duration::from_millis(500)).await;
+                        continue;
+                    }
+                };
+                let cur = db::peek_max_seq(&conn).unwrap_or(0);
                 if cur != last_seq {
                     last_seq = cur;
-                    match graph::load_graph_from_path(&state.db_path, state.window_limit) {
+                    let opts = GraphOpts {
+                        limit: state.window_limit,
+                        since_secs: Some(6 * 3600),
+                        include_hooks: false,
+                    };
+                    let key = (opts.limit, opts.since_secs, opts.include_hooks);
+                    match graph::load_graph_with(&conn, opts) {
                         Ok(g) => {
-                            let payload = serde_json::to_string(&g).unwrap_or_default();
+                            let body = serde_json::to_vec(&g).unwrap_or_default();
+                            let body_arc = Arc::new(body);
+                            let g_arc = Arc::new(g);
+                            if let Ok(mut cache) = state.cache.write() {
+                                cache.retain(|e| e.key != key);
+                                cache.push(CacheEntry {
+                                    key,
+                                    last_seq: cur,
+                                    body: Arc::clone(&body_arc),
+                                    graph: Arc::clone(&g_arc),
+                                });
+                                if cache.len() > 8 {
+                                    let drop_n = cache.len() - 8;
+                                    cache.drain(0..drop_n);
+                                }
+                            }
+                            let payload = String::from_utf8((*body_arc).clone())
+                                .unwrap_or_default();
                             return Some((Ok(Event::default().data(payload)), (state, last_seq)));
                         }
                         Err(_) => {

@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
 use axum::Json;
@@ -21,6 +21,21 @@ pub struct AppState {
     pub db_path: PathBuf,
     pub window_limit: usize,
     pub started_at: Instant,
+    /// Snapshot cache keyed by opts. Avoids re-scanning 90k events
+    /// on every refresh when the store hasn't advanced. Holds at most
+    /// a few entries — one per unique (limit, since_secs, include_hooks).
+    pub cache: RwLock<Vec<CacheEntry>>,
+}
+
+pub struct CacheEntry {
+    pub key: (usize, Option<i64>, bool),
+    pub last_seq: i64,
+    /// Pre-serialised JSON body — cheap to ship from the handler
+    /// without re-serialising on every hit.
+    pub body: Arc<Vec<u8>>,
+    /// Kept for the SSE path, which still emits the GraphResponse
+    /// directly so it can be re-serialised with `data: ` framing.
+    pub graph: Arc<GraphResponse>,
 }
 
 pub fn router(state: Arc<AppState>) -> axum::Router {
@@ -52,7 +67,10 @@ pub struct GraphQuery {
 async fn graph_endpoint(
     State(state): State<Arc<AppState>>,
     Query(q): Query<GraphQuery>,
-) -> Result<Json<GraphResponse>, (StatusCode, String)> {
+) -> Result<axum::response::Response, (StatusCode, String)> {
+    use axum::http::header;
+    use axum::response::IntoResponse;
+
     let limit = q.limit.unwrap_or(state.window_limit);
     let since_secs = match q.since_secs {
         Some(0) => None,
@@ -60,13 +78,52 @@ async fn graph_endpoint(
         None => Some(6 * 3600),
     };
     let include_hooks = q.include_hooks.unwrap_or(false);
+    let key = (limit, since_secs, include_hooks);
+
     let conn = db::open_ro(&state.db_path).map_err(internal)?;
+    let cur_seq = db::peek_max_seq(&conn).unwrap_or(0);
+    let cached_body: Option<Arc<Vec<u8>>> = {
+        let cache = state.cache.read().unwrap();
+        cache
+            .iter()
+            .find(|e| e.key == key && e.last_seq == cur_seq)
+            .map(|e| Arc::clone(&e.body))
+    };
+    if let Some(body) = cached_body {
+        return Ok((
+            [(header::CONTENT_TYPE, "application/json")],
+            (*body).clone(),
+        )
+            .into_response());
+    }
+
     let g = graph::load_graph_with(
         &conn,
         GraphOpts { limit, since_secs, include_hooks },
     )
     .map_err(internal)?;
-    Ok(Json(g))
+    let body = serde_json::to_vec(&g).map_err(|e| internal(anyhow::anyhow!(e)))?;
+    let body_arc = Arc::new(body);
+    let g_arc = Arc::new(g);
+    {
+        let mut cache = state.cache.write().unwrap();
+        cache.retain(|e| e.key != key);
+        cache.push(CacheEntry {
+            key,
+            last_seq: cur_seq,
+            body: Arc::clone(&body_arc),
+            graph: Arc::clone(&g_arc),
+        });
+        if cache.len() > 8 {
+            let drop_n = cache.len() - 8;
+            cache.drain(0..drop_n);
+        }
+    }
+    Ok((
+        [(header::CONTENT_TYPE, "application/json")],
+        (*body_arc).clone(),
+    )
+        .into_response())
 }
 
 #[derive(Deserialize)]

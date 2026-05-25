@@ -122,6 +122,49 @@ pub fn load_graph_with(conn: &Connection, opts: GraphOpts) -> Result<GraphRespon
             }
         }
     }
+    // Derive `next_tool_call` edges between consecutive tool-calls in
+    // a session — the "chain" layout the user asks for. Built from
+    // SentinelToolCall nodes sorted by ts_sec (sub-second collisions
+    // broken by seq).
+    let mut tc_by_session: HashMap<String, Vec<&Node>> = HashMap::new();
+    for n in nodes.values() {
+        if n.kind == node_kind::TOOL_CALL {
+            if let Some(sid) = n.data.get("session_id").and_then(|v| v.as_str()) {
+                tc_by_session.entry(sid.to_string()).or_default().push(n);
+            }
+        }
+    }
+    for (_sid, mut tcs) in tc_by_session {
+        tcs.sort_by_key(|n| {
+            let ts = n
+                .data
+                .get("ts_sec")
+                .and_then(|v| v.as_str())
+                .or_else(|| n.data.get("ts").and_then(|v| v.as_str()))
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| n.ts.clone());
+            (ts, n.seq)
+        });
+        for w in tcs.windows(2) {
+            let (a, b) = (w[0], w[1]);
+            let key = format!("{}->{}:next_tool_call", a.id, b.id);
+            if edge_keys.insert(key) {
+                let ts = b
+                    .data
+                    .get("ts_sec")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| b.ts.clone());
+                edges_all.push(Edge {
+                    source: a.id.clone(),
+                    target: b.id.clone(),
+                    kind: "next_tool_call".to_string(),
+                    ts,
+                });
+            }
+        }
+    }
+
     for (_sid, mut invs) in by_session {
         invs.sort_by_key(|n| {
             let ts = n

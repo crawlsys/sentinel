@@ -102,17 +102,19 @@ export function GraphCanvas({ graph, selectedNodeId, onSelectNode }: Props) {
 
     const sim = d3Force
       .forceSimulation<SimNode, SimLink>(simNodes)
-      .force("charge", d3Force.forceManyBody<SimNode>().strength(-120))
+      .force("charge", d3Force.forceManyBody<SimNode>().strength(-180))
       .force(
         "link",
         d3Force
           .forceLink<SimNode, SimLink>(simLinks)
           .id((d) => d.id)
-          .distance(60)
-          .strength(0.5),
+          .distance((l) => (l.kind === "next_tool_call" ? 35 : 70))
+          .strength((l) => (l.kind === "next_tool_call" ? 0.9 : 0.4)),
       )
       .force("center", d3Force.forceCenter(0, 0))
-      .force("collide", d3Force.forceCollide<SimNode>().radius(18));
+      .force("collide", d3Force.forceCollide<SimNode>().radius(18))
+      // Settle quickly so click targets stop wiggling.
+      .alphaDecay(0.05);
     simRef.current = sim;
 
     const svg = select(svgRef.current);
@@ -125,9 +127,9 @@ export function GraphCanvas({ graph, selectedNodeId, onSelectNode }: Props) {
         enter
           .append("line")
           .attr("class", "edge")
-          .attr("stroke", "#30363d")
-          .attr("stroke-width", 0.7)
-          .attr("stroke-opacity", 0.6),
+          .attr("stroke", (d) => (d.kind === "next_tool_call" ? "#58a6ff" : "#30363d"))
+          .attr("stroke-width", (d) => (d.kind === "next_tool_call" ? 1.2 : 0.7))
+          .attr("stroke-opacity", (d) => (d.kind === "next_tool_call" ? 0.8 : 0.5)),
       );
 
     const node = g

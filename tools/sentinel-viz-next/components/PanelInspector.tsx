@@ -4,7 +4,34 @@ import { useQuery } from "@tanstack/react-query";
 
 import type { Node } from "../types/api";
 import { fetchActivity } from "../lib/api";
-import { relTime, statusColor } from "../lib/format";
+import { categoryColor, categoryLabel, relTime, statusColor } from "../lib/format";
+
+function friendlyTitle(node: Node): string {
+  switch (node.type) {
+    case "SentinelSession":
+      return "session";
+    case "SentinelToolCall":
+      return typeof node.data?.tool === "string" && (node.data.tool as string).length > 0
+        ? `tool · ${node.data.tool}`
+        : "tool call";
+    case "SentinelHookInvocation":
+      return typeof node.data?.hook === "string"
+        ? `hook · ${node.data.hook as string}`
+        : "hook";
+    default:
+      return node.type;
+  }
+}
+
+function segmentStyle(kind: string, hadError: boolean): {
+  border: string;
+  label: string;
+} {
+  if (hadError) return { border: "#f85149", label: "#f85149" };
+  if (kind === "user_input") return { border: "#58a6ff", label: "#58a6ff" };
+  if (kind === "assistant_turn") return { border: "#bc8cff", label: "#bc8cff" };
+  return { border: "#30363d", label: "#3fb950" };
+}
 
 interface Props {
   node: Node | null;
@@ -41,7 +68,9 @@ export function PanelInspector({ node, onClose }: Props) {
       className="w-[360px] border-l border-[#30363d] bg-[#161b22] text-[#c9d1d9] p-4 text-xs font-mono overflow-y-auto"
     >
       <header className="flex items-baseline justify-between mb-3">
-        <h3 className="text-[#58a6ff] text-sm">{node.type}</h3>
+        <h3 className="text-[#c9d1d9] text-sm">
+          <span className="text-[#58a6ff]">{friendlyTitle(node)}</span>
+        </h3>
         <button
           aria-label="close inspector"
           onClick={onClose}
@@ -51,18 +80,33 @@ export function PanelInspector({ node, onClose }: Props) {
         </button>
       </header>
       <div className="space-y-1 text-[11px]">
-        <Row k="id" v={node.id} />
+        {node.category ? (
+          <div className="flex justify-between">
+            <span>category</span>
+            <span style={{ color: categoryColor(node.category) }}>
+              {categoryLabel(node.category)}
+            </span>
+          </div>
+        ) : null}
         {node.session_status ? (
           <div className="flex justify-between">
-            <span>session_status</span>
+            <span>status</span>
             <span style={{ color: statusColor(node.session_status) }}>{node.session_status}</span>
           </div>
         ) : null}
         {node.last_activity_age_s != null ? (
-          <Row k="last_activity" v={`${node.last_activity_age_s}s`} />
+          <Row k="last activity" v={relTime(new Date(Date.now() - node.last_activity_age_s * 1000).toISOString())} />
         ) : null}
-        <Row k="ts" v={node.ts} />
-        <Row k="seq" v={String(node.seq)} />
+        {typeof node.data?.session_id === "string" ? (
+          <Row k="session" v={(node.data.session_id as string).slice(0, 12) + "…"} />
+        ) : null}
+        {typeof node.data?.n_hooks === "number" ? (
+          <Row k="hooks fired" v={String(node.data.n_hooks)} />
+        ) : null}
+        {typeof node.data?.outcomes === "object" && node.data.outcomes ? (
+          <Row k="outcomes" v={Object.entries(node.data.outcomes as Record<string, number>).map(([k, v]) => `${v} ${k}`).join(", ")} />
+        ) : null}
+        <Row k="id" v={node.id.replace(/^Sentinel/, "")} />
       </div>
 
       {node.awaiting_question ? (
@@ -90,20 +134,26 @@ export function PanelInspector({ node, onClose }: Props) {
             <p className="text-[#f85149]">activity error</p>
           ) : activityQ.data?.segments.length ? (
             <ul className="space-y-2" data-testid="activity-segments">
-              {activityQ.data.segments.slice(-8).reverse().map((s, i) => (
-                <li
-                  key={`${s.ts}-${i}`}
-                  className={`p-2 rounded bg-[#0d1117] border-l-2 ${
-                    s.had_error ? "border-[#f85149]" : "border-[#30363d]"
-                  }`}
-                >
-                  <div className="flex justify-between items-baseline text-[10px] mb-1">
-                    <span className="text-[#3fb950] font-bold">{s.label}</span>
-                    <span className="text-[#6e7681]">{relTime(s.ts)}</span>
-                  </div>
-                  <div className="text-[10px] text-[#c9d1d9] opacity-90">{s.preview}</div>
-                </li>
-              ))}
+              {activityQ.data.segments.slice(-8).reverse().map((s, i) => {
+                const sty = segmentStyle(s.kind, !!s.had_error);
+                return (
+                  <li
+                    key={`${s.ts}-${i}`}
+                    className="p-2 rounded bg-[#0d1117] border-l-2"
+                    style={{ borderLeftColor: sty.border }}
+                  >
+                    <div className="flex justify-between items-baseline text-[10px] mb-1 gap-2">
+                      <span className="font-bold truncate" style={{ color: sty.label }}>
+                        {s.kind === "user_input" ? "user" : s.label}
+                      </span>
+                      <span className="text-[#6e7681] whitespace-nowrap">{relTime(s.ts)}</span>
+                    </div>
+                    <div className="text-[10px] text-[#c9d1d9] opacity-90 whitespace-pre-wrap break-words">
+                      {s.preview}
+                    </div>
+                  </li>
+                );
+              })}
             </ul>
           ) : (
             <p className="text-[#6e7681]">no segments in window</p>

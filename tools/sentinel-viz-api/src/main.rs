@@ -31,6 +31,7 @@ async fn main() -> Result<()> {
         db_path: db_path.clone(),
         window_limit,
         started_at: Instant::now(),
+        cache: std::sync::RwLock::new(Vec::new()),
     });
 
     let app = sentinel_viz_api::server::router(state);

@@ -15,8 +15,8 @@ export function StatusBar({ graph, connected, error }: Props) {
       className="flex items-center gap-4 px-3 py-1.5 border-b border-[#30363d] bg-[#161b22] text-[10px] uppercase tracking-wider text-[#6e7681] font-mono"
     >
       <span className="text-[#58a6ff] font-bold">sentinel-viz-next</span>
-      <span className={connected ? "text-[#3fb950]" : "text-[#d29922]"}>
-        {connected ? "● live" : "○ connecting"}
+      <span className={connected ? "text-[#3fb950]" : graph ? "text-[#58a6ff]" : "text-[#d29922]"}>
+        {connected ? "● live" : graph ? "● ready" : "○ connecting"}
       </span>
       {graph ? (
         <>

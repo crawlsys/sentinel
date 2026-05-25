@@ -32,7 +32,7 @@ describe("PanelInspector", () => {
     // Avoid the real fetch — short-circuit with a fetch mock that never resolves.
     vi.stubGlobal("fetch", vi.fn(() => new Promise(() => {})));
     render(withClient(<PanelInspector node={sessionNode} onClose={() => {}} />));
-    expect(screen.getByText("SentinelSession")).toBeInTheDocument();
+    expect(screen.getAllByRole("heading")[0]).toHaveTextContent("session");
     expect(screen.getByText("awaiting_user")).toBeInTheDocument();
     expect(screen.getByText(/want me to merge this PR/)).toBeInTheDocument();
     vi.unstubAllGlobals();
