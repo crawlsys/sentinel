@@ -9,7 +9,6 @@ import { SessionConsole } from "../components/SessionConsole";
 import { SettingsModal } from "../components/SettingsModal";
 import { StatusBar } from "../components/StatusBar";
 import { useGraphStream } from "../lib/sse";
-import { useSessionName } from "../lib/session-names";
 import { maybeFireStuckAlert, stuckSessions } from "../lib/stuck";
 
 export default function Page() {
@@ -42,8 +41,6 @@ export default function Page() {
   useEffect(() => {
     setPendingFocusSession(selectedSessionId);
   }, [selectedSessionId]);
-
-  const selectedSessionName = useSessionName(selectedSessionId);
 
   const stuck = useMemo(() => stuckSessions(graph), [graph]);
 
@@ -102,10 +99,7 @@ export default function Page() {
           onSelectNode={(id, ts) => selectNode(id, ts)}
         />
       </div>
-      <SessionConsole
-        sessionId={selectedSessionId}
-        sessionLabel={typeof selectedSessionName === "string" ? selectedSessionName : null}
-      />
+      <SessionConsole graph={graph} />
       <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} />
     </main>
   );

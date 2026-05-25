@@ -25,14 +25,28 @@ interface SimNode extends d3Force.SimulationNodeDatum {
   ref: Node;
 }
 
-/** Position assigned to a session within the viewport. Used by the
- *  forceX/forceY anchors to keep each session's galaxy in its own
- *  region instead of one big tangle. */
+/** Position assigned to a session within the viewport. The session
+ *  bubble pins HERE; its TCs spiral outward from this point. */
 interface SessionAnchor {
   sid: string;
-  /** Centre x (in sim coordinates — sim is centred at 0,0). */
+  /** Centre x/y in sim coordinates (sim is centred at 0,0). */
   cx: number;
   cy: number;
+}
+
+/// Golden-angle spiral step. Pi * (3 - sqrt(5)) ≈ 2.39996 rad ≈ 137.5°.
+/// Same constant sunflower seed-head spacing uses; gives evenly packed
+/// nodes with no two ever colliding angularly.
+const GOLDEN_ANGLE = Math.PI * (3 - Math.sqrt(5));
+/// Base spacing between adjacent TCs along the spiral.
+const SPIRAL_BASE_R = 22;
+
+function spiralOffset(rank: number): { dx: number; dy: number } {
+  // Rank 0 (chain head) sits very close to the centre; later ranks
+  // spiral outward proportional to sqrt(rank).
+  const r = SPIRAL_BASE_R * Math.sqrt(rank + 0.5);
+  const theta = rank * GOLDEN_ANGLE;
+  return { dx: Math.cos(theta) * r, dy: Math.sin(theta) * r };
 }
 
 interface SimLink extends d3Force.SimulationLinkDatum<SimNode> {
@@ -317,8 +331,40 @@ export function GraphCanvas({ graph, selectedNodeId, onSelectNode }: Props) {
     });
 
     // Annotate chain ranks per session before handing to the sim —
-    // labels and fade key off this.
+    // labels, fade, AND the golden-spiral position all key off this.
     annotateChainRanks(nextNodes, desired.links);
+
+    // Deterministic layout: pin every node at its computed position
+    // via fx/fy. This bypasses d3-force entirely for placement.
+    //   - Sessions sit at their anchor slot (circle around origin).
+    //   - TCs spiral outward from their session's anchor along a
+    //     golden-angle Fibonacci spiral, ordered by chain rank
+    //     (rank 0 = head = nearest the centre).
+    //   - Hooks / orphans drift via the sim (rare).
+    for (const n of nextNodes) {
+      if (n.kind === "SentinelSession") {
+        const a = n.sid ? desired.anchors.get(n.sid) : null;
+        if (a) {
+          n.fx = a.cx;
+          n.fy = a.cy;
+          n.x = a.cx;
+          n.y = a.cy;
+        }
+      } else if (n.kind === "SentinelToolCall" && n.sid && n.chainRank != null) {
+        const a = desired.anchors.get(n.sid);
+        if (a) {
+          const off = spiralOffset(n.chainRank);
+          n.fx = a.cx + off.dx;
+          n.fy = a.cy + off.dy;
+          n.x = a.cx + off.dx;
+          n.y = a.cy + off.dy;
+        }
+      } else {
+        // Free node — clear any previous pin.
+        n.fx = null;
+        n.fy = null;
+      }
+    }
 
     nodesRef.current = nextNodes;
     linksRef.current = desired.links;
@@ -444,18 +490,35 @@ export function GraphCanvas({ graph, selectedNodeId, onSelectNode }: Props) {
       .selectAll<SVGGElement, SimNode>("g.node")
       .each(function (d) {
         const grp = select(this);
+        const isSelected = d.id === selectedNodeId;
         // Primary circle (first <circle> only — second is the pulse-ring).
         grp
           .select<SVGCircleElement>("circle:not(.pulse-ring)")
-          .attr("stroke", d.id === selectedNodeId ? "#58a6ff" : "#0d1117")
-          .attr("stroke-width", d.id === selectedNodeId ? 3 : 1.5);
+          .attr("stroke", isSelected ? "#58a6ff" : "#0d1117")
+          .attr("stroke-width", isSelected ? 3 : 1.5);
         // Drop any prior burst — only the freshest click animates.
         grp.selectAll<SVGGElement, unknown>(":scope > g.click-burst").remove();
-        if (d.id === selectedNodeId) {
+        // Drop any prior selected-marker — only the current selection has one.
+        grp.selectAll<SVGGElement, unknown>(":scope > g.selected-marker").remove();
+        if (isSelected) {
+          // Persistent halo — survives SSE re-renders. Two concentric
+          // circles, the outer pulses + dashed for unmissable presence.
+          const marker = grp.append("g").attr("class", "selected-marker");
+          marker
+            .append("circle")
+            .attr("class", "halo-inner")
+            .attr("r", 13)
+            .attr("cx", 0)
+            .attr("cy", 0);
+          marker
+            .append("circle")
+            .attr("class", "halo-outer")
+            .attr("r", 18)
+            .attr("cx", 0)
+            .attr("cy", 0);
+          // One-shot burst on top (animates outward 0.7s).
           const burst = grp.append("g").attr("class", "click-burst");
           burst.append("circle").attr("cx", 0).attr("cy", 0);
-          // CSS animation runs 700ms; clean up afterward so we don't
-          // accumulate DOM nodes when the same node is re-clicked.
           window.setTimeout(() => burst.remove(), 800);
         }
       });
