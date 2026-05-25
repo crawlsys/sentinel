@@ -27,6 +27,7 @@ pub mod hook_metrics;
 pub mod hooks;
 pub mod interceptor;
 pub mod issue_suggest;
+pub mod judge_enforcement;
 pub mod judge_service;
 pub mod lead_time;
 pub mod legatus_client;

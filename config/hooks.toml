@@ -153,6 +153,14 @@ depends_on = []
 has_api_call = false
 
 [[hooks]]
+id = "step-judge"
+event = "PostToolUse"
+matcher = "mcp__skills__"
+description = "Run the adversarial AI judge on a completed step tool's evidence and produce a verdict. Staged via SENTINEL_JUDGE_ENFORCEMENT (shadow|warn|enforce, default shadow)."
+depends_on = ["evidence-collector"]
+has_api_call = true
+
+[[hooks]]
 id = "test-evidence-recorder"
 event = "PostToolUse"
 matcher = ["Bash"]

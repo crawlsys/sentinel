@@ -428,6 +428,25 @@ impl McpHandler {
                 Err(e) => return McpToolResult::err(format!("Invalid 'verdict' shape: {e}")),
             };
 
+        // Enforcement gate (#9): in `enforce` mode, refuse to seal a
+        // non-sufficient verdict — this is the seal-blocking half of the
+        // staged rollout (the `step_judge` PostToolUse hook produces + warns;
+        // the seal is the structural enforcement point). In `shadow`/`warn`
+        // mode the seal proceeds regardless, so auto-judging every step can be
+        // observed before it starts blocking work. Default is `shadow`.
+        let enforcement = crate::judge_enforcement::Mode::from_env();
+        if enforcement.blocks_seal() && !verdict.sufficient {
+            return McpToolResult::err(format!(
+                "🟠 [Judge:enforce] Refusing to seal step '{step_id}' of \
+                 '{skill}/{phase_id}': judge verdict is INSUFFICIENT \
+                 (confidence {:.2}). {}{}Set SENTINEL_JUDGE_ENFORCEMENT=shadow \
+                 to record without blocking, or address the gap and resubmit.",
+                verdict.confidence,
+                verdict.reasoning,
+                if verdict.reasoning.is_empty() { "" } else { " " },
+            ));
+        }
+
         // Optional fields with defaults.
         let mut evidence: sentinel_domain::evidence::Evidence = match args.get("evidence") {
             Some(v) => match serde_json::from_value(v.clone()) {

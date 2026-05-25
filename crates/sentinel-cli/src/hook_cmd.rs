@@ -877,6 +877,80 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
             let linear_output = hooks::linear_lifecycle::process(&input);
             output.merge(&linear_output);
 
+            // Step judge (M1.4 → integration #9) — run the adversarial AI
+            // judge against a completed step tool's evidence and PRODUCE a
+            // verdict. Until now `step_judge` fired on no event; the judge was
+            // only reachable via the opt-in `submit_phase_complete` MCP tool,
+            // so an agent could complete work and never be judged. This wires
+            // it to PostToolUse for the `mcp__skills__<skill>__step_<id>`
+            // namespace it already parses.
+            //
+            // Enforcement is staged via `SENTINEL_JUDGE_ENFORCEMENT`
+            // (default `shadow`): in shadow the verdict is recorded/logged but
+            // nothing blocks; `warn`/`enforce` surface a warning on a
+            // non-sufficient verdict (the seal-blocking half of `enforce`
+            // lives in `submit_step_complete`). The hook itself never blocks —
+            // PostToolUse is the wrong layer; the proof chain is the
+            // enforcement substrate.
+            {
+                let mode = sentinel_application::judge_enforcement::Mode::from_env();
+                let judge = sentinel_infrastructure::rig_judge::MultiModelJudge::from_env();
+                if judge.has_any_provider() {
+                    let glass_break = check_glass_break_override();
+                    let (sj_output, outcome) = hooks::step_judge::process(
+                        &input,
+                        &mut state,
+                        &step_configs,
+                        &judge,
+                        glass_break,
+                    )
+                    .await;
+                    output.merge(&sj_output);
+
+                    use sentinel_application::hooks::step_judge::StepJudgeOutcome;
+                    if let StepJudgeOutcome::Judged {
+                        skill,
+                        phase_id,
+                        step_id,
+                        verdict,
+                        judge_model,
+                        ..
+                    } = &outcome
+                    {
+                        tracing::info!(
+                            mode = %mode,
+                            skill = %skill,
+                            phase = %phase_id,
+                            step = %step_id,
+                            judge = %judge_model,
+                            sufficient = verdict.sufficient,
+                            confidence = verdict.confidence,
+                            "step_judge verdict produced"
+                        );
+                        // warn/enforce: surface a non-sufficient verdict to the
+                        // model so it knows the step didn't pass. Shadow is
+                        // silent (observe-only rollout).
+                        if mode.warns() && !verdict.sufficient {
+                            let warn_ctx = format!(
+                                "🟠 [Judge:{mode}] Step '{step_id}' of '{skill}/{phase_id}' \
+                                 judged INSUFFICIENT (confidence {:.2}): {}{}",
+                                verdict.confidence,
+                                verdict.reasoning,
+                                if mode.blocks_seal() {
+                                    " — submit_step_complete will refuse to seal this step."
+                                } else {
+                                    ""
+                                },
+                            );
+                            output.merge(&sentinel_domain::events::HookOutput::inject_context(
+                                sentinel_domain::events::HookEvent::PostToolUse,
+                                warn_ctx,
+                            ));
+                        }
+                    }
+                }
+            }
+
             // Tool usage gate — track all enforcement markers
             if let Some(session_id) = input.session_id.as_deref() {
                 if let Some(tool) = input.tool_name.as_deref() {
