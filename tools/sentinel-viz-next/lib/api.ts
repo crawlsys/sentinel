@@ -72,6 +72,31 @@ export interface SummaryResponse {
   cached: boolean;
 }
 
+export interface ConfigResponse {
+  model: string;
+  has_key: boolean;
+}
+
+export async function fetchConfig(signal?: AbortSignal): Promise<ConfigResponse> {
+  const res = await fetch(`${apiBase()}/api/config`, { signal });
+  if (!res.ok) throw new Error(`config: ${res.status}`);
+  return res.json();
+}
+
+export async function setConfig(body: {
+  model: string;
+  openai_api_key?: string;
+  ollama_url?: string;
+}): Promise<ConfigResponse> {
+  const res = await fetch(`${apiBase()}/api/config`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(`config: ${res.status} ${await res.text()}`);
+  return res.json();
+}
+
 export async function fetchSummary(
   sessionId: string,
   opts: { kind?: "card" | "wait" | "narrative"; atTs?: string } = {},

@@ -16,6 +16,9 @@ interface SimNode extends d3Force.SimulationNodeDatum {
   outcome?: string;
   session_status?: string;
   category?: string;
+  /** 0-based rank from each session's chain head (most recent TC = 0).
+   *  Undefined for sessions and TCs that aren't on a derived chain. */
+  chainRank?: number;
   ref: Node;
 }
 
@@ -47,6 +50,64 @@ function sessionLabel(d: SimNode): string {
   if (typeof named === "string" && named.length > 0) return named;
   // Fall back to UUID slice (8 chars).
   return sid.length > 12 ? `${sid.slice(0, 8)}…` : sid;
+}
+
+/** Label rendered next to a SentinelToolCall node. Only labels the
+ *  last 5 TCs per session (the "recent chain") so the eye finds the
+ *  active head; older calls in the chain are unlabelled and fade out. */
+function tcLabel(d: SimNode): string {
+  if (d.kind !== "SentinelToolCall") return "";
+  if (d.chainRank == null || d.chainRank > 4) return "";
+  const tool = typeof d.ref.data?.tool === "string" ? (d.ref.data.tool as string) : "";
+  if (!tool) return "";
+  return tool;
+}
+
+/** Opacity by chain rank. Head of the chain (rank 0) is full; each
+ *  step back fades by ~0.12. After ~6 hops the node nearly disappears.
+ *  Non-chain nodes (sessions, prompts) stay full. */
+function chainOpacity(d: SimNode): number {
+  if (d.chainRank == null) return 1.0;
+  return Math.max(0.18, 1.0 - d.chainRank * 0.14);
+}
+
+/** Compute per-TC chain rank by walking `next_tool_call` edges.
+ *  Each session's chain is laid out chronologically; we walk from
+ *  the tail (the TC that no `next_tool_call` points OUT FROM, i.e.
+ *  the most-recent TC) and assign 0,1,2,... back along the chain. */
+function annotateChainRanks(nodes: SimNode[], links: SimLink[]): void {
+  // Build directed adjacency on next_tool_call edges only.
+  const inbound = new Map<string, string>(); // target → source
+  const outbound = new Map<string, string>(); // source → target
+  for (const l of links) {
+    if (l.kind !== "next_tool_call") continue;
+    const s = typeof l.source === "string" ? l.source : l.source.id;
+    const t = typeof l.target === "string" ? l.target : l.target.id;
+    inbound.set(t, s);
+    outbound.set(s, t);
+  }
+  // Tails of chains: TC nodes with inbound but no outbound (last in their session).
+  // We also seed isolated TCs with rank 0 so they get labelled if there are
+  // any non-chain TCs in the window.
+  for (const n of nodes) {
+    if (n.kind !== "SentinelToolCall") continue;
+    if (outbound.has(n.id)) continue;
+    // walk backwards assigning rank.
+    let cur: string | undefined = n.id;
+    let rank = 0;
+    const seen = new Set<string>();
+    while (cur && !seen.has(cur)) {
+      seen.add(cur);
+      const node = nodes.find((x) => x.id === cur);
+      if (!node) break;
+      // Only assign if this is the smallest rank we've seen for this node.
+      if (node.chainRank == null || rank < node.chainRank) {
+        node.chainRank = rank;
+      }
+      cur = inbound.get(cur);
+      rank += 1;
+    }
+  }
 }
 
 export function GraphCanvas({ graph, selectedNodeId, onSelectNode }: Props) {
@@ -191,6 +252,10 @@ export function GraphCanvas({ graph, selectedNodeId, onSelectNode }: Props) {
       return n;
     });
 
+    // Annotate chain ranks per session before handing to the sim —
+    // labels and fade key off this.
+    annotateChainRanks(nextNodes, desired.links);
+
     nodesRef.current = nextNodes;
     linksRef.current = desired.links;
 
@@ -259,27 +324,33 @@ export function GraphCanvas({ graph, selectedNodeId, onSelectNode }: Props) {
             .attr("fill", "none");
           grp
             .append("text")
-            .attr("x", 12)
+            .attr("x", 10)
             .attr("y", 4)
             .attr("font-size", 9)
             .attr("fill", "#c9d1d9")
-            .text((d) => sessionLabel(d));
+            .attr("opacity", (d) => (d.kind === "SentinelSession" ? 1 : 0.7))
+            .text((d) => (d.kind === "SentinelSession" ? sessionLabel(d) : tcLabel(d)));
+          // Apply chain-rank fade to the whole group.
+          grp.attr("opacity", (d) => chainOpacity(d));
           return grp;
         },
         (update) => {
           // Re-paint in place — colours / status may have changed.
           update
             .attr("data-category", (d) => d.category ?? "")
-            .attr("data-status", (d) => d.session_status ?? "");
+            .attr("data-status", (d) => d.session_status ?? "")
+            .attr("opacity", (d) => chainOpacity(d));
           update.select("circle:not(.pulse-ring)")
             .attr("fill", (d) =>
               d.kind === "SentinelSession"
                 ? statusColor(d.session_status)
                 : nodeColor(d.kind, d.outcome, d.category),
             );
-          // Refresh label text — the name may have arrived from the
-          // naming API since the node was created.
-          update.select("text").text((d) => sessionLabel(d));
+          // Refresh label text — names may have arrived from the
+          // naming API; chain ranks may have shifted on SSE update.
+          update
+            .select("text")
+            .text((d) => (d.kind === "SentinelSession" ? sessionLabel(d) : tcLabel(d)));
           return update;
         },
         (exit) => exit.remove(),

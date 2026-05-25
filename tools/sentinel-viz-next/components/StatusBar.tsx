@@ -8,9 +8,10 @@ interface Props {
   error: string | null;
   stuckCount?: number;
   onStuckClick?: () => void;
+  onOpenSettings?: () => void;
 }
 
-export function StatusBar({ graph, connected, error, stuckCount = 0, onStuckClick }: Props) {
+export function StatusBar({ graph, connected, error, stuckCount = 0, onStuckClick, onOpenSettings }: Props) {
   return (
     <div
       data-testid="status-bar"
@@ -45,6 +46,16 @@ export function StatusBar({ graph, connected, error, stuckCount = 0, onStuckClic
         </button>
       ) : null}
       {error ? <span className={`text-[#f85149] ${stuckCount > 0 ? "ml-2" : "ml-auto"}`}>{error}</span> : null}
+      <button
+        type="button"
+        onClick={onOpenSettings}
+        data-testid="open-settings"
+        aria-label="open settings"
+        title="settings"
+        className={`${stuckCount === 0 && !error ? "ml-auto " : "ml-2 "}text-[#6e7681] hover:text-[#c9d1d9] text-[14px] leading-none`}
+      >
+        ⚙
+      </button>
     </div>
   );
 }

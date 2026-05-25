@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
+use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::routing::get;
@@ -63,6 +64,7 @@ pub fn router(state: Arc<AppState>) -> axum::Router {
         .route("/api/activity/{session_id}", get(activity_endpoint))
         .route("/api/name-session/{session_id}", get(name_session_endpoint))
         .route("/api/summary/{session_id}", get(summary_endpoint))
+        .route("/api/config", get(get_config).post(set_config))
         .route("/api/stream", get(sse::stream))
         .layer(cors)
         .with_state(state)
@@ -90,6 +92,72 @@ async fn summary_endpoint(
         .ok_or_else(|| (StatusCode::BAD_REQUEST, "kind must be card|wait|narrative".into()))?;
     let r = summary::summarize(&state.summary, &session_id, kind, q.at_ts.as_deref()).await;
     Ok(axum::Json(r))
+}
+
+#[derive(serde::Serialize)]
+pub struct ConfigResponse {
+    /// Active model label e.g. "openai:gpt-4o-mini", "local:qwen2.5:1.5b", or "none".
+    pub model: String,
+    /// Whether an API key (for OpenAI) is bound. We never echo the key.
+    pub has_key: bool,
+}
+
+async fn get_config(State(state): State<Arc<AppState>>) -> axum::Json<ConfigResponse> {
+    let m = state.naming.model.read().unwrap();
+    let (model, has_key) = match m.as_ref() {
+        None => ("none".to_string(), false),
+        Some(crate::llm::ModelConfig::OpenAi { model, api_key }) => {
+            (format!("openai:{model}"), !api_key.is_empty())
+        }
+        Some(crate::llm::ModelConfig::LocalOllama { model, .. }) => {
+            (format!("local:{model}"), true)
+        }
+    };
+    axum::Json(ConfigResponse { model, has_key })
+}
+
+#[derive(serde::Deserialize)]
+pub struct SetConfigBody {
+    /// "none" | "openai:<model>" | "local:<model>".
+    pub model: String,
+    /// OpenAI API key, only used when model is "openai:*".
+    pub openai_api_key: Option<String>,
+    /// Optional Ollama URL override (defaults to existing or http://127.0.0.1:11434).
+    pub ollama_url: Option<String>,
+}
+
+async fn set_config(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<SetConfigBody>,
+) -> Result<axum::Json<ConfigResponse>, (StatusCode, String)> {
+    use crate::llm::ModelConfig;
+    let parsed: Option<ModelConfig> = match body.model.as_str() {
+        "" | "none" => None,
+        s if s.starts_with("openai:") => {
+            let model = s.trim_start_matches("openai:").to_string();
+            let key = body.openai_api_key.unwrap_or_default();
+            if key.is_empty() {
+                return Err((StatusCode::BAD_REQUEST, "openai_api_key required for openai:*".into()));
+            }
+            Some(ModelConfig::OpenAi { model, api_key: key })
+        }
+        s if s.starts_with("local:") => {
+            let model = s.trim_start_matches("local:").to_string();
+            let base = body.ollama_url
+                .filter(|u| !u.is_empty())
+                .unwrap_or_else(|| std::env::var("OLLAMA_URL").unwrap_or_else(|_| "http://127.0.0.1:11434".into()));
+            Some(ModelConfig::LocalOllama { model, base_url: base })
+        }
+        other => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!("model must be 'none', 'openai:*', or 'local:*' — got '{other}'"),
+            ));
+        }
+    };
+    state.naming.set_model(parsed.clone());
+    state.summary.set_model(parsed);
+    Ok(get_config(State(state)).await)
 }
 
 #[derive(Deserialize)]

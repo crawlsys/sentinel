@@ -5,19 +5,32 @@ import { useEffect, useMemo, useState } from "react";
 import { EventTicker } from "../components/EventTicker";
 import { GraphCanvas } from "../components/GraphCanvas";
 import { PanelInspector } from "../components/PanelInspector";
+import { SessionConsole } from "../components/SessionConsole";
+import { SettingsModal } from "../components/SettingsModal";
 import { StatusBar } from "../components/StatusBar";
 import { useGraphStream } from "../lib/sse";
+import { useSessionName } from "../lib/session-names";
 import { maybeFireStuckAlert, stuckSessions } from "../lib/stuck";
 
 export default function Page() {
   const { graph, error, connected } = useGraphStream();
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [anchorTs, setAnchorTs] = useState<string | null>(null);
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   const selectedNode = useMemo(() => {
     if (!graph || !selectedNodeId) return null;
     return graph.nodes.find((n) => n.id === selectedNodeId) ?? null;
   }, [graph, selectedNodeId]);
+
+  // Resolve the session_id for the selected node (session OR a child
+  // tool-call): both shapes expose session_id in data.
+  const selectedSessionId = useMemo(() => {
+    const sid = selectedNode?.data?.session_id;
+    return typeof sid === "string" ? sid : null;
+  }, [selectedNode]);
+
+  const selectedSessionName = useSessionName(selectedSessionId);
 
   const stuck = useMemo(() => stuckSessions(graph), [graph]);
 
@@ -45,6 +58,7 @@ export default function Page() {
         error={error}
         stuckCount={stuck.length}
         onStuckClick={focusFirstStuck}
+        onOpenSettings={() => setSettingsOpen(true)}
       />
       <div className="flex flex-1 min-h-0">
         <div className="flex-1 min-w-0 min-h-0 relative">
@@ -75,6 +89,11 @@ export default function Page() {
           onSelectNode={(id, ts) => selectNode(id, ts)}
         />
       </div>
+      <SessionConsole
+        sessionId={selectedSessionId}
+        sessionLabel={typeof selectedSessionName === "string" ? selectedSessionName : null}
+      />
+      <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} />
     </main>
   );
 }

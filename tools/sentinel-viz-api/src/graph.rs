@@ -118,6 +118,69 @@ pub fn load_graph_with(conn: &Connection, opts: GraphOpts) -> Result<GraphRespon
         }
     }
 
+    // Collapse duplicate SentinelSession nodes: the bridge sometimes
+    // materialises a new SentinelSession#<seq> when a session is
+    // resumed, leaving two nodes for the same session_id. Keep the
+    // highest-seq (most recent) node, rewrite all edges pointing at
+    // the dropped duplicates so the topology stays connected.
+    {
+        let mut sid_to_winner: HashMap<String, String> = HashMap::new();
+        let mut alias_to_winner: HashMap<String, String> = HashMap::new();
+        for n in nodes.values() {
+            if n.kind != node_kind::SESSION {
+                continue;
+            }
+            let Some(sid) = n.data.get("session_id").and_then(|v| v.as_str()) else { continue };
+            if sid.is_empty() {
+                continue;
+            }
+            match sid_to_winner.get(sid) {
+                None => {
+                    sid_to_winner.insert(sid.to_string(), n.id.clone());
+                }
+                Some(cur) => {
+                    let cur_seq = nodes.get(cur).map(|x| x.seq).unwrap_or(0);
+                    if n.seq > cur_seq {
+                        alias_to_winner.insert(cur.clone(), n.id.clone());
+                        sid_to_winner.insert(sid.to_string(), n.id.clone());
+                    } else {
+                        alias_to_winner.insert(n.id.clone(), cur.clone());
+                    }
+                }
+            }
+        }
+        // Drop the loser nodes from the materialisation set.
+        for loser in alias_to_winner.keys() {
+            nodes.remove(loser);
+        }
+        // Rewrite edges. If an edge now points at a removed node, swap
+        // it to the winner's id. Dedupe via edge_keys.
+        if !alias_to_winner.is_empty() {
+            let resolve = |id: &str| -> String {
+                alias_to_winner.get(id).cloned().unwrap_or_else(|| id.to_string())
+            };
+            let mut rewritten: Vec<Edge> = Vec::with_capacity(edges_all.len());
+            let mut seen: HashSet<String> = HashSet::new();
+            for e in edges_all.drain(..) {
+                let s = resolve(&e.source);
+                let t = resolve(&e.target);
+                if s == t {
+                    continue;
+                }
+                let key = format!("{s}->{t}:{}", e.kind);
+                if seen.insert(key) {
+                    rewritten.push(Edge {
+                        source: s,
+                        target: t,
+                        kind: e.kind,
+                        ts: e.ts,
+                    });
+                }
+            }
+            edges_all = rewritten;
+        }
+    }
+
     // Derive `next_in_session` edges between consecutive hook invocations.
     let mut by_session: HashMap<String, Vec<&Node>> = HashMap::new();
     for n in nodes.values() {

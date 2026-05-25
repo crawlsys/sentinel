@@ -79,7 +79,7 @@ impl SummaryKind {
 }
 
 pub struct SummaryState {
-    pub model: Option<ModelConfig>,
+    pub model: RwLock<Option<ModelConfig>>,
     /// (session_id, kind, at_ts) → cached response.
     cache: RwLock<HashMap<String, CacheEntry>>,
     recent_calls: RwLock<Vec<Instant>>,
@@ -94,10 +94,15 @@ struct CacheEntry {
 impl SummaryState {
     pub fn from_env() -> Self {
         Self {
-            model: ModelConfig::from_env(),
+            model: RwLock::new(ModelConfig::from_env()),
             cache: RwLock::new(HashMap::new()),
             recent_calls: RwLock::new(Vec::new()),
         }
+    }
+
+    pub fn set_model(&self, m: Option<ModelConfig>) {
+        *self.model.write().unwrap() = m;
+        self.cache.write().unwrap().clear();
     }
 
     fn rate_allowed(&self) -> bool {
@@ -148,7 +153,8 @@ pub async fn summarize(
         source: "disabled".to_string(),
         cached: false,
     };
-    let Some(model) = state.model.as_ref() else { return disabled };
+    let model_snapshot = state.model.read().unwrap().clone();
+    let Some(model) = model_snapshot.as_ref() else { return disabled };
 
     let key = SummaryState::key(session_id, kind, at_ts);
     if let Some(cached) = state.cached(&key) {
@@ -296,7 +302,7 @@ fn sanitize(raw: &str) -> Option<String> {
 #[cfg(test)]
 pub fn disabled_for_tests() -> SummaryState {
     SummaryState {
-        model: None,
+        model: RwLock::new(None),
         cache: RwLock::new(HashMap::new()),
         recent_calls: RwLock::new(Vec::new()),
     }

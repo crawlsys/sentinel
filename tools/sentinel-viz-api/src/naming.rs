@@ -54,9 +54,8 @@ pub struct NamingState {
     cache: RwLock<HashMap<String, CacheEntry>>,
     /// Outbound-call timestamps within the rate window. Cheap O(N).
     recent_calls: RwLock<Vec<Instant>>,
-    /// Pre-parsed model config — None when SENTINEL_VIZ_NAMING_MODEL
-    /// is "none" or unset.
-    pub model: Option<ModelConfig>,
+    /// Mutable so the /api/config endpoint can hot-swap without restart.
+    pub model: RwLock<Option<ModelConfig>>,
 }
 
 impl NamingState {
@@ -64,8 +63,14 @@ impl NamingState {
         Self {
             cache: RwLock::new(HashMap::new()),
             recent_calls: RwLock::new(Vec::new()),
-            model: ModelConfig::from_env(),
+            model: RwLock::new(ModelConfig::from_env()),
         }
+    }
+
+    pub fn set_model(&self, m: Option<ModelConfig>) {
+        *self.model.write().unwrap() = m;
+        // Drop cache so a new model can re-name everything.
+        self.cache.write().unwrap().clear();
     }
 
     /// Decide whether the rate limiter would allow another call.
@@ -120,7 +125,8 @@ pub async fn name_session(state: &NamingState, session_id: &str) -> NameResponse
         source: "disabled".to_string(),
         cached: false,
     };
-    let Some(model) = state.model.as_ref() else { return no_model };
+    let model_snapshot = state.model.read().unwrap().clone();
+    let Some(model) = model_snapshot.as_ref() else { return no_model };
 
     // Build the prompt input — first user message + first 3 tool
     // calls from the JSONL transcript.
