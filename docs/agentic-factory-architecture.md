@@ -99,17 +99,18 @@ disagreement signal, all confirmed callable.
    to required when `records_provider()` is true.
 3. **Glass-break override tokens** — replace coarse `hygiene_override` with
    scoped, signed, TTL-bound tokens.
-4. **Finish the voiceprint/CatastrophicAck protocol surface** (the half-built
-   `consul-protocol` feature blocking the engine rebuild — see Deferred below).
 
-## Deferred / blocked (discovered this session)
+## Stale-checkout lesson (resolved this session)
 
-- **Engine rebuild blocked** by a pre-existing half-built feature:
-  `sentinel-legatus` references `consul_protocol::messages::AckDecision`,
-  `RegisterSession.operator_id`, `ConsularMessage::CatastrophicAck`, and
-  `ChallengeNonce::to_hex` — none of which exist yet in `consul-protocol`.
-  (The `consul-domain::identity::republic` half was fixed this session, commit
-  `ebf7284` on consul-agent, which unblocked sentinel-domain/application/
-  infrastructure.) Until the protocol surface is finished, the new judge slugs
-  are merged to source but not live in the running engine — the previously
-  staged engine (with the PowerShell fix) remains active.
+The engine rebuild *appeared* blocked by a half-built feature: `sentinel-domain`
+failed to compile (`consul_domain::identity::republic` missing) and
+`sentinel-legatus` referenced `consul_protocol` items (`AckDecision`,
+`RegisterSession.operator_id`, `ConsularMessage::CatastrophicAck`,
+`ChallengeNonce::to_hex`) that "didn't exist." **They did exist** — the local
+`legatus-consul-agent` checkout was ~9 commits behind `origin/main`, which
+already shipped the full `republic` module, the voiceprint/witness
+canonicalization, and the `CatastrophicAckProducer` runtime drain
+(`origin/main` @ `1a99058`). Syncing the consul-agent checkout to `origin/main`
+made the entire sentinel workspace compile with no sentinel-side changes. The
+lesson: when a path-dependency import "vanishes," check the dep repo is current
+before reverse-engineering the missing surface.
