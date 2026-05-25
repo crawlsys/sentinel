@@ -169,8 +169,10 @@ pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
     // 6. Auto-init disabled — run `sentinel init` manually when needed
     let init_result: Option<sentinel_domain::project::InitResult> = None;
 
-    // 6.5. Background Qdrant memory sync — catches files missed between sessions
-    spawn_qdrant_sync(ctx.process);
+    // 6.5. (Removed) Background flat-`.md` → Qdrant sync. The `qdrant sync`
+    // path imported markdown files directly, bypassing the dual-judge gate.
+    // Memories are now captured from conversation turns by
+    // `memory_turn_capture` (LLM → dual-judge → atom). No flat-file sync.
 
     // 7. Build startup context
     let context =
@@ -409,55 +411,6 @@ fn find_marketplace_repo() -> Option<PathBuf> {
 /// Check if a directory is the marketplace git repo
 fn is_marketplace_repo(dir: &Path) -> bool {
     dir.join(".git").exists() && dir.join("skills").exists() && dir.join("install.js").exists()
-}
-
-/// Spawn a background Qdrant memory sync.
-/// Runs `qdrant sync` in a detached process so it doesn't block session startup.
-/// This catches any memory files written between sessions that the Stop hook missed.
-fn spawn_qdrant_sync(process: &dyn super::ProcessPort) {
-    // Check if qdrant CLI exists
-    let qdrant_bin = which_qdrant();
-    let Some(bin) = qdrant_bin else {
-        tracing::debug!("qdrant CLI not found — skipping session-start sync");
-        return;
-    };
-
-    // Fire and forget — don't block startup
-    let bin_str = bin.to_string_lossy().to_string();
-    match process.spawn_detached(&bin_str, &["sync"]) {
-        Ok(()) => tracing::debug!("Spawned background qdrant sync"),
-        Err(e) => tracing::debug!(error = %e, "Failed to spawn qdrant sync"),
-    }
-}
-
-/// Find the qdrant CLI binary
-fn which_qdrant() -> Option<std::path::PathBuf> {
-    // Check ~/.cargo/bin first (common install location)
-    if let Some(home) = dirs::home_dir() {
-        let cargo_bin = home.join(".cargo").join("bin").join("qdrant.exe");
-        if cargo_bin.exists() {
-            return Some(cargo_bin);
-        }
-        // Unix variant
-        let cargo_bin_unix = home.join(".cargo").join("bin").join("qdrant");
-        if cargo_bin_unix.exists() {
-            return Some(cargo_bin_unix);
-        }
-    }
-    // Check release build
-    if let Some(home) = dirs::home_dir() {
-        let dev_bin = home
-            .join("Documents")
-            .join("GitHub")
-            .join("qdrant-cli-rust")
-            .join("target")
-            .join("release")
-            .join("qdrant.exe");
-        if dev_bin.exists() {
-            return Some(dev_bin);
-        }
-    }
-    None
 }
 
 /// Sync marketplace repo to ~/.claude/
@@ -1574,17 +1527,21 @@ enforce — these do):
     memory.
   * You hit an unfamiliar convention and want to check if there's a
     stored reason for it.
-  Use `mcp__qdrant__search_memory`, the `memory` skill, or read the
-  file-based memory at `~/.claude/session-env/.../memory/`.
-- **Store memory after concrete events**:
-  * The user corrected your approach — save a `feedback` memory with
-    the rule, **Why:**, and **How to apply:** lines.
-  * You made a non-obvious judgement call future sessions would
-    re-derive with effort — `project` or `feedback`.
-  * The user shared a constraint, deadline, or stakeholder fact —
-    `project`, with relative dates converted to absolute.
-  * You discovered quirky external-system behaviour not documented
-    in the code.
+  Use `mcp__memory-mcp__memory_search` (the atom engine) or the `memory`
+  skill. Relevant atoms are also auto-injected each turn by the
+  `memory_inject` hook.
+- **Store memory after concrete events.** Capture is automatic — the
+  `memory_turn_capture` hook extracts atoms from each turn and routes
+  them through the dual-judge gate. To force one the extractor would
+  miss, call `mcp__memory-mcp__memory_capture` (subject/predicate/value)
+  or `/memory capture`. There are NO flat `.md` memory files. Worth
+  capturing:
+  * The user corrected your approach — a `feedback` atom with the rule.
+  * A non-obvious judgement call future sessions would re-derive with
+    effort — `project` or `feedback`.
+  * A constraint, deadline, or stakeholder fact — `project`, with
+    relative dates converted to absolute.
+  * Quirky external-system behaviour not documented in the code.
 - **Run the browser test when the change touches UI surface** — CDP
 (`mcp__cdp__*` via edge-cdp skill) for localhost, Browserbase
 (`mcp__browserbase__*`) for staging/preview/production. Trigger any
