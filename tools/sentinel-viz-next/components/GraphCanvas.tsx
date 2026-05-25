@@ -3,6 +3,7 @@
 import * as d3Force from "d3-force";
 import * as d3Zoom from "d3-zoom";
 import { select } from "d3-selection";
+import "d3-transition"; // side-effect: extends Selection.prototype.transition
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import type { Edge, GraphResponse, Node } from "../types/api";
@@ -13,6 +14,7 @@ interface SimNode extends d3Force.SimulationNodeDatum {
   kind: string;
   outcome?: string;
   session_status?: string;
+  category?: string;
   ref: Node;
 }
 
@@ -37,6 +39,8 @@ export function GraphCanvas({ graph, selectedNodeId, onSelectNode }: Props) {
   const svgRef = useRef<SVGSVGElement | null>(null);
   const gRef = useRef<SVGGElement | null>(null);
   const simRef = useRef<d3Force.Simulation<SimNode, SimLink> | null>(null);
+  const zoomRef = useRef<d3Zoom.ZoomBehavior<SVGSVGElement, unknown> | null>(null);
+  const nodesRef = useRef<SimNode[]>([]);
   const [viewport, setViewport] = useState<ViewportSize>({ width: 0, height: 0 });
 
   useEffect(() => {
@@ -75,6 +79,7 @@ export function GraphCanvas({ graph, selectedNodeId, onSelectNode }: Props) {
         kind: n.type,
         outcome: typeof n.data?.outcome === "string" ? (n.data.outcome as string) : undefined,
         session_status: n.session_status ?? undefined,
+        category: n.category ?? undefined,
         ref: n,
       };
       byId.set(n.id, sim);
@@ -134,7 +139,9 @@ export function GraphCanvas({ graph, selectedNodeId, onSelectNode }: Props) {
           .append("circle")
           .attr("r", (d) => (d.kind === "SentinelSession" ? 9 : d.kind === "SentinelToolCall" ? 6 : 4))
           .attr("fill", (d) =>
-            d.kind === "SentinelSession" ? statusColor(d.session_status) : nodeColor(d.kind, d.outcome),
+            d.kind === "SentinelSession"
+              ? statusColor(d.session_status)
+              : nodeColor(d.kind, d.outcome, d.category),
           )
           .attr("stroke", "#0d1117")
           .attr("stroke-width", 1.5);
@@ -174,6 +181,8 @@ export function GraphCanvas({ graph, selectedNodeId, onSelectNode }: Props) {
         g.attr("transform", event.transform.toString());
       });
     svg.call(zoom).call(zoom.transform, d3Zoom.zoomIdentity.translate(centerX, centerY));
+    zoomRef.current = zoom;
+    nodesRef.current = simNodes;
 
     return () => {
       sim.stop();
@@ -181,15 +190,30 @@ export function GraphCanvas({ graph, selectedNodeId, onSelectNode }: Props) {
     };
   }, [simNodes, simLinks, onSelectNode, viewport.width, viewport.height]);
 
-  // Highlight the selected node.
+  // Highlight + pan to the selected node.
   useEffect(() => {
-    if (!gRef.current) return;
+    if (!gRef.current || !svgRef.current) return;
     select(gRef.current)
       .selectAll<SVGGElement, SimNode>("g.node")
       .select("circle")
       .attr("stroke", (d) => (d.id === selectedNodeId ? "#58a6ff" : "#0d1117"))
       .attr("stroke-width", (d) => (d.id === selectedNodeId ? 3 : 1.5));
-  }, [selectedNodeId, simNodes]);
+
+    if (!selectedNodeId || !zoomRef.current) return;
+    const target = nodesRef.current.find((n) => n.id === selectedNodeId);
+    if (!target || target.x == null || target.y == null) return;
+
+    const width = viewport.width || svgRef.current.clientWidth || 800;
+    const height = viewport.height || svgRef.current.clientHeight || 600;
+    // Centre on the node at a comfortable zoom level (k=1.4).
+    const k = 1.4;
+    const tx = width / 2 - target.x * k;
+    const ty = height / 2 - target.y * k;
+    select(svgRef.current)
+      .transition()
+      .duration(450)
+      .call(zoomRef.current.transform, d3Zoom.zoomIdentity.translate(tx, ty).scale(k));
+  }, [selectedNodeId, simNodes, viewport.width, viewport.height]);
 
   return (
     <svg

@@ -27,6 +27,17 @@ export default function Page() {
             selectedNodeId={selectedNodeId}
             onSelectNode={setSelectedNodeId}
           />
+          {!graph ? (
+            <div
+              data-testid="loading-overlay"
+              className="absolute inset-0 flex items-center justify-center text-[#6e7681] font-mono text-xs pointer-events-none"
+            >
+              <div className="flex flex-col items-center gap-3">
+                <div className="w-8 h-8 border-2 border-[#30363d] border-t-[#58a6ff] rounded-full animate-spin" />
+                <span>{error ?? "connecting to sentinel.db…"}</span>
+              </div>
+            </div>
+          ) : null}
         </div>
         <PanelInspector node={selectedNode} onClose={() => setSelectedNodeId(null)} />
         <EventTicker

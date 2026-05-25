@@ -6,6 +6,8 @@ export type SessionStatus =
   | "dead"
   | "awaiting_user";
 
+export type NodeCategory = "tc" | "planning" | "communication" | "prompt" | "other";
+
 export interface Node {
   id: string;
   type: string;
@@ -17,6 +19,7 @@ export interface Node {
   awaiting_kind?: string | null;
   awaiting_question?: string | null;
   awaiting_options?: unknown[] | null;
+  category?: NodeCategory;
 }
 
 export interface Edge {

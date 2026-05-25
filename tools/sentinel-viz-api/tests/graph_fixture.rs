@@ -2,6 +2,7 @@
 //! `graph::load_graph`, and snapshots the API response shape.
 
 use rusqlite::Connection;
+use sentinel_viz_api::graph::GraphOpts;
 use sentinel_viz_api::{db, graph};
 use tempfile::TempDir;
 
@@ -103,41 +104,86 @@ fn build_store(path: &std::path::Path) {
 }
 
 #[test]
-fn graph_response_shape_on_fixture() {
+fn graph_default_hides_hooks_and_synthesises_session_to_tc_edges() {
     let tmp = TempDir::new().unwrap();
     let path = tmp.path().join("fixture.db");
     build_store(&path);
 
     let conn = db::open_ro(&path).unwrap();
-    let g = graph::load_graph(&conn, 50).unwrap();
+    let g = graph::load_graph_with(
+        &conn,
+        GraphOpts { limit: 50, since_secs: None, include_hooks: false },
+    )
+    .unwrap();
 
     assert!(g.error.is_none(), "unexpected error: {:?}", g.error);
     assert_eq!(g.max_seq, 11, "max_seq mismatch");
-    assert!(!g.nodes.is_empty(), "expected nodes");
-    assert!(!g.edges.is_empty(), "expected edges");
 
     let kinds: std::collections::BTreeSet<String> =
         g.nodes.iter().map(|n| n.kind.clone()).collect();
     assert!(kinds.contains("SentinelSession"));
-    assert!(kinds.contains("SentinelHookInvocation"));
-    // tc1 should be in kept_ids via recent_events expansion
+    assert!(kinds.contains("SentinelToolCall"));
     assert!(
-        g.nodes.iter().any(|n| n.id == "SentinelToolCall#tc1"),
-        "tool-call referenced by ticker event should be in window"
+        !kinds.contains("SentinelHookInvocation"),
+        "hooks should be hidden by default"
     );
 
-    // next_in_session derived for sess-a's two hooks
+    // Synthetic session→tc edge replaces the dropped session→hook→tc chain.
     assert!(
-        g.edges.iter().any(|e| e.kind == "next_in_session"),
-        "expected derived next_in_session edge"
+        g.edges.iter().any(|e| e.kind == "has_tool_call_synth"
+            && e.source == "SentinelSession#sess-a"
+            && e.target == "SentinelToolCall#tc1"),
+        "expected synthesised session→tc edge"
     );
 
-    // Sessions get session_status populated
+    // TC gets categorised (Bash = compute = tc category)
+    let tc = g.nodes.iter().find(|n| n.id == "SentinelToolCall#tc1").unwrap();
+    assert!(tc.category.is_some());
+
     for n in &g.nodes {
         if n.kind == "SentinelSession" {
             assert!(n.session_status.is_some(), "session missing status: {}", n.id);
         }
     }
+}
+
+#[test]
+fn graph_include_hooks_keeps_them_and_derived_chain_edges() {
+    let tmp = TempDir::new().unwrap();
+    let path = tmp.path().join("fixture.db");
+    build_store(&path);
+
+    let conn = db::open_ro(&path).unwrap();
+    let g = graph::load_graph_with(
+        &conn,
+        GraphOpts { limit: 50, since_secs: None, include_hooks: true },
+    )
+    .unwrap();
+
+    let kinds: std::collections::BTreeSet<String> =
+        g.nodes.iter().map(|n| n.kind.clone()).collect();
+    assert!(kinds.contains("SentinelHookInvocation"));
+    assert!(
+        g.edges.iter().any(|e| e.kind == "next_in_session"),
+        "expected derived next_in_session edge"
+    );
+}
+
+#[test]
+fn graph_time_floor_drops_old_events() {
+    let tmp = TempDir::new().unwrap();
+    let path = tmp.path().join("fixture.db");
+    build_store(&path);
+
+    let conn = db::open_ro(&path).unwrap();
+    // Fixture events are dated 2026-05-25; an aggressive 1-second
+    // floor against `now` should drop them all from the ticker.
+    let g = graph::load_graph_with(
+        &conn,
+        GraphOpts { limit: 50, since_secs: Some(1), include_hooks: false },
+    )
+    .unwrap();
+    assert_eq!(g.events.len(), 0, "time floor should drop ancient events");
 }
 
 #[test]

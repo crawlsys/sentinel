@@ -9,19 +9,49 @@ const sampleEvents: RecentEvent[] = [
     seq: 1,
     type: "sentinel.tool_call_observed",
     ts: "2026-05-25T00:00:00Z",
-    payload: { session_id: "sess-a", tool: "Bash", tool_call_id: "SentinelToolCall#tc1" },
+    payload: {
+      session_id: "sess-a",
+      sentinel_event: "PreToolUse",
+      tool: "Bash",
+      tool_call_id: "SentinelToolCall#tc1",
+      ts_sec: "2026-05-25T00:00:00",
+    },
   },
   {
     seq: 2,
     type: "sentinel.tool_call_observed",
     ts: "2026-05-25T00:00:01Z",
-    payload: { session_id: "sess-a", tool: "Bash", tool_call_id: "SentinelToolCall#tc1" },
+    payload: {
+      session_id: "sess-a",
+      sentinel_event: "PreToolUse",
+      tool: "Bash",
+      tool_call_id: "SentinelToolCall#tc1",
+      ts_sec: "2026-05-25T00:00:01",
+    },
   },
   {
     seq: 3,
     type: "sentinel.hook_ingested",
     ts: "2026-05-25T00:00:02Z",
-    payload: { session_id: "sess-a", hook_event: "PreToolUse", outcome: "denied" },
+    payload: {
+      session_id: "sess-a",
+      sentinel_event: "PreToolUse",
+      hook: "tool_usage_gate",
+      outcome: "deny",
+      ts: "2026-05-25T00:00:02",
+    },
+  },
+  {
+    seq: 4,
+    type: "sentinel.tool_call_observed",
+    ts: "",
+    payload: {
+      session_id: "sess-b",
+      sentinel_event: "UserPromptSubmit",
+      tool: "",
+      tool_call_id: "SentinelToolCall#tc2",
+      ts_sec: "2026-05-25T00:00:03",
+    },
   },
 ];
 
@@ -32,20 +62,41 @@ describe("EventTicker", () => {
     expect(screen.getByTestId("ticker-rows").children).toHaveLength(0);
   });
 
-  it("groups consecutive events sharing the (session, type, tool_call_id, outcome) signature", () => {
+  it("groups consecutive tc events on the same (session,type,tool_call_id,outcome)", () => {
     render(<EventTicker events={sampleEvents} onSelectNode={() => {}} />);
-    // Two distinct rows: one denied hook, one (tc1×2) tool-call group.
     const rows = screen.getByTestId("ticker-rows").children;
-    expect(rows).toHaveLength(2);
+    // 3 distinct rows: user-prompt (tc2), denied hook, then bashed tc1 ×2.
+    expect(rows).toHaveLength(3);
     expect(screen.getByText(/×2/)).toBeInTheDocument();
   });
 
-  it("invokes onSelectNode with tool_call_id when a TC row is clicked", () => {
+  it("labels UserPromptSubmit events as 'user prompt' and not blank", () => {
+    render(<EventTicker events={sampleEvents} onSelectNode={() => {}} />);
+    expect(screen.getByText("user prompt")).toBeInTheDocument();
+  });
+
+  it("derives ts from payload.ts_sec when the SQL column is empty", () => {
+    // The 4th event has empty `ts` column but ts_sec=00:00:03 in payload.
+    render(<EventTicker events={sampleEvents} onSelectNode={() => {}} />);
+    expect(screen.getByText(/00:00:03/)).toBeInTheDocument();
+  });
+
+  it("clicking a row invokes onSelectNode with the tool_call_id", () => {
     const spy = vi.fn();
     render(<EventTicker events={sampleEvents} onSelectNode={spy} />);
     const rows = screen.getByTestId("ticker-rows").children;
-    // The freshest row is the denied hook (no tool_call_id), so click the second one.
-    fireEvent.click(rows[1]);
+    // Click the "Bash ×2" row (last in display order, freshest first → newest is user prompt, second is denied hook, third is Bash).
+    fireEvent.click(rows[2].querySelector(".cursor-pointer")!);
     expect(spy).toHaveBeenCalledWith("SentinelToolCall#tc1");
+  });
+
+  it("clicking the ×N badge expands the group without firing onSelectNode", () => {
+    const spy = vi.fn();
+    render(<EventTicker events={sampleEvents} onSelectNode={spy} />);
+    const badge = screen.getByText(/×2/);
+    fireEvent.click(badge);
+    expect(spy).not.toHaveBeenCalled();
+    // After expanding, the row should reveal both grouped members.
+    expect(screen.getAllByText("TC#tc1")).toHaveLength(2);
   });
 });

@@ -8,7 +8,8 @@ use rusqlite::Connection;
 use crate::awaiting;
 use crate::db;
 use crate::model::{
-    kind, node_kind, Edge, GraphResponse, GraphStats, Node, RecentEvent, SessionStatus,
+    kind, node_kind, Edge, GraphResponse, GraphStats, Node, NodeCategory, RecentEvent,
+    SessionStatus,
 };
 use crate::transcript;
 
@@ -23,9 +24,33 @@ const IDLE_THRESHOLD: f64 = 300.0;
 const DORMANT_THRESHOLD: f64 = 1800.0;
 const AWAIT_FRESHNESS_SECS: f64 = 3600.0;
 
-/// Read events into a windowed graph snapshot. Mirrors the
-/// `load_graph()` function in the Python viz server.
+/// Knobs the HTTP layer can override per-request.
+#[derive(Debug, Clone, Copy)]
+pub struct GraphOpts {
+    pub limit: usize,
+    /// Drop `sentinel.*` events older than this many seconds. `None`
+    /// means no time floor (matches the old behaviour of "last N
+    /// events regardless of age").
+    pub since_secs: Option<i64>,
+    /// When `false` (default), hooks are filtered out and direct
+    /// `session → tool_call` edges are synthesised in their place.
+    pub include_hooks: bool,
+}
+
+impl Default for GraphOpts {
+    fn default() -> Self {
+        Self { limit: 100, since_secs: Some(6 * 3600), include_hooks: false }
+    }
+}
+
 pub fn load_graph(conn: &Connection, limit: usize) -> Result<GraphResponse> {
+    load_graph_with(conn, GraphOpts { limit, ..GraphOpts::default() })
+}
+
+/// Read events into a windowed graph snapshot. Successor to
+/// `viz_server.py:load_graph()`.
+pub fn load_graph_with(conn: &Connection, opts: GraphOpts) -> Result<GraphResponse> {
+    let limit = opts.limit;
     let events = db::read_events(conn)?;
 
     let mut nodes: HashMap<String, Node> = HashMap::new();
@@ -57,6 +82,7 @@ pub fn load_graph(conn: &Connection, limit: usize) -> Result<GraphResponse> {
                         awaiting_kind: None,
                         awaiting_question: None,
                         awaiting_options: None,
+                        category: None,
                     },
                 );
             }
@@ -176,6 +202,38 @@ pub fn load_graph(conn: &Connection, limit: usize) -> Result<GraphResponse> {
     }
     let mut kept_ids: HashSet<String> = kept_inv_ids.union(&kept_session_ids).cloned().collect();
 
+    // Per-event timestamp resolution. `recent_events.ts` is the SQL
+    // column, which the bridge leaves empty for `sentinel.*` events;
+    // the payload always carries `ts_sec` and/or `ts`.
+    let now_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let event_ts_epoch = |ev: &RecentEvent| -> i64 {
+        let payload_ts = ev
+            .payload
+            .get("ts_sec")
+            .and_then(|v| v.as_str())
+            .or_else(|| ev.payload.get("ts").and_then(|v| v.as_str()))
+            .unwrap_or("");
+        if !payload_ts.is_empty() {
+            return parse_ts_to_epoch(payload_ts) as i64;
+        }
+        if !ev.ts.is_empty() {
+            return parse_ts_to_epoch(&ev.ts) as i64;
+        }
+        0
+    };
+
+    // Apply optional time floor — drops events older than `since_secs`.
+    if let Some(since) = opts.since_secs {
+        let cutoff = now_secs - since;
+        recent_events.retain(|ev| {
+            let t = event_ts_epoch(ev);
+            t == 0 || t >= cutoff
+        });
+    }
+
     // Compute the visible event tail (matches what the ticker will show).
     let events_limit_for_window = (limit * 6).max(600);
     let events_tail_for_window: &[RecentEvent] = if recent_events.len() > events_limit_for_window {
@@ -214,11 +272,67 @@ pub fn load_graph(conn: &Connection, limit: usize) -> Result<GraphResponse> {
         .filter(|n| kept_ids.contains(&n.id))
         .cloned()
         .collect();
-    let kept_edges: Vec<Edge> = edges_all
+    let mut kept_edges: Vec<Edge> = edges_all
         .iter()
         .filter(|e| kept_ids.contains(&e.source) && kept_ids.contains(&e.target))
         .cloned()
         .collect();
+
+    // Annotate tool-call nodes with a coarse category so the UI can
+    // colour by intent without inspecting `tool` client-side.
+    for n in kept_nodes.iter_mut() {
+        if n.kind != node_kind::TOOL_CALL {
+            continue;
+        }
+        let tool = n.data.get("tool").and_then(|v| v.as_str()).unwrap_or("");
+        let sev = n.data.get("sentinel_event").and_then(|v| v.as_str());
+        n.category = Some(NodeCategory::from_tool(tool, sev));
+    }
+
+    // Default-hide hooks: drop SentinelHookInvocation nodes + their
+    // edges, then synthesise direct session → tool-call edges by
+    // walking the (session → hook → tool-call) chain from the full
+    // edge list. This keeps the canvas legible (the bridge produces
+    // ~10× as many hooks as tool-calls).
+    if !opts.include_hooks {
+        // Build the mapping while we still have all the data.
+        let mut hook_session: HashMap<&str, &str> = HashMap::new();
+        let mut hook_to_tc: HashMap<&str, &str> = HashMap::new();
+        for e in &edges_all {
+            if e.kind == "has_invocation" && e.target.starts_with(node_kind::HOOK_INVOCATION) {
+                hook_session.insert(&e.target, &e.source);
+            } else if e.kind == "has_tool_call"
+                && e.source.starts_with(node_kind::HOOK_INVOCATION)
+                && e.target.starts_with(node_kind::TOOL_CALL)
+            {
+                hook_to_tc.insert(&e.source, &e.target);
+            }
+        }
+        let mut synth_keys: HashSet<String> = HashSet::new();
+        let mut synth_edges: Vec<Edge> = Vec::new();
+        for (hook_id, tc_id) in &hook_to_tc {
+            if !kept_ids.contains(*tc_id) {
+                continue;
+            }
+            let Some(sid) = hook_session.get(hook_id) else { continue };
+            if !kept_ids.contains(*sid) {
+                continue;
+            }
+            let key = format!("{sid}->{tc_id}:has_tool_call_synth");
+            if synth_keys.insert(key) {
+                synth_edges.push(Edge {
+                    source: sid.to_string(),
+                    target: tc_id.to_string(),
+                    kind: "has_tool_call_synth".to_string(),
+                    ts: String::new(),
+                });
+            }
+        }
+        kept_nodes.retain(|n| n.kind != node_kind::HOOK_INVOCATION);
+        let kept_set: HashSet<String> = kept_nodes.iter().map(|n| n.id.clone()).collect();
+        kept_edges.retain(|e| kept_set.contains(&e.source) && kept_set.contains(&e.target));
+        kept_edges.extend(synth_edges);
+    }
 
     // Window stats
     let mut by_type: BTreeMap<String, usize> = BTreeMap::new();

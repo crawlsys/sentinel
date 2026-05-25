@@ -60,6 +60,44 @@ pub struct Node {
     pub awaiting_question: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub awaiting_options: Option<serde_json::Value>,
+    /// Coarse categorisation for SentinelToolCall nodes. Lets the UI
+    /// colour by intent (compute vs. planning vs. communication)
+    /// without inspecting `data.tool` client-side.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub category: Option<NodeCategory>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NodeCategory {
+    /// Bash, Read, Write, Edit, Grep, Glob, NotebookEdit
+    Tc,
+    /// TaskCreate/Update/List, WebFetch, WebSearch, plan tools
+    Planning,
+    /// Agent, AskUserQuestion, Stop
+    Communication,
+    /// UserPromptSubmit (no tool — it's a user message)
+    Prompt,
+    /// Anything else
+    Other,
+}
+
+impl NodeCategory {
+    pub fn from_tool(tool: &str, sentinel_event: Option<&str>) -> Self {
+        if sentinel_event == Some("UserPromptSubmit") {
+            return Self::Prompt;
+        }
+        match tool {
+            "Bash" | "Read" | "Write" | "Edit" | "Grep" | "Glob" | "NotebookEdit"
+            | "MultiEdit" => Self::Tc,
+            "TaskCreate" | "TaskUpdate" | "TaskList" | "TaskGet" | "TaskStop" | "TaskOutput"
+            | "WebFetch" | "WebSearch" | "Plan" | "ExitPlanMode" | "EnterPlanMode" => {
+                Self::Planning
+            }
+            "Agent" | "AskUserQuestion" | "Stop" | "ToolSearch" => Self::Communication,
+            _ => Self::Other,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
