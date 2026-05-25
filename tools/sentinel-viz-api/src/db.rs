@@ -28,6 +28,15 @@ pub fn open_ro(path: &Path) -> Result<Connection> {
     .with_context(|| format!("opening sentinel db at {}", path.display()))
 }
 
+/// Cheap MAX(seq) probe — single index hit, used by SSE to decide
+/// whether a full graph reload is needed.
+pub fn peek_max_seq(conn: &Connection) -> Result<i64> {
+    let seq: Option<i64> = conn
+        .query_row("SELECT MAX(seq) FROM events", [], |row| row.get(0))
+        .unwrap_or(None);
+    Ok(seq.unwrap_or(0))
+}
+
 /// Read every event ordered by `seq` ascending.
 pub fn read_events(conn: &Connection) -> Result<Vec<Event>> {
     let mut stmt = conn.prepare(
