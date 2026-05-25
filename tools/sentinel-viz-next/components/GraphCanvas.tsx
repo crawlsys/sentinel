@@ -60,8 +60,18 @@ export function GraphCanvas({ graph, selectedNodeId, onSelectNode }: Props) {
   onSelectRef.current = onSelectNode;
   const [viewport, setViewport] = useState<ViewportSize>({ width: 0, height: 0 });
   // Bump on every session-name arrival so labels redraw.
-  const [, setNameTick] = useState(0);
+  const [nameTick, setNameTick] = useState(0);
   useEffect(() => subscribeSessionNames(() => setNameTick((n) => n + 1)), []);
+
+  // Imperatively refresh text labels when names arrive. The data
+  // effect won't re-run (graph didn't change) but the cache did.
+  useEffect(() => {
+    if (!gRef.current) return;
+    select(gRef.current)
+      .selectAll<SVGGElement, SimNode>("g.node")
+      .select<SVGTextElement>("text")
+      .text((d) => sessionLabel(d));
+  }, [nameTick]);
 
   // Track viewport size.
   useEffect(() => {
