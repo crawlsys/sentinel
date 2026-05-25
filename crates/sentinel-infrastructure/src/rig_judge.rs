@@ -90,8 +90,8 @@ impl JudgeProvider {
 
 /// Adversarial judge dispatching every `JudgeModel` tier through OpenRouter.
 ///
-/// Default tier is Kimi K2.6 (Moonshot, OSS frontier) — different family
-/// from the Anthropic models that typically generate the work, plus
+/// Default tier is Kimi K2-Thinking (Moonshot, OSS frontier) — different
+/// family from the Anthropic models that typically generate the work, plus
 /// Eastern training-distribution diversity for adversarial review.
 /// Critical-tier work pairs Kimi+Sonnet (or +Opus) — see Stage B
 /// follow-up commit.
@@ -107,7 +107,7 @@ impl MultiModelJudge {
         if judge.is_none() {
             eprintln!(
                 "[sentinel] WARNING: No AI judge available. \
-                 Set OPENROUTER_API_KEY for adversarial Kimi K2.6 / GPT-5.4 / Opus 4.7 judge. \
+                 Set OPENROUTER_API_KEY for adversarial Kimi K2-Thinking / GPT-5.5 / Opus 4.7 judge. \
                  All proof submissions will fail until configured."
             );
         }

@@ -1041,10 +1041,10 @@ mod step_tools_tests {
             Some("claim")
         );
         assert!(proof.get("combined_hash").is_some());
-        // Default judge_model is sonnet (OpenRouter: openai/gpt-5.4).
+        // Default judge_model is sonnet (OpenRouter: openai/gpt-5.5).
         assert_eq!(
             proof.get("judge_model").and_then(|v| v.as_str()),
-            Some("openai/gpt-5.4"),
+            Some("openai/gpt-5.5"),
         );
     }
 

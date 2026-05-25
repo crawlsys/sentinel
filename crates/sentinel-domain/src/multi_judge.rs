@@ -59,9 +59,9 @@ use crate::judge::{JudgeModel, JudgeVerdict};
 pub enum JudgeTrustTier {
     /// Single Haiku judge — fast/cheap, routine phases.
     Routine,
-    /// Single Kimi K2.6 judge — the default review tier (Stage A
-    /// behavior). OSS frontier, 4-10x cheaper than closed frontier
-    /// for same agentic-coding accuracy.
+    /// Single Kimi K2-Thinking judge — the default review tier (Stage A
+    /// behavior). OSS frontier, far cheaper than closed frontier for
+    /// comparable adversarial-judge quality; callable on the operator's key.
     Review,
     /// Kimi + Sonnet in parallel. Cross-vendor pair: Eastern OSS +
     /// Western closed = different blind spots, real disagreement
