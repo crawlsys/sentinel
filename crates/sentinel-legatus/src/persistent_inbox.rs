@@ -103,9 +103,20 @@ impl PersistentInbox {
                 return;
             }
         };
+        // `.read(true)` is REQUIRED alongside `.append(true)`: on
+        // Windows an append-only handle has just FILE_APPEND_DATA
+        // access, and `fs2`'s `lock_exclusive` (LockFileEx) needs
+        // FILE_READ_DATA or FILE_WRITE_DATA — without it the lock
+        // silently fails and the early-return below drops the write.
+        // We grant READ rather than WRITE because `.write(true)` +
+        // `.append(true)` together give the handle a non-append write
+        // cursor on Windows, so successive appends overwrite earlier
+        // entries instead of extending the file. `.read(true)` satisfies
+        // LockFileEx while leaving pure append-at-EOF semantics intact.
         let mut file = match OpenOptions::new()
             .create(true)
             .append(true)
+            .read(true)
             .open(&self.path)
         {
             Ok(f) => f,
@@ -118,7 +129,7 @@ impl PersistentInbox {
             warn!(?err, "persistent_inbox: lock_exclusive failed");
             return;
         }
-        let result = writeln!(file, "{line}");
+        let result = writeln!(file, "{line}").and_then(|()| file.flush());
         // Drop the lock by dropping `file` at end of scope; we
         // also explicitly unlock to be defensive across rustc
         // versions that may keep the handle alive longer.
