@@ -7,6 +7,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 ## [Unreleased]
 
 ### Added
+- **Ed25519 proof signing wired into the seal path (#4)** (2026-05-25). Proof signing existed (`step_proof::sign_with`, `SENTINEL_SIGNING_KEY` config) but was never called — proofs were SHA-chain only, never cryptographically attested. `ProofEngine` now signs every sealed `StepProof` over its `combined_hash` when a key is configured, via a `.with_signing(key, required)` builder (the CLI loads `SENTINEL_SIGNING_KEY` + `SENTINEL_SIGNING_REQUIRED`). Mandatory posture: with `SENTINEL_SIGNING_REQUIRED` set and no key, sealing is REFUSED (error, chain unmutated) rather than writing an un-attestable proof — the audit-grade guarantee. 1898 tests green.
+
+### Added
 - **Self-certify gap closed + registered MCP servers trusted** (2026-05-25). (1) `submit_step_complete` trusted the caller-supplied `verdict` arg, letting an agent self-certify; now the `step_judge` PostToolUse hook persists an INDEPENDENT verdict into `SessionState` (new `independent_verdicts` map, loaded by `with_session_state` from the same disk store) and `submit_step_complete` prefers it over the supplied one — in `enforce` mode an insufficient independent verdict refuses the seal regardless of the caller's claim. (2) `is_dangerous_mcp_tool` was deny-by-default on verb suffix, flagging `mcp__browserbase__navigate`/`evaluate`, `mcp__cdp__*`, linear mutations etc. as dangerous and applying workflow-gate enforcement; added `TRUSTED_MCP_SERVERS` (browserbase, cdp, steel, sequential-thinking, memory-mcp, sentinel, linear, qdrant, skills, agents) whose tools are trusted regardless of verb, while raw-exec servers not on the list (e.g. `codex` shell/write_file/apply_patch) stay verb-gated. 1895 domain+application tests green.
 
 ### Changed
