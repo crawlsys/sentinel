@@ -163,11 +163,27 @@ pub async fn run_connect_hosted(
     if let Some(log) = status.event_log() {
         log.record_connecting(status.attempt());
     }
-    let (ws, _) = tokio_tungstenite::connect_async(&config.consulate_url)
-        .await
-        .map_err(|err| {
+    // Bound the connect on CONNECT_TIMEOUT so an unreachable consulate
+    // (firewalled remote, or a Windows loopback SYN timeout) becomes a
+    // transport failure the wrapper can back off on, rather than blocking
+    // reconnect detection on the OS-level connect timeout.
+    let (ws, _) = match tokio::time::timeout(
+        CONNECT_TIMEOUT,
+        tokio_tungstenite::connect_async(&config.consulate_url),
+    )
+    .await
+    {
+        Ok(res) => res.map_err(|err| {
             LegatusError::Transport(format!("connect {}: {err}", config.consulate_url))
-        })?;
+        })?,
+        Err(_elapsed) => {
+            return Err(LegatusError::Transport(format!(
+                "connect {}: timed out after {}s",
+                config.consulate_url,
+                CONNECT_TIMEOUT.as_secs()
+            )));
+        }
+    };
     let (mut sink, mut source) = ws.split();
 
     // --- Handshake ------------------------------------------------
@@ -1060,6 +1076,15 @@ pub const INITIAL_RECONNECT_BACKOFF: Duration = Duration::from_secs(1);
 /// recovery wait beyond half a minute.
 pub const MAX_RECONNECT_BACKOFF: Duration = Duration::from_secs(30);
 
+/// Per-attempt connect timeout (5 seconds). Bounds how long a single
+/// `connect_async` may block before being treated as a transport
+/// failure and handed to the backoff loop. Without this, a connect to
+/// an unreachable/blackholed consulate blocks on the OS SYN timeout —
+/// ~1-2s on Windows for a closed loopback port, far longer for a
+/// firewalled remote host — stalling reconnect detection. A bounded
+/// timeout makes per-attempt latency deterministic across platforms.
+pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
@@ -1377,15 +1402,45 @@ mod tests {
     // ----- run_connect_hosted_with_reconnect ----------------------
 
     fn reconnect_test_config() -> ConnectConfig {
-        // Address that's guaranteed to refuse — port 1 is never
-        // bound. Lets us exercise the transport-error → backoff path
-        // without a real listener.
+        // We need an address whose connect FAILS FAST and deterministically
+        // on every platform — the reconnect tests below budget on the
+        // assumption that the first attempt fails in ~ms so the loop is
+        // already in backoff when they probe.
+        //
+        // The old `ws://127.0.0.1:1` is wrong on Windows: connecting to a
+        // never-bound low port SYN-times-out over ~1-2s rather than
+        // refusing instantly (Linux gives an immediate ECONNREFUSED, hence
+        // the original assumption). That blew the 200ms/500ms/1.5s budgets.
+        //
+        // Fix: bind a listener to an OS-assigned free port, read the port,
+        // then DROP the listener. A connect to a just-closed loopback port
+        // gets an immediate RST on both Linux and Windows — fast and
+        // deterministic, no SYN timeout.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")
+            .expect("bind ephemeral port for reconnect test");
+        let port = listener.local_addr().expect("local_addr").port();
+        drop(listener); // free the port so connects refuse immediately
         ConnectConfig::new(
-            "ws://127.0.0.1:1",
+            format!("ws://127.0.0.1:{port}"),
             [0x11; 32],
             "reconnect-test",
             "/tmp/reconnect-test",
         )
+    }
+
+    /// Poll `cond` every 25ms until it returns true or `budget` elapses.
+    /// Returns whether the condition was observed true. Lets reconnect
+    /// tests assert on a published state without baking in a fixed sleep
+    /// that assumes a platform-specific connect-refusal latency.
+    async fn poll_until<F: Fn() -> bool>(cond: F, budget: Duration) -> bool {
+        let deadline = tokio::time::Instant::now() + budget;
+        while tokio::time::Instant::now() < deadline {
+            if cond() {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        cond()
     }
 
     #[tokio::test]
@@ -1395,14 +1450,24 @@ mod tests {
         let (_handle, runtime) = crate::handle::make_pair();
         let cancel = std::sync::Arc::new(Notify::new());
         let cancel_for_signal = std::sync::Arc::clone(&cancel);
+        let status = ConnectionStatus::new();
+        let status_probe = status.clone();
 
         let task = tokio::spawn(async move {
-            run_connect_hosted_with_reconnect(reconnect_test_config(), cancel, runtime, ConnectionStatus::new()).await
+            run_connect_hosted_with_reconnect(reconnect_test_config(), cancel, runtime, status).await
         });
 
-        // Let the first attempt fail (connect refused is fast) and
-        // the loop enter the 1s backoff sleep, then fire cancel.
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        // Wait until the loop has actually entered the backoff sleep
+        // (published Reconnecting) before firing cancel — otherwise on a
+        // slow-connect platform we'd cancel mid-connect and exercise a
+        // different path than the one under test. Polling removes the old
+        // "connect-refused is fast, 200ms is enough" timing assumption.
+        let in_backoff = poll_until(
+            || status_probe.get() == ConnectionState::Reconnecting,
+            Duration::from_secs(8),
+        )
+        .await;
+        assert!(in_backoff, "wrapper should reach Reconnecting/backoff before cancel");
         cancel_for_signal.notify_waiters();
 
         // The cancel arm of tokio::select! must be selected over
@@ -1451,18 +1516,28 @@ mod tests {
         let cancel = std::sync::Arc::new(Notify::new());
         let cancel_for_signal = std::sync::Arc::clone(&cancel);
 
+        let status = ConnectionStatus::new();
+        let status_probe = status.clone();
         let task = tokio::spawn(async move {
-            run_connect_hosted_with_reconnect(reconnect_test_config(), cancel, runtime, ConnectionStatus::new()).await
+            run_connect_hosted_with_reconnect(reconnect_test_config(), cancel, runtime, status).await
         });
 
-        // 1.5s is well past the first attempt (connect-refused is
-        // ~ms) AND past the first 1s backoff sleep. If the wrapper
-        // exited after the first failure (the pre-fix bug), the task
-        // would be finished by now.
-        tokio::time::sleep(Duration::from_millis(1500)).await;
+        // Wait until the wrapper has published Reconnecting — that proves
+        // it failed the first connect AND chose to back off + retry rather
+        // than exit (the pre-fix silent-exit bug returned Ok(()) here, so
+        // the task would finish instead of ever reaching Reconnecting).
+        // Polling the state is deterministic regardless of platform connect
+        // latency; the old fixed 1.5s sleep assumed instant connect-refusal.
+        let reached_reconnecting = poll_until(
+            || status_probe.get() == ConnectionState::Reconnecting,
+            Duration::from_secs(8),
+        )
+        .await;
         assert!(
-            !task.is_finished(),
-            "reconnect wrapper exited prematurely — should still be in retry loop after 1.5s"
+            reached_reconnecting && !task.is_finished(),
+            "reconnect wrapper must enter the retry/backoff loop, not exit \
+             (reached_reconnecting={reached_reconnecting}, finished={})",
+            task.is_finished()
         );
 
         // Now confirm it does exit cleanly on cancel.
@@ -1512,13 +1587,20 @@ mod tests {
             .await
         });
 
-        // 500ms: first connect attempt has long since failed; the
-        // wrapper has set Reconnecting and is in backoff sleep.
-        tokio::time::sleep(Duration::from_millis(500)).await;
-        assert_eq!(
-            status.get(),
-            ConnectionState::Reconnecting,
-            "after the first failed connect, wrapper must publish Reconnecting"
+        // Poll (rather than assume a fixed timing) until the wrapper
+        // publishes Reconnecting after its first failed connect. Connect
+        // latency to a refused address is platform-dependent (instant on
+        // Linux, up to the OS SYN timeout on Windows), so a fixed sleep is
+        // racy; a bounded poll asserts the same contract deterministically.
+        let reached_reconnecting = poll_until(
+            || status.get() == ConnectionState::Reconnecting,
+            Duration::from_secs(8),
+        )
+        .await;
+        assert!(
+            reached_reconnecting,
+            "after the first failed connect, wrapper must publish Reconnecting (last state: {:?})",
+            status.get()
         );
 
         // Cancel; wrapper should set Disconnected as part of its
