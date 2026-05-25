@@ -152,6 +152,16 @@ regenerate_claude_md = "ReversibleWithEffort"
 edit_claude_md_template = "ReversibleWithEffort"
 restart_all_mcps = "ReversibleWithEffort"
 
+# Sequential-thinking — pure in-context reasoning. The single tool only
+# records a thought into the model's own reasoning buffer; zero external
+# side effect. Must be TriviallyReversible or the conservative MCP default
+# (Irreversible) strands it at the A3 dry-run gate — which in turn deadlocks
+# against `tool_usage_gate`, since that gate REQUIRES a sequentialthinking
+# call before code edits. Two [Sentinel-Authority] gates in direct
+# contradiction; this entry breaks the cycle.
+[mcp.sequential-thinking]
+sequentialthinking = "TriviallyReversible"
+
 # ---------------------------------------------------------------------------
 # Layer 3: Bash command patterns
 # ---------------------------------------------------------------------------
@@ -173,6 +183,30 @@ restart_all_mcps = "ReversibleWithEffort"
 match = "^rm[[:space:]]+-rf[[:space:]]+/[[:space:]]*$"
 class = "Catastrophic"
 # rm -rf / — root-deletion.
+
+# --- PowerShell destructive verbs (shares this list with Bash via the
+# `PowerShell` dispatch arm; PS uses the same tool_input.command field) ---
+
+[[bash.pattern]]
+match = "(?i)Remove-Item[[:space:]].*-Recurse.*-Force"
+class = "Catastrophic"
+# Remove-Item -Recurse -Force — PowerShell's `rm -rf`. Order of flags
+# varies, so both orderings are caught by the next pattern too.
+
+[[bash.pattern]]
+match = "(?i)Remove-Item[[:space:]].*-Force.*-Recurse"
+class = "Catastrophic"
+# Same as above with -Force before -Recurse.
+
+[[bash.pattern]]
+match = "(?i)(Format-Volume|Clear-Disk|Remove-Partition|Initialize-Disk)"
+class = "Catastrophic"
+# Disk-level PowerShell cmdlets — wipe volumes/partitions.
+
+[[bash.pattern]]
+match = "(?i)Remove-Item[[:space:]].*(HKLM:|HKCU:|HKEY)"
+class = "Catastrophic"
+# Registry key deletion via Remove-Item on a registry PSDrive.
 
 [[bash.pattern]]
 match = "^rm[[:space:]]+-rf[[:space:]]+[^./]"

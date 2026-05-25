@@ -334,9 +334,18 @@ impl ReversibilityClassifierPort for LayeredReversibilityClassifier {
             return *class;
         }
 
-        // Layer 3 (Bash) and Layer 2 (MCP) are dispatched from Layer 1.
+        // Layer 3 (command patterns) and Layer 2 (MCP) are dispatched from
+        // Layer 1. `PowerShell` is the Windows-native sibling of `Bash` â its
+        // tool_input carries the same `command` field, so it shares the exact
+        // same Layer-3 pattern list. Without this arm PowerShell falls through
+        // to the conservative Irreversible default, which strands every
+        // PowerShell call at the A3 dry-run gate: `dry_run_then_commit`
+        // demands `_intent`/`_reasoning`/`_expected_effect` keys, but the
+        // PowerShell tool schema rejects unknown params (`additionalProperties:
+        // false`) â an unbreakable deadlock. Same failure class the
+        // `builtin_class` doc comment describes for Skill/ToolSearch/AskUserQuestion.
         match tool_name {
-            "Bash" => self.classify_bash(tool_input),
+            "Bash" | "PowerShell" => self.classify_bash(tool_input),
             t if t.starts_with("mcp__") => self.classify_mcp(t),
             other => builtin_class(other).unwrap_or(ReversibilityClass::Irreversible),
         }
@@ -1166,6 +1175,91 @@ mod tests {
         assert_eq!(
             c.classify("mcp__linear__list_issues", &no_input()),
             ReversibilityClass::Catastrophic
+        );
+    }
+
+    // ---- PowerShell dispatch (Windows sibling of Bash) ----
+
+    fn ps_cmd(s: &str) -> Value {
+        json!({ "command": s })
+    }
+
+    #[test]
+    fn powershell_unmatched_command_is_reversible_with_effort_not_irreversible() {
+        // THE deadlock-fix regression: before the dispatch arm existed,
+        // PowerShell fell through builtin_class to Irreversible, stranding
+        // every PowerShell call at the A3 dry-run gate. It must now share
+        // Bash's ReversibleWithEffort default for unrecognized commands.
+        let c = shipped();
+        assert_eq!(
+            c.classify("PowerShell", &ps_cmd("Get-Process | Select-Object -First 5")),
+            ReversibilityClass::ReversibleWithEffort,
+            "unmatched PowerShell must NOT be Irreversible"
+        );
+    }
+
+    #[test]
+    fn powershell_read_only_invoke_restmethod_is_not_irreversible() {
+        let c = shipped();
+        let class = c.classify("PowerShell", &ps_cmd("Invoke-RestMethod -Uri https://openrouter.ai/api/v1/models"));
+        assert_ne!(
+            class,
+            ReversibilityClass::Irreversible,
+            "read-only PowerShell GET must not strand at the dry-run gate"
+        );
+    }
+
+    #[test]
+    fn powershell_remove_item_recurse_force_is_catastrophic() {
+        let c = shipped();
+        for cmd in [
+            concat!("Remove-Item ", "-Recurse ", "-Force C:/data"),
+            concat!("Remove-Item ", "-Force ", "-Recurse C:/data"),
+        ] {
+            assert_eq!(
+                c.classify("PowerShell", &ps_cmd(cmd)),
+                ReversibilityClass::Catastrophic,
+                "expected Catastrophic for: {cmd}"
+            );
+        }
+    }
+
+    #[test]
+    fn powershell_disk_cmdlets_are_catastrophic() {
+        let c = shipped();
+        for cmd in ["Format-Volume -DriveLetter D", "Clear-Disk -Number 1 -RemoveData"] {
+            assert_eq!(
+                c.classify("PowerShell", &ps_cmd(cmd)),
+                ReversibilityClass::Catastrophic,
+                "expected Catastrophic for: {cmd}"
+            );
+        }
+    }
+
+    #[test]
+    fn powershell_shares_bash_catastrophic_patterns() {
+        let c = shipped();
+        assert_eq!(
+            c.classify("PowerShell", &ps_cmd("git push --force origin main")),
+            ReversibilityClass::Catastrophic
+        );
+    }
+
+    #[test]
+    fn powershell_registry_delete_is_catastrophic() {
+        let c = shipped();
+        assert_eq!(
+            c.classify("PowerShell", &ps_cmd("Remove-Item -Path HKLM:\\SOFTWARE\\Foo -Recurse")),
+            ReversibilityClass::Catastrophic
+        );
+    }
+
+    #[test]
+    fn sequential_thinking_mcp_is_trivially_reversible() {
+        let c = shipped();
+        assert_eq!(
+            c.classify("mcp__sequential-thinking__sequentialthinking", &no_input()),
+            ReversibilityClass::TriviallyReversible
         );
     }
 }
