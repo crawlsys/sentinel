@@ -77,8 +77,8 @@ mod tests {
 
     #[test]
     fn maps_all_tiers() {
-        assert_eq!(OpenRouterLlm::model_id(LlmModel::Haiku), "openai/gpt-5.4-nano");
-        assert_eq!(OpenRouterLlm::model_id(LlmModel::Sonnet), "openai/gpt-5.5");
+        assert_eq!(OpenRouterLlm::model_id(LlmModel::Haiku), "openai/gpt-5.5-pro");
+        assert_eq!(OpenRouterLlm::model_id(LlmModel::Sonnet), "anthropic/claude-sonnet-4.6");
         assert_eq!(OpenRouterLlm::model_id(LlmModel::Opus), "anthropic/claude-opus-4.7");
     }
 
