@@ -159,6 +159,14 @@ pub struct WorkflowStep {
     #[serde(default)]
     pub baseline_threshold: u64,
 
+    /// **Per-step judge tier (#73)**. Which `JudgeModel` evaluates this
+    /// step's evidence. `None` (the default) inherits the phase's tier so
+    /// existing configs are unaffected; set per-step to route a routine
+    /// step to a cheaper tier (`kimi`/`sonnet`) or a critical step to `opus`.
+    /// TOML: `judge = "codex" | "kimi" | "sonnet" | "opus"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub judge: Option<JudgeModel>,
+
     /// **Per-step timeout (M4.4 — Apollo resilience)**. Wall-clock cap
     /// in milliseconds. Skills-mcp aborts the step if exceeded. None =
     /// no timeout (the default) — appropriate for steps with their own

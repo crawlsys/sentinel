@@ -392,7 +392,7 @@ impl McpHandler {
     ///
     /// Optional arguments (sensible defaults applied when omitted):
     /// - `evidence` (object) — defaults to empty Evidence
-    /// - `judge_model` (string: "sonnet" | "opus" | "haiku") — defaults to "sonnet"
+    /// - `judge_model` (string: "sonnet" | "opus" | "codex" | "kimi") — defaults to "sonnet"
     /// - `artifact` (any JSON value) — defaults to null
     /// - `account_context` (string|null) — defaults to null
     /// - `started_at` (RFC3339 string) — defaults to now-1ms
@@ -519,10 +519,10 @@ impl McpHandler {
         let judge_model = match args.get("judge_model").and_then(|v| v.as_str()) {
             Some("sonnet") | None => sentinel_domain::judge::JudgeModel::Sonnet,
             Some("opus") => sentinel_domain::judge::JudgeModel::Opus,
-            Some("haiku") => sentinel_domain::judge::JudgeModel::Haiku,
+            Some("codex") => sentinel_domain::judge::JudgeModel::Codex,
             Some(other) => {
                 return McpToolResult::err(format!(
-                    "Unknown judge_model '{other}' — expected sonnet | opus | haiku"
+                    "Unknown judge_model '{other}' — expected sonnet | opus | codex | kimi"
                 ));
             }
         };

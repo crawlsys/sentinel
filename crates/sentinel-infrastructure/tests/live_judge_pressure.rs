@@ -28,7 +28,7 @@ use sentinel_infrastructure::rig_judge::MultiModelJudge;
 
 /// The four production judge tiers, in cost-ascending order.
 const TIERS: &[JudgeModel] = &[
-    JudgeModel::Haiku,
+    JudgeModel::Codex,
     JudgeModel::Kimi,
     JudgeModel::Sonnet,
     JudgeModel::Opus,

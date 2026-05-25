@@ -23,6 +23,7 @@ pub mod interceptor;
 pub mod ipc;
 pub mod mcp_transport;
 pub mod memory_mcp_client;
+pub mod openrouter_llm;
 pub mod process;
 pub mod proof_store;
 pub mod provenance_store;
