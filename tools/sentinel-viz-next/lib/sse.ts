@@ -7,7 +7,9 @@ import { fetchGraph, streamUrl } from "./api";
 
 /// Subscribes to /api/stream and yields the most recent full snapshot.
 /// Falls back to polling /api/graph if EventSource is unavailable.
-export function useGraphStream(): {
+/// Pass `focusedSession` (a data.session_id) to ask the server to
+/// expand that session's window from the default 12 nodes to 36.
+export function useGraphStream(focusedSession: string | null = null): {
   graph: GraphResponse | null;
   error: string | null;
   connected: boolean;
@@ -27,7 +29,7 @@ export function useGraphStream(): {
 
     const loadSnapshot = async (signal?: AbortSignal) => {
       try {
-        const data = await fetchGraph(100, signal);
+        const data = await fetchGraph(100, signal, { focusedSession });
         if (!cancelled) {
           setGraph(data);
           setError(data.error ?? null);
@@ -86,7 +88,7 @@ export function useGraphStream(): {
       es.close();
       sourceRef.current = null;
     };
-  }, []);
+  }, [focusedSession]);
 
   return { graph, error, connected };
 }

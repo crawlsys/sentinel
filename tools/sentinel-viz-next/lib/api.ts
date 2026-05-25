@@ -13,8 +13,14 @@ export function apiBase(): string {
   return DEFAULT_BASE;
 }
 
-export async function fetchGraph(limit = 100, signal?: AbortSignal): Promise<GraphResponse> {
-  const url = `${apiBase()}/api/graph?limit=${limit}`;
+export async function fetchGraph(
+  limit = 100,
+  signal?: AbortSignal,
+  opts: { focusedSession?: string | null } = {},
+): Promise<GraphResponse> {
+  const params = new URLSearchParams({ limit: String(limit) });
+  if (opts.focusedSession) params.set("focused_session", opts.focusedSession);
+  const url = `${apiBase()}/api/graph?${params}`;
   const res = await fetch(url, { signal });
   if (!res.ok) throw new Error(`graph: ${res.status}`);
   return res.json();

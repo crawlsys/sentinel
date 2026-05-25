@@ -13,10 +13,17 @@ import { useSessionName } from "../lib/session-names";
 import { maybeFireStuckAlert, stuckSessions } from "../lib/stuck";
 
 export default function Page() {
-  const { graph, error, connected } = useGraphStream();
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [anchorTs, setAnchorTs] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  // We resolve `selectedSessionId` from the previous graph snapshot
+  // so the focused-session re-fetch can fire without waiting on the
+  // current snapshot's node list (it might not include this session
+  // yet). Stored in a state hook to break the SSE→graph→selection
+  // chain.
+  const [pendingFocusSession, setPendingFocusSession] = useState<string | null>(null);
+
+  const { graph, error, connected } = useGraphStream(pendingFocusSession);
 
   const selectedNode = useMemo(() => {
     if (!graph || !selectedNodeId) return null;
@@ -29,6 +36,12 @@ export default function Page() {
     const sid = selectedNode?.data?.session_id;
     return typeof sid === "string" ? sid : null;
   }, [selectedNode]);
+
+  // Sync the focus state so the SSE/initial-fetch loop re-issues
+  // with `focused_session=<sid>` whenever the selection changes.
+  useEffect(() => {
+    setPendingFocusSession(selectedSessionId);
+  }, [selectedSessionId]);
 
   const selectedSessionName = useSessionName(selectedSessionId);
 

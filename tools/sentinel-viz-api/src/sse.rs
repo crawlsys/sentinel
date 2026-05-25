@@ -37,6 +37,7 @@ pub async fn stream(
                         limit: state.window_limit,
                         since_secs: Some(6 * 3600),
                         include_hooks: false,
+                        focused_session: None,
                     };
                     let key = (opts.limit, opts.since_secs, opts.include_hooks);
                     match graph::load_graph_with(&conn, opts) {

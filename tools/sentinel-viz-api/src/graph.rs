@@ -13,9 +13,12 @@ use crate::model::{
 };
 use crate::transcript;
 
-/// Window strategy constants. Match `viz_server.py:490-491`.
-const K_SESSIONS: usize = 6;
-const PER_SESSION_CAP: usize = 40;
+/// Window strategy constants. Per user feedback 2026-05-25:
+/// "max 4 in-progress sessions; each gets at least 12 nodes; the
+/// currently-selected/active session shows up to 36."
+const K_SESSIONS: usize = 4;
+const PER_SESSION_CAP_DEFAULT: usize = 12;
+const PER_SESSION_CAP_FOCUSED: usize = 36;
 
 /// Liveness thresholds (seconds). Match `viz_server.py:574-578`.
 const FIRING_THRESHOLD: f64 = 30.0;
@@ -30,7 +33,7 @@ const DORMANT_THRESHOLD: f64 = 1800.0;
 const AWAIT_FRESHNESS_SECS: f64 = 86_400.0;
 
 /// Knobs the HTTP layer can override per-request.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct GraphOpts {
     pub limit: usize,
     /// Drop `sentinel.*` events older than this many seconds. `None`
@@ -40,16 +43,28 @@ pub struct GraphOpts {
     /// When `false` (default), hooks are filtered out and direct
     /// `session → tool_call` edges are synthesised in their place.
     pub include_hooks: bool,
+    /// Session id (the data.session_id value) that should get the
+    /// larger PER_SESSION_CAP_FOCUSED window. Others get the
+    /// default cap.
+    pub focused_session: Option<String>,
 }
 
 impl Default for GraphOpts {
     fn default() -> Self {
-        Self { limit: 100, since_secs: Some(6 * 3600), include_hooks: false }
+        Self {
+            limit: 100,
+            since_secs: Some(6 * 3600),
+            include_hooks: false,
+            focused_session: None,
+        }
     }
 }
 
 pub fn load_graph(conn: &Connection, limit: usize) -> Result<GraphResponse> {
-    load_graph_with(conn, GraphOpts { limit, ..GraphOpts::default() })
+    load_graph_with(
+        conn,
+        GraphOpts { limit, ..GraphOpts::default() },
+    )
 }
 
 /// Read events into a windowed graph snapshot. Successor to
@@ -297,11 +312,34 @@ pub fn load_graph_with(conn: &Connection, opts: GraphOpts) -> Result<GraphRespon
         .collect();
     let mut kept_inv_ids: HashSet<String> = HashSet::new();
     for sid in &top_sids {
+        // Focused session gets a larger window than the others so the
+        // operator sees deep context for what they're looking at,
+        // while peripheral sessions stay readable at 12 nodes each.
+        let cap = if Some(sid) == opts.focused_session.as_ref() {
+            PER_SESSION_CAP_FOCUSED
+        } else {
+            PER_SESSION_CAP_DEFAULT
+        };
         if let Some(invs) = inv_by_session.get(sid) {
             let mut sorted: Vec<&&Node> = invs.iter().collect();
             sorted.sort_by_key(|n| std::cmp::Reverse(n.seq));
-            for n in sorted.into_iter().take(PER_SESSION_CAP) {
+            for n in sorted.into_iter().take(cap) {
                 kept_inv_ids.insert(n.id.clone());
+            }
+        }
+    }
+    // If a focused session was requested AND isn't in the top-K
+    // (possible when it's been quiet recently), include it anyway
+    // with the focused cap. This keeps the user's currently-selected
+    // session present even if other galaxies are more active.
+    if let Some(focus) = opts.focused_session.as_ref() {
+        if !top_sids.contains(focus) {
+            if let Some(invs) = inv_by_session.get(focus) {
+                let mut sorted: Vec<&&Node> = invs.iter().collect();
+                sorted.sort_by_key(|n| std::cmp::Reverse(n.seq));
+                for n in sorted.into_iter().take(PER_SESSION_CAP_FOCUSED) {
+                    kept_inv_ids.insert(n.id.clone());
+                }
             }
         }
     }
@@ -362,28 +400,46 @@ pub fn load_graph_with(conn: &Connection, opts: GraphOpts) -> Result<GraphRespon
         &recent_events[..]
     };
 
-    // Expand kept_ids ONLY for the freshest events the user is likely
-    // to click on. Pulling in every node referenced by the full 600-
-    // event tail bloats the canvas (each tool_call event has a
-    // unique id, so the expansion is unbounded). Cap at 60 — the
-    // ticker's first viewport-worth of rows.
-    let expand_cap = 60.min(events_tail_for_window.len());
-    let expand_from = events_tail_for_window
-        .len()
-        .saturating_sub(expand_cap);
-    for ev in &events_tail_for_window[expand_from..] {
-        if let Some(s) = ev.payload.get("session_id").and_then(|v| v.as_str()) {
-            for n in nodes.values() {
-                if n.kind == node_kind::SESSION
-                    && n.data.get("session_id").and_then(|v| v.as_str()) == Some(s)
-                {
-                    kept_ids.insert(n.id.clone());
-                }
+    // Expand kept_ids by walking the ticker tail newest-first, but
+    // honour per-session caps so each session keeps at most
+    // PER_SESSION_CAP_DEFAULT TCs (12), or PER_SESSION_CAP_FOCUSED
+    // (36) for the focused session. Sessions outside top_sids ∪
+    // focused are skipped — we don't drag in TCs from a session we
+    // deliberately dropped.
+    let visible_session_ids: HashSet<String> = top_sids
+        .iter()
+        .chain(opts.focused_session.iter())
+        .cloned()
+        .collect();
+    let mut tc_count_per_session: HashMap<String, usize> = HashMap::new();
+    // Walk newest-first so we keep the freshest TCs per session.
+    for ev in events_tail_for_window.iter().rev() {
+        let Some(ev_sid) = ev.payload.get("session_id").and_then(|v| v.as_str()) else { continue };
+        if ev_sid.is_empty() || !visible_session_ids.contains(ev_sid) {
+            continue;
+        }
+        // Pull the session node into the window so its label renders.
+        for n in nodes.values() {
+            if n.kind == node_kind::SESSION
+                && n.data.get("session_id").and_then(|v| v.as_str()) == Some(ev_sid)
+            {
+                kept_ids.insert(n.id.clone());
             }
         }
+        // Apply per-session TC cap.
+        let cap = if Some(ev_sid) == opts.focused_session.as_deref() {
+            PER_SESSION_CAP_FOCUSED
+        } else {
+            PER_SESSION_CAP_DEFAULT
+        };
+        let count = tc_count_per_session.entry(ev_sid.to_string()).or_insert(0);
+        if *count >= cap {
+            continue;
+        }
         if let Some(tcid) = ev.payload.get("tool_call_id").and_then(|v| v.as_str()) {
-            if nodes.contains_key(tcid) {
+            if nodes.contains_key(tcid) && !kept_ids.contains(tcid) {
                 kept_ids.insert(tcid.to_string());
+                *count += 1;
             }
         }
         if let Some(hid) = ev.payload.get("invocation_id").and_then(|v| v.as_str()) {

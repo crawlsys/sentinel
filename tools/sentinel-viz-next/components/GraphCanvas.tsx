@@ -19,7 +19,20 @@ interface SimNode extends d3Force.SimulationNodeDatum {
   /** 0-based rank from each session's chain head (most recent TC = 0).
    *  Undefined for sessions and TCs that aren't on a derived chain. */
   chainRank?: number;
+  /** The session_id this node belongs to (string), or null for
+   *  orphan nodes. Used to look up the per-session anchor. */
+  sid?: string | null;
   ref: Node;
+}
+
+/** Position assigned to a session within the viewport. Used by the
+ *  forceX/forceY anchors to keep each session's galaxy in its own
+ *  region instead of one big tangle. */
+interface SessionAnchor {
+  sid: string;
+  /** Centre x (in sim coordinates — sim is centred at 0,0). */
+  cx: number;
+  cy: number;
 }
 
 interface SimLink extends d3Force.SimulationLinkDatum<SimNode> {
@@ -119,6 +132,10 @@ export function GraphCanvas({ graph, selectedNodeId, onSelectNode }: Props) {
   const linksRef = useRef<SimLink[]>([]);
   const onSelectRef = useRef(onSelectNode);
   onSelectRef.current = onSelectNode;
+  // Session anchor map kept in a ref so the d3 forces (set up once,
+  // accessor closures) can read the freshest value without rebuilding
+  // the sim on every data change.
+  const anchorsRef = useRef<Map<string, SessionAnchor>>(new Map());
   const [viewport, setViewport] = useState<ViewportSize>({ width: 0, height: 0 });
   // Bump on every session-name arrival so labels redraw.
   const [nameTick, setNameTick] = useState(0);
@@ -164,20 +181,47 @@ export function GraphCanvas({ graph, selectedNodeId, onSelectNode }: Props) {
     const svg = select(svgRef.current);
     const g = select(gRef.current);
 
+    // Per-session anchors (forceX / forceY) replace the central
+    // forceCenter. Each TC/session is pulled toward its session's
+    // assigned slot; orphan nodes (no anchor) drift to origin.
+    const anchorX = (d: SimNode): number => {
+      if (!d.sid) return 0;
+      const a = anchorsRef.current.get(d.sid);
+      return a ? a.cx : 0;
+    };
+    const anchorY = (d: SimNode): number => {
+      if (!d.sid) return 0;
+      const a = anchorsRef.current.get(d.sid);
+      return a ? a.cy : 0;
+    };
+
     const sim = d3Force
       .forceSimulation<SimNode, SimLink>(nodesRef.current)
-      .force("charge", d3Force.forceManyBody<SimNode>().strength(-180))
+      .force("charge", d3Force.forceManyBody<SimNode>().strength(-90))
       .force(
         "link",
         d3Force
           .forceLink<SimNode, SimLink>(linksRef.current)
           .id((d) => d.id)
-          .distance((l) => (l.kind === "next_tool_call" ? 35 : 70))
-          .strength((l) => (l.kind === "next_tool_call" ? 0.9 : 0.4)),
+          .distance((l) => (l.kind === "next_tool_call" ? 30 : 55))
+          .strength((l) => (l.kind === "next_tool_call" ? 0.85 : 0.45)),
       )
-      .force("center", d3Force.forceCenter(0, 0))
-      .force("collide", d3Force.forceCollide<SimNode>().radius(18))
-      .alphaDecay(0.05);
+      .force(
+        "x",
+        d3Force
+          .forceX<SimNode>(anchorX)
+          // Session bubbles get pinned hard at the anchor; their TCs
+          // are pulled gently so the chain can fan around the centre.
+          .strength((d) => (d.kind === "SentinelSession" ? 0.45 : 0.12)),
+      )
+      .force(
+        "y",
+        d3Force
+          .forceY<SimNode>(anchorY)
+          .strength((d) => (d.kind === "SentinelSession" ? 0.45 : 0.12)),
+      )
+      .force("collide", d3Force.forceCollide<SimNode>().radius(16))
+      .alphaDecay(0.04);
     simRef.current = sim;
 
     sim.on("tick", () => {
@@ -210,20 +254,40 @@ export function GraphCanvas({ graph, selectedNodeId, onSelectNode }: Props) {
 
   // Memoise the desired node/link set from the graph prop.
   const desired = useMemo(() => {
-    if (!graph) return { nodes: [] as SimNode[], links: [] as SimLink[] };
+    if (!graph) return { nodes: [] as SimNode[], links: [] as SimLink[], anchors: new Map<string, SessionAnchor>() };
     const nodes: SimNode[] = graph.nodes.map((n) => ({
       id: n.id,
       kind: n.type,
       outcome: typeof n.data?.outcome === "string" ? (n.data.outcome as string) : undefined,
       session_status: n.session_status ?? undefined,
       category: n.category ?? undefined,
+      sid: typeof n.data?.session_id === "string" ? (n.data.session_id as string) : null,
       ref: n,
     }));
     const ids = new Set(nodes.map((n) => n.id));
     const links: SimLink[] = graph.edges
       .filter((e) => ids.has(e.source) && ids.has(e.target))
       .map((e: Edge) => ({ source: e.source, target: e.target, kind: e.type }));
-    return { nodes, links };
+
+    // Assign each session a fixed anchor slot. With K=4 the natural
+    // layout is a 2x2 grid; arrange them by seq so ordering is
+    // stable across SSE ticks.
+    const sessionSids: string[] = nodes
+      .filter((n) => n.kind === "SentinelSession" && n.sid)
+      .sort((a, b) => (a.ref.seq ?? 0) - (b.ref.seq ?? 0))
+      .map((n) => n.sid as string);
+    const RADIUS = 260; // sim units from origin to each anchor
+    const anchors = new Map<string, SessionAnchor>();
+    sessionSids.forEach((sid, i) => {
+      // Distribute around a circle so any N sessions look balanced.
+      const angle = (i / Math.max(sessionSids.length, 1)) * Math.PI * 2 - Math.PI / 2;
+      anchors.set(sid, {
+        sid,
+        cx: Math.cos(angle) * RADIUS,
+        cy: Math.sin(angle) * RADIUS,
+      });
+    });
+    return { nodes, links, anchors };
   }, [graph]);
 
   // Incremental data update: preserve positions for nodes that survive,
@@ -258,6 +322,7 @@ export function GraphCanvas({ graph, selectedNodeId, onSelectNode }: Props) {
 
     nodesRef.current = nextNodes;
     linksRef.current = desired.links;
+    anchorsRef.current = desired.anchors;
 
     sim.nodes(nextNodes);
     (sim.force("link") as d3Force.ForceLink<SimNode, SimLink> | null)?.links(desired.links);

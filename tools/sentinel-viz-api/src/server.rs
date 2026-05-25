@@ -170,6 +170,9 @@ pub struct GraphQuery {
     /// Default `false` collapses them and synthesises direct
     /// session → tool-call edges.
     pub include_hooks: Option<bool>,
+    /// Session id (data.session_id) that should get the larger
+    /// per-session window. Others use the default cap.
+    pub focused_session: Option<String>,
 }
 
 async fn graph_endpoint(
@@ -186,6 +189,7 @@ async fn graph_endpoint(
         None => Some(6 * 3600),
     };
     let include_hooks = q.include_hooks.unwrap_or(false);
+    let focused_session = q.focused_session.clone().filter(|s| !s.is_empty());
     let key = (limit, since_secs, include_hooks);
 
     // If we can't even open the DB, return a degraded-but-valid
@@ -200,30 +204,40 @@ async fn graph_endpoint(
         }
     };
     let cur_seq = db::peek_max_seq(&conn).unwrap_or(0);
-    let cached_body: Option<Arc<Vec<u8>>> = {
-        let cache = state.cache.read().unwrap();
-        cache
-            .iter()
-            .find(|e| e.key == key && e.last_seq == cur_seq)
-            .map(|e| Arc::clone(&e.body))
-    };
-    if let Some(body) = cached_body {
-        return Ok((
-            [(header::CONTENT_TYPE, "application/json")],
-            (*body).clone(),
-        )
-            .into_response());
+    // Skip the shared cache when a focused_session is set — that
+    // request varies per session. Trade-off: pay the rebuild cost
+    // on each focus change.
+    if focused_session.is_none() {
+        let cached_body: Option<Arc<Vec<u8>>> = {
+            let cache = state.cache.read().unwrap();
+            cache
+                .iter()
+                .find(|e| e.key == key && e.last_seq == cur_seq)
+                .map(|e| Arc::clone(&e.body))
+        };
+        if let Some(body) = cached_body {
+            return Ok((
+                [(header::CONTENT_TYPE, "application/json")],
+                (*body).clone(),
+            )
+                .into_response());
+        }
     }
 
     let g = graph::load_graph_with(
         &conn,
-        GraphOpts { limit, since_secs, include_hooks },
+        GraphOpts {
+            limit,
+            since_secs,
+            include_hooks,
+            focused_session: focused_session.clone(),
+        },
     )
     .map_err(internal)?;
     let body = serde_json::to_vec(&g).map_err(|e| internal(anyhow::anyhow!(e)))?;
     let body_arc = Arc::new(body);
     let g_arc = Arc::new(g);
-    {
+    if focused_session.is_none() {
         let mut cache = state.cache.write().unwrap();
         cache.retain(|e| e.key != key);
         cache.push(CacheEntry {
