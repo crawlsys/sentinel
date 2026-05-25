@@ -162,6 +162,21 @@ restart_all_mcps = "ReversibleWithEffort"
 [mcp.sequential-thinking]
 sequentialthinking = "TriviallyReversible"
 
+# Memory engine (memory-mcp) — atom store reads + capture. Reads are
+# pure observation; capture goes through the dual-judge accept/reject gate
+# and is recoverable (atoms can be superseded/archived), so ReversibleWithEffort.
+# Without these, the conservative unknown-MCP default (Irreversible) strands
+# every memory tool at the A3 dry-run gate (the _intent/_reasoning/_expected_effect
+# fields can't be passed through the MCP tool schema — unbreakable deadlock,
+# same class as the PowerShell + sequential-thinking fixes).
+[mcp.memory-mcp]
+memory_search = "TriviallyReversible"
+memory_why = "TriviallyReversible"
+memory_audit = "TriviallyReversible"
+memory_stats = "TriviallyReversible"
+memory_capture = "ReversibleWithEffort"
+memory_record_outcome = "ReversibleWithEffort"
+
 # ---------------------------------------------------------------------------
 # Layer 3: Bash command patterns
 # ---------------------------------------------------------------------------
