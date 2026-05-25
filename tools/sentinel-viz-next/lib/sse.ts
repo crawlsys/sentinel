@@ -33,7 +33,8 @@ export function useGraphStream(): {
           setError(null);
         }
       } catch (err) {
-        if (!cancelled && !(err instanceof DOMException && err.name === "AbortError")) {
+        const isAbort = err instanceof Error && err.name === "AbortError";
+        if (!cancelled && !isAbort) {
           setError(`snapshot failed: ${String(err)}`);
         }
       }
