@@ -49,6 +49,30 @@ function writeReport(report: Evidence) {
   );
 }
 
+test.beforeAll(async ({ request }) => {
+  // Don't start hitting the viewer until the Rust API actually
+  // responds with a populated snapshot. Round 1 was dominated by
+  // 500-during-startup masking every other failure.
+  let lastErr = "";
+  for (let i = 0; i < 20; i++) {
+    try {
+      const r = await request.get("http://127.0.0.1:8082/api/healthz");
+      if (r.ok()) {
+        const g = await request.get("http://127.0.0.1:8082/api/graph");
+        if (g.ok()) {
+          const body = (await g.json()) as { nodes: unknown[] };
+          if (Array.isArray(body.nodes)) return;
+        }
+      }
+      lastErr = `attempt ${i}: healthz=${r.status()}`;
+    } catch (e) {
+      lastErr = `attempt ${i}: ${String(e)}`;
+    }
+    await new Promise((r) => setTimeout(r, 500));
+  }
+  throw new Error(`API not ready after 10s: ${lastErr}`);
+});
+
 test.beforeEach(async ({ page }) => {
   page.setDefaultNavigationTimeout(20_000);
   page.setDefaultTimeout(10_000);

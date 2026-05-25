@@ -30,12 +30,12 @@ export function useGraphStream(): {
         const data = await fetchGraph(100, signal);
         if (!cancelled) {
           setGraph(data);
-          setError(null);
+          setError(data.error ?? null);
         }
       } catch (err) {
         const isAbort = err instanceof Error && err.name === "AbortError";
         if (!cancelled && !isAbort) {
-          setError(`snapshot failed: ${String(err)}`);
+          setError(humanError(err));
         }
       }
     };
@@ -54,18 +54,18 @@ export function useGraphStream(): {
     const es = new EventSource(streamUrl());
     sourceRef.current = es;
     let lastMessageAt = 0;
-    es.onopen = () => {
-      if (!cancelled) setConnected(true);
-    };
+    // NOTE: do NOT mark connected=true in onopen. Localhost SSE socket
+    // opens before the initial snapshot is parsed, which makes the
+    // status bar skip the "● ready" state entirely. The status flow
+    // we want is: "○ connecting" → "● ready" (snapshot loaded) →
+    // "● live" (first SSE message received). Only set connected=true
+    // when actual data arrives.
     es.onerror = () => {
-      // EventSource fires onerror for transient hiccups even when it
-      // auto-reconnects successfully on the next tick. Only mark
-      // disconnected if we haven't seen a message in the last 30s.
       if (cancelled) return;
       const since = Date.now() - lastMessageAt;
       if (lastMessageAt === 0 || since > 30_000) {
         setConnected(false);
-        setError("stream reconnecting…");
+        setError("sentinel API unreachable — auto-reconnecting");
       }
     };
     es.onmessage = (e) => {
@@ -75,9 +75,9 @@ export function useGraphStream(): {
       try {
         const data = JSON.parse(e.data) as GraphResponse;
         setGraph(data);
-        setError(null);
+        setError(data.error ?? null);
       } catch (err) {
-        setError(`bad payload: ${String(err)}`);
+        setError(`bad response from sentinel API: ${String(err)}`);
       }
     };
     return () => {
@@ -89,4 +89,18 @@ export function useGraphStream(): {
   }, []);
 
   return { graph, error, connected };
+}
+
+function humanError(err: unknown): string {
+  const m = String(err);
+  if (m.includes("graph: 5") || m.includes("HTTP 5")) {
+    return "sentinel API is unreachable (5xx)";
+  }
+  if (m.includes("Failed to fetch") || m.includes("NetworkError")) {
+    return "sentinel API unreachable — is the Rust API running?";
+  }
+  if (m.includes("AbortError")) {
+    return "request cancelled";
+  }
+  return `snapshot failed (${m.replace(/^Error: /, "")})`;
 }

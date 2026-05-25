@@ -196,6 +196,9 @@ export function GraphCanvas({ graph, selectedNodeId, onSelectNode }: Props) {
             .append("g")
             .attr("class", "node")
             .attr("data-node-id", (d) => d.id)
+            .attr("data-category", (d) => d.category ?? "")
+            .attr("data-status", (d) => d.session_status ?? "")
+            .attr("data-kind", (d) => d.kind)
             .style("cursor", "pointer")
             .on("click", (_, d) => onSelectRef.current(d.id));
           // Pulse animation: circle scales from 1.5× → 1× via radius transition.
@@ -235,7 +238,10 @@ export function GraphCanvas({ graph, selectedNodeId, onSelectNode }: Props) {
         },
         (update) => {
           // Re-paint in place — colours / status may have changed.
-          update.select("circle")
+          update
+            .attr("data-category", (d) => d.category ?? "")
+            .attr("data-status", (d) => d.session_status ?? "")
+            .select("circle")
             .attr("fill", (d) =>
               d.kind === "SentinelSession"
                 ? statusColor(d.session_status)

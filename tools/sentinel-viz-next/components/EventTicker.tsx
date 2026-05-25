@@ -17,7 +17,10 @@ interface TickerMember {
 }
 
 interface TickerRow {
+  /** Stable React key. */
   key: string;
+  /** Grouping signature, excludes per-event tool_call_id. */
+  sig: string;
   ts: string;
   sessionId: string | null;
   sentinelEvent: string;
@@ -131,16 +134,22 @@ function buildRows(events: RecentEvent[]): TickerRow[] {
     const tool = strField(e.payload, "tool");
     const ts = bestTs(e);
     const { label, category } = deriveLabelAndCategory(e.type, sentinelEvent, tool);
-    const sig = `${sid ?? ""}|${e.type}|${sentinelEvent}|${tcid ?? ""}|${outcome ?? ""}`;
+    // Grouping signature deliberately excludes `tool_call_id` — every
+    // `sentinel.tool_call_observed` event has a unique tcid, so
+    // including it would make `×N` flyouts unreachable. We still keep
+    // tcid per member so each flyout entry remains clickable to the
+    // specific node it represents.
+    const sig = `${sid ?? ""}|${e.type}|${sentinelEvent}|${tool ?? ""}|${outcome ?? ""}`;
     const prev = rows[rows.length - 1];
-    if (
-      prev
-      && prev.key.split("|").slice(0, 5).join("|") === sig
-    ) {
+    if (prev && prev.sig === sig) {
       prev.members.push({ ts, toolCallId: tcid, outcome });
+      // Refresh the row's display ts to the freshest member so the
+      // visible time keeps up.
+      prev.ts = ts;
       continue;
     }
     rows.push({
+      sig,
       key: `${sig}|${e.seq}`,
       ts,
       sessionId: sid,

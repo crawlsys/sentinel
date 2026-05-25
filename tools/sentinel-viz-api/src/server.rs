@@ -90,7 +90,17 @@ async fn graph_endpoint(
     let include_hooks = q.include_hooks.unwrap_or(false);
     let key = (limit, since_secs, include_hooks);
 
-    let conn = db::open_ro(&state.db_path).map_err(internal)?;
+    // If we can't even open the DB, return a degraded-but-valid
+    // GraphResponse so the viewer can surface a friendly error
+    // instead of a raw 500.
+    let conn = match db::open_ro(&state.db_path) {
+        Ok(c) => c,
+        Err(e) => {
+            return Ok(degraded_response(&format!(
+                "cannot open sentinel.db: {e}"
+            )));
+        }
+    };
     let cur_seq = db::peek_max_seq(&conn).unwrap_or(0);
     let cached_body: Option<Arc<Vec<u8>>> = {
         let cache = state.cache.read().unwrap();
@@ -197,4 +207,28 @@ async fn activity_endpoint(
 
 fn internal(e: anyhow::Error) -> (StatusCode, String) {
     (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+}
+
+/// Build a 200 response carrying an empty `GraphResponse` with the
+/// `error` field populated so the viewer can render a friendly
+/// message instead of a hard 5xx.
+fn degraded_response(msg: &str) -> axum::response::Response {
+    use axum::http::header;
+    use axum::response::IntoResponse;
+
+    let g = crate::model::GraphResponse {
+        nodes: vec![],
+        edges: vec![],
+        events: vec![],
+        max_seq: 0,
+        window_limit: 0,
+        stats: crate::model::GraphStats::default(),
+        error: Some(msg.to_string()),
+    };
+    let body = serde_json::to_vec(&g).unwrap_or_default();
+    (
+        [(header::CONTENT_TYPE, "application/json")],
+        body,
+    )
+        .into_response()
 }
