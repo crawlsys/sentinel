@@ -334,6 +334,19 @@ pub async fn process(
                 verdict.sufficient,
             );
 
+            // Persist the INDEPENDENT verdict (#12 — close the self-certify
+            // gap). `submit_step_complete` reads this from the same per-session
+            // state so the judge's own verdict — not the caller-supplied one —
+            // gates the seal in warn/enforce mode. An agent can no longer
+            // grade its own homework by passing `verdict: sufficient=true`.
+            state.record_independent_verdict(
+                &step_ref.skill,
+                &phase_id,
+                &step_ref.step_id,
+                verdict.sufficient,
+                verdict.confidence,
+            );
+
             if in_warmup {
                 (
                     HookOutput::allow(),

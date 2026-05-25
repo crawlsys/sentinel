@@ -428,22 +428,39 @@ impl McpHandler {
                 Err(e) => return McpToolResult::err(format!("Invalid 'verdict' shape: {e}")),
             };
 
-        // Enforcement gate (#9): in `enforce` mode, refuse to seal a
-        // non-sufficient verdict — this is the seal-blocking half of the
-        // staged rollout (the `step_judge` PostToolUse hook produces + warns;
-        // the seal is the structural enforcement point). In `shadow`/`warn`
-        // mode the seal proceeds regardless, so auto-judging every step can be
-        // observed before it starts blocking work. Default is `shadow`.
+        // Enforcement gate (#9 + #12): in `enforce` mode, refuse to seal a
+        // non-sufficient verdict — the seal-blocking half of the staged
+        // rollout (the `step_judge` PostToolUse hook produces + warns; the
+        // seal is the structural enforcement point). Default is `shadow`.
+        //
+        // #12 — close the self-certify gap: the caller SUPPLIES the `verdict`
+        // arg, so an agent could pass `sufficient: true` regardless of reality.
+        // Prefer the INDEPENDENT verdict the `step_judge` hook recorded into
+        // the per-session state (loaded from the same disk store by
+        // `with_session_state` before this tool runs). When an independent
+        // verdict exists, IT decides — not the caller. The supplied verdict is
+        // only trusted as a fallback when the hook produced none (e.g. the
+        // step tool wasn't routed through step_judge).
+        let effective_verdict = {
+            let st = self.state.read().await;
+            match st.independent_verdict(skill, phase_id, step_id) {
+                Some(indep) => (indep.sufficient, indep.confidence, true),
+                None => (verdict.sufficient, f64::from(verdict.confidence), false),
+            }
+        };
+        let (eff_sufficient, eff_confidence, from_independent) = effective_verdict;
         let enforcement = crate::judge_enforcement::Mode::from_env();
-        if enforcement.blocks_seal() && !verdict.sufficient {
+        if enforcement.blocks_seal() && !eff_sufficient {
+            let source = if from_independent {
+                "independent step_judge verdict"
+            } else {
+                "supplied verdict (no independent judgement on record)"
+            };
             return McpToolResult::err(format!(
                 "🟠 [Judge:enforce] Refusing to seal step '{step_id}' of \
-                 '{skill}/{phase_id}': judge verdict is INSUFFICIENT \
-                 (confidence {:.2}). {}{}Set SENTINEL_JUDGE_ENFORCEMENT=shadow \
-                 to record without blocking, or address the gap and resubmit.",
-                verdict.confidence,
-                verdict.reasoning,
-                if verdict.reasoning.is_empty() { "" } else { " " },
+                 '{skill}/{phase_id}': {source} is INSUFFICIENT \
+                 (confidence {eff_confidence:.2}). Set SENTINEL_JUDGE_ENFORCEMENT=shadow \
+                 to record without blocking, or address the gap and resubmit."
             ));
         }
 
@@ -1060,10 +1077,10 @@ mod step_tools_tests {
             Some("claim")
         );
         assert!(proof.get("combined_hash").is_some());
-        // Default judge_model is sonnet (OpenRouter: openai/gpt-5.5).
+        // Default judge_model is sonnet (OpenRouter: anthropic/claude-sonnet-4.6).
         assert_eq!(
             proof.get("judge_model").and_then(|v| v.as_str()),
-            Some("openai/gpt-5.5"),
+            Some("anthropic/claude-sonnet-4.6"),
         );
     }
 

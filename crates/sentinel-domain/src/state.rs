@@ -103,6 +103,17 @@ pub struct SessionState {
     /// (proof chain persistence) since both walk the same disk archive.
     #[serde(default)]
     pub step_baselines: HashMap<String, BaselineCounter>,
+
+    /// Independent step verdicts produced by the `step_judge` PostToolUse
+    /// hook, keyed by `skill:phase_id:step_id` (#12 — close the self-certify
+    /// gap). `submit_step_complete` reads these to enforce the judge's OWN
+    /// verdict over the caller-supplied one: an agent can pass any `verdict`
+    /// arg, but the independently-judged verdict here is what gates the seal
+    /// in warn/enforce mode. The hook persists this to disk via state_store;
+    /// the MCP handler sees it because `with_session_state` loads the same
+    /// per-session state before running the tool.
+    #[serde(default)]
+    pub independent_verdicts: HashMap<String, IndependentVerdict>,
 }
 
 /// Counter tracking successful judgements for a single
@@ -127,6 +138,21 @@ pub struct BaselineCounter {
     /// vs one in active warmup).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_observed_at: Option<DateTime<Utc>>,
+}
+
+/// The independent verdict the `step_judge` hook produced for a step,
+/// persisted so `submit_step_complete` can enforce it over the
+/// caller-supplied verdict (#12). Minimal by design — only what the seal
+/// gate needs to decide.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IndependentVerdict {
+    /// Whether the independent judge found the evidence sufficient.
+    pub sufficient: bool,
+    /// The independent judge's confidence in `sufficient`.
+    pub confidence: f64,
+    /// When the hook recorded this verdict.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub judged_at: Option<DateTime<Utc>>,
 }
 
 impl BaselineCounter {
@@ -225,6 +251,7 @@ impl SessionState {
             state_generation: 0,
             glass_break: None,
             step_baselines: HashMap::new(),
+            independent_verdicts: HashMap::new(),
             revoked_agents: HashSet::new(),
         }
     }
@@ -291,6 +318,44 @@ impl SessionState {
             .get(&Self::baseline_key(skill, phase_id, step_id))
             .cloned()
             .unwrap_or_default()
+    }
+
+    /// Record the independent `step_judge` verdict for a step (#12). Keyed
+    /// the same way as the baseline counter. Overwrites any prior verdict
+    /// for the step — the most recent independent judgement is what gates
+    /// the seal. Called by the `step_judge` hook after every judgement.
+    pub fn record_independent_verdict(
+        &mut self,
+        skill: &str,
+        phase_id: &str,
+        step_id: &str,
+        sufficient: bool,
+        confidence: f64,
+    ) {
+        let key = Self::baseline_key(skill, phase_id, step_id);
+        self.independent_verdicts.insert(
+            key,
+            IndependentVerdict {
+                sufficient,
+                confidence,
+                judged_at: Some(Utc::now()),
+            },
+        );
+    }
+
+    /// Read the independent verdict for a step, if the `step_judge` hook
+    /// recorded one. `None` means no independent judgement exists for this
+    /// step — the seal gate treats that as "no override available" and
+    /// falls back to the caller-supplied verdict.
+    #[must_use]
+    pub fn independent_verdict(
+        &self,
+        skill: &str,
+        phase_id: &str,
+        step_id: &str,
+    ) -> Option<&IndependentVerdict> {
+        self.independent_verdicts
+            .get(&Self::baseline_key(skill, phase_id, step_id))
     }
 
     /// **Attack #169 fix**: Maximum distinct skills per session.
