@@ -104,6 +104,30 @@ export function isInterventionOutcome(outcome: string | null): boolean {
   return outcome != null && INTERVENTION_OUTCOMES.has(outcome);
 }
 
+/// Translate the bridge's lifecycle-event name into a phrase an
+/// operator can read at a glance. Unknown values fall through
+/// unchanged so we don't accidentally hide new lifecycle events.
+export function sentinelEventPhrase(sentinelEvent: string): string {
+  switch (sentinelEvent) {
+    case "PreToolUse":
+      return "about to run";
+    case "PostToolUse":
+      return "finished";
+    case "UserPromptSubmit":
+      return "you submitted";
+    case "Stop":
+      return "stopped";
+    case "Notification":
+      return "notified";
+    case "SubagentStop":
+      return "subagent stopped";
+    case "PreCompact":
+      return "compacting";
+    default:
+      return sentinelEvent || "event";
+  }
+}
+
 const ACTOR_GLYPH: Record<RowActor, string> = {
   // White diamond — neutral, agent doing things. Picked over `▸`
   // because `▸` is already used for the ×N expand toggle.
@@ -248,6 +272,7 @@ export function EventTicker({ events, onSelectNode, sessionColors, stuckMeta }: 
             <li
               key={row.key}
               data-actor={row.actor}
+              data-session-id={row.sessionId ?? undefined}
               data-intervention={row.isIntervention ? "true" : undefined}
               data-stuck={pinnedKeys.has(row.key) ? "true" : undefined}
               className={`pl-0 pr-3 py-1 border-b border-[#21262d] hover:bg-[#1f6feb22] flex ${
@@ -316,7 +341,14 @@ export function EventTicker({ events, onSelectNode, sessionColors, stuckMeta }: 
                 </span>
               </div>
               <div className="text-[10px] text-[#6e7681] truncate pl-4">
-                {row.sessionId ? `s:${row.sessionId.slice(0, 8)}…` : ""} {row.sentinelEvent}
+                {/* Operator-friendly status text. The session-color
+                    tab already encodes which session this is — no
+                    need to repeat the sid prefix. The sentinel_event
+                    name is internal jargon (PreToolUse, PostToolUse,
+                    Stop, UserPromptSubmit); translate it. Falls
+                    through to the raw event name for anything we
+                    haven't covered. */}
+                {sentinelEventPhrase(row.sentinelEvent)}
                 {row.outcome ? ` · ${row.outcome}` : ""}
               </div>
               {pinnedKeys.has(row.key) && row.sessionId && stuckMeta?.get(row.sessionId) ? (
@@ -401,8 +433,9 @@ function buildRows(events: RecentEvent[]): TickerRow[] {
     const outcome = strField(e.payload, "outcome");
     const sentinelEvent = strField(e.payload, "sentinel_event") ?? e.type.replace(/^sentinel\./, "");
     const tool = strField(e.payload, "tool");
+    const hook = strField(e.payload, "hook");
     const ts = bestTs(e);
-    const { label, category } = deriveLabelAndCategory(e.type, sentinelEvent, tool);
+    const { label, category } = deriveLabelAndCategory(e.type, sentinelEvent, tool, hook);
     // Grouping signature deliberately excludes `tool_call_id` — every
     // `sentinel.tool_call_observed` event has a unique tcid, so
     // including it would make `×N` flyouts unreachable. We still keep
@@ -455,6 +488,7 @@ function deriveLabelAndCategory(
   evType: string,
   sentinelEvent: string,
   tool: string | null,
+  hook: string | null = null,
 ): { label: string; category: NodeCategory } {
   if (sentinelEvent === "UserPromptSubmit") {
     return { label: "user prompt", category: "prompt" };
@@ -466,5 +500,16 @@ function deriveLabelAndCategory(
     else if (COMMUNICATION_TOOLS.has(tool)) cat = "communication";
     return { label: tool, category: cat };
   }
-  return { label: sentinelEvent || evType.replace(/^sentinel\./, ""), category: "other" };
+  // No tool — typically a hook event or a tool-less observation.
+  // Hook name is more informative than the lifecycle event name, so
+  // prefer it. Otherwise translate the lifecycle event into
+  // operator phrasing so the row label is never raw jargon like
+  // "PreToolUse".
+  if (hook && hook.length > 0) {
+    return { label: hook, category: "other" };
+  }
+  return {
+    label: sentinelEventPhrase(sentinelEvent || evType.replace(/^sentinel\./, "")),
+    category: "other",
+  };
 }

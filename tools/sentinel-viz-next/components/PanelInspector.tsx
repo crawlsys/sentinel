@@ -8,10 +8,27 @@ import { fetchActivity, fetchSummary } from "../lib/api";
 import { indexActivity } from "../lib/activity-cache";
 import { categoryColor, categoryLabel, relTime, statusColor } from "../lib/format";
 
-function friendlyTitle(node: Node): string {
+export function friendlyTitle(node: Node): string {
   switch (node.type) {
-    case "SentinelSession":
+    case "SentinelSession": {
+      // Anonymous "session" was a frequent operator complaint — they
+      // had to scan the body to identify which session was loaded.
+      // Prefer the LLM-assigned name when available (set by the
+      // backend's name-session endpoint and cached in node.data),
+      // fall back to the short sid.
+      const name =
+        typeof node.data?.name === "string" && (node.data.name as string).length > 0
+          ? (node.data.name as string)
+          : null;
+      const sid =
+        typeof node.data?.session_id === "string"
+          ? (node.data.session_id as string).slice(0, 8)
+          : null;
+      if (name && sid) return `${name} · s:${sid}`;
+      if (name) return name;
+      if (sid) return `session · s:${sid}`;
       return "session";
+    }
     case "SentinelToolCall":
       return typeof node.data?.tool === "string" && (node.data.tool as string).length > 0
         ? `tool · ${node.data.tool}`
@@ -145,8 +162,11 @@ export function PanelInspector({ node, anchorTs, onClose }: Props) {
         <Row k="id" v={node.id.replace(/^Sentinel/, "")} />
       </div>
 
-      {node.awaiting_question ? (
-        <div className="mt-4 p-2 bg-[#0d1117] border border-[#30363d] rounded">
+      {node.awaiting_question && shouldShowRawAwaiting(summaryKind, summaryQ.data?.text ?? null) ? (
+        <div
+          data-testid="raw-awaiting-block"
+          className="mt-4 p-2 bg-[#0d1117] border border-[#30363d] rounded"
+        >
           <div className="text-[10px] uppercase text-[#bc8cff] mb-1">awaiting user · {node.awaiting_kind}</div>
           <div className="text-[11px] whitespace-pre-wrap">{node.awaiting_question}</div>
         </div>
@@ -252,6 +272,19 @@ export function PanelInspector({ node, anchorTs, onClose }: Props) {
       ) : null}
     </section>
   );
+}
+
+/// When the SummaryCard's "what it's waiting on" variant has rendered
+/// an LLM-generated rollup of the same question, the raw awaiting
+/// callout is a duplicate. Hide it then. Show it when the summary is
+/// disabled, errored, or hasn't loaded text yet — that way the
+/// operator never loses sight of the raw question.
+export function shouldShowRawAwaiting(
+  summaryKind: "card" | "wait",
+  summaryText: string | null,
+): boolean {
+  if (summaryKind !== "wait") return true;
+  return !summaryText || summaryText.trim().length === 0;
 }
 
 function Row({ k, v }: { k: string; v: string }) {

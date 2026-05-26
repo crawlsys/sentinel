@@ -188,6 +188,48 @@ test("KpiBar: present, shows active/evt-min/5m/out-5m cards", async ({ page }) =
   expect(text).toMatch(/out\/5m/i);
 });
 
+// ──────────────────────── OPERATOR PHRASING (P3-20) ────────────────────────
+
+test("ticker sub-lines never show raw lifecycle jargon (PreToolUse / UserPromptSubmit etc.)", async ({
+  page,
+}) => {
+  await waitGraphReady(page);
+  const allText = await page
+    .locator('[data-testid="ticker-rows"]')
+    .innerText();
+  // The raw enum names live in payload.sentinel_event — they should
+  // be translated before reaching the DOM.
+  for (const jargon of ["PreToolUse", "PostToolUse", "UserPromptSubmit", "SubagentStop", "PreCompact"]) {
+    expect(allText).not.toContain(jargon);
+  }
+});
+
+test("inspector title for a session is no longer the anonymous 'session' label", async ({
+  page,
+}) => {
+  await waitGraphReady(page);
+  // Click a SessionConsole row or a ticker row that selects a session.
+  const firstRow = page.locator('[data-testid="ticker-rows"] li').first();
+  if ((await firstRow.count()) === 0) {
+    test.skip(true, "no ticker rows");
+    return;
+  }
+  await firstRow.locator(".cursor-pointer").first().click();
+  await page.waitForTimeout(1000);
+  // The inspector's h3 should contain either a name or a sid prefix,
+  // not just "session".
+  const title = (await page.locator('[data-testid="panel-inspector"] h3').first().textContent()) ?? "";
+  if (title.toLowerCase().includes("session")) {
+    // Anonymous "session" by itself is the failure case — we now
+    // append "· s:<sid>" when we know the sid.
+    expect(title).toMatch(/s:[a-f0-9]{4,}/i);
+  } else {
+    // Or the LLM-assigned name short-circuits the "session" prefix
+    // entirely — that's fine too, just not blank/anonymous.
+    expect(title.trim().length).toBeGreaterThan(2);
+  }
+});
+
 // ──────────────────────── ACTOR DISTINCTION (P3-19) ────────────────────────
 
 test("every ticker row exposes a data-actor attribute in {claude, sentinel, user}", async ({

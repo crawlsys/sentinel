@@ -55,6 +55,31 @@ const sampleEvents: RecentEvent[] = [
   },
 ];
 
+describe("EventTicker — sub-line operator phrasing (P3-20)", () => {
+  it("rows show operator-facing phrasing instead of raw lifecycle event names", () => {
+    render(<EventTicker events={sampleEvents} onSelectNode={() => {}} />);
+    const rendered = screen.getByTestId("ticker-rows").textContent ?? "";
+    // No raw lifecycle jargon should appear in the rendered sub-line.
+    expect(rendered).not.toMatch(/PreToolUse/);
+    expect(rendered).not.toMatch(/UserPromptSubmit/);
+    // Friendly phrases should be present instead.
+    expect(rendered).toMatch(/about to run|finished|you submitted/i);
+  });
+
+  it("no longer prefixes the sub-line with a redundant 's:<sid>…' (color-tab carries that)", () => {
+    render(<EventTicker events={sampleEvents} onSelectNode={() => {}} />);
+    const subLines = Array.from(
+      screen.getByTestId("ticker-rows").querySelectorAll("li"),
+    )
+      .map((li) => li.querySelector("div.text-\\[10px\\].text-\\[\\#6e7681\\].truncate.pl-4"))
+      .filter(Boolean) as HTMLElement[];
+    expect(subLines.length).toBeGreaterThan(0);
+    for (const sub of subLines) {
+      expect(sub.textContent ?? "").not.toMatch(/^\s*s:/);
+    }
+  });
+});
+
 describe("EventTicker — actor distinction (P3-19)", () => {
   it("every ticker row carries a data-actor attribute", () => {
     render(<EventTicker events={sampleEvents} onSelectNode={() => {}} />);
@@ -183,9 +208,12 @@ describe("EventTicker", () => {
       render(<EventTicker events={sampleEvents} onSelectNode={() => {}} stuckMeta={stuckMeta} />);
       const rows = screen.getByTestId("ticker-rows").querySelectorAll("li");
       // First row must belong to the stuck session and carry the
-      // stuck-row class.
+      // stuck-row class. We identify the session via data-session-id
+      // (added in P3-20 for testability + future filtering — the
+      // previous textContent check was brittle once we removed the
+      // redundant `s:<sid>` prefix from the sub-line).
       expect(rows[0].className).toContain("stuck-row");
-      expect(rows[0].textContent).toMatch(/sess-a/);
+      expect(rows[0].getAttribute("data-session-id")).toBe("sess-a");
       expect(rows[0].getAttribute("data-stuck")).toBe("true");
     });
 
