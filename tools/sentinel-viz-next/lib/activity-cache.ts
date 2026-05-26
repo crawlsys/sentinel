@@ -56,11 +56,27 @@ export function indexActivity(sessionId: string, activity: ActivityResponse | un
 }
 
 /** Look up a ToolCallSummary for the given (session, tool, ts). Returns
- *  null if we haven't ingested the matching activity yet. */
+ *  null if we haven't ingested the matching activity yet.
+ *
+ *  Tolerance: try the exact minute, then ±1 minute. The bridge's
+ *  ts_sec and the JSONL transcript's segment ts come from different
+ *  writers and can drift by ~1s (or fall across a minute boundary
+ *  for events near :00 / :59). Without the ±1 fallback, ~30% of
+ *  ticker rows missed cache hits despite the data being present. */
 export function lookup(sessionId: string | null, tool: string | null, ts: string | null): ToolCallSummary | null {
   if (!sessionId || !tool || !ts) return null;
-  const k = key(sessionId, tool, ts);
-  return cache[k] ?? null;
+  const exact = cache[key(sessionId, tool, ts)];
+  if (exact) return exact;
+  // Walk ±1 minute. Parse the minute-bucket back out, shift, re-key.
+  const minute = ts.length >= 16 ? ts.slice(0, 16) : ts;
+  const parsed = Date.parse(`${minute}:00Z`);
+  if (Number.isNaN(parsed)) return null;
+  for (const offsetMin of [-1, 1]) {
+    const shifted = new Date(parsed + offsetMin * 60_000).toISOString().slice(0, 16);
+    const k = `${sessionId}\t${tool}\t${shifted}`;
+    if (cache[k]) return cache[k];
+  }
+  return null;
 }
 
 /** Subscribe to cache updates — used by EventTicker to re-render

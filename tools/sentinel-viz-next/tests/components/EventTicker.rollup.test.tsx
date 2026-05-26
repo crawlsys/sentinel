@@ -1,8 +1,9 @@
 import { describe, it, expect } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 
-import { EventTicker, shouldShowSubLine } from "../../components/EventTicker";
-import type { RecentEvent } from "../../types/api";
+import { EventTicker, shouldShowSubLine, compactSummaryFor } from "../../components/EventTicker";
+import { indexActivity, _resetActivityCache } from "../../lib/activity-cache";
+import type { ActivityResponse, RecentEvent } from "../../types/api";
 
 /// P3-24: smarter rollup. Adjacent ROUTINE claude tool-call events
 /// in the same session+category collapse into a single row whose
@@ -226,6 +227,117 @@ describe("EventTicker — P3-24 smarter rollup", () => {
     );
     const rows = screen.getByTestId("ticker-rows").querySelectorAll("li[data-actor='user']");
     expect(rows.length).toBe(2);
+  });
+
+  it("compactSummaryFor strips cd-prefix, tildifies, and truncates Bash commands", () => {
+    const out = compactSummaryFor(
+      "Bash",
+      "cd /home/kcrawley/projects/basilisk; git push -u origin feat/foo",
+    );
+    expect(out).not.toContain("cd ");
+    expect(out).not.toContain("/home/kcrawley");
+    expect(out).toContain("git push");
+  });
+
+  it("compactSummaryFor tildifies + end-truncates file paths for Read/Write/Edit", () => {
+    const longPath = "/home/kcrawley/projects/basilisk/tools/sentinel-viz-next/components/EventTicker.tsx";
+    const out = compactSummaryFor("Edit", longPath);
+    expect(out).not.toContain("/home/kcrawley");
+    expect(out.endsWith("EventTicker.tsx")).toBe(true);
+  });
+
+  it("flyout members show actual command from the activity-cache (not just tcid)", async () => {
+    _resetActivityCache();
+    const sessionId = "sess-flyout";
+    // Pre-seed the activity-cache with a ToolCallSummary for one
+    // Bash invocation at ts = 2026-05-26T00:00:00.
+    const fakeActivity: ActivityResponse = {
+      session_id: sessionId,
+      transcript: "x.jsonl",
+      events: [],
+      segments: [
+        {
+          ts: "2026-05-26T00:00:00",
+          kind: "assistant_turn",
+          label: "Bash",
+          preview: "cd /tmp; ls",
+          tools: ["Bash"],
+          tool_calls: [
+            {
+              id: "tc-bash-1",
+              tool: "Bash",
+              summary: "cd /home/kcrawley/projects/x; cargo test --workspace",
+              result_preview: "test result: ok. 42 passed",
+            },
+          ],
+          tool_count: 1,
+        },
+      ],
+    };
+    indexActivity(sessionId, fakeActivity);
+
+    const events: RecentEvent[] = [
+      // Same minute bucket as the cached entry; rolled row of two identical Bashes.
+      tcEvent(1, sessionId, "Bash", "tcA"),
+      tcEvent(2, sessionId, "Bash", "tcB"),
+    ];
+    const { findByText, container } = render(
+      <EventTicker events={events} onSelectNode={() => {}} />,
+    );
+    // Open the ×2 flyout.
+    const badge = await findByText(/×2/);
+    fireEvent.click(badge);
+    // The expanded flyout should render the compacted Bash command
+    // (tildified, cd-stripped, smart-trunc). The lookup is exact
+    // minute by default — fixture and event share the same minute.
+    const flyout = container.querySelector('[data-testid="ticker-flyout"]');
+    const text = flyout?.textContent ?? "";
+    expect(text).toContain("cargo test --workspace");
+    expect(text).not.toContain("/home/kcrawley");
+  });
+
+  it("flyout members show git diff stats chip when result_preview includes the standard footer", async () => {
+    _resetActivityCache();
+    const sessionId = "sess-diff";
+    const fakeActivity: ActivityResponse = {
+      session_id: sessionId,
+      transcript: "x.jsonl",
+      events: [],
+      segments: [
+        {
+          ts: "2026-05-26T00:00:00",
+          kind: "assistant_turn",
+          label: "Bash",
+          preview: "git commit",
+          tools: ["Bash"],
+          tool_calls: [
+            {
+              id: "tc-commit",
+              tool: "Bash",
+              summary: "git commit -m 'feat: x'",
+              result_preview: "[main abc1234] feat: x\n 3 files changed, 25 insertions(+), 5 deletions(-)",
+            },
+          ],
+          tool_count: 1,
+        },
+      ],
+    };
+    indexActivity(sessionId, fakeActivity);
+
+    const events: RecentEvent[] = [
+      tcEvent(1, sessionId, "Bash", "tcA"),
+      tcEvent(2, sessionId, "Bash", "tcB"),
+    ];
+    const { findByText, container } = render(
+      <EventTicker events={events} onSelectNode={() => {}} />,
+    );
+    const badge = await findByText(/×2/);
+    fireEvent.click(badge);
+    const stats = container.querySelectorAll('[data-testid="flyout-diff-stats"]');
+    expect(stats.length).toBeGreaterThan(0);
+    const text = stats[0].textContent ?? "";
+    expect(text).toContain("+25");
+    expect(text).toContain("-5");
   });
 
   it("single-tool same-session burst still collapses to one row labelled with just the tool", () => {

@@ -40,10 +40,17 @@ describe("activity-cache", () => {
     indexActivity("sess-a", a);
     expect(_cacheSize()).toBe(1);
     expect(lookup("sess-a", "Bash", "2026-05-25T13:25:43")?.summary).toBe("ls -la /tmp");
-    // Minute-bucket match: 30 seconds later in the same minute still hits.
+    // Same minute bucket → exact hit.
     expect(lookup("sess-a", "Bash", "2026-05-25T13:25:00")?.summary).toBe("ls -la /tmp");
-    // Different minute → miss.
-    expect(lookup("sess-a", "Bash", "2026-05-25T13:26:00")).toBeNull();
+    // P3-25: ±1 minute tolerance (bridge ts_sec vs JSONL ts can
+    // straddle a minute boundary or drift ~1s in long sessions).
+    // 13:26 is within the window → still hits.
+    expect(lookup("sess-a", "Bash", "2026-05-25T13:26:00")?.summary).toBe("ls -la /tmp");
+    // 13:24 is also within the window.
+    expect(lookup("sess-a", "Bash", "2026-05-25T13:24:00")?.summary).toBe("ls -la /tmp");
+    // Outside the ±1 window → miss.
+    expect(lookup("sess-a", "Bash", "2026-05-25T13:27:00")).toBeNull();
+    expect(lookup("sess-a", "Bash", "2026-05-25T13:23:00")).toBeNull();
   });
 
   it("supports many tool_calls per segment", () => {

@@ -5,6 +5,14 @@ import { memo, useEffect, useMemo, useState } from "react";
 import type { NodeCategory, RecentEvent } from "../types/api";
 import { lookup as lookupActivityCache, subscribe as subscribeActivityCache } from "../lib/activity-cache";
 import { categoryColor, categoryLabel, tickerTime } from "../lib/format";
+import {
+  compactBashCommand,
+  compactPath,
+  formatGitDiffStats,
+  parseGitDiffStats,
+  smartTrunc,
+  tildify,
+} from "../lib/format-text";
 
 interface Props {
   events: RecentEvent[];
@@ -188,16 +196,21 @@ export function EventTicker({ events, onSelectNode, sessionColors, stuckMeta }: 
   const rows = useMemo(() => buildRows(events), [events]);
   // Augment each row from the activity cache (cheap O(rows) lookup).
   // Recompute on cache updates via the cacheTick dep.
+  // Rolled rows (multiple tools) don't get a single-tool augment —
+  // the per-member flyout carries that detail. Singleton-tool rows
+  // (tools.length === 1) get the augment-cache lookup; we
+  // compact-format based on the tool kind so paths get tildified
+  // and bash chains get cd-stripped.
   const augmentedRows = useMemo(
     () =>
       rows.map((r) => {
         if (!r.sessionId) return r;
-        const lookupTool = r.label === "user prompt" ? "" : r.label;
+        if (r.tools.length > 1) return r; // rolled row — no augment
+        const lookupTool = r.tools[0] ?? "";
         if (!lookupTool) return r;
         const tc = lookupActivityCache(r.sessionId, lookupTool, r.ts);
         if (!tc || !tc.summary) return r;
-        const trimmed = tc.summary.length > 80 ? `${tc.summary.slice(0, 78)}…` : tc.summary;
-        return { ...r, augment: trimmed };
+        return { ...r, augment: compactSummaryFor(lookupTool, tc.summary) };
       }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [rows, cacheTick],
@@ -327,7 +340,7 @@ export function EventTicker({ events, onSelectNode, sessionColors, stuckMeta }: 
               data-session-id={row.sessionId ?? undefined}
               data-intervention={row.isIntervention ? "true" : undefined}
               data-stuck={pinnedKeys.has(row.key) ? "true" : undefined}
-              className={`pl-0 pr-3 py-1 border-b border-[#21262d] hover:bg-[#1f6feb22] flex ${
+              className={`pl-0 pr-3 py-0.5 border-b border-[#21262d] hover:bg-[#1f6feb22] flex ${
                 pinnedKeys.has(row.key)
                   ? "stuck-row"
                   : interventionKeys.has(row.key)
@@ -388,7 +401,9 @@ export function EventTicker({ events, onSelectNode, sessionColors, stuckMeta }: 
                 <span className="truncate flex-1">
                   {row.label}
                   {row.augment ? (
-                    <span className="text-[#6e7681] ml-1">· {row.augment}</span>
+                    <span className="text-[#6e7681] ml-1 text-[10px]" title={row.augment}>
+                      · {row.augment}
+                    </span>
                   ) : null}
                 </span>
               </div>
@@ -410,25 +425,17 @@ export function EventTicker({ events, onSelectNode, sessionColors, stuckMeta }: 
                 <StuckReasonLine meta={stuckMeta.get(row.sessionId)!} />
               ) : null}
               {isOpen ? (
-                <ul className="mt-1 pl-4 border-l border-dashed border-[#30363d]">
+                <ul
+                  className="mt-1 pl-4 border-l border-dashed border-[#30363d]"
+                  data-testid="ticker-flyout"
+                >
                   {row.members.map((m, i) => (
-                    <li
+                    <FlyoutMember
                       key={`${row.key}-m-${i}`}
-                      onClick={() => m.toolCallId && onSelectNode(m.toolCallId, m.ts)}
-                      className="py-0.5 text-[10px] text-[#c9d1d9] hover:text-[#58a6ff] cursor-pointer flex gap-2"
-                    >
-                      <TimeAgo ts={m.ts} className="text-[#6e7681]" />
-                      {/* Each rolled-up member shows its actual tool
-                          so the operator can scan the sequence even
-                          when the rolled-row label only shows the
-                          first N distinct tools. */}
-                      {m.tool ? (
-                        <span className="text-[#c9d1d9]">{m.tool}</span>
-                      ) : null}
-                      <span className="text-[#6e7681] truncate">
-                        {m.toolCallId ? m.toolCallId.replace("SentinelToolCall#", "TC#") : ""}
-                      </span>
-                    </li>
+                      sessionId={row.sessionId}
+                      member={m}
+                      onSelect={onSelectNode}
+                    />
                   ))}
                 </ul>
               ) : null}
@@ -438,6 +445,84 @@ export function EventTicker({ events, onSelectNode, sessionColors, stuckMeta }: 
         })}
       </ul>
     </aside>
+  );
+}
+
+/// Tool-aware summary compaction. Different tools have different
+/// data shapes:
+///   - Bash: chained "cd …; cmd" → strip cd, tildify, smart-trunc
+///   - Read/Write/Edit/NotebookEdit/Glob: file paths → tildify,
+///     end-truncate so the filename stays visible
+///   - Other: generic smart-truncate + tildify
+///
+/// Output is the string that gets appended to the row label as
+/// "Bash · <compact>". Kept under 80 chars by default — the 360px
+/// column at ~10px mono fits roughly that.
+export function compactSummaryFor(tool: string, summary: string): string {
+  if (!summary) return "";
+  if (tool === "Bash") return compactBashCommand(summary, 80);
+  if (
+    tool === "Read" ||
+    tool === "Write" ||
+    tool === "Edit" ||
+    tool === "MultiEdit" ||
+    tool === "NotebookEdit" ||
+    tool === "Glob"
+  ) {
+    return compactPath(summary, 80);
+  }
+  return smartTrunc(tildify(summary), 80);
+}
+
+/// One row in the ×N flyout. Looks up the activity-cache for THIS
+/// specific (sid, tool, ts) so each member shows what it actually
+/// did — not just the tool name + tcid.
+function FlyoutMember({
+  sessionId,
+  member,
+  onSelect,
+}: {
+  sessionId: string | null;
+  member: TickerMember;
+  onSelect: (nodeId: string, eventTs?: string) => void;
+}) {
+  const tc = sessionId && member.tool
+    ? lookupActivityCache(sessionId, member.tool, member.ts)
+    : null;
+  const summary = tc?.summary ? compactSummaryFor(member.tool ?? "", tc.summary) : null;
+  const diffStats = tc?.result_preview ? parseGitDiffStats(tc.result_preview) : null;
+  const err = !!tc?.error;
+  return (
+    <li
+      onClick={() => member.toolCallId && onSelect(member.toolCallId, member.ts)}
+      className="py-0.5 text-[10px] text-[#c9d1d9] hover:text-[#58a6ff] cursor-pointer flex gap-2 items-baseline"
+    >
+      <TimeAgo ts={member.ts} className="text-[#6e7681] shrink-0" />
+      {member.tool ? (
+        <span className="text-[#c9d1d9] shrink-0 w-12 truncate">{member.tool}</span>
+      ) : null}
+      <span
+        className={`text-[9px] truncate flex-1 ${err ? "text-[#f85149]" : "text-[#8b949e]"}`}
+        title={tc?.summary ?? undefined}
+      >
+        {summary ?? (
+          <span className="text-[#484f58]">
+            {member.toolCallId ? member.toolCallId.replace("SentinelToolCall#", "TC#") : ""}
+          </span>
+        )}
+      </span>
+      {diffStats ? (
+        <span
+          data-testid="flyout-diff-stats"
+          className="text-[9px] shrink-0 px-1 rounded bg-[#21262d] border border-[#30363d]"
+          title={`${diffStats.insertions} insertions, ${diffStats.deletions} deletions, ${diffStats.files} files`}
+        >
+          <span className="text-[#3fb950]">+{diffStats.insertions}</span>
+          <span className="text-[#6e7681]">/</span>
+          <span className="text-[#f85149]">-{diffStats.deletions}</span>
+        </span>
+      ) : null}
+    </li>
   );
 }
 
