@@ -159,7 +159,13 @@ export function SessionConsole({
   return (
     <div
       data-testid="session-console"
-      className="border-t border-[#30363d] bg-[#0d1117] font-mono text-xs"
+      // P3-37: hide on mobile (md and below) — the SessionStrips
+      // panel already surfaces per-session AI summaries and
+      // activity sparklines, so the live-log feed is largely
+      // redundant on small screens AND eats prime vertical real
+      // estate the strips need. Operator can still inspect any
+      // individual event via the modal that opens on tap.
+      className="hidden md:block border-t border-[#30363d] bg-[#0d1117] font-mono text-xs"
       onMouseEnter={() => setPaused(true)}
       onMouseLeave={() => setPaused(false)}
     >
