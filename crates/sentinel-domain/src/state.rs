@@ -73,6 +73,15 @@ pub struct SessionState {
     #[serde(default)]
     pub glass_break: Option<GlassBreak>,
 
+    /// Session-wide **production override**. When `Some`, the operator has
+    /// armed prod work by saying "production override"; prod actions (deploys,
+    /// prod Doppler/Auth0, destructive prod, prod DB ops/migrations) are
+    /// authorized for the rest of the session without per-action asking, each
+    /// surfaced via a dual-display notice. Cleared by "production lock" or
+    /// session end. `None` = the default prod-refusal posture.
+    #[serde(default)]
+    pub production_override: Option<ProductionOverride>,
+
     /// **Agent revocation kill switch (AEGIS pattern)**: agent IDs that
     /// have been explicitly revoked via `sentinel agent revoke <id>` or
     /// auto-revoked by the violation policy. Tool calls bearing these
@@ -207,6 +216,20 @@ pub struct BreakToolUse {
     pub ts: String,
 }
 
+/// Session-wide production-override grant. Armed by the operator saying
+/// "production override"; cleared by "production lock" or session end.
+/// Deliberately simple (no challenge code / expiry) — it's an operator-
+/// driven, session-scoped grant surfaced via a dual-display notice, not a
+/// cryptographically-gated break like [`GlassBreak`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProductionOverride {
+    /// When the operator armed prod work (RFC3339 UTC).
+    pub armed_at: DateTime<Utc>,
+    /// Optional operator-supplied note captured alongside the phrase
+    /// (e.g. "production override — hotfix the auth migration").
+    pub note: Option<String>,
+}
+
 /// Tracks failed submission attempts for rate limiting
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SubmissionAttempts {
@@ -250,10 +273,32 @@ impl SessionState {
             phase_file_hashes: HashMap::new(),
             state_generation: 0,
             glass_break: None,
+            production_override: None,
             step_baselines: HashMap::new(),
             independent_verdicts: HashMap::new(),
             revoked_agents: HashSet::new(),
         }
+    }
+
+    /// Arm the session-wide production override (operator said "production
+    /// override"). Idempotent — re-arming refreshes `armed_at`/`note`.
+    pub fn arm_production_override(&mut self, note: Option<String>) {
+        self.production_override = Some(ProductionOverride {
+            armed_at: Utc::now(),
+            note,
+        });
+    }
+
+    /// Revoke the production override (operator said "production lock", or a
+    /// fresh lock is desired). No-op if not armed.
+    pub fn revoke_production_override(&mut self) {
+        self.production_override = None;
+    }
+
+    /// Whether prod actions are currently authorized for this session.
+    #[must_use]
+    pub const fn production_override_armed(&self) -> bool {
+        self.production_override.is_some()
     }
 
     /// Revoke an agent — every subsequent tool call carrying this

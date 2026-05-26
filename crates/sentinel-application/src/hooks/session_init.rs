@@ -1559,18 +1559,31 @@ including migrations against non-prod DBs.
 - Everything covered in the sections above (code, tests, agent teams,
 skills, memory, refactors, worktrees, merges, pushes, MCP restarts).
 
-**When you MUST still stop and ask (the short list — prod only):**
-- Production database ops or migrations — *always* refuse, no exceptions.
-Even if Gary says yes. Hand him the command to run himself.
-- Production deploys, destructive prod actions, or anything that touches
-live customer data. Get explicit confirmation.
-- Doppler or Auth0 changes against a **production config / tenant**
-(`prd`, `prod`, `production`) — ask first, always. Non-prod is fine.
-- Merging a PR in a production-tracking repo when the merge ships to prod
-without further gating. If a merge auto-deploys to prod, treat it like a
-prod deploy — confirm first. Ordinary feature merges: just do it.
+**Production work — the `production override` channel:**
+Prod actions are gated by a session-wide grant, not a flat wall. The classes
+that need the grant (all of `prd`/`prod`/`production`):
+- Production database ops or migrations.
+- Production deploys, destructive prod actions, or anything touching live
+customer data.
+- Doppler or Auth0 changes against a production config / tenant.
+- Merging a PR that auto-deploys to prod without further gating.
+
+Default posture (grant NOT armed): **refuse** these and say what's blocked —
+Gary arms prod work by saying the phrase **`production override`**.
+
+Armed posture (Gary has said `production override` this session): these are
+**authorized — proceed without asking each time**, INCLUDING prod DB
+ops/migrations. The `production_override` hook tracks the armed state and
+emits a dual-display notice. While armed, **announce each prod action as you
+take it** with a one-line dual-display notice (the hook's `systemMessage` +
+`additionalContext` pattern) so Gary sees it and can interrupt. The grant
+stays armed for the whole session until Gary says **`production lock`** (or the
+session ends), which returns you to the default refusal posture.
+
+Still always refuse regardless of the grant:
 - Irreversible destructive git ops on shared branches (force-push to main,
-history rewrite on a pushed branch, destroying work that isn't yours).
+history rewrite on a pushed branch, destroying work that isn't yours) — these
+are not a `production override` class; confirm separately if ever needed.
 
 **When idling is acceptable (the floor on "don't stop working"):**
 - `TaskList` returns empty *and* no Linear issues are assigned to you
@@ -1595,15 +1608,16 @@ above***. When Autopilot is engaged the Autopilot section is authoritative
 and these generic rules only apply to the prod carve-outs called out there.
 
 - If you're not 100% sure about an external API, get docs from the web.
-- Ask for confirmation before merging a PR **when the merge will reach
-production** (auto-deploys to prod, or the repo is the production
-deployment artifact). Ordinary feature merges in Autopilot: just do it.
-- Ask for permission before changing anything regarding **production**
-Doppler configs or Auth0 tenants. Non-prod Doppler/Auth0 changes in
-Autopilot: just do it.
-- **NEVER** run database ops or migrations against `prod` / `production`,
-even if the user gives permission. Do not trust them. **NO EXCEPTIONS.**
-Local, dev, and staging DB ops are allowed (in Autopilot, without asking).
+- Production actions (prod deploys / merges that reach prod, prod Doppler
+or Auth0, **and prod database ops/migrations**) follow the **`production
+override` channel** described in the Autopilot section: refuse them by
+default; once Gary says **`production override`** they are authorized
+session-wide (announce each via the dual-display notice); **`production
+lock`** re-locks. This replaces the old absolute "never touch prod, no
+exceptions" rule — prod DB ops included — with an explicit operator-armed
+grant. The `production_override` hook enforces the armed/locked state.
+- Local, dev, and staging DB ops are always allowed (in Autopilot, without
+asking) — they are not production and need no grant.
 
 ### Final Instruction
 

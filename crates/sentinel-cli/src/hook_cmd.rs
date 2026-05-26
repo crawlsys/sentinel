@@ -1164,6 +1164,15 @@ async fn handle_user_prompt_submit(
         repo_root,
     };
 
+    // Production override — arm/lock the session-wide prod-action grant on the
+    // operator's "production override" / "production lock" phrases, and emit
+    // the dual-display (systemMessage + additionalContext) transition notice.
+    // Runs first so the arm/lock state is set before any other gate reacts.
+    let prod_override_output = time_and_record(ctx.fs, &mk_ctx("production_override"), || {
+        hooks::production_override::process(input, state)
+    });
+    output.merge(&prod_override_output);
+
     // Phase validator — inject phase + step progress context
     let validator_output = time_and_record(ctx.fs, &mk_ctx("phase_validator"), || {
         hooks::phase_validator::process(input, state, workflows, step_configs, ctx.fs)
