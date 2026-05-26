@@ -332,6 +332,10 @@ where
 mod tests {
     use super::*;
 
+    // -----------------------------------------------------------------------
+    // strip_code_fence — existing coverage
+    // -----------------------------------------------------------------------
+
     #[test]
     fn strip_code_fence_json_variant() {
         let input = "```json\n{\"k\":1}\n```";
@@ -350,6 +354,51 @@ mod tests {
         assert_eq!(strip_code_fence(input), r#"{"k":1}"#);
     }
 
+    // -----------------------------------------------------------------------
+    // strip_code_fence — additional edge cases
+    // -----------------------------------------------------------------------
+
+    /// Leading/trailing whitespace around the fenced block is stripped.
+    #[test]
+    fn strip_code_fence_trims_outer_whitespace() {
+        let input = "  \n```json\n{\"k\":1}\n```\n  ";
+        assert_eq!(strip_code_fence(input), r#"{"k":1}"#);
+    }
+
+    /// A fence with no closing ``` still returns the interior content (the
+    /// implementation uses `trim_end_matches` which silently handles missing
+    /// trailing fence).
+    #[test]
+    fn strip_code_fence_missing_closing_fence() {
+        let input = "```json\n{\"k\":1}";
+        // trim_end_matches("```") on "{\"k\":1}" finds no match → returns content as-is
+        assert_eq!(strip_code_fence(input), r#"{"k":1}"#);
+    }
+
+    /// An empty string produces an empty string (no panic).
+    #[test]
+    fn strip_code_fence_empty_input() {
+        assert_eq!(strip_code_fence(""), "");
+    }
+
+    /// Only whitespace produces an empty string.
+    #[test]
+    fn strip_code_fence_only_whitespace() {
+        assert_eq!(strip_code_fence("   \n\t  "), "");
+    }
+
+    /// A fence whose interior is itself a JSON object spread across multiple
+    /// lines is returned intact (newlines preserved inside the content).
+    #[test]
+    fn strip_code_fence_multiline_json_content() {
+        let input = "```json\n{\n  \"a\": 1,\n  \"b\": 2\n}\n```";
+        assert_eq!(strip_code_fence(input), "{\n  \"a\": 1,\n  \"b\": 2\n}");
+    }
+
+    // -----------------------------------------------------------------------
+    // preview — existing coverage
+    // -----------------------------------------------------------------------
+
     #[test]
     fn preview_truncates() {
         let s = "x".repeat(300);
@@ -362,6 +411,56 @@ mod tests {
     fn preview_passthrough_short() {
         assert_eq!(preview("hi", 100), "hi");
     }
+
+    // -----------------------------------------------------------------------
+    // preview — additional edge cases
+    // -----------------------------------------------------------------------
+
+    /// Exactly at the limit is returned unchanged (boundary value).
+    #[test]
+    fn preview_exact_limit_not_truncated() {
+        let s = "a".repeat(10);
+        assert_eq!(preview(&s, 10), s);
+    }
+
+    /// One character over the limit triggers truncation with ellipsis.
+    #[test]
+    fn preview_one_over_limit_truncated() {
+        let s = "a".repeat(11);
+        let p = preview(&s, 10);
+        assert!(p.ends_with("..."));
+        assert_eq!(p.chars().count(), 13); // 10 content + 3 ellipsis
+    }
+
+    /// Unicode multi-byte characters are counted by scalar value, not byte.
+    #[test]
+    fn preview_unicode_counted_by_scalar() {
+        // Each '©' is 2 bytes but 1 scalar value.
+        let s: String = "©".repeat(5);
+        // Limit of 5 → no truncation (exactly at boundary).
+        assert_eq!(preview(&s, 5), s);
+        // Limit of 4 → truncation.
+        let p = preview(&s, 4);
+        assert!(p.ends_with("..."));
+    }
+
+    /// max_chars = 0 always truncates any non-empty string.
+    #[test]
+    fn preview_zero_limit_always_truncates() {
+        let p = preview("hello", 0);
+        assert_eq!(p, "...");
+    }
+
+    /// An empty string at any limit returns empty (nothing to truncate).
+    #[test]
+    fn preview_empty_string_any_limit() {
+        assert_eq!(preview("", 0), "");
+        assert_eq!(preview("", 100), "");
+    }
+
+    // -----------------------------------------------------------------------
+    // read_timeout — existing coverage
+    // -----------------------------------------------------------------------
 
     #[test]
     fn read_timeout_returns_default_when_absent() {
@@ -393,5 +492,237 @@ mod tests {
             Duration::from_secs(30),
         );
         assert_eq!(t, Duration::from_secs(30));
+    }
+
+    // -----------------------------------------------------------------------
+    // read_timeout — additional edge cases
+    // -----------------------------------------------------------------------
+
+    /// A value of "0" is valid — results in Duration::ZERO (not the default).
+    #[test]
+    fn read_timeout_zero_value_is_valid() {
+        let t = read_timeout(&|_| Some("0".to_string()), "VAR", Duration::from_secs(30));
+        assert_eq!(t, Duration::ZERO);
+    }
+
+    /// A float string like "3.5" cannot be parsed as u64 → falls back to default.
+    #[test]
+    fn read_timeout_float_string_falls_back() {
+        let t = read_timeout(&|_| Some("3.5".to_string()), "VAR", Duration::from_secs(10));
+        assert_eq!(t, Duration::from_secs(10));
+    }
+
+    /// Negative number string cannot be parsed as u64 → falls back to default.
+    #[test]
+    fn read_timeout_negative_string_falls_back() {
+        let t = read_timeout(&|_| Some("-5".to_string()), "VAR", Duration::from_secs(10));
+        assert_eq!(t, Duration::from_secs(10));
+    }
+
+    /// An empty string cannot be parsed → falls back to default.
+    #[test]
+    fn read_timeout_empty_string_falls_back() {
+        let t = read_timeout(&|_| Some(String::new()), "VAR", Duration::from_secs(10));
+        assert_eq!(t, Duration::from_secs(10));
+    }
+
+    /// Only the named variable is read; other keys do not influence the result.
+    #[test]
+    fn read_timeout_only_reads_named_var() {
+        let t = read_timeout(
+            &|k: &str| match k {
+                "RIGHT_VAR" => Some("99".to_string()),
+                "WRONG_VAR" => Some("1".to_string()),
+                _ => None,
+            },
+            "RIGHT_VAR",
+            Duration::from_secs(30),
+        );
+        assert_eq!(t, Duration::from_secs(99));
+    }
+
+    // -----------------------------------------------------------------------
+    // run_blocking — nested-runtime safety (SEN-18 regression)
+    // -----------------------------------------------------------------------
+
+    /// Helper: build a tiny dedicated sidecar runtime for the tests below.
+    /// Each test builds its own so they stay independent.
+    fn test_sidecar() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .thread_name("sentinel-test-sidecar")
+            .build()
+            .expect("test sidecar runtime must build")
+    }
+
+    /// Happy path: a trivially-ready future resolves and `run_blocking`
+    /// returns its value without panicking.
+    #[test]
+    fn run_blocking_returns_value_from_ready_future() {
+        let rt = test_sidecar();
+        let handle = rt.handle().clone();
+        let fut: BoxFuture<'static, anyhow::Result<String>> =
+            Box::pin(async { Ok("hello".to_string()) });
+
+        let result = run_blocking(
+            handle,
+            Duration::from_secs(5),
+            fut,
+            |msg| format!("network: {msg}"),
+            |dur| format!("timeout after {dur:?}"),
+            || "panic".to_string(),
+        );
+        assert_eq!(result.unwrap(), "hello");
+    }
+
+    /// A future that returns `Err` is mapped through `map_network_err`.
+    #[test]
+    fn run_blocking_maps_network_error() {
+        let rt = test_sidecar();
+        let handle = rt.handle().clone();
+        let fut: BoxFuture<'static, anyhow::Result<String>> =
+            Box::pin(async { Err(anyhow::anyhow!("connection refused")) });
+
+        let result = run_blocking(
+            handle,
+            Duration::from_secs(5),
+            fut,
+            |msg| format!("network: {msg}"),
+            |dur| format!("timeout after {dur:?}"),
+            || "panic".to_string(),
+        );
+        let err = result.unwrap_err();
+        assert!(err.contains("network:"), "expected network prefix, got: {err}");
+        assert!(err.contains("connection refused"), "expected cause, got: {err}");
+    }
+
+    /// A future that never resolves hits the timeout and `map_timeout` is
+    /// called with the configured duration.
+    #[test]
+    fn run_blocking_maps_timeout() {
+        let rt = test_sidecar();
+        let handle = rt.handle().clone();
+        // A future that waits longer than our timeout.
+        let fut: BoxFuture<'static, anyhow::Result<String>> = Box::pin(async {
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            Ok("should not reach here".to_string())
+        });
+        let timeout = Duration::from_millis(50);
+
+        let result = run_blocking(
+            handle,
+            timeout,
+            fut,
+            |msg| format!("network: {msg}"),
+            |dur| format!("timed out after {dur:?}"),
+            || "panic".to_string(),
+        );
+        let err = result.unwrap_err();
+        assert!(err.contains("timed out after"), "expected timeout message, got: {err}");
+    }
+
+    /// Regression (SEN-18): `run_blocking` MUST NOT panic when called from
+    /// within a tokio multi-thread runtime worker thread.  The old pattern
+    /// of calling `sidecar.block_on()` directly on the caller's thread
+    /// panicked because the caller was already a tokio worker.  The scoped-
+    /// thread bridge fixes this.  This test would panic (not merely fail)
+    /// against the pre-fix code.
+    #[tokio::test]
+    async fn run_blocking_does_not_panic_when_called_from_tokio_worker() {
+        // Spawn `run_blocking` on a blocking thread of the CURRENT multi-thread
+        // runtime — exactly the call path the PreToolUse hook dispatcher uses.
+        let result = tokio::task::spawn_blocking(move || {
+            let rt = test_sidecar();
+            let handle = rt.handle().clone();
+            let fut: BoxFuture<'static, anyhow::Result<String>> =
+                Box::pin(async { Ok("nested-safe".to_string()) });
+            run_blocking(
+                handle,
+                Duration::from_secs(5),
+                fut,
+                |msg| format!("network: {msg}"),
+                |dur| format!("timeout after {dur:?}"),
+                || "panic".to_string(),
+            )
+        })
+        .await
+        .expect("spawn_blocking task must not panic");
+
+        assert_eq!(result.unwrap(), "nested-safe");
+    }
+
+    // -----------------------------------------------------------------------
+    // build_ollama_prompt_fn — provider dispatch (pure construction, no network)
+    // -----------------------------------------------------------------------
+
+    /// Without `OLLAMA_API_KEY` the function constructs a local-mode client
+    /// and returns the `"ollama-local"` provider prefix.
+    #[test]
+    fn build_ollama_prompt_fn_local_mode_when_no_api_key() {
+        let env = |k: &str| -> Option<String> {
+            match k {
+                "OLLAMA_API_KEY" => None,
+                "OLLAMA_HOST" => None, // use default
+                _ => None,
+            }
+        };
+        let (_, prefix) = build_ollama_prompt_fn(&env, "scorer").unwrap();
+        assert_eq!(prefix, "ollama-local");
+    }
+
+    /// With `OLLAMA_API_KEY` set the function selects cloud mode and returns
+    /// the `"ollama-cloud"` provider prefix.
+    #[test]
+    fn build_ollama_prompt_fn_cloud_mode_when_api_key_set() {
+        let env = |k: &str| -> Option<String> {
+            match k {
+                "OLLAMA_API_KEY" => Some("fake-cloud-key".to_string()),
+                "OLLAMA_BASE_URL" => None, // use default
+                _ => None,
+            }
+        };
+        let (_, prefix) = build_ollama_prompt_fn(&env, "scorer").unwrap();
+        assert_eq!(prefix, "ollama-cloud");
+    }
+
+    /// `OLLAMA_HOST` is respected in local mode (custom host is accepted).
+    #[test]
+    fn build_ollama_prompt_fn_local_mode_custom_host_accepted() {
+        let env = |k: &str| -> Option<String> {
+            match k {
+                "OLLAMA_API_KEY" => None,
+                "OLLAMA_HOST" => Some("http://10.0.0.5:11434".to_string()),
+                _ => None,
+            }
+        };
+        // Construction must succeed (the client builder accepts any base URL).
+        let (_, prefix) = build_ollama_prompt_fn(&env, "scorer")
+            .unwrap_or_else(|e| panic!("custom OLLAMA_HOST should be accepted: {e}"));
+        assert_eq!(prefix, "ollama-local");
+    }
+
+    /// `OLLAMA_BASE_URL` is respected in cloud mode (custom base URL accepted).
+    #[test]
+    fn build_ollama_prompt_fn_cloud_mode_custom_base_url_accepted() {
+        let env = |k: &str| -> Option<String> {
+            match k {
+                "OLLAMA_API_KEY" => Some("key".to_string()),
+                "OLLAMA_BASE_URL" => Some("https://my-ollama.example.com/v1".to_string()),
+                _ => None,
+            }
+        };
+        let (_, prefix) = build_ollama_prompt_fn(&env, "scorer")
+            .unwrap_or_else(|e| panic!("custom OLLAMA_BASE_URL should be accepted: {e}"));
+        assert_eq!(prefix, "ollama-cloud");
+    }
+
+    /// `build_openrouter_prompt_fn` returns the `"openrouter"` provider prefix.
+    #[test]
+    fn build_openrouter_prompt_fn_returns_openrouter_prefix() {
+        // Any non-empty string is accepted by the client builder without a
+        // live network call — the key is only validated on the first request.
+        let (_, prefix) = build_openrouter_prompt_fn("fake-key", "scorer").unwrap();
+        assert_eq!(prefix, "openrouter");
     }
 }
