@@ -271,16 +271,31 @@ impl SpecChallengeScorerPort for LlmSpecChallengeScorer {
         let prompt_fn = self.prompt_fn.clone();
         let model_id = self.model_id.clone();
         let timeout = self.timeout;
-        let response_text = runtime.block_on(async move {
-            let call = prompt_fn(model_id, system_prompt, user_prompt);
-            match tokio::time::timeout(timeout, call).await {
-                Ok(Ok(text)) => Ok(text),
-                Ok(Err(err)) => Err(SpecChallengeScorerError::Backend(format!("{err:#}"))),
-                Err(_elapsed) => Err(SpecChallengeScorerError::Backend(format!(
-                    "spec-challenge scorer timed out after {}s",
-                    timeout.as_secs()
-                ))),
-            }
+        // Drive the blocking call on a dedicated thread (outside any tokio
+        // worker) so `block_on` never trips the "runtime within a runtime"
+        // panic when `score` is reached from inside the CLI's #[tokio::main]
+        // runtime. The work runs on the shared sidecar runtime via its Handle.
+        let handle = runtime.handle().clone();
+        let response_text = std::thread::scope(|s| {
+            s.spawn(move || {
+                handle.block_on(async move {
+                    let call = prompt_fn(model_id, system_prompt, user_prompt);
+                    match tokio::time::timeout(timeout, call).await {
+                        Ok(Ok(text)) => Ok(text),
+                        Ok(Err(err)) => Err(SpecChallengeScorerError::Backend(format!("{err:#}"))),
+                        Err(_elapsed) => Err(SpecChallengeScorerError::Backend(format!(
+                            "spec-challenge scorer timed out after {}s",
+                            timeout.as_secs()
+                        ))),
+                    }
+                })
+            })
+            .join()
+            .unwrap_or_else(|_| {
+                Err(SpecChallengeScorerError::Backend(
+                    "spec-challenge scorer worker thread panicked".to_string(),
+                ))
+            })
         })?;
 
         debug!(

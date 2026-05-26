@@ -38,12 +38,15 @@
 //!
 //! [`AuditorPort::score`] is sync — hooks aren't async-trait. The rig
 //! client is async. The bridge uses a **module-local sidecar tokio
-//! runtime** built lazily and reused across calls: when `score()` is
-//! invoked from a sync context (the hook), the sidecar's `block_on`
-//! drives the rig call to completion without touching whatever tokio
-//! runtime the caller is in. This avoids the "Cannot start a runtime
-//! from within a runtime" panic that `tokio::Runtime::new().block_on()`
-//! produces inside an existing runtime context.
+//! runtime** built lazily and reused across calls. Crucially, `score`
+//! is reached from inside the CLI's `#[tokio::main]` multi-thread
+//! runtime (the `PreToolUse` hook dispatch), so we must NOT call
+//! `sidecar.block_on(..)` on the calling thread — that blocks a tokio
+//! worker from within a runtime and panics with "Cannot start a runtime
+//! from within a runtime". Instead we drive the sidecar's `Handle`
+//! `block_on` on a dedicated `std::thread::scope` thread (outside any
+//! runtime's worker pool), which is panic-safe whether or not the caller
+//! is already inside a runtime.
 
 use std::sync::Arc;
 use std::sync::OnceLock;
@@ -557,13 +560,31 @@ impl AuditorPort for RigAuditor {
         let prompt_fn = self.prompt_fn.clone();
         let model_id = self.model_id.clone();
         let timeout = self.timeout;
-        let response_text = runtime.block_on(async move {
-            let call = prompt_fn(model_id.clone(), system_prompt, user_prompt);
-            match tokio::time::timeout(timeout, call).await {
-                Ok(Ok(text)) => Ok(text),
-                Ok(Err(err)) => Err(AuditorError::Unavailable(format!("{err:#}"))),
-                Err(_elapsed) => Err(AuditorError::TimedOut(timeout)),
-            }
+        // `score` is sync but is called from inside the CLI's `#[tokio::main]`
+        // multi-thread runtime (the PreToolUse hook dispatch). Calling
+        // `runtime.block_on(..)` directly on that worker thread panics with
+        // "Cannot start a runtime from within a runtime" — the sidecar having
+        // its own runtime does NOT help, because `block_on` blocks the CURRENT
+        // thread, and the current thread is a tokio worker. Drive the blocking
+        // call on a dedicated `std::thread` (outside any runtime's worker pool)
+        // so the runtime-entry guard is never tripped. The work itself still
+        // runs on the shared sidecar runtime via its `Handle`.
+        let handle = runtime.handle().clone();
+        let response_text = std::thread::scope(|s| {
+            s.spawn(move || {
+                handle.block_on(async move {
+                    let call = prompt_fn(model_id.clone(), system_prompt, user_prompt);
+                    match tokio::time::timeout(timeout, call).await {
+                        Ok(Ok(text)) => Ok(text),
+                        Ok(Err(err)) => Err(AuditorError::Unavailable(format!("{err:#}"))),
+                        Err(_elapsed) => Err(AuditorError::TimedOut(timeout)),
+                    }
+                })
+            })
+            .join()
+            .unwrap_or_else(|_| {
+                Err(AuditorError::Other("auditor worker thread panicked".to_string()))
+            })
         })?;
 
         let auditor_model = format!("{}:{}", self.provider_prefix, self.model_id);
@@ -973,6 +994,26 @@ mod tests {
             .with_provider_prefix("ollama-cloud");
         let verdict = auditor.score(&fixture_dry_run()).unwrap();
         assert_eq!(verdict.auditor_model, "ollama-cloud:moonshotai/kimi-k2");
+    }
+
+    /// Regression: `score()` is reached from inside the CLI's `#[tokio::main]`
+    /// multi-thread runtime (the PreToolUse hook dispatch). The old
+    /// `sidecar.block_on()` on the calling thread panicked with "Cannot start
+    /// a runtime from within a runtime" — which is exactly the browserbase
+    /// PreToolUse hook crash this fix addresses. Driving `block_on` on a
+    /// dedicated scoped thread makes `score` callable from within a runtime.
+    /// This test would panic (not just fail) against the pre-fix code.
+    #[tokio::test]
+    async fn score_does_not_panic_when_called_from_within_a_runtime() {
+        let stub = make_stub(vec![Ok(make_pass_response())]);
+        let auditor = RigAuditor::with_prompt_fn(stub, "test/model");
+        // Run the sync `score` on a blocking thread of the CURRENT multi-thread
+        // runtime — the same nesting that crashed the live browserbase hook.
+        let verdict = tokio::task::spawn_blocking(move || auditor.score(&fixture_dry_run()))
+            .await
+            .expect("score task must not panic")
+            .expect("score must return a verdict");
+        assert_eq!(verdict.auditor_model, "openrouter:test/model");
     }
 
     #[test]
