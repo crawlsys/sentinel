@@ -819,13 +819,30 @@ function buildRows(events: RecentEvent[]): TickerRow[] {
     const prev = rows[rows.length - 1];
 
     // STRICT merge: adjacent events sharing the full sig (same
-    // session + event type + tool + outcome). Preserves the
-    // single-tool label so the augment-cache lookup still hits.
-    // EXCEPTION: user prompts. Two adjacent UserPromptSubmit
-    // events share the same sig (no tool, no outcome) but almost
-    // always have different content — collapsing would silently
-    // hide one of the operator's prompts. Keep them distinct.
-    if (prev && prev.sig === sig && sentinelEvent !== "UserPromptSubmit") {
+    // session + event type + tool + outcome).
+    //
+    // UserPromptSubmit nuance: Claude fires EVERY registered hook
+    // (phase_validator, memory_inject, hygiene_reminders,
+    // error_reporter, ...) on a single prompt and the bridge emits
+    // one sentinel.hook_ingested record per hook. The previous
+    // exception that refused to merge UserPromptSubmit rows
+    // assumed one event per prompt; in reality it's N events with
+    // identical preview text, timestamps within milliseconds.
+    // Without merging, the ticker fills with ~8 identical rows for
+    // every prompt the operator submits.
+    //
+    // Allow merge when the inter-event delta is ≤5s — that's the
+    // multi-hook fanout window. Genuine back-to-back prompts take
+    // longer (operator types, agent responds) and stay distinct.
+    const canMergeUserPrompt =
+      sentinelEvent === "UserPromptSubmit" &&
+      prev &&
+      Math.abs(new Date(ts).getTime() - new Date(prev.ts).getTime()) <= 5_000;
+    if (
+      prev &&
+      prev.sig === sig &&
+      (sentinelEvent !== "UserPromptSubmit" || canMergeUserPrompt)
+    ) {
       prev.members.push({ ts, toolCallId: tcid, outcome, tool });
       prev.ts = ts;
       continue;

@@ -210,17 +210,41 @@ describe("EventTicker — P3-24 smarter rollup", () => {
     expect(rows[0].textContent).toContain("×3");
   });
 
-  it("user prompts NEVER collapse — operator content is too signal-dense to merge silently", () => {
-    // P3-24 fix: strict-sig collapse used to also merge user
-    // prompts because two UserPromptSubmit events share an
-    // identical sig (no tool, no outcome). User prompts almost
-    // always have different content, so collapsing would silently
-    // hide an operator turn. Now gated.
+  it("user prompts within the multi-hook fanout window (≤5s) merge into one row", () => {
+    // Reality: every UserPromptSubmit fires N hooks (memory_inject,
+    // phase_validator, hygiene_reminders, error_reporter, ...) and
+    // the bridge emits one sentinel.hook_ingested per hook —
+    // identical content, ts within ms. Previously the ticker
+    // refused to collapse any UserPromptSubmit rows, so each
+    // prompt rendered as 6-8 duplicate rows in the operator's
+    // view. Now we merge when sig matches AND inter-event delta
+    // ≤5s. Two events 1s apart represent the same operator turn
+    // with multi-hook fanout — collapse to one row with ×2.
     render(
       <EventTicker
         events={[
           userPromptEvent(1, "s-a"),
           userPromptEvent(2, "s-a"),
+        ]}
+        onSelectNode={() => {}}
+      />,
+    );
+    const rows = screen.getByTestId("ticker-rows").querySelectorAll("li[data-actor='user']");
+    expect(rows.length).toBe(1);
+    expect(rows[0].textContent).toContain("×2");
+  });
+
+  it("user prompts >5s apart stay distinct — genuine back-to-back operator turns", () => {
+    // Operator-typed back-to-back prompts in a real session are
+    // separated by at least the assistant's response time
+    // (typically 10s+). Anything beyond the 5s multi-hook fanout
+    // window is treated as a distinct turn and rendered as its
+    // own row so we don't hide operator content behind a multiplier.
+    render(
+      <EventTicker
+        events={[
+          userPromptEvent(1, "s-a"),
+          userPromptEvent(30, "s-a"),
         ]}
         onSelectNode={() => {}}
       />,
