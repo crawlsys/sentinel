@@ -46,6 +46,7 @@ use consulate::connection_registry::ConnectionRegistry;
 use consulate::escalation_bus::{EscalationEnvelope, EscalationEvent};
 use pretty_assertions::assert_eq;
 use sentinel_legatus::client::{run_connect_hosted, ConnectConfig};
+use tempfile::TempDir;
 use sentinel_legatus::handle::{make_pair, EscalationKind};
 use sentinel_legatus::{ConnectionStatus, LegatusError};
 use tokio::net::TcpListener;
@@ -125,14 +126,24 @@ async fn spawn_consulate() -> SpawnedConsulate {
     }
 }
 
-fn sentinel_config(url: String) -> ConnectConfig {
+/// Build a `ConnectConfig` for one test invocation.
+///
+/// Each test must pass its own `working_dir` — typically the path of
+/// a `tempfile::TempDir` that lives for the duration of the test.
+/// Sharing a fixed path across concurrent tests is what causes the
+/// "file lock on artifact directory" contention when the full
+/// workspace suite runs in parallel: any file-system access keyed on
+/// `working_dir` (e.g. inbox / outbox replay on a future reconnect)
+/// would race across test threads. Using a per-test `TempDir`
+/// eliminates that shared resource.
+fn sentinel_config(url: String, working_dir: &str) -> ConnectConfig {
     ConnectConfig {
         consulate_url: url,
         failover_urls: Vec::new(),
         bootstrap_secret: TEST_BOOTSTRAP_SECRET,
         suggested_name: "sentinel-roundtrip".into(),
         runtime: RuntimeKind::ClaudeCode,
-        working_dir: "/tmp/sentinel-roundtrip".into(),
+        working_dir: working_dir.to_owned(),
         branch: Some("test".into()),
         task_description: Some("round-trip integration test".into()),
         heartbeat_interval: Duration::from_millis(75),
@@ -171,6 +182,13 @@ where
 
 #[tokio::test]
 async fn consulate_dispatches_then_observes_ack_result_completed() {
+    // Per-test TempDir: each concurrent test must own its own
+    // working_dir so no two tests share a file-system path even if
+    // the legatus runtime is ever extended to write inbox/outbox
+    // files there. Keeps the dir alive for the full test body.
+    let _dir = TempDir::new().expect("create temp working dir");
+    let working_dir = _dir.path().to_string_lossy().into_owned();
+
     let SpawnedConsulate {
         url,
         session_id_rx,
@@ -183,7 +201,7 @@ async fn consulate_dispatches_then_observes_ack_result_completed() {
     let cancel_for_task = cancel.clone();
     let (handle, mut runtime) = make_pair();
     let legatus_task = tokio::spawn(async move {
-        run_connect_hosted(sentinel_config(url), cancel_for_task, &mut runtime, &ConnectionStatus::new()).await
+        run_connect_hosted(sentinel_config(url, &working_dir), cancel_for_task, &mut runtime, &ConnectionStatus::new()).await
     });
 
     // Phase 1: consulate observes handshake + registration.
@@ -297,6 +315,9 @@ async fn consulate_dispatches_then_observes_ack_result_completed() {
 
 #[tokio::test]
 async fn instruction_outcome_failure_round_trips_with_error_body() {
+    let _dir = TempDir::new().expect("create temp working dir");
+    let working_dir = _dir.path().to_string_lossy().into_owned();
+
     let SpawnedConsulate {
         url,
         session_id_rx,
@@ -308,7 +329,7 @@ async fn instruction_outcome_failure_round_trips_with_error_body() {
     let cancel_for_task = cancel.clone();
     let (handle, mut runtime) = make_pair();
     let _legatus_task = tokio::spawn(async move {
-        run_connect_hosted(sentinel_config(url), cancel_for_task, &mut runtime, &ConnectionStatus::new()).await
+        run_connect_hosted(sentinel_config(url, &working_dir), cancel_for_task, &mut runtime, &ConnectionStatus::new()).await
     });
 
     let session_id = tokio::time::timeout(Duration::from_secs(5), session_id_rx)
@@ -404,6 +425,9 @@ async fn t1_catastrophic_ack_round_trips_into_approval_cache() {
     };
     use sentinel_legatus::{CatastrophicApprovalCache, SpentNonceLog};
 
+    let _dir = TempDir::new().expect("create temp working dir");
+    let working_dir = _dir.path().to_string_lossy().into_owned();
+
     let SpawnedConsulate {
         url,
         session_id_rx,
@@ -423,7 +447,7 @@ async fn t1_catastrophic_ack_round_trips_into_approval_cache() {
         .with_approval_cache(approval_cache.clone())
         .with_spent_nonce_log(spent_nonces);
     let legatus_task = tokio::spawn(async move {
-        run_connect_hosted(sentinel_config(url), cancel_for_task, &mut runtime, &ConnectionStatus::new()).await
+        run_connect_hosted(sentinel_config(url, &working_dir), cancel_for_task, &mut runtime, &ConnectionStatus::new()).await
     });
 
     let session_id = tokio::time::timeout(Duration::from_secs(5), session_id_rx)
@@ -547,6 +571,9 @@ async fn t1_catastrophic_ack_replay_is_rejected() {
     };
     use sentinel_legatus::{CatastrophicApprovalCache, SpentNonceLog};
 
+    let _dir = TempDir::new().expect("create temp working dir");
+    let working_dir = _dir.path().to_string_lossy().into_owned();
+
     let SpawnedConsulate {
         url,
         session_id_rx,
@@ -563,7 +590,7 @@ async fn t1_catastrophic_ack_replay_is_rejected() {
         .with_approval_cache(approval_cache.clone())
         .with_spent_nonce_log(spent_nonces.clone());
     let legatus_task = tokio::spawn(async move {
-        run_connect_hosted(sentinel_config(url), cancel_for_task, &mut runtime, &ConnectionStatus::new()).await
+        run_connect_hosted(sentinel_config(url, &working_dir), cancel_for_task, &mut runtime, &ConnectionStatus::new()).await
     });
 
     let session_id = tokio::time::timeout(Duration::from_secs(5), session_id_rx)
@@ -662,6 +689,9 @@ async fn t1_catastrophic_ack_replay_is_rejected() {
 /// that as `Err(LegatusError::Transport(_))`.
 #[tokio::test]
 async fn run_connect_hosted_surfaces_transport_failure_on_remote_close() {
+    let _dir = TempDir::new().expect("create temp working dir");
+    let working_dir = _dir.path().to_string_lossy().into_owned();
+
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("ws://{}", listener.local_addr().unwrap());
     let registry = Arc::new(build_registry().await);
@@ -689,7 +719,7 @@ async fn run_connect_hosted_surfaces_transport_failure_on_remote_close() {
     let cancel_for_task = cancel.clone();
     let (_handle, mut runtime) = make_pair();
     let legatus_task = tokio::spawn(async move {
-        run_connect_hosted(sentinel_config(url), cancel_for_task, &mut runtime, &ConnectionStatus::new()).await
+        run_connect_hosted(sentinel_config(url, &working_dir), cancel_for_task, &mut runtime, &ConnectionStatus::new()).await
     });
 
     // The legatus loop should observe the peer close within a few

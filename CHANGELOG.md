@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Changed
+- **scanner.rs god-functions decomposed (behavior-identical) (#32)** (2026-05-25). The two ~300–360-line god-functions in `scanner.rs` (`run_validation`, `sync_counts`) mixed discover/classify/validate/count-sync/manifest concerns. Decomposed each into focused helpers along the natural seam — `run_validation` 360→22 lines (6 `validate_*` helpers, one per category), `sync_counts` 290→16 lines (`build_universal_patterns`/`apply_universal_patterns`/`apply_targeted_updates`). Guarded by **10 new golden-output tests** capturing the exact current scan/validate/sync-counts behavior, asserted green against the original code FIRST, then re-asserted after each extraction — output is byte-identical. 15 scanner tests green, clippy zero.
+- **mcp_handler.rs: extracted `submit_step_complete` arg-parsing (#34)** (2026-05-25). Pulled the required-field validation prologue into a pure, testable `parse_submit_step_args(args) -> Result<SubmitStepArgs, _>` (named struct documents the 5 required inputs), separating "what shape does this call require" from the stateful enforcement logic. Six other long-but-cohesive handlers (`query_proof_corpus`, `get_step_proof`, etc.) were deliberately LEFT intact — splitting cohesive single-responsibility functions for line count is an anti-pattern. 1363 tests pass, clippy zero.
+
+### Fixed
+- **sentinel-legatus round_trip_consulate flaky under parallel test load (#33)** (2026-05-25). The 5 round-trip tests passed in isolation but ~4 failed under `cargo test --workspace` with "Blocking waiting for file lock on artifact directory" — shared on-disk state contention. Each test now uses an isolated `TempDir` (and ephemeral port where bound) so parallel runs no longer collide. Green both in isolation and under full parallel workspace test. No production behavior change.
+
 ### Added
 - **Test coverage for the extracted `llm_scorer_runtime` shared bridge (#29)** (2026-05-25). Added unit tests for the F5-extracted module: `strip_code_fence` (fence-stripping, plain-passthrough, whitespace, multiline), `read_timeout` (override parse + default fallback), and `run_blocking` (the std::thread::scope tokio bridge — timeout-mapping + the #18 nested-runtime guarantee at the shared-helper level). 333 → 365 infra tests, all green, clippy zero. (Engineering and Architecture score-lifts were assessed and deliberately declined: the remaining long functions are cohesive, and the `consul-domain` coupling is an intentional ADR-003 cross-repo identity contract — forcing either would lower real quality for a cosmetic point.)
 

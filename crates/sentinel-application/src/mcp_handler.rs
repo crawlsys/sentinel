@@ -55,6 +55,67 @@ impl McpToolResult {
     }
 }
 
+/// Parsed required arguments for `submit_step_complete`.
+///
+/// Extracted from the raw JSON args by [`parse_submit_step_args`] before
+/// the handler touches any `&self` state.  All string fields borrow from
+/// the original `args` value; `verdict` is owned (deserialized + sanitized
+/// on the way in).
+struct SubmitStepArgs<'a> {
+    skill: &'a str,
+    phase_id: &'a str,
+    step_id: &'a str,
+    step_description: &'a str,
+    verdict: sentinel_domain::judge::JudgeVerdict,
+}
+
+/// Parse the five required fields out of raw MCP args for
+/// `sentinel__submit_step_complete`.
+///
+/// Returns `Err(McpToolResult)` with a user-facing error on any missing or
+/// malformed field so the handler body can start at the first decision that
+/// actually needs `&self`.
+fn parse_submit_step_args(
+    args: &serde_json::Value,
+) -> Result<SubmitStepArgs<'_>, McpToolResult> {
+    let skill = args
+        .get("skill")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| McpToolResult::err("Missing 'skill' argument"))?;
+
+    let phase_id = args
+        .get("phase_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| McpToolResult::err("Missing 'phase_id' argument"))?;
+
+    let step_id = args
+        .get("step_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| McpToolResult::err("Missing 'step_id' argument"))?;
+
+    let step_description = args
+        .get("step_description")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| McpToolResult::err("Missing 'step_description' argument"))?;
+
+    let verdict_raw = args
+        .get("verdict")
+        .cloned()
+        .ok_or_else(|| McpToolResult::err("Missing 'verdict' argument"))?;
+
+    let verdict = serde_json::from_value::<sentinel_domain::judge::JudgeVerdict>(verdict_raw)
+        .map(sentinel_domain::judge::JudgeVerdict::sanitized)
+        .map_err(|e| McpToolResult::err(format!("Invalid 'verdict' shape: {e}")))?;
+
+    Ok(SubmitStepArgs {
+        skill,
+        phase_id,
+        step_id,
+        step_description,
+        verdict,
+    })
+}
+
 /// MCP handler — routes tool calls to engine functions
 pub struct McpHandler {
     state: Arc<RwLock<SessionState>>,
@@ -402,31 +463,19 @@ impl McpHandler {
     /// failure. Refusing to seal an insufficient verdict is the
     /// engine's job — surface the error here for caller telemetry.
     async fn submit_step_complete(&self, args: serde_json::Value) -> McpToolResult {
-        // Required string fields.
-        let Some(skill) = args.get("skill").and_then(|v| v.as_str()) else {
-            return McpToolResult::err("Missing 'skill' argument");
+        // Parse and validate the five required fields up front.
+        // Errors here are purely about arg shape — no &self access needed.
+        let parsed = match parse_submit_step_args(&args) {
+            Ok(p) => p,
+            Err(e) => return e,
         };
-        let Some(phase_id) = args.get("phase_id").and_then(|v| v.as_str()) else {
-            return McpToolResult::err("Missing 'phase_id' argument");
-        };
-        let Some(step_id) = args.get("step_id").and_then(|v| v.as_str()) else {
-            return McpToolResult::err("Missing 'step_id' argument");
-        };
-        let Some(step_description) = args.get("step_description").and_then(|v| v.as_str()) else {
-            return McpToolResult::err("Missing 'step_description' argument");
-        };
-
-        // Required: the verdict. Deserialize, sanitize, surface clear
-        // errors when the shape is wrong.
-        let verdict_raw = match args.get("verdict") {
-            Some(v) => v.clone(),
-            None => return McpToolResult::err("Missing 'verdict' argument"),
-        };
-        let verdict: sentinel_domain::judge::JudgeVerdict =
-            match serde_json::from_value(verdict_raw) {
-                Ok(v) => sentinel_domain::judge::JudgeVerdict::sanitized(v),
-                Err(e) => return McpToolResult::err(format!("Invalid 'verdict' shape: {e}")),
-            };
+        let (skill, phase_id, step_id, step_description, verdict) = (
+            parsed.skill,
+            parsed.phase_id,
+            parsed.step_id,
+            parsed.step_description,
+            parsed.verdict,
+        );
 
         // Enforcement gate (#9 + #12): in `enforce` mode, refuse to seal a
         // non-sufficient verdict — the seal-blocking half of the staged
