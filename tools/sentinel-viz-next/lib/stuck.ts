@@ -57,38 +57,56 @@ export function maybeFireStuckAlert(stuckCount: number, stuck: Node[]): void {
   if (now - state.lastFiredAt < STUCK_ALERT_SUPPRESS_MS) return;
   state.lastFiredAt = now;
 
-  // Permission flow: never prompt aggressively. Ask exactly once;
-  // if denied, never re-prompt this session.
-  const fire = () => {
-    try {
-      const n = new Notification(`${stuckCount} sentinel sessions awaiting you`, {
-        body: stuck
-          .slice(0, 3)
-          .map((s) => {
-            const sid = (s.data?.session_id as string | undefined) ?? s.id;
-            return `${sid.slice(0, 8)}: ${s.awaiting_question?.slice(0, 90) ?? "(no question)"}`;
-          })
-          .join("\n"),
-        icon: "/favicon.ico",
-        tag: "sentinel-stuck",
-      });
-      n.onclick = () => {
-        window.focus();
-        n.close();
-      };
-    } catch {
-      /* notification denied or unsupported — silent */
-    }
-  };
-
+  // Only fire when permission is ALREADY granted. We never call
+  // Notification.requestPermission() from here — this path is driven
+  // by SSE data arrival, not a user gesture, and modern browsers
+  // reject (and may flag as abusive) non-gesture permission prompts.
+  // The prompt is requested from a real click via
+  // requestStuckNotificationPermission() instead.
   if (Notification.permission === "granted") {
-    fire();
-  } else if (Notification.permission === "default") {
-    Notification.requestPermission().then((perm) => {
-      if (perm === "granted") fire();
-    }).catch(() => {});
+    fireStuckNotification(stuckCount, stuck);
   }
-  // If "denied", do nothing — respect the user's choice.
+}
+
+function fireStuckNotification(stuckCount: number, stuck: Node[]): void {
+  try {
+    const n = new Notification(`${stuckCount} sentinel sessions awaiting you`, {
+      body: stuck
+        .slice(0, 3)
+        .map((s) => {
+          const sid = (s.data?.session_id as string | undefined) ?? s.id;
+          return `${sid.slice(0, 8)}: ${s.awaiting_question?.slice(0, 90) ?? "(no question)"}`;
+        })
+        .join("\n"),
+      icon: "/favicon.ico",
+      tag: "sentinel-stuck",
+    });
+    n.onclick = () => {
+      window.focus();
+      n.close();
+    };
+  } catch {
+    /* notification denied or unsupported — silent */
+  }
+}
+
+/** Request browser Notification permission. MUST be called from a real
+ *  user gesture (e.g. a click handler) — never from a render/effect —
+ *  or browsers will reject the prompt. Safe to call repeatedly; resolves
+ *  to the current permission state. Returns "unsupported" off the main
+ *  thread or where Notification is unavailable. */
+export async function requestStuckNotificationPermission(): Promise<
+  NotificationPermission | "unsupported"
+> {
+  if (typeof window === "undefined" || typeof Notification === "undefined") {
+    return "unsupported";
+  }
+  if (Notification.permission !== "default") return Notification.permission;
+  try {
+    return await Notification.requestPermission();
+  } catch {
+    return Notification.permission;
+  }
 }
 
 /** Reset module state. Test-only. */

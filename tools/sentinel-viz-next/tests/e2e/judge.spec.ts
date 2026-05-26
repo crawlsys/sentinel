@@ -1,7 +1,8 @@
 /// Adversarial judge harness. Runs each Gherkin scenario from
 /// `tests/specs/viz.feature` against the live :8083 viewer + :8082
 /// API, captures evidence (screenshot, DOM state, network), and
-/// writes a JSON report to `~/.agents/scratch/sentinel-viz-judge/`.
+/// writes a JSON report to `$SENTINEL_VIZ_JUDGE_DIR` (defaults to a
+/// `sentinel-viz-judge` dir under the OS temp dir).
 ///
 /// This file is NOT the spec — it's the runner. The spec is the
 /// .feature file; the judge agent reads the spec, runs THIS file,
@@ -12,9 +13,11 @@
 
 import { expect, test } from "@playwright/test";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 
-const OUT_DIR = "/home/kcrawley/.agents/scratch/sentinel-viz-judge";
+const OUT_DIR =
+  process.env.SENTINEL_VIZ_JUDGE_DIR ?? path.join(os.tmpdir(), "sentinel-viz-judge");
 fs.mkdirSync(OUT_DIR, { recursive: true });
 
 interface Evidence {
@@ -457,7 +460,9 @@ test("api-graph-warm-latency", async ({ request }, testInfo) => {
     expect(r.ok()).toBeTruthy();
     samples.push(Date.now() - t);
   }
-  ev.perf.warmSamplesMs = Object.fromEntries(samples.map((v, i) => [i, v])) as Record<string, number>;
+  samples.forEach((v, i) => {
+    ev.perf[`warmSampleMs_${i}`] = v;
+  });
   ev.perf.maxWarmMs = Math.max(...samples);
   writeReport(ev);
   testInfo.attach("evidence", { body: JSON.stringify(ev, null, 2), contentType: "application/json" });
@@ -481,7 +486,9 @@ test("api-activity-warm-latency", async ({ request }, testInfo) => {
     expect(r.ok()).toBeTruthy();
     samples.push(Date.now() - t);
   }
-  ev.perf.warmSamplesMs = Object.fromEntries(samples.map((v, i) => [i, v])) as Record<string, number>;
+  samples.forEach((v, i) => {
+    ev.perf[`warmSampleMs_${i}`] = v;
+  });
   ev.perf.maxWarmMs = Math.max(...samples);
   writeReport(ev);
   testInfo.attach("evidence", { body: JSON.stringify(ev, null, 2), contentType: "application/json" });
