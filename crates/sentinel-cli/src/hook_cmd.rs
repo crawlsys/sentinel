@@ -773,6 +773,18 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
                     hooks::db_ops_gate::process(&input)
                 });
                 output.merge(&db_output);
+
+                // Output compressor (LAST, Bash only) — rewrite noisy commands
+                // to route through `sentinel compress`. Runs only if no gate
+                // above blocked the call (never rewrite a command that's about
+                // to be denied) and there's no pending input rewrite to clobber.
+                if output.blocked != Some(true) {
+                    let compress_output =
+                        time_and_record(ctx.fs, &mk_ctx("output_compressor"), || {
+                            hooks::output_compressor::process(&input, ctx.env)
+                        });
+                    output.merge(&compress_output);
+                }
             }
         }
 

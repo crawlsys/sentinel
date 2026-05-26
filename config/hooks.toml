@@ -123,6 +123,14 @@ depends_on = []
 has_api_call = false
 
 [[hooks]]
+id = "output-compressor"
+event = "PreToolUse"
+matcher = ["Bash"]
+description = "Route noisy commands (cargo/git/grep/find) through `sentinel compress` to cut token usage; preserves all error/result/warning lines verbatim. Bypass with SENTINEL_COMPRESS_BYPASS=1"
+depends_on = []
+has_api_call = false
+
+[[hooks]]
 id = "todo-interceptor"
 event = "PreToolUse"
 description = "Track todo-related tool calls"
