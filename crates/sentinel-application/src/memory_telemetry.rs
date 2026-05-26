@@ -67,7 +67,7 @@ pub fn record(fs: &dyn FileSystemPort, event: &MemoryEvent) {
     let _ = fs.append(&path, line.as_bytes());
 }
 
-/// Convenience: emit a `recall` event for the memory_inject hook.
+/// Convenience: emit a `recall` event for the `memory_inject` hook.
 ///
 /// `hits` is the list of surfaced atoms as `(id, event_id, name, score)`.
 /// `injected` is whether the rendered block was actually returned as context
@@ -105,7 +105,7 @@ pub fn record_recall(
     );
 }
 
-/// Convenience: emit a `feedback` event for the memory_feedback hook.
+/// Convenience: emit a `feedback` event for the `memory_feedback` hook.
 ///
 /// `outcomes` is the per-atom classification as `(event_id, label)` where label
 /// is `"used" | "ignored" | "contradicted"`.
