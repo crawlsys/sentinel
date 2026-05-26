@@ -288,6 +288,12 @@ pub enum LlmModel {
     Sonnet,
     /// Heavy reasoning.
     Opus,
+    /// Adversarial / code worker tier (delegation). Maps to the Codex
+    /// model — strong at code reasoning and adversarial critique.
+    Codex,
+    /// Cheap context-scanning worker tier (delegation). Maps to Kimi —
+    /// large-context, low-cost reads over big inputs.
+    Kimi,
 }
 
 // ---------------------------------------------------------------------------

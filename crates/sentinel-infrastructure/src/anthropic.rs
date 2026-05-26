@@ -167,9 +167,10 @@ impl sentinel_application::classifier::AiClassifier for AnthropicClient {
 /// the existing `model_id()` mapping.
 const fn llm_to_judge(model: LlmModel) -> JudgeModel {
     match model {
-        LlmModel::Haiku => JudgeModel::Codex,
+        LlmModel::Haiku | LlmModel::Codex => JudgeModel::Codex,
         LlmModel::Sonnet => JudgeModel::Sonnet,
         LlmModel::Opus => JudgeModel::Opus,
+        LlmModel::Kimi => JudgeModel::Kimi,
     }
 }
 

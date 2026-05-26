@@ -518,6 +518,50 @@ fn tool_definitions() -> serde_json::Value {
                     },
                     "required": ["requirement"]
                 }
+            },
+            {
+                "name": "sentinel__delegate_codex",
+                "description": "Delegate a focused adversarial/code-reasoning task to the Codex worker model (openai/gpt-5.5-pro) via OpenRouter — the same gateway the judge uses. Use for 'poke holes in this approach', 'review this diff for bugs/edge cases', 'is this design sound'. Returns the worker's concrete critique. Requires OPENROUTER_API_KEY.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "task": {
+                            "type": "string",
+                            "description": "What to reason about adversarially (the question / claim / approach to critique)."
+                        },
+                        "context": {
+                            "type": "string",
+                            "description": "Optional supporting material (a diff, code, design notes) the worker reads."
+                        },
+                        "max_tokens": {
+                            "type": "integer",
+                            "description": "Optional response token cap (default 2048)."
+                        }
+                    },
+                    "required": ["task"]
+                }
+            },
+            {
+                "name": "sentinel__delegate_kimi_context_scan",
+                "description": "Delegate a cheap large-context scan to the Kimi worker model (moonshotai/kimi-k2.6) via OpenRouter. Answers a specific question against a (potentially large) blob of content, extracting only the relevant facts. Use to offload 'scan this and tell me X' reads from the orchestrator's context. Requires OPENROUTER_API_KEY.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "question": {
+                            "type": "string",
+                            "description": "The specific question to answer from the content."
+                        },
+                        "content": {
+                            "type": "string",
+                            "description": "The content to scan (file contents, logs, a large blob)."
+                        },
+                        "max_tokens": {
+                            "type": "integer",
+                            "description": "Optional response token cap (default 2048)."
+                        }
+                    },
+                    "required": ["question", "content"]
+                }
             }
         ]
     })
@@ -736,6 +780,24 @@ async fn handle_request(
                 return handle_route_capability(request, &arguments);
             }
 
+            // Worker delegation (#2): hand a unit of work to a worker model.
+            if tool_name == "sentinel__delegate_codex" {
+                return handle_delegate(
+                    request,
+                    &arguments,
+                    sentinel_application::delegation_service::Worker::Codex,
+                )
+                .await;
+            }
+            if tool_name == "sentinel__delegate_kimi_context_scan" {
+                return handle_delegate(
+                    request,
+                    &arguments,
+                    sentinel_application::delegation_service::Worker::Kimi,
+                )
+                .await;
+            }
+
             if tool_name == "sentinel__get_wip_snapshot" {
                 return match sentinel_application::wip_snapshot::read() {
                     Ok(Some(snap)) => JsonRpcResponse::success(
@@ -899,6 +961,83 @@ fn handle_route_capability(
             }),
         ),
     )
+}
+
+/// Handle `sentinel__delegate_codex` / `sentinel__delegate_kimi_context_scan`
+/// (#2). Hands a unit of work to a worker model via the standardized
+/// `OpenRouterLlm` path and returns the structured result.
+///
+/// Codex reads `task` + optional `context`; Kimi reads `question` + `content`
+/// (mapped onto the same `task`/`context` slots of the delegation request).
+async fn handle_delegate(
+    request: &JsonRpcRequest,
+    args: &serde_json::Value,
+    worker: sentinel_application::delegation_service::Worker,
+) -> JsonRpcResponse {
+    use sentinel_application::delegation_service::{
+        delegate, DelegationRequest, Worker, DEFAULT_MAX_TOKENS,
+    };
+
+    // Codex uses task/context; Kimi uses question/content. Normalize both onto
+    // the request's task/context fields.
+    let (task_key, ctx_key) = match worker {
+        Worker::Codex => ("task", "context"),
+        Worker::Kimi => ("question", "content"),
+    };
+    let Some(task) = args.get(task_key).and_then(|v| v.as_str()) else {
+        return JsonRpcResponse::success(
+            request.id.clone(),
+            mcp_tool_result(
+                false,
+                serde_json::json!({"error": format!("missing required argument: `{task_key}`")}),
+            ),
+        );
+    };
+    let context = args.get(ctx_key).and_then(|v| v.as_str()).unwrap_or("");
+    let max_tokens = args
+        .get("max_tokens")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|n| u32::try_from(n).ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(DEFAULT_MAX_TOKENS);
+
+    let llm = match sentinel_infrastructure::openrouter_llm::OpenRouterLlm::from_env() {
+        Ok(l) => l,
+        Err(e) => {
+            return JsonRpcResponse::success(
+                request.id.clone(),
+                mcp_tool_result(
+                    false,
+                    serde_json::json!({
+                        "error": format!("worker delegation unavailable: {e} (set OPENROUTER_API_KEY)")
+                    }),
+                ),
+            );
+        }
+    };
+
+    let req = DelegationRequest {
+        worker,
+        task: task.to_string(),
+        context: context.to_string(),
+        max_tokens,
+    };
+    match delegate(&llm, &req).await {
+        Ok(res) => JsonRpcResponse::success(
+            request.id.clone(),
+            mcp_tool_result(
+                true,
+                serde_json::json!({ "worker": res.worker, "output": res.output }),
+            ),
+        ),
+        Err(e) => JsonRpcResponse::success(
+            request.id.clone(),
+            mcp_tool_result(
+                false,
+                serde_json::json!({"error": format!("worker delegation failed: {e}")}),
+            ),
+        ),
+    }
 }
 
 /// Handle `sentinel__submit_phase_complete`

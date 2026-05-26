@@ -47,8 +47,12 @@ impl OpenRouterLlm {
     /// keep this adapter decoupled from the churning `JudgeModel` enum.
     const fn model_id(model: LlmModel) -> &'static str {
         match model {
-            LlmModel::Haiku => "openai/gpt-5.5-pro", // Codex tier
+            // Haiku tier historically maps to Codex; the explicit `Codex`
+            // delegation tier resolves to the same pinned model.
+            LlmModel::Haiku | LlmModel::Codex => "openai/gpt-5.5-pro",
             LlmModel::Sonnet | LlmModel::Opus => "anthropic/claude-opus-4.7", // no Sonnet in policy → Opus
+            // Kimi delegation tier — large-context, low-cost worker.
+            LlmModel::Kimi => "moonshotai/kimi-k2.6",
         }
     }
 }
