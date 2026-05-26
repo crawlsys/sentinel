@@ -39,6 +39,7 @@ METRICS_DIRS = [
     # session output and emits bridge-compatible records here.
     Path.home() / ".codex/sentinel/metrics",           # codex rollout shim
     Path.home() / ".opencode/sentinel/metrics",        # opencode log shim
+    Path.home() / ".qwen/sentinel/metrics",            # qwen chat shim
 ]
 HOOK_INVOCATIONS_PATHS = [d / "hook-invocations.jsonl" for d in METRICS_DIRS]
 SESSIONS_JSONL_PATHS   = [d / "sessions.jsonl"         for d in METRICS_DIRS]
