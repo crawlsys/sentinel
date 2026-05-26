@@ -4,9 +4,8 @@ name: test
 # currently sits on a Free plan and GitHub Actions refuses to start jobs on
 # private repos when Actions billing is in a failed / over-limit state.
 # Every push then posts a red "FAIL" check whose only annotation is the
-# billing message — not useful signal. Local `cargo test -p
-# sentinel-application --lib` is the source of truth until Actions is
-# restored.
+# billing message — not useful signal. Local `cargo clippy --workspace` +
+# `cargo test --workspace` is the source of truth until Actions is restored.
 #
 # To re-enable: set `CI_ENABLED=true` at
 #   https://github.com/garysomerhalder/sentinel/settings/variables/actions
@@ -23,9 +22,18 @@ on:
     branches: [main]
   workflow_dispatch:
 
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
-  unit:
-    name: cargo test -p sentinel-application --lib
+  # Full workspace gate — build (incl. test targets), clippy at the
+  # pedantic+nursery bar with -D warnings, and the whole test suite.
+  # Catches the failure modes a `-p <crate> --lib`-only run misses:
+  #   - a test target that does not COMPILE (we --all-targets build first)
+  #   - clippy regressions anywhere in the workspace
+  #   - a crate whose tests were never run because it wasn't named
+  workspace:
+    name: build + clippy + test (workspace)
     runs-on: ubuntu-latest
     if: ${{ github.event_name == 'workflow_dispatch' || vars.CI_ENABLED == 'true' }}
     steps:
@@ -39,5 +47,53 @@ jobs:
       - name: Cache cargo registry + build
         uses: Swatinem/rust-cache@v2
 
-      - name: Run unit tests
-        run: cargo test -p sentinel-application --lib
+      # Build every target (lib, bins, tests, examples) so a test module
+      # that fails to compile is a hard failure here — the exact gap that
+      # let a non-compiling test suite ship "green" before.
+      - name: cargo build --workspace --all-targets
+        run: cargo build --workspace --all-targets
+
+      - name: cargo clippy --workspace --all-targets -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: cargo test --workspace
+        run: cargo test --workspace
+
+  # The tools/ crates carry their OWN [workspace] tables (so the core
+  # workspace build can't drag them in), which means the job above does
+  # NOT cover them. Gate each detached tool crate explicitly so it can't
+  # escape the bar — sentinel-viz-api did exactly that and shipped a
+  # non-compiling test suite + 161 clippy warnings.
+  detached-tools:
+    name: build + clippy + test (detached tools/)
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'workflow_dispatch' || vars.CI_ENABLED == 'true' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        crate:
+          - tools/sentinel-viz-api
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo registry + build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ${{ matrix.crate }}
+
+      - name: build --all-targets (${{ matrix.crate }})
+        working-directory: ${{ matrix.crate }}
+        run: cargo build --all-targets
+
+      - name: clippy -D warnings (${{ matrix.crate }})
+        working-directory: ${{ matrix.crate }}
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: test (${{ matrix.crate }})
+        working-directory: ${{ matrix.crate }}
+        run: cargo test
