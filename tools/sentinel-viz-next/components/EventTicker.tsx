@@ -296,7 +296,19 @@ export function EventTicker({ events, onSelectNode, sessionColors, stuckMeta }: 
                 title={sessionColor ? `session ${row.sessionId?.slice(0, 8)}` : ""}
               />
               <div className="flex-1 min-w-0">
-              <div className="flex gap-2 items-baseline cursor-pointer" onClick={focus}>
+              <div
+                role="button"
+                tabIndex={0}
+                className="flex gap-2 items-baseline cursor-pointer"
+                onClick={focus}
+                onKeyDown={(e) => {
+                  if (e.target !== e.currentTarget) return;
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    focus();
+                  }
+                }}
+              >
                 {/* Actor glyph — disambiguates "who initiated this
                     event" at a glance: ◇ Claude, ⚙ Sentinel, ↩ user.
                     Fixed-width column so labels still line up.
@@ -359,7 +371,16 @@ export function EventTicker({ events, onSelectNode, sessionColors, stuckMeta }: 
                   {row.members.map((m, i) => (
                     <li
                       key={`${row.key}-m-${i}`}
+                      role={m.toolCallId ? "button" : undefined}
+                      tabIndex={m.toolCallId ? 0 : undefined}
                       onClick={() => m.toolCallId && onSelectNode(m.toolCallId, m.ts)}
+                      onKeyDown={(e) => {
+                        if (!m.toolCallId) return;
+                        if (e.key === "Enter" || e.key === " ") {
+                          e.preventDefault();
+                          onSelectNode(m.toolCallId, m.ts);
+                        }
+                      }}
                       className="py-0.5 text-[10px] text-[#c9d1d9] hover:text-[#58a6ff] cursor-pointer"
                     >
                       <TimeAgo ts={m.ts} className="text-[#6e7681] mr-2" />

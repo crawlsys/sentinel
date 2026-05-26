@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 
 import { SessionConsole } from "../../components/SessionConsole";
 import type { ActivityResponse, GraphResponse, Segment } from "../../types/api";

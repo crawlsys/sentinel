@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { EventTicker } from "../components/EventTicker";
 import { GraphCanvas } from "../components/GraphCanvas";
@@ -10,7 +10,7 @@ import { SettingsModal } from "../components/SettingsModal";
 import { StatusBar } from "../components/StatusBar";
 import { sessionColorMap } from "../lib/session-colors";
 import { useGraphStream } from "../lib/sse";
-import { maybeFireStuckAlert, stuckSessions } from "../lib/stuck";
+import { maybeFireStuckAlert, requestStuckNotificationPermission, stuckSessions } from "../lib/stuck";
 import { useAutoWatch } from "../lib/auto-watch";
 
 export default function Page() {
@@ -38,9 +38,17 @@ export default function Page() {
     return typeof sid === "string" ? sid : null;
   }, [selectedNode]);
 
-  // Sync the focus state so the SSE/initial-fetch loop re-issues
-  // with `focused_session=<sid>` whenever the selection changes.
+  // Sync the focus state so the SSE/initial-fetch loop re-issues with
+  // `focused_session=<sid>` whenever the selection changes. We mirror
+  // into state (rather than passing selectedSessionId straight to
+  // useGraphStream) so the last resolved sid survives graph ticks where
+  // the selected node hasn't landed in the snapshot yet. The ref guard
+  // ensures we only setState on an actual change — no cascading
+  // re-render from re-mirroring the same value every render.
+  const lastFocusRef = useRef<string | null>(null);
   useEffect(() => {
+    if (lastFocusRef.current === selectedSessionId) return;
+    lastFocusRef.current = selectedSessionId;
     setPendingFocusSession(selectedSessionId);
   }, [selectedSessionId]);
 
@@ -93,6 +101,10 @@ export default function Page() {
   }
 
   function focusFirstStuck() {
+    // This is a real user gesture (clicking the STUCK badge) — the one
+    // place we're allowed to request Notification permission. Fire-and-
+    // forget; the data-driven maybeFireStuckAlert only fires once granted.
+    void requestStuckNotificationPermission();
     if (stuck.length === 0) return;
     const first = stuck[0];
     const ts = typeof first.data?.started_at === "string" ? (first.data.started_at as string) : undefined;

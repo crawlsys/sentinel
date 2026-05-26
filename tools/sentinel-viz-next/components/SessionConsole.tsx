@@ -73,14 +73,19 @@ export function SessionConsole({
     if (paused) return;
     let cancelled = false;
     const sessionIds = focused ? [focused] : visibleSessionIds;
-    if (sessionIds.length === 0) {
-      setEntries([]);
-      return;
-    }
     const perSessionLimit = focused ? MAX_ENTRIES_FOCUSED : 6;
     const maxEntries = focused ? MAX_ENTRIES_FOCUSED : MAX_ENTRIES_MERGED;
 
     async function refresh() {
+      // No visible sessions → clear and skip the fetch entirely (the
+      // empty clear happens here, inside the async body, rather than
+      // synchronously in the effect body — the latter triggers a
+      // cascading-render lint error). Promise.allSettled([]) wouldn't
+      // call fetchActivity anyway, but skipping avoids the loading flash.
+      if (sessionIds.length === 0) {
+        if (!cancelled) setEntries([]);
+        return;
+      }
       setLoading(true);
       try {
         const responses = await Promise.allSettled(
@@ -112,11 +117,13 @@ export function SessionConsole({
         if (!cancelled) setLoading(false);
       }
     }
-    refresh();
-    const id = window.setInterval(refresh, REFRESH_INTERVAL_MS);
+    void refresh();
+    // Only poll while there's something to fetch.
+    const id =
+      sessionIds.length > 0 ? window.setInterval(refresh, REFRESH_INTERVAL_MS) : undefined;
     return () => {
       cancelled = true;
-      window.clearInterval(id);
+      if (id !== undefined) window.clearInterval(id);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionIdsKey, paused]);
@@ -128,8 +135,10 @@ export function SessionConsole({
       onMouseEnter={() => setPaused(true)}
       onMouseLeave={() => setPaused(false)}
     >
-      <div
-        className="flex items-center gap-2 px-3 py-1.5 cursor-pointer hover:bg-[#161b22]"
+      <button
+        type="button"
+        aria-expanded={open}
+        className="w-full text-left flex items-center gap-2 px-3 py-1.5 cursor-pointer hover:bg-[#161b22]"
         onClick={() => setOpen((o) => !o)}
       >
         <span className="text-[#6e7681]">{open ? "▼" : "▶"}</span>
@@ -169,7 +178,7 @@ export function SessionConsole({
           {entries.length} of last {focused ? MAX_ENTRIES_FOCUSED : MAX_ENTRIES_MERGED} ·{" "}
           {paused ? "paused (hover)" : "auto 8s"}
         </span>
-      </div>
+      </button>
       {open ? (
         <ul className="overflow-y-auto px-3 py-2 space-y-1.5" style={{ maxHeight: "26vh" }}>
           {entries.length === 0 ? (

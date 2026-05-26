@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { fetchConfig, setConfig } from "../lib/api";
 
@@ -27,19 +27,73 @@ export function SettingsModal({ open, onClose }: Props) {
   const [err, setErr] = useState<string | null>(null);
   const [savedAt, setSavedAt] = useState<number | null>(null);
 
+  // Dialog focus management.
+  const dialogRef = useRef<HTMLDivElement | null>(null);
+  const firstFieldRef = useRef<HTMLSelectElement | null>(null);
+  // The element focused before the modal opened, restored on close.
+  const triggerRef = useRef<Element | null>(null);
+
+  // Load config when the modal opens. setState only ever runs inside
+  // the async fetch callbacks (never synchronously in the effect body),
+  // and an AbortController prevents writes after unmount/close.
   useEffect(() => {
     if (!open) return;
-    setErr(null);
-    fetchConfig()
+    const abort = new AbortController();
+    fetchConfig(abort.signal)
       .then((c) => {
+        if (abort.signal.aborted) return;
         setCurrentModel(c.model);
         setCurrentHasKey(c.has_key);
         setPendingModel(c.model);
+        setErr(null);
       })
-      .catch((e) => setErr(String(e)));
+      .catch((e) => {
+        if (abort.signal.aborted) return;
+        const isAbort = e instanceof Error && e.name === "AbortError";
+        if (!isAbort) setErr(String(e));
+      });
+    return () => abort.abort();
+  }, [open]);
+
+  // Focus management: remember the trigger, focus the first field on
+  // open, restore focus to the trigger on close.
+  useEffect(() => {
+    if (!open) return;
+    triggerRef.current = document.activeElement;
+    firstFieldRef.current?.focus();
+    const trigger = triggerRef.current;
+    return () => {
+      if (trigger instanceof HTMLElement) trigger.focus();
+    };
   }, [open]);
 
   if (!open) return null;
+
+  // Trap Tab within the dialog and close on Escape.
+  function onKeyDown(e: React.KeyboardEvent<HTMLDivElement>) {
+    if (e.key === "Escape") {
+      e.stopPropagation();
+      onClose();
+      return;
+    }
+    if (e.key !== "Tab") return;
+    const root = dialogRef.current;
+    if (!root) return;
+    const focusable = root.querySelectorAll<HTMLElement>(
+      'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+    );
+    if (focusable.length === 0) return;
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    const active = document.activeElement;
+    if (e.shiftKey && active === first) {
+      e.preventDefault();
+      last.focus();
+    } else if (!e.shiftKey && active === last) {
+      e.preventDefault();
+      first.focus();
+    }
+  }
 
   const needsKey = pendingModel.startsWith("openai:");
   const canSave = !saving && pendingModel !== "" && (!needsKey || pendingKey.length > 0 || (currentHasKey && pendingModel === currentModel));
@@ -67,13 +121,16 @@ export function SettingsModal({ open, onClose }: Props) {
 
   return (
     <div
+      ref={dialogRef}
       role="dialog"
+      aria-modal="true"
       aria-label="settings"
       data-testid="settings-modal"
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/60"
       onClick={(e) => {
         if (e.target === e.currentTarget) onClose();
       }}
+      onKeyDown={onKeyDown}
     >
       <div className="bg-[#161b22] border border-[#30363d] rounded-lg w-[480px] max-w-[95vw] p-4 font-mono text-xs">
         <div className="flex items-baseline justify-between mb-3">
@@ -109,6 +166,7 @@ export function SettingsModal({ open, onClose }: Props) {
             naming + summary model
           </label>
           <select
+            ref={firstFieldRef}
             value={pendingModel}
             onChange={(e) => setPendingModel(e.target.value)}
             className="w-full bg-[#0d1117] border border-[#30363d] rounded px-2 py-1 text-[#c9d1d9]"
@@ -118,7 +176,7 @@ export function SettingsModal({ open, onClose }: Props) {
             ))}
           </select>
           <div className="text-[10px] text-[#6e7681] mt-1">
-            Used for session names, card summaries, and "what it's waiting on" text.
+            Used for session names, card summaries, and {"\"what it's waiting on\""} text.
           </div>
         </div>
 

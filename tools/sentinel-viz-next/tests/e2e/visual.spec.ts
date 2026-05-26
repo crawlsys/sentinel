@@ -1,9 +1,10 @@
 import { expect, test } from "@playwright/test";
 
 /// Visual QA. Takes screenshots of the main viz at multiple states.
-/// Outputs go to ~/.agents/scratch/sentinel-viz-shots/.
+/// Outputs go to `$SENTINEL_VIZ_SHOTS_DIR`, or Playwright's per-test
+/// output dir (testInfo.outputDir) when unset.
 test("visual QA: home page + node selection", async ({ page }, testInfo) => {
-  const shotsDir = "/home/kcrawley/.agents/scratch/sentinel-viz-shots";
+  const shotsDir = process.env.SENTINEL_VIZ_SHOTS_DIR ?? testInfo.outputDir;
 
   await page.setViewportSize({ width: 1600, height: 900 });
 
@@ -50,7 +51,10 @@ test("visual QA: home page + node selection", async ({ page }, testInfo) => {
     await page.screenshot({ path: `${shotsDir}/05-node-clicked.png`, fullPage: false });
   }
 
-  // Always succeed — this is a screenshot-only spec, not an assertion.
-  expect(true).toBe(true);
-  testInfo.attach("shots-dir", { body: shotsDir, contentType: "text/plain" });
+  // This is primarily a screenshot-capture spec, but assert something
+  // real so it can actually fail: the graph canvas must have mounted.
+  // (Previously this ended with `expect(true).toBe(true)`, which made
+  // the test pass even if the app never rendered.)
+  await expect(page.locator('svg[data-testid="graph-canvas"]')).toBeVisible();
+  await testInfo.attach("shots-dir", { body: shotsDir, contentType: "text/plain" });
 });

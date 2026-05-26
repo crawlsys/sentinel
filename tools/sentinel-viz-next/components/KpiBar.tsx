@@ -29,20 +29,23 @@ export function KpiBar() {
 
   useEffect(() => {
     let cancelled = false;
+    const abort = new AbortController();
     async function tick() {
       try {
-        const r = await fetch(`${apiBase()}/api/kpis`);
+        const r = await fetch(`${apiBase()}/api/kpis`, { signal: abort.signal });
         if (!r.ok) return;
         const data = (await r.json()) as Kpis;
         if (!cancelled) setKpis(data);
       } catch {
-        /* silent — status bar already shows API errors */
+        /* silent — status bar already shows API errors (includes
+           AbortError from unmount/interval-clear) */
       }
     }
     tick();
     const id = window.setInterval(tick, 5_000);
     return () => {
       cancelled = true;
+      abort.abort();
       window.clearInterval(id);
     };
   }, []);

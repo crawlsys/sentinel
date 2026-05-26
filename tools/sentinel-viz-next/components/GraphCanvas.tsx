@@ -9,8 +9,16 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { Edge, GraphResponse, Node } from "../types/api";
 import { nodeColor, statusColor } from "../lib/format";
 import { ensureName, subscribe as subscribeSessionNames } from "../lib/session-names";
+import {
+  type LayoutNode,
+  annotateChainRanks,
+  chainOpacity,
+  sessionLabel as sessionLabelPure,
+  spiralOffset,
+  tcLabel,
+} from "../lib/graph-layout";
 
-interface SimNode extends d3Force.SimulationNodeDatum {
+interface SimNode extends d3Force.SimulationNodeDatum, LayoutNode {
   id: string;
   kind: string;
   outcome?: string;
@@ -25,6 +33,11 @@ interface SimNode extends d3Force.SimulationNodeDatum {
   ref: Node;
 }
 
+/// Thin wrapper binding the pure label helper to the live names cache.
+function sessionLabel(d: SimNode): string {
+  return sessionLabelPure(d, ensureName);
+}
+
 /** Position assigned to a session within the viewport. The session
  *  bubble pins HERE; its TCs spiral outward from this point. */
 interface SessionAnchor {
@@ -32,21 +45,6 @@ interface SessionAnchor {
   /** Centre x/y in sim coordinates (sim is centred at 0,0). */
   cx: number;
   cy: number;
-}
-
-/// Golden-angle spiral step. Pi * (3 - sqrt(5)) ≈ 2.39996 rad ≈ 137.5°.
-/// Same constant sunflower seed-head spacing uses; gives evenly packed
-/// nodes with no two ever colliding angularly.
-const GOLDEN_ANGLE = Math.PI * (3 - Math.sqrt(5));
-/// Base spacing between adjacent TCs along the spiral.
-const SPIRAL_BASE_R = 22;
-
-function spiralOffset(rank: number): { dx: number; dy: number } {
-  // Rank 0 (chain head) sits very close to the centre; later ranks
-  // spiral outward proportional to sqrt(rank).
-  const r = SPIRAL_BASE_R * Math.sqrt(rank + 0.5);
-  const theta = rank * GOLDEN_ANGLE;
-  return { dx: Math.cos(theta) * r, dy: Math.sin(theta) * r };
 }
 
 interface SimLink extends d3Force.SimulationLinkDatum<SimNode> {
@@ -67,77 +65,6 @@ interface ViewportSize {
   height: number;
 }
 
-/** Label rendered next to a SentinelSession node. Asks the
- *  naming subsystem for a cached human name; falls back to UUID
- *  slice when naming is disabled or hasn't returned yet. */
-function sessionLabel(d: SimNode): string {
-  if (d.kind !== "SentinelSession") return "";
-  const sid = typeof d.ref.data?.session_id === "string" ? (d.ref.data.session_id as string) : d.id;
-  if (!sid) return "";
-  const named = ensureName(sid);
-  if (typeof named === "string" && named.length > 0) return named;
-  // Fall back to UUID slice (8 chars).
-  return sid.length > 12 ? `${sid.slice(0, 8)}…` : sid;
-}
-
-/** Label rendered next to a SentinelToolCall node. Only labels the
- *  last 5 TCs per session (the "recent chain") so the eye finds the
- *  active head; older calls in the chain are unlabelled and fade out. */
-function tcLabel(d: SimNode): string {
-  if (d.kind !== "SentinelToolCall") return "";
-  if (d.chainRank == null || d.chainRank > 4) return "";
-  const tool = typeof d.ref.data?.tool === "string" ? (d.ref.data.tool as string) : "";
-  if (!tool) return "";
-  return tool;
-}
-
-/** Opacity by chain rank. Head of the chain (rank 0) is full; each
- *  step back fades by ~0.12. After ~6 hops the node nearly disappears.
- *  Non-chain nodes (sessions, prompts) stay full. */
-function chainOpacity(d: SimNode): number {
-  if (d.chainRank == null) return 1.0;
-  return Math.max(0.18, 1.0 - d.chainRank * 0.14);
-}
-
-/** Compute per-TC chain rank by walking `next_tool_call` edges.
- *  Each session's chain is laid out chronologically; we walk from
- *  the tail (the TC that no `next_tool_call` points OUT FROM, i.e.
- *  the most-recent TC) and assign 0,1,2,... back along the chain. */
-function annotateChainRanks(nodes: SimNode[], links: SimLink[]): void {
-  // Build directed adjacency on next_tool_call edges only.
-  const inbound = new Map<string, string>(); // target → source
-  const outbound = new Map<string, string>(); // source → target
-  for (const l of links) {
-    if (l.kind !== "next_tool_call") continue;
-    const s = typeof l.source === "string" ? l.source : l.source.id;
-    const t = typeof l.target === "string" ? l.target : l.target.id;
-    inbound.set(t, s);
-    outbound.set(s, t);
-  }
-  // Tails of chains: TC nodes with inbound but no outbound (last in their session).
-  // We also seed isolated TCs with rank 0 so they get labelled if there are
-  // any non-chain TCs in the window.
-  for (const n of nodes) {
-    if (n.kind !== "SentinelToolCall") continue;
-    if (outbound.has(n.id)) continue;
-    // walk backwards assigning rank.
-    let cur: string | undefined = n.id;
-    let rank = 0;
-    const seen = new Set<string>();
-    while (cur && !seen.has(cur)) {
-      seen.add(cur);
-      const node = nodes.find((x) => x.id === cur);
-      if (!node) break;
-      // Only assign if this is the smallest rank we've seen for this node.
-      if (node.chainRank == null || rank < node.chainRank) {
-        node.chainRank = rank;
-      }
-      cur = inbound.get(cur);
-      rank += 1;
-    }
-  }
-}
-
 export function GraphCanvas({ graph, selectedNodeId, onSelectNode, sessionColors }: Props) {
   const svgRef = useRef<SVGSVGElement | null>(null);
   const gRef = useRef<SVGGElement | null>(null);
@@ -145,12 +72,22 @@ export function GraphCanvas({ graph, selectedNodeId, onSelectNode, sessionColors
   const zoomRef = useRef<d3Zoom.ZoomBehavior<SVGSVGElement, unknown> | null>(null);
   const nodesRef = useRef<SimNode[]>([]);
   const linksRef = useRef<SimLink[]>([]);
+  // Latest onSelectNode kept in a ref so the d3 click handler (bound
+  // once at sim setup) always calls the freshest callback without
+  // rebinding. Updated in an effect — writing a ref during render is
+  // disallowed by the React rules lint.
   const onSelectRef = useRef(onSelectNode);
-  onSelectRef.current = onSelectNode;
+  useEffect(() => {
+    onSelectRef.current = onSelectNode;
+  }, [onSelectNode]);
   // Session anchor map kept in a ref so the d3 forces (set up once,
   // accessor closures) can read the freshest value without rebuilding
   // the sim on every data change.
   const anchorsRef = useRef<Map<string, SessionAnchor>>(new Map());
+  // Pending click-burst removal timers. Tracked so we can clear them on
+  // unmount (and when the selection effect re-runs) — otherwise a fast
+  // unmount leaves setTimeout callbacks that touch removed d3 selections.
+  const burstTimersRef = useRef<Set<number>>(new Set());
   const [viewport, setViewport] = useState<ViewportSize>({ width: 0, height: 0 });
   // Bump on every session-name arrival so labels redraw.
   const [nameTick, setNameTick] = useState(0);
@@ -315,6 +252,12 @@ export function GraphCanvas({ graph, selectedNodeId, onSelectNode, sessionColors
     const g = select(gRef.current);
 
     const prev = new Map(nodesRef.current.map((n) => [n.id, n]));
+    // Capture the PREVIOUS edge set now, before linksRef.current is
+    // reassigned to desired.links below — otherwise the new-edge check
+    // compares desired.links against itself and is always false.
+    const edgeKey = (l: SimLink) =>
+      `${typeof l.source === "string" ? l.source : l.source.id}|${typeof l.target === "string" ? l.target : l.target.id}|${l.kind}`;
+    const prevEdgeKeys = new Set(linksRef.current.map(edgeKey));
     const nextNodes: SimNode[] = desired.nodes.map((n) => {
       const old = prev.get(n.id);
       if (old) {
@@ -381,17 +324,7 @@ export function GraphCanvas({ graph, selectedNodeId, onSelectNode, sessionColors
     // loop perpetually warm for ~4s after each restart.
     const prevIds = prev;
     const newNodeArrived = nextNodes.some((n) => !prevIds.has(n.id));
-    const prevEdgeKeys = new Set(
-      linksRef.current.map(
-        (l) => `${typeof l.source === "string" ? l.source : l.source.id}|${typeof l.target === "string" ? l.target : l.target.id}|${l.kind}`,
-      ),
-    );
-    const newEdgeArrived = desired.links.some(
-      (l) =>
-        !prevEdgeKeys.has(
-          `${typeof l.source === "string" ? l.source : l.source.id}|${typeof l.target === "string" ? l.target : l.target.id}|${l.kind}`,
-        ),
-    );
+    const newEdgeArrived = desired.links.some((l) => !prevEdgeKeys.has(edgeKey(l)));
     if (newNodeArrived || newEdgeArrived || nodesRef.current.length === 0) {
       // First paint OR genuine topology change → warm the sim.
       sim.alpha(0.18).restart();
@@ -497,7 +430,7 @@ export function GraphCanvas({ graph, selectedNodeId, onSelectNode, sessionColors
         },
         (exit) => exit.remove(),
       );
-  }, [desired]);
+  }, [desired, sessionColors]);
 
   // Initial centring once viewport is known and graph has nodes.
   const initialPanRef = useRef(false);
@@ -514,9 +447,22 @@ export function GraphCanvas({ graph, selectedNodeId, onSelectNode, sessionColors
     initialPanRef.current = true;
   }, [viewport.width, viewport.height, desired]);
 
+  // Clear any pending click-burst timers on unmount.
+  useEffect(() => {
+    const timers = burstTimersRef.current;
+    return () => {
+      for (const id of timers) window.clearTimeout(id);
+      timers.clear();
+    };
+  }, []);
+
   // Highlight + pan to the selected node, plus one-shot click-burst.
   useEffect(() => {
     if (!gRef.current || !svgRef.current) return;
+    // Drop timers from a prior run — their bursts are about to be
+    // re-created or removed below anyway.
+    for (const id of burstTimersRef.current) window.clearTimeout(id);
+    burstTimersRef.current.clear();
     select(gRef.current)
       .selectAll<SVGGElement, SimNode>("g.node")
       .each(function (d) {
@@ -550,7 +496,11 @@ export function GraphCanvas({ graph, selectedNodeId, onSelectNode, sessionColors
           // One-shot burst on top (animates outward 0.7s).
           const burst = grp.append("g").attr("class", "click-burst");
           burst.append("circle").attr("cx", 0).attr("cy", 0);
-          window.setTimeout(() => burst.remove(), 800);
+          const timerId = window.setTimeout(() => {
+            burst.remove();
+            burstTimersRef.current.delete(timerId);
+          }, 800);
+          burstTimersRef.current.add(timerId);
         }
       });
 

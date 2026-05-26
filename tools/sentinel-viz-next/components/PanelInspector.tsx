@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 
 import type { Node } from "../types/api";
@@ -95,6 +95,16 @@ export function PanelInspector({ node, anchorTs, onClose }: Props) {
     if (sessionId && activityQ.data) indexActivity(sessionId, activityQ.data);
   }, [sessionId, activityQ.data]);
 
+  // "Now", used to roll the relative "last activity" timestamp forward.
+  // Lazy initializer keeps Date.now() out of the render body (calling it
+  // during render is impure); the interval refreshes it every 5s so the
+  // displayed age stays live. Same pattern as EventTicker's <TimeAgo>.
+  const [now, setNow] = useState<number>(() => Date.now());
+  useEffect(() => {
+    const id = window.setInterval(() => setNow(Date.now()), 5_000);
+    return () => window.clearInterval(id);
+  }, []);
+
   const summaryKind: "wait" | "card" = node?.session_status === "awaiting_user" ? "wait" : "card";
   const summaryQ = useQuery({
     queryKey: ["summary", sessionId, anchorTs ?? null, summaryKind],
@@ -148,7 +158,7 @@ export function PanelInspector({ node, anchorTs, onClose }: Props) {
           </div>
         ) : null}
         {node.last_activity_age_s != null ? (
-          <Row k="last activity" v={relTime(new Date(Date.now() - node.last_activity_age_s * 1000).toISOString())} />
+          <Row k="last activity" v={relTime(new Date(now - node.last_activity_age_s * 1000).toISOString())} />
         ) : null}
         {typeof node.data?.session_id === "string" ? (
           <Row k="session" v={(node.data.session_id as string).slice(0, 12) + "…"} />

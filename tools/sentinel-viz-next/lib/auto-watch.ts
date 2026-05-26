@@ -43,7 +43,11 @@ export interface AutoWatchAPI {
 export function useAutoWatch(defaultOn: boolean = false): AutoWatchAPI {
   const [on, setOnState] = useState<boolean>(defaultOn);
   const [reason, setReason] = useState<AutoWatchAPI["reason"]>("operator");
-  const lastInteractionAt = useRef<number>(Date.now());
+  // 0 is a sentinel meaning "not yet initialised"; the mount effect
+  // seeds the real Date.now() so the idle clock starts from when the
+  // hook actually mounted (not from render, which React rules forbid —
+  // Date.now() is impure). The idle poll skips while this is 0.
+  const lastInteractionAt = useRef<number>(0);
   const onRef = useRef<boolean>(defaultOn);
   const lastOperatorSetAt = useRef<number>(0);
 
@@ -61,6 +65,10 @@ export function useAutoWatch(defaultOn: boolean = false): AutoWatchAPI {
 
   useEffect(() => {
     if (typeof window === "undefined") return;
+
+    // Seed the idle clock on mount. Doing it here (not at render) keeps
+    // the ref initialiser pure per React's rules.
+    lastInteractionAt.current = Date.now();
 
     function withinIgnoredControl(target: EventTarget | null): boolean {
       if (!(target instanceof Element)) return false;
@@ -97,6 +105,9 @@ export function useAutoWatch(defaultOn: boolean = false): AutoWatchAPI {
     window.addEventListener("focus", onFocus);
 
     const idleCheckId = window.setInterval(() => {
+      // Skip while uninitialised (mount seed runs above before the
+      // first poll, but guard defensively against the 0 sentinel).
+      if (lastInteractionAt.current === 0) return;
       const idleFor = Date.now() - lastInteractionAt.current;
       if (idleFor >= IDLE_MS && !onRef.current) applyState(true, "idle");
     }, IDLE_POLL_MS);
