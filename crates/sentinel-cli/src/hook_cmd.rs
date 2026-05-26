@@ -12,7 +12,9 @@ use sentinel_domain::state::SessionState;
 use sentinel_domain::workflow::{SkillSteps, SkillWorkflow};
 
 use sentinel_domain::capability::VendorClass;
-use sentinel_domain::ports::{AuditorPort, LlmPort, VectorStorePort};
+use sentinel_domain::ports::{
+    AuditorPort, LlmPort, ReversibilityClassifierPort, VectorStorePort,
+};
 use sentinel_infrastructure::ba_config::BaEnforcementConfig;
 use sentinel_infrastructure::capability_router::TomlCapabilityRouter;
 use sentinel_infrastructure::dry_run_auditor::RigAuditor;
@@ -21,6 +23,9 @@ use sentinel_infrastructure::memory_mcp_client::MemoryMcpClient;
 use sentinel_infrastructure::provenance_store::JsonlProvenanceStore;
 use sentinel_infrastructure::requirement_matrix::FilesystemRequirementMatrix;
 use sentinel_infrastructure::reversibility::LayeredReversibilityClassifier;
+use sentinel_infrastructure::spec_challenge_config::SpecChallengeConfig;
+use sentinel_infrastructure::spec_challenge_scorer::LlmSpecChallengeScorer;
+use sentinel_infrastructure::spec_challenge_store::FilesystemSpecChallengeStore;
 use std::sync::Arc;
 
 pub async fn run(event: &str, matcher: Option<&str>, standalone: bool) -> Result<()> {
@@ -318,6 +323,60 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
                 None
             }
         };
+    // A13 spec-challenge store — persists the agent's SpecChallenge for
+    // proof-chain re-verification. Optional: a missing store leaves the
+    // gate inert (it still runs its deterministic completeness check, it
+    // just can't persist).
+    let spec_challenge_store: Option<Arc<FilesystemSpecChallengeStore>> =
+        match FilesystemSpecChallengeStore::with_default_path() {
+            Ok(s) => Some(Arc::new(s)),
+            Err(err) => {
+                tracing::info!(
+                    ?err,
+                    "FilesystemSpecChallengeStore::with_default_path failed; A13 spec-challenge persistence inert"
+                );
+                None
+            }
+        };
+    // A13 semantic scorer — only consulted for Catastrophic-class work
+    // (or Irreversible under StrictBlocking). `from_env` returns Err →
+    // None when the scorer env isn't configured, which is the inert
+    // path; under the shipped ObserveOnly mode the scorer is never
+    // called, so its absence never matters until an operator opts into
+    // blocking. Mirrors the A3 auditor's env-gated construction.
+    let spec_challenge_scorer: Option<Arc<LlmSpecChallengeScorer>> =
+        match LlmSpecChallengeScorer::from_env() {
+            Ok(s) => Some(Arc::new(s)),
+            Err(err) => {
+                tracing::info!(
+                    ?err,
+                    "LlmSpecChallengeScorer::from_env unavailable; A13 semantic scoring inert (fine under ObserveOnly)"
+                );
+                None
+            }
+        };
+    // A13 enforcement config — shipped default is ObserveOnly (no
+    // blocking; telemetry only), overridable via
+    // ~/.claude/sentinel/config/spec-challenge.toml. Mirrors the
+    // BA1+3 ba-enforcement config below.
+    let spec_challenge_overrides_path = dirs::home_dir().map(|h| {
+        h.join(".claude")
+            .join("sentinel")
+            .join("config")
+            .join("spec-challenge.toml")
+    });
+    let spec_challenge_config = match SpecChallengeConfig::with_shipped_and_overrides(
+        spec_challenge_overrides_path.as_deref(),
+    ) {
+        Ok(c) => c,
+        Err(err) => {
+            tracing::warn!(
+                ?err,
+                "spec-challenge.toml load failed; falling back to ObserveOnly for the A13 gate"
+            );
+            SpecChallengeConfig::observe_only()
+        }
+    };
     // Load BA1+3 enforcement config: shipped defaults (both
     // ObserveOnly) overridden by operator-supplied
     // ~/.claude/sentinel/config/ba-enforcement.toml.
@@ -384,6 +443,7 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
                 a3_enabled,
                 provenance_store.as_deref(),
                 requirement_matrix.as_deref(),
+                spec_challenge_store.as_deref(),
                 &ba_enforcement,
                 &constitution_rules,
                 repo_root_for_metrics.as_deref(),
@@ -1213,6 +1273,7 @@ fn handle_pre_tool_use(
     a3_enabled: bool,
     provenance_store: Option<&JsonlProvenanceStore>,
     requirement_matrix: Option<&FilesystemRequirementMatrix>,
+    spec_challenge_store: Option<&FilesystemSpecChallengeStore>,
     ba_enforcement: &BaEnforcementConfig,
     constitution_rules: &[sentinel_application::constitution_gate_runtime::Rule],
     repo_root: Option<&str>,
@@ -1296,6 +1357,33 @@ fn handle_pre_tool_use(
                 )
             });
         output.merge(&trace_output);
+    }
+
+    // A13 spec_challenge_gate — reversibility-class-graded completeness
+    // check on the agent's SpecChallenge (input.extra.spec_challenge).
+    // Self-gates: TriviallyReversible work skips, non-A13 tools without a
+    // challenge pass through. The reversibility class is computed from the
+    // same classifier the other gates use. Ships in ObserveOnly — it never
+    // blocks; findings are logged for telemetry while the challenge corpus
+    // builds. Flip to DefaultBlocking once rollout posture allows.
+    {
+        let tool_input_val = input
+            .tool_input
+            .clone()
+            .unwrap_or(serde_json::Value::Null);
+        let class = reversibility_classifier
+            .classify(input.tool_name.as_deref().unwrap_or(""), &tool_input_val);
+        let scorer: Option<&dyn sentinel_domain::ports::SpecChallengeScorerPort> = None;
+        let spec_output = time_and_record(ctx.fs, &mk_ctx("spec_challenge_gate"), || {
+            hooks::spec_challenge_gate::process(
+                input,
+                class,
+                spec_challenge_store.map(|s| s as &dyn sentinel_domain::ports::SpecChallengeStorePort),
+                scorer,
+                hooks::spec_challenge_gate::A13EnforcementMode::ObserveOnly,
+            )
+        });
+        output.merge(&spec_output);
     }
 
     // A3 dry-run-then-commit gate — fires for ALL tools (the hook
