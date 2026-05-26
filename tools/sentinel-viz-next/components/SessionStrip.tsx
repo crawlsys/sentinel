@@ -169,23 +169,63 @@ export function SessionStrip({ data, selected, onSelect }: Props) {
             ) : null}
           </div>
         ) : null}
-        {/* Stuck banner — only when the session is in awaiting_user
-            past the stuck threshold. Mirrors the EventTicker's
-            stuck-reason line styling. Includes the AI "what it's
-            waiting on" rollup when available — operator gets both
-            the raw question and the LLM rollup in one line. */}
+        {/* Stuck callout — P3-34: restored the v1 viz's red-
+            bordered prominent box that includes BOTH the AI
+            "what it's waiting on" rollup AND the raw question.
+            Operator screenshot review: "it's completely unclear
+            what is stuck here, we used to get a red or yellow
+            highlighted box with the AI summary of what needed to
+            happen to unblock the stuckness". The one-line banner
+            was too easy to miss.
+            Structure:
+              ⚠ STUCK 57m · AskUserQuestion
+              ai  Operator should acknowledge burst status and
+                  confirm idling…   ← LLM rollup of what's needed
+              raw  Status reported. Burst healthy, no… ← raw text
+        */}
         {data.stuck ? (
           <div
             data-testid="session-strip-stuck"
-            className="mt-1 text-[10px] font-bold text-[#f85149] truncate"
-            title={data.stuck.question ?? data.stuck.kind ?? "awaiting"}
+            className="mt-1.5 rounded border border-[#f85149] bg-[#3a0f0f33] p-2 space-y-1"
           >
-            ⚠ STUCK {formatStuckAge(data.stuck.ageSecs)} ·{" "}
-            {data.stuck.kind ?? "awaiting"}
+            <div className="text-[10px] font-bold text-[#f85149] flex items-baseline gap-1.5 flex-wrap">
+              <span>⚠ STUCK</span>
+              <span className="text-[#ffa198]">{formatStuckAge(data.stuck.ageSecs)}</span>
+              <span className="text-[#ffa198]">·</span>
+              <span className="text-[#ffa198]">{data.stuck.kind ?? "awaiting"}</span>
+            </div>
+            {/* AI "what needs to happen" rollup. Only renders
+                when we have actual text — falls back to a hint
+                otherwise so the operator can tell pending from
+                disabled. */}
+            {summaryAvailable ? (
+              <div
+                data-testid="session-strip-stuck-ai"
+                className="text-[10px] text-[#ffa198] leading-snug"
+                title={summaryText}
+              >
+                <span className="uppercase tracking-wider text-[9px] text-[#f85149] mr-1">
+                  ai
+                </span>
+                {summaryText}
+              </div>
+            ) : summaryQ.isPending ? (
+              <div className="text-[10px] text-[#7d3434] italic leading-snug">
+                <span className="uppercase tracking-wider text-[9px] mr-1">ai</span>
+                generating "what's needed"…
+              </div>
+            ) : null}
+            {/* Raw question — always shown when present.
+                Operators sometimes need to see the literal text the
+                agent asked, not just the LLM rollup. Multi-line so
+                long questions don't get truncated. */}
             {data.stuck.question ? (
-              <span className="font-normal text-[#ffa198] ml-1">
-                — {data.stuck.question.length > 90 ? `${data.stuck.question.slice(0, 88)}…` : data.stuck.question}
-              </span>
+              <div className="text-[10px] text-[#c9d1d9] leading-snug">
+                <span className="uppercase tracking-wider text-[9px] text-[#8b949e] mr-1">
+                  raw
+                </span>
+                {data.stuck.question}
+              </div>
             ) : null}
           </div>
         ) : null}

@@ -121,8 +121,18 @@ export function buildSessionStrips(
 
   // Build the SessionStripData[] sorted by recency (last activity
   // age ascending — freshest at the top).
+  //
+  // P3-34: STUCK sessions are ALWAYS included even when they have
+  // zero events in the window. By definition they're stuck because
+  // the operator hasn't responded — so the agent's last event is
+  // probably outside the window. Filtering them out hides exactly
+  // the rows the operator needs to act on. Synthesise an empty
+  // category set so the strip renders with just the stuck banner.
   const out: SessionStripData[] = [];
+  const stuckSids = new Set<string>(opts.stuck ? Array.from(opts.stuck.keys()) : []);
+  const seenSids = new Set<string>();
   for (const [sid, byCat] of perSession) {
+    seenSids.add(sid);
     const node = sessionNodes.get(sid);
     const rows: SessionStripCategoryRow[] = [];
     let totalEvents = 0;
@@ -137,7 +147,7 @@ export function buildSessionStrips(
       totalEvents += total;
       if (peak > peakPerMin) peakPerMin = peak;
     }
-    if (totalEvents === 0) continue;
+    if (totalEvents === 0 && !stuckSids.has(sid)) continue;
 
     const status = node?.session_status ?? null;
     const lastActivityAgeS = node?.last_activity_age_s ?? null;
@@ -159,6 +169,31 @@ export function buildSessionStrips(
       totalEvents,
       peakPerMin,
     });
+  }
+
+  // P3-34 (cont'd): backfill stuck sessions that had ZERO events
+  // in the window. They never made it into `perSession` so the
+  // loop above didn't visit them. Render with an empty category
+  // list — the stuck banner is the whole point of showing them.
+  if (opts.stuck) {
+    for (const [sid, _meta] of opts.stuck) {
+      if (seenSids.has(sid)) continue;
+      const node = sessionNodes.get(sid);
+      out.push({
+        sessionId: sid,
+        displayName: opts.names?.get(sid)
+          ? `${opts.names.get(sid)} · s:${sid.slice(0, 8)}`
+          : `s:${sid.slice(0, 8)}`,
+        shortSid: sid.slice(0, 8),
+        color: opts.colors.get(sid) ?? "#6e7681",
+        status: node?.session_status ?? "awaiting_user",
+        lastActivityAgeS: node?.last_activity_age_s ?? null,
+        stuck: opts.stuck.get(sid) ?? null,
+        rows: [],
+        totalEvents: 0,
+        peakPerMin: 0,
+      });
+    }
   }
 
   out.sort((a, b) => {

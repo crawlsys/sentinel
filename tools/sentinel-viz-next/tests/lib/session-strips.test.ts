@@ -140,6 +140,30 @@ describe("buildSessionStrips", () => {
     expect(strips.map((s) => s.sessionId)).toEqual(["sess-a"]);
   });
 
+  it("stuck sessions render even when they have ZERO events in the window (P3-34)", () => {
+    // Stuck session = operator hasn't responded for >15min, so its
+    // newest event is necessarily older than recent windows. Strip
+    // MUST still appear so operator can act.
+    const events: RecentEvent[] = []; // empty — no events in window
+    const stuck = new Map([
+      [
+        "sess-stuck",
+        { ageSecs: 3600, kind: "reply" as string | null, question: "are we good?" as string | null },
+      ],
+    ]);
+    const strips = buildSessionStrips(graphOf(events), {
+      windowMinutes: 60,
+      colors: COLOR_MAP,
+      stuck,
+      now: NOW,
+    });
+    expect(strips).toHaveLength(1);
+    expect(strips[0].sessionId).toBe("sess-stuck");
+    expect(strips[0].stuck?.question).toBe("are we good?");
+    expect(strips[0].rows).toEqual([]);
+    expect(strips[0].totalEvents).toBe(0);
+  });
+
   it("sorts strips with stuck sessions first, then by last_activity_age ascending", () => {
     const events: RecentEvent[] = [
       tcEvent(1, "sess-a", "Bash", 1), // 30s old, firing

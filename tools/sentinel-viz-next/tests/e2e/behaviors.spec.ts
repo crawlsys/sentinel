@@ -258,6 +258,27 @@ test("session strips panel renders + window selector flips between 15m/30m/1h/3h
   expect(text).toMatch(/last\s+6h/i);
 });
 
+test("stuck sessions render a prominent callout with AI + raw question (P3-34)", async ({
+  page,
+}) => {
+  await waitGraphReady(page);
+  const callout = page.getByTestId("session-strip-stuck").first();
+  if ((await callout.count()) === 0) {
+    test.skip(true, "no stuck sessions in current DB");
+    return;
+  }
+  await expect(callout).toBeVisible();
+  // Callout should be tall — multi-line, not the old one-liner.
+  const box = await callout.boundingBox();
+  expect(box?.height ?? 0).toBeGreaterThan(40);
+  // Carries STUCK + kind + (eventually) the AI rollup.
+  const text = (await callout.textContent()) ?? "";
+  expect(text).toContain("STUCK");
+  // The raw question must be present (we never hide it even when
+  // AI is loading or unavailable).
+  expect(text.toLowerCase()).toMatch(/raw/);
+});
+
 test("session strips show AI summaries when the LLM is configured (P3-32)", async ({ page }) => {
   await waitGraphReady(page);
   // Bump to 6h so any DB snapshot has at least one active session.
