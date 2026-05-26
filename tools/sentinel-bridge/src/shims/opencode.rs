@@ -128,9 +128,16 @@ pub fn run_once() -> Result<usize> {
     }
 
     // 2. New messages → UserPromptSubmit for role=user.
+    //
+    // BUG-FIX: previously SELECT'd only time_created, then updated
+    // the watermark from t_created. But the WHERE filter is on
+    // time_updated. If time_created < time_updated for the row at
+    // the watermark boundary, max(t_created) never crossed prior,
+    // so the same row was emitted on every poll (with a fresh
+    // trace_id each time — bridge dedup couldn't catch it).
     {
         let mut stmt = conn.prepare(
-            "SELECT m.id, m.session_id, m.time_created, m.data, s.directory
+            "SELECT m.id, m.session_id, m.time_created, m.time_updated, m.data, s.directory
              FROM message m
              LEFT JOIN session s ON s.id = m.session_id
              WHERE m.time_updated > ? ORDER BY m.time_updated",
@@ -141,13 +148,14 @@ pub fn run_once() -> Result<usize> {
                 r.get::<_, String>(0)?,
                 r.get::<_, String>(1)?,
                 r.get::<_, i64>(2)?,
-                r.get::<_, Option<String>>(3)?,
+                r.get::<_, i64>(3)?,
                 r.get::<_, Option<String>>(4)?,
+                r.get::<_, Option<String>>(5)?,
             ))
         })?;
         let mut max_msg = state.message_last_updated;
         for row in rows {
-            let (_mid, sid, t_created, data_raw, dir) = row?;
+            let (_mid, sid, t_created, t_updated, data_raw, dir) = row?;
             let parsed: Value = data_raw
                 .as_deref()
                 .and_then(|s| serde_json::from_str(s).ok())
@@ -166,7 +174,7 @@ pub fn run_once() -> Result<usize> {
                 )?;
                 emitted += 1;
             }
-            max_msg = max_msg.max(t_created);
+            max_msg = max_msg.max(t_updated);
         }
         state.message_last_updated = max_msg;
     }
