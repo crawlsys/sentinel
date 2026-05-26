@@ -427,12 +427,24 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
                 );
             }
 
+            let mk_ctx = |hook: &'static str| InvocationContext {
+                event: "SessionStart",
+                hook,
+                tool: None,
+                session_id: input.session_id.as_deref(),
+                repo_root: repo_root_for_metrics.as_deref(),
+            };
+
             // Session init — log session, sync marketplace repo, inject startup context
-            let init_output = hooks::session_init::process(&input, &ctx);
+            let init_output = time_and_record(ctx.fs, &mk_ctx("session_init"), || {
+                hooks::session_init::process(&input, &ctx)
+            });
             output.merge(&init_output);
 
             // Task rehydrate — inject persistent tasks from previous sessions
-            let rehydrate_output = hooks::task_rehydrate::process(&input, &ctx);
+            let rehydrate_output = time_and_record(ctx.fs, &mk_ctx("task_rehydrate"), || {
+                hooks::task_rehydrate::process(&input, &ctx)
+            });
             output.merge(&rehydrate_output);
 
             // Memory verify removed from SessionStart — Qdrant HTTP calls blocked
@@ -440,17 +452,31 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
             // non-critical path) where latency doesn't affect user experience.
 
             // Dependency freshness check — detect outdated deps (any language)
-            let dep_output = hooks::dep_check::process(&input, &ctx);
+            let dep_output = time_and_record(ctx.fs, &mk_ctx("dep_check"), || {
+                hooks::dep_check::process(&input, &ctx)
+            });
             output.merge(&dep_output);
         }
 
         HookEvent::PreCompact => {
+            let mk_ctx = |hook: &'static str| InvocationContext {
+                event: "PreCompact",
+                hook,
+                tool: None,
+                session_id: input.session_id.as_deref(),
+                repo_root: repo_root_for_metrics.as_deref(),
+            };
+
             // Pre-compact snapshot — save session state before context compaction
-            let compact_output = hooks::pre_compact::process(&input, &ctx);
+            let compact_output = time_and_record(ctx.fs, &mk_ctx("pre_compact"), || {
+                hooks::pre_compact::process(&input, &ctx)
+            });
             output.merge(&compact_output);
 
             // Session index — upsert transcript exchanges to Qdrant for search
-            let index_output = hooks::session_index::process(&input, &ctx);
+            let index_output = time_and_record(ctx.fs, &mk_ctx("session_index"), || {
+                hooks::session_index::process(&input, &ctx)
+            });
             output.merge(&index_output);
 
             // Memory verify — re-check stored memories against ground truth
@@ -458,54 +484,128 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
             // Qdrant + LLM). Moved here from SessionStart on 2026-04 because
             // verification blocked startup 5-20s; PreCompact is the right
             // home — background, non-critical, runs once per long session.
-            let verify_output = hooks::memory_verify::process(&input, &ctx);
+            let verify_output = time_and_record(ctx.fs, &mk_ctx("memory_verify"), || {
+                hooks::memory_verify::process(&input, &ctx)
+            });
             output.merge(&verify_output);
         }
 
         HookEvent::TeammateIdle => {
             // Team quality gate — remind teammate to check for remaining work
-            let idle_output = hooks::teammate_idle::process(&input, &ctx);
+            let idle_output = time_and_record(
+                ctx.fs,
+                &InvocationContext {
+                    event: "TeammateIdle",
+                    hook: "teammate_idle",
+                    tool: None,
+                    session_id: input.session_id.as_deref(),
+                    repo_root: repo_root_for_metrics.as_deref(),
+                },
+                || hooks::teammate_idle::process(&input, &ctx),
+            );
             output.merge(&idle_output);
         }
 
         HookEvent::TaskCompleted => {
+            let mk_ctx = |hook: &'static str| InvocationContext {
+                event: "TaskCompleted",
+                hook,
+                tool: None,
+                session_id: input.session_id.as_deref(),
+                repo_root: repo_root_for_metrics.as_deref(),
+            };
+
             // Task verification gate — verify work before marking complete
-            let completed_output = hooks::task_completed::process(&input, &ctx);
+            let completed_output = time_and_record(ctx.fs, &mk_ctx("task_completed"), || {
+                hooks::task_completed::process(&input, &ctx)
+            });
             output.merge(&completed_output);
 
             // Task persist — snapshot task list to persistent markdown + JSON
-            let persist_output = hooks::task_persist::process(&input, &ctx);
+            let persist_output = time_and_record(ctx.fs, &mk_ctx("task_persist"), || {
+                hooks::task_persist::process(&input, &ctx)
+            });
             output.merge(&persist_output);
         }
 
         // ── New events added from Claude Code v2.1.88 source analysis ──
         HookEvent::SessionEnd => {
             // Session cleanup — flush state, log session end (1.5s timeout!)
-            let end_output = hooks::session_end::process(&input, &ctx);
+            let end_output = time_and_record(
+                ctx.fs,
+                &InvocationContext {
+                    event: "SessionEnd",
+                    hook: "session_end",
+                    tool: None,
+                    session_id: input.session_id.as_deref(),
+                    repo_root: repo_root_for_metrics.as_deref(),
+                },
+                || hooks::session_end::process(&input, &ctx),
+            );
             output.merge(&end_output);
         }
 
         HookEvent::PostCompact => {
             // Restore critical state after context compaction
-            let compact_output = hooks::post_compact::process(&input, &ctx);
+            let compact_output = time_and_record(
+                ctx.fs,
+                &InvocationContext {
+                    event: "PostCompact",
+                    hook: "post_compact",
+                    tool: None,
+                    session_id: input.session_id.as_deref(),
+                    repo_root: repo_root_for_metrics.as_deref(),
+                },
+                || hooks::post_compact::process(&input, &ctx),
+            );
             output.merge(&compact_output);
         }
 
         HookEvent::SubagentStart => {
             // Inject skill context into spawned agents
-            let subagent_output = hooks::subagent_start::process(&input, &ctx);
+            let subagent_output = time_and_record(
+                ctx.fs,
+                &InvocationContext {
+                    event: "SubagentStart",
+                    hook: "subagent_start",
+                    tool: None,
+                    session_id: input.session_id.as_deref(),
+                    repo_root: repo_root_for_metrics.as_deref(),
+                },
+                || hooks::subagent_start::process(&input, &ctx),
+            );
             output.merge(&subagent_output);
         }
 
         HookEvent::SubagentStop => {
             // Log agent completion for telemetry
-            let subagent_output = hooks::subagent_stop::process(&input, &ctx);
+            let subagent_output = time_and_record(
+                ctx.fs,
+                &InvocationContext {
+                    event: "SubagentStop",
+                    hook: "subagent_stop",
+                    tool: None,
+                    session_id: input.session_id.as_deref(),
+                    repo_root: repo_root_for_metrics.as_deref(),
+                },
+                || hooks::subagent_stop::process(&input, &ctx),
+            );
             output.merge(&subagent_output);
         }
 
         HookEvent::TaskCreated => {
+            let mk_ctx = |hook: &'static str| InvocationContext {
+                event: "TaskCreated",
+                hook,
+                tool: None,
+                session_id: input.session_id.as_deref(),
+                repo_root: repo_root_for_metrics.as_deref(),
+            };
+
             // Log task creation for telemetry
-            let task_output = hooks::task_created::process(&input, &ctx);
+            let task_output = time_and_record(ctx.fs, &mk_ctx("task_created"), || {
+                hooks::task_created::process(&input, &ctx)
+            });
             output.merge(&task_output);
 
             // Tool usage gate — mark task created for this session
@@ -514,31 +614,73 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
             }
 
             // Task persist — snapshot task list to persistent markdown + JSON
-            let persist_output = hooks::task_persist::process(&input, &ctx);
+            let persist_output = time_and_record(ctx.fs, &mk_ctx("task_persist"), || {
+                hooks::task_persist::process(&input, &ctx)
+            });
             output.merge(&persist_output);
         }
 
         HookEvent::Setup => {
             // Repo init/maintenance
-            let setup_output = hooks::setup::process(&input, &ctx);
+            let setup_output = time_and_record(
+                ctx.fs,
+                &InvocationContext {
+                    event: "Setup",
+                    hook: "setup",
+                    tool: None,
+                    session_id: input.session_id.as_deref(),
+                    repo_root: repo_root_for_metrics.as_deref(),
+                },
+                || hooks::setup::process(&input, &ctx),
+            );
             output.merge(&setup_output);
         }
 
         HookEvent::CwdChanged => {
             // Working directory changed — re-detect project context
-            let cwd_output = hooks::cwd_changed::process(&input, &ctx);
+            let cwd_output = time_and_record(
+                ctx.fs,
+                &InvocationContext {
+                    event: "CwdChanged",
+                    hook: "cwd_changed",
+                    tool: None,
+                    session_id: input.session_id.as_deref(),
+                    repo_root: repo_root_for_metrics.as_deref(),
+                },
+                || hooks::cwd_changed::process(&input, &ctx),
+            );
             output.merge(&cwd_output);
         }
 
         HookEvent::StopFailure => {
             // API error at end of turn — log for diagnostics
-            let failure_output = hooks::stop_failure::process(&input, &ctx);
+            let failure_output = time_and_record(
+                ctx.fs,
+                &InvocationContext {
+                    event: "StopFailure",
+                    hook: "stop_failure",
+                    tool: None,
+                    session_id: input.session_id.as_deref(),
+                    repo_root: repo_root_for_metrics.as_deref(),
+                },
+                || hooks::stop_failure::process(&input, &ctx),
+            );
             output.merge(&failure_output);
         }
 
         HookEvent::PermissionDenied => {
             // Auto-mode denied a tool call — log for diagnostics
-            let denied_output = hooks::permission_denied::process(&input, &ctx);
+            let denied_output = time_and_record(
+                ctx.fs,
+                &InvocationContext {
+                    event: "PermissionDenied",
+                    hook: "permission_denied",
+                    tool: None,
+                    session_id: input.session_id.as_deref(),
+                    repo_root: repo_root_for_metrics.as_deref(),
+                },
+                || hooks::permission_denied::process(&input, &ctx),
+            );
             output.merge(&denied_output);
         }
 
@@ -1312,6 +1454,16 @@ async fn handle_post_tool_use(
 ) -> HookOutput {
     let mut output = HookOutput::allow();
 
+    let cwd_for_metrics = input.cwd.as_deref().unwrap_or(".");
+    let repo_root_for_metrics = ctx.git.repo_root(cwd_for_metrics);
+    let mk_ctx = |hook: &'static str| InvocationContext {
+        event: "PostToolUse",
+        hook,
+        tool: input.tool_name.as_deref(),
+        session_id: input.session_id.as_deref(),
+        repo_root: repo_root_for_metrics.as_deref(),
+    };
+
     // BA1 audit-extract — lift documented-connector retrievals into
     // sentinel's provenance audit chain. Fires only for mcp__* tools
     // that emit a structured `provenance_audit` field; silently
@@ -1334,11 +1486,15 @@ async fn handle_post_tool_use(
     output.merge(&skill_gate_post);
 
     // MCP health — detect MCP server failures and log to errors.jsonl
-    let mcp_output = hooks::mcp_health::process(input, ctx);
+    let mcp_output = time_and_record(ctx.fs, &mk_ctx("mcp_health"), || {
+        hooks::mcp_health::process(input, ctx)
+    });
     output.merge(&mcp_output);
 
     // Todo interceptor — persist rich todos from TodoWrite calls
-    let todo_output = hooks::todo_interceptor::process(input, ctx);
+    let todo_output = time_and_record(ctx.fs, &mk_ctx("todo_interceptor"), || {
+        hooks::todo_interceptor::process(input, ctx)
+    });
     output.merge(&todo_output);
 
     // Evidence collector — capture tool results for proof chains.
@@ -1347,7 +1503,9 @@ async fn handle_post_tool_use(
     // in daemon mode where state is held in memory. This is a known limitation —
     // the proof chain still works via ProofEngine's own evidence gathering.
     // TODO: Implement evidence persistence for CLI mode if needed.
-    let evidence_output = hooks::evidence_collector::process(input, None);
+    let evidence_output = time_and_record(ctx.fs, &mk_ctx("evidence_collector"), || {
+        hooks::evidence_collector::process(input, None)
+    });
     output.merge(&evidence_output);
 
     // Activity tracker — log every tool call to activity-log.jsonl
@@ -1369,7 +1527,9 @@ async fn handle_post_tool_use(
 
     // Plan organizer — inject plan file organization instructions (ExitPlanMode only)
     if matches!(input.tool_name.as_deref(), Some("ExitPlanMode")) {
-        let plan_output = hooks::plan_organizer::process(input, ctx);
+        let plan_output = time_and_record(ctx.fs, &mk_ctx("plan_organizer"), || {
+            hooks::plan_organizer::process(input, ctx)
+        });
         output.merge(&plan_output);
     }
 
@@ -1533,73 +1693,115 @@ fn handle_stop(
 ) -> HookOutput {
     let mut output = HookOutput::allow();
 
+    let cwd_for_metrics = input.cwd.as_deref().unwrap_or(".");
+    let repo_root_for_metrics = ctx.git.repo_root(cwd_for_metrics);
+    let mk_ctx = |hook: &'static str| InvocationContext {
+        event: "Stop",
+        hook,
+        tool: None,
+        session_id: input.session_id.as_deref(),
+        repo_root: repo_root_for_metrics.as_deref(),
+    };
+
     // Execution log — capture [RUN]/[STEP]/[PHASE] markers from transcript
-    let exec_output = hooks::execution_log::process(input, ctx);
+    let exec_output = time_and_record(ctx.fs, &mk_ctx("execution_log"), || {
+        hooks::execution_log::process(input, ctx)
+    });
     output.merge(&exec_output);
 
     // Skill telemetry — aggregate skill usage metrics
-    let telemetry_output = hooks::skill_telemetry::process(input, ctx);
+    let telemetry_output = time_and_record(ctx.fs, &mk_ctx("skill_telemetry"), || {
+        hooks::skill_telemetry::process(input, ctx)
+    });
     output.merge(&telemetry_output);
 
     // --- Two-phase hooks (detect state, write for UserPromptSubmit to read) ---
 
     // Context monitor — capture context window usage zone
-    let ctx_output = hooks::context_monitor::process_stop(input, ctx);
+    let ctx_output = time_and_record(ctx.fs, &mk_ctx("context_monitor"), || {
+        hooks::context_monitor::process_stop(input, ctx)
+    });
     output.merge(&ctx_output);
 
     // Commit hygiene — detect uncommitted changes
-    let hygiene_output = hooks::commit_hygiene::process_stop(input, ctx);
+    let hygiene_output = time_and_record(ctx.fs, &mk_ctx("commit_hygiene"), || {
+        hooks::commit_hygiene::process_stop(input, ctx)
+    });
     output.merge(&hygiene_output);
 
     // Doc cleanup — scan for junk docs
-    let doc_output = hooks::doc_cleanup::process_stop(input, ctx);
+    let doc_output = time_and_record(ctx.fs, &mk_ctx("doc_cleanup"), || {
+        hooks::doc_cleanup::process_stop(input, ctx)
+    });
     output.merge(&doc_output);
 
     // Doc drift — detect stale README/CLAUDE.md/CHANGELOG
-    let drift_output = hooks::doc_drift::process_stop(input, ctx);
+    let drift_output = time_and_record(ctx.fs, &mk_ctx("doc_drift"), || {
+        hooks::doc_drift::process_stop(input, ctx)
+    });
     output.merge(&drift_output);
 
     // Hygiene reminders — detect unpushed commits, stale worktrees, changelog gaps
-    let reminders_output = hooks::hygiene_reminders::process_stop(input, ctx);
+    let reminders_output = time_and_record(ctx.fs, &mk_ctx("hygiene_reminders"), || {
+        hooks::hygiene_reminders::process_stop(input, ctx)
+    });
     output.merge(&reminders_output);
 
     // Verification gate — detect unverified completion claims
-    let verify_output = hooks::verification_gate::process_stop(input, ctx);
+    let verify_output = time_and_record(ctx.fs, &mk_ctx("verification_gate"), || {
+        hooks::verification_gate::process_stop(input, ctx)
+    });
     output.merge(&verify_output);
 
     // Task coverage check — warn if uncommitted changes but no active task
-    let coverage_output = hooks::task_coverage_check::process(input, ctx);
+    let coverage_output = time_and_record(ctx.fs, &mk_ctx("task_coverage_check"), || {
+        hooks::task_coverage_check::process(input, ctx)
+    });
     output.merge(&coverage_output);
 
     // Good citizen observer — surface unaddressed warnings/findings
     // observed during the turn, prompt agent to file TaskCreate.
-    let citizen_output = hooks::good_citizen_observer::process_stop(input, ctx);
+    let citizen_output = time_and_record(ctx.fs, &mk_ctx("good_citizen_observer"), || {
+        hooks::good_citizen_observer::process_stop(input, ctx)
+    });
     output.merge(&citizen_output);
 
     // Activity tracker — build session summary from activity log
-    let activity_stop_output = hooks::activity_tracker::process_stop(input, ctx);
+    let activity_stop_output = time_and_record(ctx.fs, &mk_ctx("activity_tracker"), || {
+        hooks::activity_tracker::process_stop(input, ctx)
+    });
     output.merge(&activity_stop_output);
 
     // Task persist — final snapshot catches any TaskUpdate calls mid-turn
-    let task_persist_output = hooks::task_persist::process(input, ctx);
+    let task_persist_output = time_and_record(ctx.fs, &mk_ctx("task_persist"), || {
+        hooks::task_persist::process(input, ctx)
+    });
     output.merge(&task_persist_output);
 
     // Memory extract — periodic session transcript re-indexing.
     // (Flat-.md capture path is removed; turn-capture below replaces it.)
-    let memory_extract_output = hooks::memory_extract::process(input, ctx);
+    let memory_extract_output = time_and_record(ctx.fs, &mk_ctx("memory_extract"), || {
+        hooks::memory_extract::process(input, ctx)
+    });
     output.merge(&memory_extract_output);
 
     // Memory turn-capture — LLM extracts atoms from this turn and
     // routes them through the dual-judge memory_capture gate.
-    let memory_turn_output = hooks::memory_turn_capture::process(input, ctx);
+    let memory_turn_output = time_and_record(ctx.fs, &mk_ctx("memory_turn_capture"), || {
+        hooks::memory_turn_capture::process(input, ctx)
+    });
     output.merge(&memory_turn_output);
 
     // Memory feedback — boost used memories, flag corrections
-    let memory_feedback_output = hooks::memory_feedback::process(input, ctx);
+    let memory_feedback_output = time_and_record(ctx.fs, &mk_ctx("memory_feedback"), || {
+        hooks::memory_feedback::process(input, ctx)
+    });
     output.merge(&memory_feedback_output);
 
     // Memory inject (Stop phase) — pre-compute Qdrant search for next turn
-    let memory_precompute_output = hooks::memory_inject::process_stop(input, ctx);
+    let memory_precompute_output = time_and_record(ctx.fs, &mk_ctx("memory_inject"), || {
+        hooks::memory_inject::process_stop(input, ctx)
+    });
     output.merge(&memory_precompute_output);
 
     // Cross-session proof chain archive (#39). Best-effort write to
