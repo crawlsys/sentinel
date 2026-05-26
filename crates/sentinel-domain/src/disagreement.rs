@@ -1,10 +1,10 @@
 //! `DisagreementMarker` — the chain entry that records multi-judge
 //! disagreement (Stage B Part 2 of #82, follow-up to commit 00b6e91
-//! which shipped the multi_judge types).
+//! which shipped the `multi_judge` types).
 //!
 //! When a critical / critical-strict tier runs N judges in parallel
 //! and they disagree on `sufficient`, the engine appends a
-//! `DisagreementMarker` to the chain right after the StepProof
+//! `DisagreementMarker` to the chain right after the `StepProof`
 //! that triggered the disagreement. The chain reads:
 //!
 //! ```text
@@ -20,15 +20,15 @@
 //! Same shape as `PhaseProof` / `StepProof`:
 //!
 //! - `previous_hash` = the head hash before the marker (the
-//!   triggering StepProof's `combined_hash`)
+//!   triggering `StepProof`'s `combined_hash`)
 //! - `multi_judge_hash` = SHA-256 over the canonical JSON of
 //!   [`MultiJudgeVerdict`]. Tampering with the per-judge breakdown
 //!   mid-chain breaks `verify_self`.
 //! - `combined_hash` = SHA-256 over `("disagreement" || skill ||
 //!   session_id || step_id || multi_judge_hash || previous_hash)`.
 //!   The `"disagreement"` discriminator prevents a forger from
-//!   substituting a StepProof's `combined_hash` for a
-//!   DisagreementMarker's (and vice versa) — distinct hash domains
+//!   substituting a `StepProof`'s `combined_hash` for a
+//!   `DisagreementMarker`'s (and vice versa) — distinct hash domains
 //!   per entry kind.
 
 use chrono::{DateTime, Utc};
@@ -40,17 +40,17 @@ use crate::multi_judge::MultiJudgeVerdict;
 /// A chain entry recording multi-judge disagreement on a step's
 /// verdict.
 ///
-/// The triggering StepProof appears in the chain as usual; this
+/// The triggering `StepProof` appears in the chain as usual; this
 /// marker is appended right after it so a chain walker can see the
 /// per-judge breakdown without re-running the judges.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DisagreementMarker {
-    /// Skill name (matches the StepProof this marker follows).
+    /// Skill name (matches the `StepProof` this marker follows).
     pub skill: String,
     /// Session ID.
     pub session_id: String,
     /// Step the disagreement is about. Matches the triggering
-    /// StepProof's `step_id`.
+    /// `StepProof`'s `step_id`.
     pub step_id: String,
     /// Phase the step lives under.
     pub phase_id: String,
@@ -66,11 +66,11 @@ pub struct DisagreementMarker {
     /// Folded into `combined_hash` so tampering with per-judge
     /// fields breaks chain verification.
     pub multi_judge_hash: String,
-    /// SHA-256 over (`"disagreement"` || skill || session_id ||
-    /// step_id || multi_judge_hash || previous_hash). The
+    /// SHA-256 over (`"disagreement"` || skill || `session_id` ||
+    /// `step_id` || `multi_judge_hash` || `previous_hash`). The
     /// "disagreement" discriminator gives this entry kind its own
-    /// hash domain — a StepProof's combined_hash can never collide
-    /// with a DisagreementMarker's combined_hash even if every
+    /// hash domain — a `StepProof`'s `combined_hash` can never collide
+    /// with a `DisagreementMarker`'s `combined_hash` even if every
     /// other field happened to match.
     pub combined_hash: String,
 
@@ -201,14 +201,7 @@ mod tests {
     #[test]
     fn new_marker_computes_consistent_hashes() {
         let v = sample_disagreement();
-        let m = DisagreementMarker::new(
-            "linear",
-            "sess-1",
-            "claim.3",
-            "claim",
-            v,
-            "abc123",
-        );
+        let m = DisagreementMarker::new("linear", "sess-1", "claim.3", "claim", v, "abc123");
         assert!(m.verify_self());
         assert!(!m.combined_hash.is_empty());
         assert!(!m.multi_judge_hash.is_empty());
@@ -217,14 +210,7 @@ mod tests {
     #[test]
     fn tamper_with_multi_judge_breaks_verify() {
         let v = sample_disagreement();
-        let mut m = DisagreementMarker::new(
-            "linear",
-            "sess-1",
-            "claim.3",
-            "claim",
-            v,
-            "abc123",
-        );
+        let mut m = DisagreementMarker::new("linear", "sess-1", "claim.3", "claim", v, "abc123");
         // Mutate the captured verdict — multi_judge_hash no longer
         // matches the recomputed value.
         m.multi_judge.sufficient = !m.multi_judge.sufficient;
@@ -234,14 +220,7 @@ mod tests {
     #[test]
     fn tamper_with_step_id_breaks_verify() {
         let v = sample_disagreement();
-        let mut m = DisagreementMarker::new(
-            "linear",
-            "sess-1",
-            "claim.3",
-            "claim",
-            v,
-            "abc123",
-        );
+        let mut m = DisagreementMarker::new("linear", "sess-1", "claim.3", "claim", v, "abc123");
         m.step_id = "claim.999".to_string();
         // multi_judge_hash still matches but combined_hash doesn't.
         assert!(!m.verify_self());
@@ -290,14 +269,7 @@ mod tests {
     #[test]
     fn marker_serde_round_trip() {
         let v = sample_disagreement();
-        let m = DisagreementMarker::new(
-            "linear",
-            "sess-1",
-            "claim.3",
-            "claim",
-            v,
-            "abc123",
-        );
+        let m = DisagreementMarker::new("linear", "sess-1", "claim.3", "claim", v, "abc123");
         let json = serde_json::to_string(&m).unwrap();
         let back: DisagreementMarker = serde_json::from_str(&json).unwrap();
         assert!(back.verify_self());

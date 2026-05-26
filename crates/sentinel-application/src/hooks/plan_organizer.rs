@@ -1,6 +1,6 @@
 //! Plan Organizer Hook
 //!
-//! Fires on PostToolUse when tool_name == "ExitPlanMode".
+//! Fires on `PostToolUse` when `tool_name` == "`ExitPlanMode`".
 //! Claude Code saves plans to `{project}/plans/{slug}.md` by default with
 //! a random slug (e.g. "bright-EAGLE-river.md"). This hook archives plans
 //! to TWO destinations:
@@ -44,7 +44,7 @@ fn detect_project(cwd: &str) -> String {
 }
 
 /// Extract the plan file path from the tool result JSON.
-/// ExitPlanMode returns `{ "data": { "filePath": "...", ... } }` on success.
+/// `ExitPlanMode` returns `{ "data": { "filePath": "...", ... } }` on success.
 fn extract_plan_path(tool_result: Option<&serde_json::Value>) -> Option<PathBuf> {
     let resp = tool_result?;
     // Try direct `filePath` first
@@ -97,7 +97,7 @@ fn next_versioned_path(fs: &dyn FileSystemPort, target_dir: &Path, slug: &str) -
     target_dir.join(format!("{slug}-v999.md"))
 }
 
-/// Process an ExitPlanMode PostToolUse event.
+/// Process an `ExitPlanMode` `PostToolUse` event.
 /// Copies the plan file into `~/.claude/plans/{project}/{slug}-v{N}.md`.
 pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     // Only fire on ExitPlanMode
@@ -109,12 +109,9 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     let project = detect_project(cwd);
 
     // Extract the plan file path from the tool response
-    let plan_path = match extract_plan_path(input.tool_result.as_ref()) {
-        Some(p) => p,
-        None => {
-            tracing::debug!("No plan file path in ExitPlanMode response; skipping");
-            return HookOutput::allow();
-        }
+    let plan_path = if let Some(p) = extract_plan_path(input.tool_result.as_ref()) { p } else {
+        tracing::debug!("No plan file path in ExitPlanMode response; skipping");
+        return HookOutput::allow();
     };
 
     // Derive slug from filename (strip .md extension)
@@ -165,12 +162,8 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     // `sentinel project init` in this repo). Failures here are
     // best-effort — log and continue; the global archive above is
     // the authoritative copy.
-    let repo_local_path = try_write_repo_local_archive(
-        ctx.fs,
-        Path::new(cwd),
-        &slug,
-        plan_content.as_bytes(),
-    );
+    let repo_local_path =
+        try_write_repo_local_archive(ctx.fs, Path::new(cwd), &slug, plan_content.as_bytes());
 
     // Emit channel event for real-time notification
     let summary = format!("Plan archived: {}", target_path.display());
@@ -179,7 +172,7 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
         "project".to_string(),
         serde_json::Value::String(project.clone()),
     );
-    meta.insert("slug".to_string(), serde_json::Value::String(slug.clone()));
+    meta.insert("slug".to_string(), serde_json::Value::String(slug));
     meta.insert(
         "archived_path".to_string(),
         serde_json::Value::String(target_path.display().to_string()),
@@ -205,7 +198,10 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
 
     // Inject context telling the user and Claude where the archived copies live.
     let repo_local_line = match &repo_local_path {
-        Some(p) => format!("\nRepo-local: {} (committed with the code via .sentinel/plans/)", p.display()),
+        Some(p) => format!(
+            "\nRepo-local: {} (committed with the code via .sentinel/plans/)",
+            p.display()
+        ),
         None => String::new(),
     };
     let context = format!(
@@ -409,7 +405,11 @@ mod tests {
         let worktree = tmp.path().join("wt");
         let deep = worktree.join("sub");
         std::fs::create_dir_all(&deep).unwrap();
-        std::fs::write(worktree.join(".git"), "gitdir: /elsewhere/.git/worktrees/wt").unwrap();
+        std::fs::write(
+            worktree.join(".git"),
+            "gitdir: /elsewhere/.git/worktrees/wt",
+        )
+        .unwrap();
         let found = find_repo_root(&RealFs, &deep);
         assert_eq!(found, Some(worktree));
     }
@@ -463,7 +463,10 @@ mod tests {
         let path = try_write_repo_local_archive(&RealFs, &repo, "my-plan", b"plan content");
         assert!(path.is_some());
         let p = path.unwrap();
-        assert_eq!(p, repo.join(".sentinel").join("plans").join("my-plan-v1.md"));
+        assert_eq!(
+            p,
+            repo.join(".sentinel").join("plans").join("my-plan-v1.md")
+        );
         assert_eq!(std::fs::read_to_string(&p).unwrap(), "plan content");
     }
 
@@ -475,7 +478,10 @@ mod tests {
 
         let path = try_write_repo_local_archive(&RealFs, &repo, "my-plan", b"plan content");
         assert!(path.is_none(), "must NOT auto-create .sentinel/plans/");
-        assert!(!repo.join(".sentinel").exists(), "must not create .sentinel/ implicitly");
+        assert!(
+            !repo.join(".sentinel").exists(),
+            "must not create .sentinel/ implicitly"
+        );
     }
 
     #[test]
@@ -496,6 +502,9 @@ mod tests {
 
         let path = try_write_repo_local_archive(&RealFs, &repo, "my-plan", b"new version");
         assert_eq!(path, Some(plans.join("my-plan-v2.md")));
-        assert_eq!(std::fs::read_to_string(plans.join("my-plan-v1.md")).unwrap(), "old version");
+        assert_eq!(
+            std::fs::read_to_string(plans.join("my-plan-v1.md")).unwrap(),
+            "old version"
+        );
     }
 }

@@ -16,7 +16,7 @@ use crate::proof_engine::ProofEngine;
 /// MCP tool call request
 #[derive(Debug, Clone, Deserialize)]
 pub struct McpToolCall {
-    /// Tool name (e.g., "sentinel__submit_evidence")
+    /// Tool name (e.g., "`sentinel__submit_evidence`")
     pub name: String,
 
     /// Tool arguments as JSON
@@ -38,7 +38,7 @@ pub struct McpToolResult {
 }
 
 impl McpToolResult {
-    pub fn ok(content: serde_json::Value) -> Self {
+    pub const fn ok(content: serde_json::Value) -> Self {
         Self {
             success: true,
             content,
@@ -53,6 +53,67 @@ impl McpToolResult {
             error: Some(message.into()),
         }
     }
+}
+
+/// Parsed required arguments for `submit_step_complete`.
+///
+/// Extracted from the raw JSON args by [`parse_submit_step_args`] before
+/// the handler touches any `&self` state.  All string fields borrow from
+/// the original `args` value; `verdict` is owned (deserialized + sanitized
+/// on the way in).
+struct SubmitStepArgs<'a> {
+    skill: &'a str,
+    phase_id: &'a str,
+    step_id: &'a str,
+    step_description: &'a str,
+    verdict: sentinel_domain::judge::JudgeVerdict,
+}
+
+/// Parse the five required fields out of raw MCP args for
+/// `sentinel__submit_step_complete`.
+///
+/// Returns `Err(McpToolResult)` with a user-facing error on any missing or
+/// malformed field so the handler body can start at the first decision that
+/// actually needs `&self`.
+fn parse_submit_step_args(
+    args: &serde_json::Value,
+) -> Result<SubmitStepArgs<'_>, McpToolResult> {
+    let skill = args
+        .get("skill")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| McpToolResult::err("Missing 'skill' argument"))?;
+
+    let phase_id = args
+        .get("phase_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| McpToolResult::err("Missing 'phase_id' argument"))?;
+
+    let step_id = args
+        .get("step_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| McpToolResult::err("Missing 'step_id' argument"))?;
+
+    let step_description = args
+        .get("step_description")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| McpToolResult::err("Missing 'step_description' argument"))?;
+
+    let verdict_raw = args
+        .get("verdict")
+        .cloned()
+        .ok_or_else(|| McpToolResult::err("Missing 'verdict' argument"))?;
+
+    let verdict = serde_json::from_value::<sentinel_domain::judge::JudgeVerdict>(verdict_raw)
+        .map(sentinel_domain::judge::JudgeVerdict::sanitized)
+        .map_err(|e| McpToolResult::err(format!("Invalid 'verdict' shape: {e}")))?;
+
+    Ok(SubmitStepArgs {
+        skill,
+        phase_id,
+        step_id,
+        step_description,
+        verdict,
+    })
 }
 
 /// MCP handler — routes tool calls to engine functions
@@ -73,7 +134,7 @@ pub struct McpHandler {
     /// registry wired is a fail-fast error, not a silent skip).
     evidence_adapters: Option<Arc<crate::evidence_adapters::EvidenceAdapterRegistry>>,
     /// Step-level verifier requirements (sentinel #71). Each entry
-    /// says "the step at (skill, phase_id, step_id) cannot seal
+    /// says "the step at (skill, `phase_id`, `step_id`) cannot seal
     /// unless its evidence carries a receipt from the named
     /// adapter." Checked AFTER the BIBLE wireup folds any
     /// `evidence_claim` receipt into `Evidence.custom`, so verifiers
@@ -94,7 +155,7 @@ pub struct ProofArchiveBacking {
 }
 
 impl McpHandler {
-    pub fn new(state: Arc<RwLock<SessionState>>, proof_engine: Arc<ProofEngine>) -> Self {
+    pub const fn new(state: Arc<RwLock<SessionState>>, proof_engine: Arc<ProofEngine>) -> Self {
         Self {
             state,
             proof_engine,
@@ -224,7 +285,7 @@ impl McpHandler {
 
     /// Return a single [`StepProof`](sentinel_domain::step_proof::StepProof)
     /// matching `(skill, step_id [, phase_id])`. Phase id disambiguates
-    /// when the same step_id repeats across phases (e.g. "1" in both
+    /// when the same `step_id` repeats across phases (e.g. "1" in both
     /// "claim" and "review" phases).
     async fn get_step_proof(&self, args: serde_json::Value) -> McpToolResult {
         let skill = match args.get("skill").and_then(|v| v.as_str()) {
@@ -388,45 +449,69 @@ impl McpHandler {
     /// - `phase_id` (string)
     /// - `step_id` (string)
     /// - `step_description` (string) — what "sufficient" means for this step
-    /// - `verdict` (object) — JudgeVerdict { sufficient, confidence, reasoning, requested_evidence? }
+    /// - `verdict` (object) — `JudgeVerdict` { sufficient, confidence, reasoning, `requested_evidence`? }
     ///
     /// Optional arguments (sensible defaults applied when omitted):
     /// - `evidence` (object) — defaults to empty Evidence
-    /// - `judge_model` (string: "sonnet" | "opus" | "haiku") — defaults to "sonnet"
+    /// - `judge_model` (string: "sonnet" | "opus" | "codex" | "kimi") — defaults to "sonnet"
     /// - `artifact` (any JSON value) — defaults to null
     /// - `account_context` (string|null) — defaults to null
     /// - `started_at` (RFC3339 string) — defaults to now-1ms
     ///
-    /// Returns the sealed StepProof on success, or an error on
+    /// Returns the sealed `StepProof` on success, or an error on
     /// insufficient verdict / chain-link mismatch / serialization
     /// failure. Refusing to seal an insufficient verdict is the
     /// engine's job — surface the error here for caller telemetry.
     async fn submit_step_complete(&self, args: serde_json::Value) -> McpToolResult {
-        // Required string fields.
-        let Some(skill) = args.get("skill").and_then(|v| v.as_str()) else {
-            return McpToolResult::err("Missing 'skill' argument");
+        // Parse and validate the five required fields up front.
+        // Errors here are purely about arg shape — no &self access needed.
+        let parsed = match parse_submit_step_args(&args) {
+            Ok(p) => p,
+            Err(e) => return e,
         };
-        let Some(phase_id) = args.get("phase_id").and_then(|v| v.as_str()) else {
-            return McpToolResult::err("Missing 'phase_id' argument");
-        };
-        let Some(step_id) = args.get("step_id").and_then(|v| v.as_str()) else {
-            return McpToolResult::err("Missing 'step_id' argument");
-        };
-        let Some(step_description) = args.get("step_description").and_then(|v| v.as_str()) else {
-            return McpToolResult::err("Missing 'step_description' argument");
-        };
+        let (skill, phase_id, step_id, step_description, verdict) = (
+            parsed.skill,
+            parsed.phase_id,
+            parsed.step_id,
+            parsed.step_description,
+            parsed.verdict,
+        );
 
-        // Required: the verdict. Deserialize, sanitize, surface clear
-        // errors when the shape is wrong.
-        let verdict_raw = match args.get("verdict") {
-            Some(v) => v.clone(),
-            None => return McpToolResult::err("Missing 'verdict' argument"),
+        // Enforcement gate (#9 + #12): in `enforce` mode, refuse to seal a
+        // non-sufficient verdict — the seal-blocking half of the staged
+        // rollout (the `step_judge` PostToolUse hook produces + warns; the
+        // seal is the structural enforcement point). Default is `shadow`.
+        //
+        // #12 — close the self-certify gap: the caller SUPPLIES the `verdict`
+        // arg, so an agent could pass `sufficient: true` regardless of reality.
+        // Prefer the INDEPENDENT verdict the `step_judge` hook recorded into
+        // the per-session state (loaded from the same disk store by
+        // `with_session_state` before this tool runs). When an independent
+        // verdict exists, IT decides — not the caller. The supplied verdict is
+        // only trusted as a fallback when the hook produced none (e.g. the
+        // step tool wasn't routed through step_judge).
+        let effective_verdict = {
+            let st = self.state.read().await;
+            match st.independent_verdict(skill, phase_id, step_id) {
+                Some(indep) => (indep.sufficient, indep.confidence, true),
+                None => (verdict.sufficient, verdict.confidence, false),
+            }
         };
-        let verdict: sentinel_domain::judge::JudgeVerdict =
-            match serde_json::from_value(verdict_raw) {
-                Ok(v) => sentinel_domain::judge::JudgeVerdict::sanitized(v),
-                Err(e) => return McpToolResult::err(format!("Invalid 'verdict' shape: {e}")),
+        let (eff_sufficient, eff_confidence, from_independent) = effective_verdict;
+        let enforcement = crate::judge_enforcement::Mode::from_env();
+        if enforcement.blocks_seal() && !eff_sufficient {
+            let source = if from_independent {
+                "independent step_judge verdict"
+            } else {
+                "supplied verdict (no independent judgement on record)"
             };
+            return McpToolResult::err(format!(
+                "🟠 [Judge:enforce] Refusing to seal step '{step_id}' of \
+                 '{skill}/{phase_id}': {source} is INSUFFICIENT \
+                 (confidence {eff_confidence:.2}). Set SENTINEL_JUDGE_ENFORCEMENT=shadow \
+                 to record without blocking, or address the gap and resubmit."
+            ));
+        }
 
         // Optional fields with defaults.
         let mut evidence: sentinel_domain::evidence::Evidence = match args.get("evidence") {
@@ -448,9 +533,7 @@ impl McpHandler {
                 match serde_json::from_value(claim_raw.clone()) {
                     Ok(c) => c,
                     Err(e) => {
-                        return McpToolResult::err(format!(
-                            "Invalid 'evidence_claim' shape: {e}"
-                        ));
+                        return McpToolResult::err(format!("Invalid 'evidence_claim' shape: {e}"));
                     }
                 };
             let Some(registry) = self.evidence_adapters.as_ref() else {
@@ -470,9 +553,7 @@ impl McpHandler {
                     let receipt_json = match serde_json::to_value(&receipt) {
                         Ok(v) => v,
                         Err(e) => {
-                            return McpToolResult::err(format!(
-                                "Receipt serialization error: {e}"
-                            ));
+                            return McpToolResult::err(format!("Receipt serialization error: {e}"));
                         }
                     };
                     // `Evidence.custom` is a `serde_json::Value`. The
@@ -504,10 +585,10 @@ impl McpHandler {
         let judge_model = match args.get("judge_model").and_then(|v| v.as_str()) {
             Some("sonnet") | None => sentinel_domain::judge::JudgeModel::Sonnet,
             Some("opus") => sentinel_domain::judge::JudgeModel::Opus,
-            Some("haiku") => sentinel_domain::judge::JudgeModel::Haiku,
+            Some("codex") => sentinel_domain::judge::JudgeModel::Codex,
             Some(other) => {
                 return McpToolResult::err(format!(
-                    "Unknown judge_model '{other}' — expected sonnet | opus | haiku"
+                    "Unknown judge_model '{other}' — expected sonnet | opus | codex | kimi"
                 ));
             }
         };
@@ -544,7 +625,7 @@ impl McpHandler {
                 })
             }
             Some(v) if v.is_null() => None, // Explicit clear.
-            Some(v) => v.as_str().map(|s| s.to_string()),
+            Some(v) => v.as_str().map(std::string::ToString::to_string),
         };
 
         // started_at — accept RFC3339 string, fall back to now-1ms so
@@ -646,18 +727,18 @@ impl McpHandler {
     ///
     /// The `step_sequence` field is the key signal: it lets the M7 router
     /// query "for prompts like X, what step-sequence patterns have worked
-    /// before?" without dragging the full StepProof payloads across the
+    /// before?" without dragging the full `StepProof` payloads across the
     /// MCP boundary.
     async fn query_proof_corpus(&self, args: serde_json::Value) -> McpToolResult {
         let skill_filter = args.get("skill_filter").and_then(|v| v.as_str());
-        let min_steps = args.get("min_steps").and_then(|v| v.as_u64()).unwrap_or(0);
+        let min_steps = args.get("min_steps").and_then(serde_json::Value::as_u64).unwrap_or(0);
         let successful_only = args
             .get("successful_only")
-            .and_then(|v| v.as_bool())
+            .and_then(serde_json::Value::as_bool)
             .unwrap_or(true);
         let max_results = args
             .get("max_results")
-            .and_then(|v| v.as_u64())
+            .and_then(serde_json::Value::as_u64)
             .unwrap_or(50)
             .min(500) as usize;
 
@@ -669,7 +750,7 @@ impl McpHandler {
         let mut summaries: Vec<serde_json::Value> = Vec::new();
         let mut total_matched: u64 = 0;
 
-        for (skill, chain) in state.proof_chains.iter() {
+        for (skill, chain) in &state.proof_chains {
             if let Some(want) = skill_filter {
                 if skill != want {
                     continue;
@@ -689,9 +770,7 @@ impl McpHandler {
                 continue;
             }
 
-            let all_sufficient = step_entries
-                .iter()
-                .all(|s| s.judge_verdict.sufficient)
+            let all_sufficient = step_entries.iter().all(|s| s.judge_verdict.sufficient)
                 && chain.proofs.iter().all(|p| p.judge_verdict.sufficient);
             if successful_only && !all_sufficient {
                 continue;
@@ -880,7 +959,10 @@ mod step_tools_tests {
         let proof = result.content;
         assert_eq!(proof.get("step_id").and_then(|v| v.as_str()), Some("1"));
         assert_eq!(proof.get("skill").and_then(|v| v.as_str()), Some("linear"));
-        assert_eq!(proof.get("phase_id").and_then(|v| v.as_str()), Some("claim"));
+        assert_eq!(
+            proof.get("phase_id").and_then(|v| v.as_str()),
+            Some("claim")
+        );
         assert!(proof.get("combined_hash").is_some());
     }
 
@@ -920,7 +1002,7 @@ mod step_tools_tests {
     async fn get_step_proof_requires_skill_and_step_id() {
         let handler = handler_with_chain().await;
         for bad_args in [
-            serde_json::json!({}),                   // missing both
+            serde_json::json!({}),                  // missing both
             serde_json::json!({"skill": "linear"}), // missing step_id
             serde_json::json!({"step_id": "1"}),    // missing skill
         ] {
@@ -945,7 +1027,10 @@ mod step_tools_tests {
             .await;
         assert!(result.success);
         let payload = result.content;
-        assert_eq!(payload.get("skill").and_then(|v| v.as_str()), Some("linear"));
+        assert_eq!(
+            payload.get("skill").and_then(|v| v.as_str()),
+            Some("linear")
+        );
         assert_eq!(payload.get("step_count").and_then(|v| v.as_u64()), Some(2));
         let steps = payload.get("steps").and_then(|v| v.as_array()).unwrap();
         assert_eq!(steps.len(), 2);
@@ -953,8 +1038,14 @@ mod step_tools_tests {
         assert_eq!(steps[0].get("step_id").and_then(|v| v.as_str()), Some("1"));
         assert_eq!(steps[1].get("step_id").and_then(|v| v.as_str()), Some("2"));
         // head_hash matches the last step's combined_hash.
-        let last_combined = steps[1].get("combined_hash").and_then(|v| v.as_str()).unwrap();
-        assert_eq!(payload.get("head_hash").and_then(|v| v.as_str()), Some(last_combined));
+        let last_combined = steps[1]
+            .get("combined_hash")
+            .and_then(|v| v.as_str())
+            .unwrap();
+        assert_eq!(
+            payload.get("head_hash").and_then(|v| v.as_str()),
+            Some(last_combined)
+        );
     }
 
     #[tokio::test]
@@ -981,10 +1072,16 @@ mod step_tools_tests {
             .await;
         assert!(result.success);
         let payload = result.content;
-        assert_eq!(payload.get("skill").and_then(|v| v.as_str()), Some("linear"));
+        assert_eq!(
+            payload.get("skill").and_then(|v| v.as_str()),
+            Some("linear")
+        );
         assert_eq!(payload.get("step_count").and_then(|v| v.as_u64()), Some(2));
         assert_eq!(payload.get("phase_count").and_then(|v| v.as_u64()), Some(0));
-        assert_eq!(payload.get("chain_length").and_then(|v| v.as_u64()), Some(2));
+        assert_eq!(
+            payload.get("chain_length").and_then(|v| v.as_u64()),
+            Some(2)
+        );
         let last = payload.get("last_step").unwrap();
         assert_eq!(last.get("step_id").and_then(|v| v.as_str()), Some("2"));
         assert_eq!(last.get("phase_id").and_then(|v| v.as_str()), Some("claim"));
@@ -1024,12 +1121,15 @@ mod step_tools_tests {
         let proof = result.content;
         assert_eq!(proof.get("skill").and_then(|v| v.as_str()), Some("linear"));
         assert_eq!(proof.get("step_id").and_then(|v| v.as_str()), Some("1"));
-        assert_eq!(proof.get("phase_id").and_then(|v| v.as_str()), Some("claim"));
+        assert_eq!(
+            proof.get("phase_id").and_then(|v| v.as_str()),
+            Some("claim")
+        );
         assert!(proof.get("combined_hash").is_some());
-        // Default judge_model is sonnet (OpenRouter: openai/gpt-5.4).
+        // Default judge_model is sonnet (OpenRouter: anthropic/claude-sonnet-4.6).
         assert_eq!(
             proof.get("judge_model").and_then(|v| v.as_str()),
-            Some("openai/gpt-5.4"),
+            Some("anthropic/claude-sonnet-4.6"),
         );
     }
 
@@ -1062,7 +1162,10 @@ mod step_tools_tests {
             Some("firefly-pro"),
         );
         assert_eq!(
-            proof.get("artifact").and_then(|v| v.get("pr_url")).and_then(|v| v.as_str()),
+            proof
+                .get("artifact")
+                .and_then(|v| v.get("pr_url"))
+                .and_then(|v| v.as_str()),
             Some("https://github.com/foo/bar/pull/9"),
         );
         assert_eq!(
@@ -1097,7 +1200,10 @@ mod step_tools_tests {
 
         assert!(!result.success);
         let err = result.error.unwrap();
-        assert!(err.contains("insufficient"), "error mentions insufficient: {err}");
+        assert!(
+            err.contains("insufficient"),
+            "error mentions insufficient: {err}"
+        );
         // No chain mutation on failure.
         let s = state.read().await;
         assert!(!s.proof_chains.contains_key("linear"));
@@ -1112,10 +1218,7 @@ mod step_tools_tests {
         // Each entry below is missing exactly one required field.
         let cases = [
             (serde_json::json!({}), "skill"),
-            (
-                serde_json::json!({"skill": "linear"}),
-                "phase_id",
-            ),
+            (serde_json::json!({"skill": "linear"}), "phase_id"),
             (
                 serde_json::json!({"skill": "linear", "phase_id": "claim"}),
                 "step_id",
@@ -1172,7 +1275,11 @@ mod step_tools_tests {
             .await;
 
         assert!(!result.success);
-        assert!(result.error.as_deref().unwrap().contains("bogus-model-name"));
+        assert!(result
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("bogus-model-name"));
     }
 
     #[tokio::test]
@@ -1245,14 +1352,23 @@ mod step_tools_tests {
             .await;
         assert!(result.success);
         let payload = result.content;
-        assert_eq!(payload.get("scope").and_then(|v| v.as_str()), Some("live-session"));
-        assert_eq!(payload.get("total_matched").and_then(|v| v.as_u64()), Some(1));
+        assert_eq!(
+            payload.get("scope").and_then(|v| v.as_str()),
+            Some("live-session")
+        );
+        assert_eq!(
+            payload.get("total_matched").and_then(|v| v.as_u64()),
+            Some(1)
+        );
         let chains = payload.get("chains").and_then(|v| v.as_array()).unwrap();
         assert_eq!(chains.len(), 1);
         let c0 = &chains[0];
         assert_eq!(c0.get("skill").and_then(|v| v.as_str()), Some("linear"));
         assert_eq!(c0.get("step_count").and_then(|v| v.as_u64()), Some(2));
-        assert_eq!(c0.get("all_sufficient").and_then(|v| v.as_bool()), Some(true));
+        assert_eq!(
+            c0.get("all_sufficient").and_then(|v| v.as_bool()),
+            Some(true)
+        );
         // step_sequence is the pattern signal — exact ordered coordinates.
         let seq = c0.get("step_sequence").and_then(|v| v.as_array()).unwrap();
         let labels: Vec<&str> = seq.iter().filter_map(|v| v.as_str()).collect();
@@ -1270,8 +1386,15 @@ mod step_tools_tests {
             .await;
         assert!(result.success);
         let payload = result.content;
-        assert_eq!(payload.get("total_matched").and_then(|v| v.as_u64()), Some(0));
-        assert!(payload.get("chains").and_then(|v| v.as_array()).unwrap().is_empty());
+        assert_eq!(
+            payload.get("total_matched").and_then(|v| v.as_u64()),
+            Some(0)
+        );
+        assert!(payload
+            .get("chains")
+            .and_then(|v| v.as_array())
+            .unwrap()
+            .is_empty());
     }
 
     #[tokio::test]
@@ -1299,7 +1422,10 @@ mod step_tools_tests {
             .await;
         assert!(result2.success);
         assert_eq!(
-            result2.content.get("total_matched").and_then(|v| v.as_u64()),
+            result2
+                .content
+                .get("total_matched")
+                .and_then(|v| v.as_u64()),
             Some(1),
         );
     }
@@ -1338,7 +1464,10 @@ mod step_tools_tests {
             .await;
         assert!(result.success);
         let payload = result.content;
-        assert_eq!(payload.get("total_matched").and_then(|v| v.as_u64()), Some(3));
+        assert_eq!(
+            payload.get("total_matched").and_then(|v| v.as_u64()),
+            Some(3)
+        );
         let chains = payload.get("chains").and_then(|v| v.as_array()).unwrap();
         assert_eq!(chains.len(), 2, "max_results caps returned chains");
     }
@@ -1359,7 +1488,11 @@ mod step_tools_tests {
             })
             .await;
         assert!(result.success);
-        let chains = result.content.get("chains").and_then(|v| v.as_array()).unwrap();
+        let chains = result
+            .content
+            .get("chains")
+            .and_then(|v| v.as_array())
+            .unwrap();
         assert_eq!(chains.len(), 1);
         assert_eq!(
             chains[0].get("all_sufficient").and_then(|v| v.as_bool()),
@@ -1540,8 +1673,14 @@ mod step_tools_tests {
                 result.error
             );
             let proof = result.content;
-            assert_eq!(proof.get("phase_id").and_then(|v| v.as_str()), Some(*phase_id));
-            assert_eq!(proof.get("step_id").and_then(|v| v.as_str()), Some(*step_id));
+            assert_eq!(
+                proof.get("phase_id").and_then(|v| v.as_str()),
+                Some(*phase_id)
+            );
+            assert_eq!(
+                proof.get("step_id").and_then(|v| v.as_str()),
+                Some(*step_id)
+            );
             let hash = proof
                 .get("combined_hash")
                 .and_then(|v| v.as_str())
@@ -1571,20 +1710,15 @@ mod step_tools_tests {
             })
             .collect();
 
-        let phase_sequence: Vec<&str> =
-            step_entries.iter().map(|s| s.phase_id.as_str()).collect();
-        let expected_sequence: Vec<&str> =
-            pipeline.iter().map(|(p, _, _, _)| *p).collect();
+        let phase_sequence: Vec<&str> = step_entries.iter().map(|s| s.phase_id.as_str()).collect();
+        let expected_sequence: Vec<&str> = pipeline.iter().map(|(p, _, _, _)| *p).collect();
         assert_eq!(phase_sequence, expected_sequence);
 
-        let step_sequence: Vec<&str> =
-            step_entries.iter().map(|s| s.step_id.as_str()).collect();
-        let expected_step_sequence: Vec<&str> =
-            pipeline.iter().map(|(_, s, _, _)| *s).collect();
+        let step_sequence: Vec<&str> = step_entries.iter().map(|s| s.step_id.as_str()).collect();
+        let expected_step_sequence: Vec<&str> = pipeline.iter().map(|(_, s, _, _)| *s).collect();
         assert_eq!(step_sequence, expected_step_sequence);
 
-        let unique_hashes: std::collections::HashSet<_> =
-            sealed_hashes.iter().collect();
+        let unique_hashes: std::collections::HashSet<_> = sealed_hashes.iter().collect();
         assert_eq!(
             unique_hashes.len(),
             sealed_hashes.len(),
@@ -1692,7 +1826,7 @@ mod step_tools_tests {
     //   review (3.L4) — CI green + CodeRabbit triaged
     //   review (3.L5) — Merge to main
     //   qa-handoff (3.5.0)   — Deploy to staging
-    //   qa-handoff (3.5.1)   — Steel smoke test on staging
+    //   qa-handoff (3.5.1)   — Browserbase smoke test on staging
     //   qa-handoff (3.5.2)   — Loom upload of smoke screenshots
     //   qa-handoff (3.5.3-4) — Transition Linear to QA Testing + assign
     //   qa-handoff (3.5.5)   — Implementation comment with evidence
@@ -1771,7 +1905,7 @@ mod step_tools_tests {
             (
                 "qa-handoff",
                 "3.5.1",
-                "Steel smoke test on staging — feature reachable, no console errors",
+                "Browserbase smoke test on staging — feature reachable, no console errors",
                 serde_json::json!({
                     "issue_id": "FPCRM-200",
                     "staging_url": "https://staging.firefly-pro.example/",
@@ -1911,7 +2045,10 @@ mod step_tools_tests {
         assert_eq!(final_step.phase_id, "qa-handoff");
         assert_eq!(final_step.step_id, "3.5.6");
         assert_eq!(
-            final_step.artifact.get("new_state").and_then(|v| v.as_str()),
+            final_step
+                .artifact
+                .get("new_state")
+                .and_then(|v| v.as_str()),
             Some("Completed")
         );
 
@@ -1960,7 +2097,7 @@ mod step_tools_tests {
             &handler,
             "qa-handoff",
             "3.5.6",
-            "QA tester rejects — bug found in staging Steel test",
+            "QA tester rejects — bug found in staging Browserbase test",
             serde_json::json!({
                 "issue_id": "FPCRM-201",
                 "previous_state": "QA Testing",
@@ -1988,7 +2125,10 @@ mod step_tools_tests {
         // honest record is the whole point of proof chains — they
         // can't lie about what happened.
         assert_eq!(
-            final_step.artifact.get("new_state").and_then(|v| v.as_str()),
+            final_step
+                .artifact
+                .get("new_state")
+                .and_then(|v| v.as_str()),
             Some("QA Failed")
         );
         assert!(
@@ -2165,8 +2305,7 @@ mod step_tools_tests {
                 _ => None,
             })
             .collect();
-        let unique_hashes: std::collections::HashSet<&str> =
-            hashes.iter().copied().collect();
+        let unique_hashes: std::collections::HashSet<&str> = hashes.iter().copied().collect();
         assert_eq!(
             unique_hashes.len(),
             hashes.len(),
@@ -2240,9 +2379,7 @@ mod step_tools_tests {
         // wire-in path without needing a real GitHub/Browserbase adapter.
         let state = Arc::new(RwLock::new(SessionState::new("bible-receipt")));
         let engine = Arc::new(ProofEngine::new(state.clone(), Arc::new(StubJudge)));
-        let registry = Arc::new(
-            crate::evidence_adapters::EvidenceAdapterRegistry::with_fallback(),
-        );
+        let registry = Arc::new(crate::evidence_adapters::EvidenceAdapterRegistry::with_fallback());
         let handler = McpHandler::new(state.clone(), engine).with_evidence_adapters(registry);
 
         let result = handler
@@ -2571,7 +2708,11 @@ mod step_tools_tests {
                 }),
             })
             .await;
-        assert!(result.success, "non-matching verifier must not block: {:?}", result.error);
+        assert!(
+            result.success,
+            "non-matching verifier must not block: {:?}",
+            result.error
+        );
     }
 
     #[tokio::test]
@@ -2580,9 +2721,7 @@ mod step_tools_tests {
         // a receipt in → verifier sees it → seal proceeds.
         let state = Arc::new(RwLock::new(SessionState::new("sv-bibled")));
         let engine = Arc::new(ProofEngine::new(state, Arc::new(StubJudge)));
-        let registry = Arc::new(
-            crate::evidence_adapters::EvidenceAdapterRegistry::with_fallback(),
-        );
+        let registry = Arc::new(crate::evidence_adapters::EvidenceAdapterRegistry::with_fallback());
         let req = sentinel_domain::step_verifier::StepVerifierRequirement::provenance_only(
             "linear",
             "qa-handoff",
@@ -2612,7 +2751,11 @@ mod step_tools_tests {
                 }),
             })
             .await;
-        assert!(result.success, "verifier should accept the bibled receipt: {:?}", result.error);
+        assert!(
+            result.success,
+            "verifier should accept the bibled receipt: {:?}",
+            result.error
+        );
     }
 
     #[tokio::test]
@@ -2627,9 +2770,8 @@ mod step_tools_tests {
             "3.5.5",
             "browserbase",
         );
-        let handler =
-            McpHandler::new(Arc::new(RwLock::new(SessionState::new("x"))), engine)
-                .with_step_verifiers(vec![req]);
+        let handler = McpHandler::new(Arc::new(RwLock::new(SessionState::new("x"))), engine)
+            .with_step_verifiers(vec![req]);
 
         let result = handler
             .handle(McpToolCall {
@@ -2664,9 +2806,8 @@ mod step_tools_tests {
             "3.5.5",
             "fake_failing_adapter",
         );
-        let handler =
-            McpHandler::new(Arc::new(RwLock::new(SessionState::new("x"))), engine)
-                .with_step_verifiers(vec![req]);
+        let handler = McpHandler::new(Arc::new(RwLock::new(SessionState::new("x"))), engine)
+            .with_step_verifiers(vec![req]);
 
         // Pre-build an "evidence" object with a verified=false receipt
         // manually (bypasses BIBLE wireup; lets us simulate "the

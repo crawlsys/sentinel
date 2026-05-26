@@ -5,7 +5,7 @@
 //! or migrations in prod or production, even if the user gives permission."
 //!
 //! Local database ops are allowed (no prod indicators detected).
-//! Production is detected by: DATABASE_URL containing "prod", explicit
+//! Production is detected by: `DATABASE_URL` containing "prod", explicit
 //! --env production flags, or known production hostnames.
 
 use regex::Regex;
@@ -34,7 +34,7 @@ static PROD_INDICATOR: LazyLock<Regex> = LazyLock::new(|| {
     ).unwrap()
 });
 
-/// Process a PreToolUse Bash event. Blocks production database operations.
+/// Process a `PreToolUse` Bash event. Blocks production database operations.
 pub fn process(input: &HookInput) -> HookOutput {
     let cmd = match extract_bash_command(input) {
         Some(c) => c,

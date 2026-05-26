@@ -119,7 +119,7 @@ pub struct CodexFindings {
     pub total: u64,
 }
 
-/// CodeRabbit severity-block counts within a single PR.
+/// `CodeRabbit` severity-block counts within a single PR.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct CodeRabbitFindings {
     pub critical: u64,
@@ -184,8 +184,8 @@ pub fn scan_pr_reviews(
     }
 
     // Write JSONL (full overwrite — input is the source of truth).
-    let mut jsonl_file = File::create(&jsonl_path)
-        .with_context(|| format!("create {}", jsonl_path.display()))?;
+    let mut jsonl_file =
+        File::create(&jsonl_path).with_context(|| format!("create {}", jsonl_path.display()))?;
     for row in &all_rows {
         let line = serde_json::to_string(row)?;
         writeln!(jsonl_file, "{line}")?;
@@ -353,14 +353,14 @@ fn build_row(repo: &str, summary: &PrSummaryRaw, detail: &PrDetailRaw) -> PrRow 
 }
 
 impl CodexFindings {
-    fn total_set(self) -> Self {
+    const fn total_set(self) -> Self {
         let total = self.critical + self.high + self.medium + self.low;
         Self { total, ..self }
     }
 }
 
 impl CodeRabbitFindings {
-    fn total_set(self) -> Self {
+    const fn total_set(self) -> Self {
         let total = self.critical + self.potential_issue + self.suggestion + self.nitpick;
         Self { total, ..self }
     }
@@ -394,7 +394,7 @@ pub fn count_codex_findings(body: &str) -> CodexFindings {
     f
 }
 
-/// Count CodeRabbit severity blocks. CodeRabbit reviews use shapes like:
+/// Count `CodeRabbit` severity blocks. `CodeRabbit` reviews use shapes like:
 ///   `_⚠️ Potential issue_ | _🔴 Critical_`
 ///   `_🛠️ Refactor suggestion_`
 ///   `_🧹 Nitpick (assertive)_`
@@ -468,12 +468,12 @@ pub fn percentile(values: &[f64], q: f64) -> f64 {
         return sorted[lo];
     }
     let frac = pos - (lo as f64);
-    sorted[lo] + (sorted[hi] - sorted[lo]) * frac
+    (sorted[hi] - sorted[lo]).mul_add(frac, sorted[lo])
 }
 
-/// Heuristic remediation rate for CodeRabbit: # of CodeRabbit-authored
-/// review threads that have a follow-up commit after their submitted_at.
-/// Returns `None` if there are no CodeRabbit reviews to score against.
+/// Heuristic remediation rate for `CodeRabbit`: # of CodeRabbit-authored
+/// review threads that have a follow-up commit after their `submitted_at`.
+/// Returns `None` if there are no `CodeRabbit` reviews to score against.
 fn compute_coderabbit_remediation(detail: &PrDetailRaw) -> Option<f64> {
     let cr_reviews: Vec<&ReviewRaw> = detail
         .reviews
@@ -512,7 +512,9 @@ fn accumulate_findings(
     codex: &mut CodexFindings,
     crab: &mut CodeRabbitFindings,
 ) {
-    if author.eq_ignore_ascii_case("coderabbitai") || author.to_ascii_lowercase().contains("coderabbit") {
+    if author.eq_ignore_ascii_case("coderabbitai")
+        || author.to_ascii_lowercase().contains("coderabbit")
+    {
         let f = count_coderabbit_findings(body);
         crab.critical += f.critical;
         crab.potential_issue += f.potential_issue;
@@ -543,7 +545,9 @@ fn round_2(v: f64) -> f64 {
 }
 
 fn parse_iso(s: &str) -> Option<DateTime<Utc>> {
-    DateTime::parse_from_rfc3339(s).ok().map(|d| d.with_timezone(&Utc))
+    DateTime::parse_from_rfc3339(s)
+        .ok()
+        .map(|d| d.with_timezone(&Utc))
 }
 
 // ---- gh CLI shell-out + JSON parsing ----
@@ -788,7 +792,8 @@ fn coderabbit_critical_regex() -> &'static regex::Regex {
 fn coderabbit_potential_regex() -> &'static regex::Regex {
     static RE: OnceLock<regex::Regex> = OnceLock::new();
     RE.get_or_init(|| {
-        regex::Regex::new(r"⚠️\s*potential issue|potential\s*issue\b").expect("static regex compiles")
+        regex::Regex::new(r"⚠️\s*potential issue|potential\s*issue\b")
+            .expect("static regex compiles")
     })
 }
 

@@ -136,8 +136,8 @@ pub fn scan_cache_efficiency(
     // Per-session JSONL output (one row per session, including
     // sessions with zero usage so the output is exhaustive).
     ensure_parent(output_jsonl)?;
-    let mut jsonl_file = File::create(output_jsonl)
-        .with_context(|| format!("create {}", output_jsonl.display()))?;
+    let mut jsonl_file =
+        File::create(output_jsonl).with_context(|| format!("create {}", output_jsonl.display()))?;
     for row in &rows {
         let line = serde_json::to_string(row)?;
         writeln!(jsonl_file, "{line}")?;
@@ -145,10 +145,7 @@ pub fn scan_cache_efficiency(
     jsonl_file.flush()?;
 
     // Aggregates: only sessions with usage contribute to percentiles.
-    let with_usage: Vec<&SessionRow> = rows
-        .iter()
-        .filter(|r| r.cache_hit_rate.is_some())
-        .collect();
+    let with_usage: Vec<&SessionRow> = rows.iter().filter(|r| r.cache_hit_rate.is_some()).collect();
 
     let hit_rates: Vec<f64> = with_usage
         .iter()
@@ -277,10 +274,7 @@ fn parse_session(jsonl: &Path, project: &str) -> Option<SessionRow> {
         (1.0 - hr) * total * APPROX_INPUT_DOLLARS_PER_TOKEN
     });
 
-    let date = latest_ts.map_or_else(
-        || "unknown".to_string(),
-        |t| t.date_naive().to_string(),
-    );
+    let date = latest_ts.map_or_else(|| "unknown".to_string(), |t| t.date_naive().to_string());
 
     Some(SessionRow {
         session_id,
@@ -332,8 +326,7 @@ fn aggregate_by_project(rows: &[&SessionRow]) -> Vec<ProjectAggregate> {
     let mut out: Vec<ProjectAggregate> = buckets
         .into_iter()
         .map(|(project, rs)| {
-            let hit_rates: Vec<f64> =
-                rs.iter().map(|r| r.cache_hit_rate.unwrap_or(0.0)).collect();
+            let hit_rates: Vec<f64> = rs.iter().map(|r| r.cache_hit_rate.unwrap_or(0.0)).collect();
             let total_input = rs.iter().map(|r| r.total_input_tokens).sum::<u64>();
             let total_read = rs.iter().map(|r| r.cache_read_input_tokens).sum::<u64>();
             ProjectAggregate {
@@ -346,7 +339,7 @@ fn aggregate_by_project(rows: &[&SessionRow]) -> Vec<ProjectAggregate> {
             }
         })
         .collect();
-    out.sort_by(|a, b| b.total_input_tokens.cmp(&a.total_input_tokens));
+    out.sort_by_key(|b| std::cmp::Reverse(b.total_input_tokens));
     out
 }
 
@@ -456,7 +449,11 @@ mod tests {
         let body = r#"{"type":"system","content":"pr-link"}"#;
         let p = write_session(dir.path(), "s2", body);
         let row = parse_session(&p, "proj").unwrap();
-        assert!(row.cache_hit_rate.is_none(), "expected None, got {:?}", row.cache_hit_rate);
+        assert!(
+            row.cache_hit_rate.is_none(),
+            "expected None, got {:?}",
+            row.cache_hit_rate
+        );
         assert_eq!(row.total_input_tokens, 0);
         assert!(row.waste_estimate_usd.abs() < f64::EPSILON);
     }
@@ -542,13 +539,16 @@ mod tests {
 
         let out_jsonl = dir.path().join("out").join("cache.jsonl");
         let out_summary = dir.path().join("out").join("summary.json");
-        let report =
-            scan_cache_efficiency(&projects, &out_jsonl, &out_summary).unwrap();
+        let report = scan_cache_efficiency(&projects, &out_jsonl, &out_summary).unwrap();
 
         assert_eq!(report.sessions_scanned, 2);
         assert_eq!(report.sessions_with_usage, 2);
         // p50 of {0.2, 0.8} = 0.5
-        assert!((report.p50_hit_rate - 0.5).abs() < 1e-6, "p50={}", report.p50_hit_rate);
+        assert!(
+            (report.p50_hit_rate - 0.5).abs() < 1e-6,
+            "p50={}",
+            report.p50_hit_rate
+        );
 
         let jsonl_content = fs::read_to_string(&out_jsonl).unwrap();
         assert_eq!(jsonl_content.lines().count(), 2);
@@ -568,8 +568,7 @@ mod tests {
         let nonexistent = dir.path().join("does-not-exist");
         let out_jsonl = dir.path().join("cache.jsonl");
         let out_summary = dir.path().join("summary.json");
-        let report =
-            scan_cache_efficiency(&nonexistent, &out_jsonl, &out_summary).unwrap();
+        let report = scan_cache_efficiency(&nonexistent, &out_jsonl, &out_summary).unwrap();
         assert_eq!(report.sessions_scanned, 0);
         assert!(out_jsonl.exists());
         assert!(out_summary.exists());

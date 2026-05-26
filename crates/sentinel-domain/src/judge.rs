@@ -8,36 +8,39 @@ use serde::{Deserialize, Serialize};
 /// Judge criticality tier — determines which model evaluates the evidence.
 ///
 /// All tiers route through `OpenRouter` (single gateway, single auth surface,
-/// automatic provider failover). Names are historical from Anthropic's model
-/// family. Actual routing:
+/// automatic provider failover). The four tiers are the operator-pinned model
+/// set — Codex / Sonnet / Opus / Kimi — one per vendor for cross-distribution
+/// diversity. Routing (operator-specified 2026-05-25):
 ///
-/// - `Haiku` → `cerebras/glm-4.7` (fast tier — routine phases, lowest cost)
-/// - `Kimi` → `moonshotai/kimi-k2.6` (review tier, **default** — OSS frontier,
-///   58.6 SWE-Bench Pro, 4-10x cheaper than closed frontier; cross-distribution
-///   diversity vs Western closed models for adversarial review)
-/// - `Sonnet` → `openai/gpt-5.4` (cross-vendor verification — pairs with Kimi
-///   for critical-tier multi-judge to break shared-blind-spot failure mode)
-/// - `Opus` → `anthropic/claude-opus-4.7` (critical-strict tier — third leg
-///   of trio for highest-stakes work)
+/// - `Codex` → `openai/gpt-5.5-pro` (`OpenAI`; the model that powers Codex)
+/// - `Kimi` → `moonshotai/kimi-k2.6` (Moonshot; OSS frontier, Eastern
+///   training distribution for adversarial diversity)
+/// - `Sonnet` → `anthropic/claude-sonnet-4.6` (Anthropic; balanced daily tier)
+/// - `Opus` → `anthropic/claude-opus-4.7` (Anthropic; deepest reasoning,
+///   highest-stakes work)
 ///
-/// Tiers are ordered by cost ascending (Haiku < Kimi < Sonnet < Opus).
-/// Step configs declare the tier; multi-judge dispatch is a runtime
-/// concern that pairs Kimi+Sonnet (critical) or Kimi+Sonnet+Opus
-/// (critical-strict) for distributional diversity.
+/// Step configs declare the tier; multi-judge dispatch is a runtime concern
+/// that pairs models from different vendors (Codex/openai + Kimi/moonshot +
+/// Opus/anthropic) so disagreement signals come from genuinely different
+/// blind spots.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum JudgeModel {
-    /// Fast tier — Cerebras GLM-4.7. Cheapest, lowest latency, simplest phases.
-    Haiku,
-    /// Review tier (DEFAULT) — Moonshot Kimi K2.6 via OpenRouter. OSS frontier;
-    /// 58.6 SWE-Bench Pro / 89.6 LiveCodeBench / 256K context. Eastern training
-    /// distribution adds diversity vs Western closed-model trio.
+    /// Codex tier — `OpenAI` GPT-5.5-pro via `OpenRouter` (the model that powers
+    /// Codex). Operator-pinned per the four-model judge set
+    /// (Codex / Sonnet / Opus / Kimi).
+    Codex,
+    /// Review tier (DEFAULT) — Moonshot Kimi K2-Thinking via `OpenRouter`. The
+    /// callable Kimi variant (`kimi-k2.6` 404s on the operator's provider
+    /// routing). Eastern training distribution adds diversity vs the Western
+    /// closed-model trio for adversarial review.
     Kimi,
-    /// Cross-vendor verification — OpenAI GPT-5.4 via OpenRouter. Pairs with
-    /// Kimi at the `critical` trust tier so disagreement signals are real
-    /// (different model families, different blind spots).
+    /// Cross-vendor verification — `OpenAI` GPT-5.5 via `OpenRouter` (newest
+    /// frontier; #1 reasoning, 2.8s live). Pairs with Kimi at the `critical`
+    /// trust tier so disagreement signals are real (different model families,
+    /// different blind spots). Was the stale `gpt-5.4`.
     Sonnet,
-    /// Critical-strict tier — Anthropic Claude Opus 4.7 via OpenRouter. Third
+    /// Critical-strict tier — Anthropic Claude Opus 4.7 via `OpenRouter`. Third
     /// leg of the trio for highest-stakes audit-grade work.
     Opus,
 }
@@ -45,9 +48,9 @@ pub enum JudgeModel {
 impl std::fmt::Display for JudgeModel {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Haiku => write!(f, "cerebras/glm-4.7"),
+            Self::Codex => write!(f, "openai/gpt-5.5-pro"),
             Self::Kimi => write!(f, "moonshotai/kimi-k2.6"),
-            Self::Sonnet => write!(f, "openai/gpt-5.4"),
+            Self::Sonnet => write!(f, "anthropic/claude-sonnet-4.6"),
             Self::Opus => write!(f, "anthropic/claude-opus-4.7"),
         }
     }
@@ -55,21 +58,23 @@ impl std::fmt::Display for JudgeModel {
 
 impl JudgeModel {
     /// Default judge for skill phases that don't specify a tier explicitly.
-    /// Lands on Kimi K2.6 — best agentic-coding accuracy at lowest blended
-    /// price ($1.15-2.15/M tokens vs $5/$25-30 for the closed frontier).
+    /// Lands on Kimi K2-Thinking — Eastern-distribution diversity at a
+    /// fraction of the closed-frontier price, and (unlike `kimi-k2.6`)
+    /// actually callable on the operator's `OpenRouter` key.
     #[must_use]
     pub const fn default_review_tier() -> Self {
         Self::Kimi
     }
 
-    /// OpenRouter model identifier for this tier — what the API expects in
-    /// the `model` field of a chat-completion request.
+    /// `OpenRouter` model identifier for this tier — what the API expects in
+    /// the `model` field of a chat-completion request. Every slug here was
+    /// confirmed to resolve + respond by live probe (see the type docs).
     #[must_use]
     pub const fn openrouter_model_id(self) -> &'static str {
         match self {
-            Self::Haiku => "cerebras/glm-4.7",
+            Self::Codex => "openai/gpt-5.5-pro",
             Self::Kimi => "moonshotai/kimi-k2.6",
-            Self::Sonnet => "openai/gpt-5.4",
+            Self::Sonnet => "anthropic/claude-sonnet-4.6",
             Self::Opus => "anthropic/claude-opus-4.7",
         }
     }
@@ -97,7 +102,7 @@ impl JudgeVerdict {
     /// **Attack #127 fix**: Deserialized confidence values may be out of range
     /// (e.g., `-99999.0` or `1e308` from a forged judge response). Clamping
     /// prevents logic bypass via out-of-range confidence values.
-    fn clamp_confidence(c: f64) -> f64 {
+    const fn clamp_confidence(c: f64) -> f64 {
         c.clamp(0.0, 1.0)
     }
 
@@ -158,9 +163,9 @@ mod tests {
 
     #[test]
     fn test_judge_model_display() {
-        assert_eq!(JudgeModel::Haiku.to_string(), "cerebras/glm-4.7");
+        assert_eq!(JudgeModel::Codex.to_string(), "openai/gpt-5.5-pro");
         assert_eq!(JudgeModel::Kimi.to_string(), "moonshotai/kimi-k2.6");
-        assert_eq!(JudgeModel::Sonnet.to_string(), "openai/gpt-5.4");
+        assert_eq!(JudgeModel::Sonnet.to_string(), "anthropic/claude-sonnet-4.6");
         assert_eq!(JudgeModel::Opus.to_string(), "anthropic/claude-opus-4.7");
     }
 
@@ -170,7 +175,7 @@ mod tests {
         // — they're sent to the same endpoint as the same string. Drift
         // between the two is a silent footgun.
         for model in [
-            JudgeModel::Haiku,
+            JudgeModel::Codex,
             JudgeModel::Kimi,
             JudgeModel::Sonnet,
             JudgeModel::Opus,
@@ -193,7 +198,7 @@ mod tests {
         // `kimi`, `sonnet`, etc. and a lossy round-trip would silently
         // demote configs to the default tier on reload.
         for model in [
-            JudgeModel::Haiku,
+            JudgeModel::Codex,
             JudgeModel::Kimi,
             JudgeModel::Sonnet,
             JudgeModel::Opus,

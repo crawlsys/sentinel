@@ -3,7 +3,7 @@
 //! Detects MCP server failures after tool calls and logs them to
 //! ~/.claude/metrics/errors.jsonl for auto-filing to Linear.
 //!
-//! Runs on PostToolUse — only checks tools with the `mcp__` prefix.
+//! Runs on `PostToolUse` — only checks tools with the `mcp__` prefix.
 //! Never blocks, only logs.
 
 use chrono::Utc;
@@ -57,7 +57,7 @@ fn detect_error(input: &HookInput) -> Option<String> {
     let is_error = input
         .extra
         .get("is_error")
-        .and_then(|v| v.as_bool())
+        .and_then(serde_json::Value::as_bool)
         .unwrap_or(false);
 
     // Check tool_result for error patterns
@@ -135,7 +135,7 @@ fn log_mcp_error(
     let _ = fs.append(&errors_path, line.as_bytes());
 }
 
-/// Process an MCP health check (PostToolUse)
+/// Process an MCP health check (`PostToolUse`)
 pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     let tool_name = match &input.tool_name {
         Some(name) if name.starts_with("mcp__") => name.as_str(),
@@ -229,6 +229,37 @@ mod tests {
 
     #[test]
     fn test_detects_timeout_error() {
+        // Browserbase MCP (current) — typical remote browser timeout.
+        let input = HookInput {
+            tool_name: Some("mcp__browserbase__navigate".to_string()),
+            tool_result: Some(serde_json::json!("Request timed out after 30000ms")),
+            session_id: Some("test-session".to_string()),
+            ..Default::default()
+        };
+        let error = detect_error(&input);
+        assert!(error.is_some());
+        assert_eq!(error.unwrap(), "timed out");
+    }
+
+    #[test]
+    fn test_detects_timeout_error_cdp() {
+        // CDP MCP (current) — local browser timeout (e.g. wait_for_selector).
+        let input = HookInput {
+            tool_name: Some("mcp__cdp__navigate".to_string()),
+            tool_result: Some(serde_json::json!("Request timed out after 30000ms")),
+            session_id: Some("test-session".to_string()),
+            ..Default::default()
+        };
+        let error = detect_error(&input);
+        assert!(error.is_some());
+        assert_eq!(error.unwrap(), "timed out");
+    }
+
+    #[test]
+    fn test_detects_timeout_error_legacy_steel() {
+        // Legacy Steel MCP — kept as forward-compat regression. The
+        // steel-mcp binary is no longer registered, but if a residual
+        // tool name ever surfaced, the error detector should still classify it.
         let input = HookInput {
             tool_name: Some("mcp__steel__navigate".to_string()),
             tool_result: Some(serde_json::json!("Request timed out after 30000ms")),
@@ -254,6 +285,13 @@ mod tests {
     #[test]
     fn test_extract_server_name() {
         assert_eq!(extract_server_name("mcp__linear__get_issue"), "linear");
+        assert_eq!(
+            extract_server_name("mcp__browserbase__navigate"),
+            "browserbase"
+        );
+        assert_eq!(extract_server_name("mcp__cdp__navigate"), "cdp");
+        // Legacy Steel — kept as regression coverage. The steel-mcp binary
+        // is no longer registered but the extractor should still work.
         assert_eq!(extract_server_name("mcp__steel__navigate"), "steel");
         assert_eq!(extract_server_name("mcp__doppler__list_secrets"), "doppler");
         assert_eq!(extract_server_name("mcp__"), "");

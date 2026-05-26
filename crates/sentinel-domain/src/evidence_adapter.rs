@@ -18,7 +18,7 @@
 //! evidence — it asks the adapter registry: "I'm claiming `git.pr_opened`;
 //! here's my context; produce a receipt." The adapter calls out to where
 //! the truth lives and returns an [`EvidenceReceipt`] that gets folded into
-//! the StepProof's `Evidence.custom`.
+//! the `StepProof`'s `Evidence.custom`.
 //!
 //! # The provenance hash
 //!
@@ -85,13 +85,12 @@ impl EvidenceClaim {
     /// provenance hash so the receipt binds to the claim shape, not
     /// just the claim type.
     ///
-    /// Determinism note: relies on `serde_json`'s default BTreeMap
+    /// Determinism note: relies on `serde_json`'s default `BTreeMap`
     /// object key ordering. Same caveat as elsewhere in the chain —
     /// don't enable `preserve_order`.
     #[must_use]
     pub fn context_hash(&self) -> String {
-        let json = serde_json::to_string(&self.context)
-            .expect("Value serialization is infallible");
+        let json = serde_json::to_string(&self.context).expect("Value serialization is infallible");
         let mut hasher = Sha256::new();
         hasher.update(json.as_bytes());
         format!("{:x}", hasher.finalize())
@@ -129,18 +128,18 @@ pub struct EvidenceReceipt {
     /// >24h old").
     pub fetched_at: DateTime<Utc>,
 
-    /// Hash binding (adapter_name, claim_type, claim_context_hash,
-    /// payload_hash). Verifiers re-derive and compare to detect
+    /// Hash binding (`adapter_name`, `claim_type`, `claim_context_hash`,
+    /// `payload_hash`). Verifiers re-derive and compare to detect
     /// silent receipt swaps. Computed via [`compute_provenance_hash`].
     pub provenance_hash: String,
 }
 
-/// Errors the adapter framework can surface. Adapter-specific errors
-/// (HTTP failures, auth refusals) get wrapped in `Fetch` with a
-/// human-readable message — typed errors for those would force
-/// every adapter into the same error vocabulary, which doesn't match
-/// the heterogeneous reality (GitHub's 403 isn't Browserbase's 403
-/// isn't Doppler's 403).
+/// Errors the adapter framework can surface.
+///
+/// Adapter-specific errors (HTTP failures, auth refusals) get wrapped in `Fetch`
+/// with a human-readable message — typed errors for those would force every adapter
+/// into the same error vocabulary, which doesn't match the heterogeneous reality
+/// (GitHub's 403 isn't Browserbase's 403 isn't Doppler's 403).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AdapterError {
     /// No adapter in the registry supports this claim type.
@@ -151,10 +150,7 @@ pub enum AdapterError {
     /// Adapter returned a receipt but the provenance hash doesn't
     /// match what we'd derive — usually means the adapter is buggy
     /// or someone tampered with the receipt in transit.
-    ProvenanceMismatch {
-        expected: String,
-        actual: String,
-    },
+    ProvenanceMismatch { expected: String, actual: String },
     /// Adapter declared it supports the claim type but rejected the
     /// specific context (e.g. required field missing). Message is
     /// adapter-supplied.
@@ -209,8 +205,7 @@ pub fn compute_provenance_hash(
 /// `payload_hash` portion of the provenance hash.
 #[must_use]
 pub fn compute_payload_hash(payload: &serde_json::Value) -> String {
-    let json = serde_json::to_string(payload)
-        .expect("Value serialization is infallible");
+    let json = serde_json::to_string(payload).expect("Value serialization is infallible");
     let mut hasher = Sha256::new();
     hasher.update(json.as_bytes());
     format!("{:x}", hasher.finalize())
@@ -366,13 +361,7 @@ mod tests {
     #[test]
     fn new_populates_provenance_hash() {
         let claim = sample_claim();
-        let receipt = EvidenceReceipt::new(
-            "github_api",
-            &claim,
-            true,
-            sample_payload(),
-            ts(),
-        );
+        let receipt = EvidenceReceipt::new("github_api", &claim, true, sample_payload(), ts());
         assert_eq!(receipt.provenance_hash.len(), 64);
         assert!(receipt.verify_provenance(&claim).is_ok());
     }
@@ -382,13 +371,7 @@ mod tests {
         // Build a receipt → serialize to JSON → deserialize →
         // re-verify. Provenance hash must survive the trip.
         let claim = sample_claim();
-        let original = EvidenceReceipt::new(
-            "github_api",
-            &claim,
-            true,
-            sample_payload(),
-            ts(),
-        );
+        let original = EvidenceReceipt::new("github_api", &claim, true, sample_payload(), ts());
         let json = serde_json::to_string(&original).unwrap();
         let restored: EvidenceReceipt = serde_json::from_str(&json).unwrap();
         assert!(restored.verify_provenance(&claim).is_ok());
@@ -399,15 +382,8 @@ mod tests {
         // Receipt issued; attacker swaps the payload body.
         // Re-verification must catch the substitution.
         let claim = sample_claim();
-        let mut receipt = EvidenceReceipt::new(
-            "github_api",
-            &claim,
-            true,
-            sample_payload(),
-            ts(),
-        );
-        receipt.payload =
-            serde_json::json!({ "url": "https://attacker.example.com/fake" });
+        let mut receipt = EvidenceReceipt::new("github_api", &claim, true, sample_payload(), ts());
+        receipt.payload = serde_json::json!({ "url": "https://attacker.example.com/fake" });
         let err = receipt.verify_provenance(&claim).unwrap_err();
         assert!(matches!(err, AdapterError::ProvenanceMismatch { .. }));
     }
@@ -418,13 +394,7 @@ mod tests {
         // from `self_attested` — the provenance hash binds the
         // adapter identity.
         let claim = sample_claim();
-        let mut receipt = EvidenceReceipt::new(
-            "github_api",
-            &claim,
-            true,
-            sample_payload(),
-            ts(),
-        );
+        let mut receipt = EvidenceReceipt::new("github_api", &claim, true, sample_payload(), ts());
         receipt.adapter_name = "self_attested".into();
         let err = receipt.verify_provenance(&claim).unwrap_err();
         assert!(matches!(err, AdapterError::ProvenanceMismatch { .. }));
@@ -435,13 +405,7 @@ mod tests {
         // Receipt for PR #42 cannot be re-presented as a receipt for
         // PR #43 — the context is part of the hash.
         let claim_42 = sample_claim();
-        let receipt = EvidenceReceipt::new(
-            "github_api",
-            &claim_42,
-            true,
-            sample_payload(),
-            ts(),
-        );
+        let receipt = EvidenceReceipt::new("github_api", &claim_42, true, sample_payload(), ts());
         // Verify against a different claim (different pr_number).
         let mut claim_43 = sample_claim();
         claim_43.context = serde_json::json!({
@@ -462,13 +426,7 @@ mod tests {
             claim_type: "git.pr_opened".into(),
             ..sample_claim()
         };
-        let receipt = EvidenceReceipt::new(
-            "github_api",
-            &claim_a,
-            true,
-            sample_payload(),
-            ts(),
-        );
+        let receipt = EvidenceReceipt::new("github_api", &claim_a, true, sample_payload(), ts());
         let claim_b = EvidenceClaim {
             claim_type: "git.pr_merged".into(),
             ..sample_claim()
@@ -485,13 +443,8 @@ mod tests {
         // This makes "we know we don't know" a first-class chain entry
         // rather than an absence-of-data ambiguity.
         let claim = sample_claim();
-        let receipt = EvidenceReceipt::new(
-            "self_attested",
-            &claim,
-            false,
-            serde_json::json!({}),
-            ts(),
-        );
+        let receipt =
+            EvidenceReceipt::new("self_attested", &claim, false, serde_json::json!({}), ts());
         assert!(!receipt.verified);
         assert_eq!(receipt.provenance_hash.len(), 64);
         assert!(receipt.verify_provenance(&claim).is_ok());

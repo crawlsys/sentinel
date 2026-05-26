@@ -40,7 +40,7 @@ impl LastSeenStore {
     }
 
     /// Build a store backed by an explicit path (useful for tests).
-    pub fn at(path: PathBuf) -> Self {
+    pub const fn at(path: PathBuf) -> Self {
         Self { path }
     }
 
@@ -104,7 +104,7 @@ pub fn state_dir_for_session(session_id: &str) -> PathBuf {
 pub struct DecodedWebhook {
     /// Source name: "linear", "github", "vercel", etc.
     pub source: String,
-    /// Event type: "Issue.update", "pull_request.closed", "check_run.completed".
+    /// Event type: "Issue.update", "`pull_request.closed`", "`check_run.completed`".
     pub event_type: String,
     /// Primary resource identifier: "FPCRM-329", "owner/repo#123", etc.
     #[serde(default)]
@@ -130,7 +130,7 @@ pub struct ReplayResult {
     pub until: Option<DateTime<Utc>>,
     /// Total events fetched.
     pub event_count: usize,
-    /// Counts per (source, event_type) bucket, sorted by count desc.
+    /// Counts per (source, `event_type`) bucket, sorted by count desc.
     pub buckets: Vec<Bucket>,
     /// Human-readable one-line summaries for the top N events by importance
     /// (failures/state-changes first).
@@ -173,7 +173,7 @@ impl ReplayResult {
 /// A counted bucket for [`ReplayResult::buckets`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Bucket {
-    /// Human label, e.g. "PRs merged" or "github check_run.completed".
+    /// Human label, e.g. "PRs merged" or "github `check_run.completed`".
     pub label: String,
     /// How many events fell into this bucket.
     pub count: usize,
@@ -215,7 +215,7 @@ pub fn analyze_events(
     buckets.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.label.cmp(&b.label)));
 
     // Highlights sorted by score desc, keep top 5.
-    highlights.sort_by(|a, b| b.0.cmp(&a.0));
+    highlights.sort_by_key(|b| std::cmp::Reverse(b.0));
     let highlights: Vec<String> = highlights.into_iter().take(5).map(|(_, s)| s).collect();
 
     ReplayResult {

@@ -260,6 +260,9 @@ struct SearchResponse {
 
 // ── Low-level JSON-RPC IO helpers ────────────────────────────────────
 
+// value is serialised synchronously before any .await; the &T reference is not
+// held across yield points so the future's non-Send-ness is benign here.
+#[allow(clippy::future_not_send)]
 async fn write_json_line<T: Serialize>(
     stdin: &mut tokio::process::ChildStdin,
     value: &T,

@@ -1,6 +1,6 @@
 //! Worktree Reminder Hook
 //!
-//! Runs on UserPromptSubmit. Detects when the user is asking for code changes
+//! Runs on `UserPromptSubmit`. Detects when the user is asking for code changes
 //! in a git repository and injects a reminder to use `EnterWorktree` to isolate
 //! changes rather than editing directly on the current branch.
 //!
@@ -9,6 +9,7 @@
 //! 2. The session is NOT already inside a worktree
 //! 3. The user prompt suggests code changes (edit, fix, update, refactor, etc.)
 
+use std::fmt::Write as _;
 use std::path::Path;
 
 use regex::Regex;
@@ -46,7 +47,7 @@ fn suggests_code_changes(prompt: &str) -> bool {
     // Need at least one action word match
     patterns
         .iter()
-        .any(|p| Regex::new(p).map(|re| re.is_match(&lower)).unwrap_or(false))
+        .any(|p| Regex::new(p).is_ok_and(|re| re.is_match(&lower)))
 }
 
 pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
@@ -99,11 +100,12 @@ pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
                 .map(|b| format!("  git branch -d {b}"))
                 .collect::<Vec<_>>()
                 .join("\n");
-            msg.push_str(&format!(
+            let _ = write!(
+                msg,
                 "\n\n[Branch Cleanup] {} local `worktree-*` branch(es) merged into main \
                  — safe to delete:\n{cmds}",
                 merged_local.len()
-            ));
+            );
         }
     }
 

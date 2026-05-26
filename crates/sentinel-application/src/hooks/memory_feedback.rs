@@ -25,6 +25,11 @@ use super::{FileSystemPort, HookContext, MemoryMcpPort};
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct InjectedMemory {
     id: String,
+    /// Retrieval-event id captured by `memory_inject` from `memory_search`. This —
+    /// not `id` (the atom id) — is what `memory_record_outcome` expects, since
+    /// the retrieval log is keyed by event id.
+    #[serde(default)]
+    event_id: Option<String>,
     name: String,
     score: f64,
 }
@@ -145,6 +150,13 @@ fn record_outcomes_unified(
 
     let mut outcomes: Vec<(String, &'static str)> = Vec::with_capacity(injected.len());
     for memory in injected {
+        // The outcome must attach to the retrieval EVENT, not the atom. If
+        // memory_inject didn't capture an event_id (e.g. an older state file),
+        // there's no event to record against — skip rather than send an atom
+        // id the retrieval log can't resolve.
+        let Some(event_id) = memory.event_id.clone() else {
+            continue;
+        };
         let label = if used_ids.contains(memory.id.as_str()) {
             "used"
         } else if correction_detected {
@@ -152,18 +164,17 @@ fn record_outcomes_unified(
         } else {
             "ignored"
         };
-        outcomes.push((memory.id.clone(), label));
+        outcomes.push((event_id, label));
     }
 
-    // Fire-and-forget: outcomes are best-effort. A transient memory-mcp
-    // failure must not block the Stop hook. Aggregate all calls under a
-    // single tokio runtime to minimise subprocess overhead.
-    //
-    // `run_async` requires `T: Send + Default`. `()` satisfies both, and
-    // the whole path is inherently fire-and-forget (errors from
-    // individual calls are already logged at WARN inside the loop), so
-    // we unwrap to () here.
-    crate::hooks::run_async(async move {
+    // Fire-and-forget, but NOT under the default 3s budget: this loops one
+    // `memory_record_outcome` call per injected atom (up to ~8), and each one
+    // cold-spawns memory-mcp (~2s). Under 3s only the first call or two would
+    // land before the timeout killed the rest — which is exactly why the
+    // feedback loop never closed and Loop 4 saw `used=0`. Give it a generous
+    // budget (Stop is async; this never blocks the user's turn). Errors per
+    // call are logged at WARN inside the loop.
+    crate::hooks::run_async_timeout(async move {
         for (event_id, outcome) in outcomes {
             let mut args = serde_json::Map::new();
             args.insert(
@@ -183,7 +194,7 @@ fn record_outcomes_unified(
                 );
             }
         }
-    });
+    }, std::time::Duration::from_secs(30));
 }
 
 // ---------------------------------------------------------------------------
@@ -208,12 +219,9 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
         Err(_) => return HookOutput::allow(),
     };
 
-    let state: InjectedState = match serde_json::from_str(&state_content) {
-        Ok(s) => s,
-        Err(_) => {
-            debug!("Invalid injected-memories state file — skipping");
-            return HookOutput::allow();
-        }
+    let state: InjectedState = if let Ok(s) = serde_json::from_str(&state_content) { s } else {
+        debug!("Invalid injected-memories state file — skipping");
+        return HookOutput::allow();
     };
 
     if state.memories.is_empty() {
@@ -262,11 +270,13 @@ mod tests {
         let memories = vec![
             InjectedMemory {
                 id: "id1".to_string(),
+                event_id: None,
                 name: "Firefly Pro CRM".to_string(),
                 score: 0.85,
             },
             InjectedMemory {
                 id: "id2".to_string(),
+                event_id: None,
                 name: "Sentinel Hook Engine".to_string(),
                 score: 0.75,
             },
@@ -282,6 +292,7 @@ mod tests {
     fn test_detect_used_memories_none() {
         let memories = vec![InjectedMemory {
             id: "id1".to_string(),
+            event_id: None,
             name: "Firefly Pro CRM".to_string(),
             score: 0.85,
         }];
@@ -296,6 +307,7 @@ mod tests {
         // Names <= 3 chars should be skipped to avoid false positives
         let memories = vec![InjectedMemory {
             id: "id1".to_string(),
+            event_id: None,
             name: "api".to_string(),
             score: 0.80,
         }];
@@ -309,6 +321,7 @@ mod tests {
     fn test_detect_used_memories_case_insensitive() {
         let memories = vec![InjectedMemory {
             id: "id1".to_string(),
+            event_id: None,
             name: "Qdrant Vector Database".to_string(),
             score: 0.90,
         }];

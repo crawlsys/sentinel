@@ -1,12 +1,12 @@
-//! SessionEnd hook — cleanup on session termination
+//! `SessionEnd` hook — cleanup on session termination
 //!
 //! Called when the Claude Code session ends. Has a very tight timeout
-//! (1.5s default via CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS).
+//! (1.5s default via `CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS`).
 //! Must be extremely fast — only essential cleanup.
 
 use sentinel_domain::events::{HookInput, HookOutput};
 
-/// Process SessionEnd event
+/// Process `SessionEnd` event
 ///
 /// Performs minimal cleanup: flush pending state to disk.
 /// Must complete within 1.5s — no network calls, no heavy I/O.

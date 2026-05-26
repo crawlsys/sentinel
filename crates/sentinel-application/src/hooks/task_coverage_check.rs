@@ -1,7 +1,7 @@
 //! Task Coverage Check — Stop hook
 //!
 //! When Claude finishes responding, check if there are uncommitted file
-//! changes but no in_progress task. Warns about untracked work so nothing
+//! changes but no `in_progress` task. Warns about untracked work so nothing
 //! slips through without a task.
 
 use sentinel_domain::events::{HookEvent, HookInput, HookOutput};

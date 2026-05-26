@@ -1,0 +1,54 @@
+# Sentinel SLA Rules (SEN-12)
+#
+# Copy to ~/.claude/sentinel/config/slas.toml and adjust as needed.
+# Each rule defines a target duration (in minutes) and filters that decide
+# which subjects the rule applies to. Subjects are fed in as JSONL — see
+# `sentinel sla check --help`.
+
+[[sla]]
+name = "P0 ticket time-to-pickup"
+target_minutes = 240          # 4 hours
+subject_kind = "ticket"
+require_priority = "urgent"
+require_state = ["Backlog", "Todo"]
+
+[[sla]]
+name = "P0 time-to-resolution"
+target_minutes = 1440         # 24 hours
+subject_kind = "ticket"
+require_priority = "urgent"
+require_state = ["In Progress", "Code Review", "QA Testing"]
+
+[[sla]]
+name = "PR time-to-first-review"
+target_minutes = 240          # 4 hours
+subject_kind = "pr"
+require_state = ["open"]
+require_no_reviews = true
+
+[[sla]]
+name = "PR merge after approval"
+target_minutes = 120          # 2 hours
+subject_kind = "pr"
+require_state = ["approved"]
+
+[[sla]]
+name = "CI green to deploy"
+target_minutes = 30
+subject_kind = "deploy"
+require_state = ["ci_green_undeployed"]
+
+[[sla]]
+name = "QA Testing dwell"
+target_minutes = 1440         # 24 hours
+subject_kind = "ticket"
+require_state = ["QA Testing"]
+
+[[sla]]
+name = "High-priority backlog wait"
+target_minutes = 2880         # 48 hours
+subject_kind = "ticket"
+require_state = ["Backlog", "Todo"]
+# require_priority isn't a list yet, so configure separately for urgent + high
+# until that's added. For now this rule fires on any priority — adapter
+# should pre-filter subjects to {urgent, high}.

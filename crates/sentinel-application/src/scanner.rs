@@ -151,31 +151,29 @@ pub struct MarketplaceSnapshot {
 /// Count subdirectories in a path.
 pub fn count_subdirs(dir: &Path) -> usize {
     fs::read_dir(dir)
-        .map(|entries| {
+        .map_or(0, |entries| {
             entries
-                .filter_map(|e| e.ok())
+                .filter_map(std::result::Result::ok)
                 .filter(|e| {
-                    e.file_type().map(|ft| ft.is_dir()).unwrap_or(false)
+                    e.file_type().is_ok_and(|ft| ft.is_dir())
                         && !e.file_name().to_string_lossy().starts_with('_')
                 })
                 .count()
         })
-        .unwrap_or(0)
 }
 
 /// Count files with a given extension in a directory (non-recursive).
 pub fn count_files_with_ext(dir: &Path, ext: &str) -> usize {
     fs::read_dir(dir)
-        .map(|entries| {
+        .map_or(0, |entries| {
             entries
-                .filter_map(|e| e.ok())
+                .filter_map(std::result::Result::ok)
                 .filter(|e| {
-                    e.file_type().map(|ft| ft.is_file()).unwrap_or(false)
+                    e.file_type().is_ok_and(|ft| ft.is_file())
                         && e.file_name().to_string_lossy().ends_with(ext)
                 })
                 .count()
         })
-        .unwrap_or(0)
 }
 
 /// Count MCP servers from `~/.claude.json`.
@@ -190,7 +188,7 @@ pub fn count_mcp_servers(home_dir: &Path) -> usize {
         .and_then(|json| {
             json.get("mcpServers")
                 .and_then(|v| v.as_object())
-                .map(|obj| obj.len())
+                .map(serde_json::Map::len)
         })
         .unwrap_or(0)
 }
@@ -202,16 +200,15 @@ pub fn count_repos_with_suffix(home_dir: &Path, suffix: &str) -> usize {
     let gh_dir = home_dir.join("Documents").join("GitHub");
 
     fs::read_dir(gh_dir)
-        .map(|entries| {
+        .map_or(0, |entries| {
             entries
-                .filter_map(|e| e.ok())
+                .filter_map(std::result::Result::ok)
                 .filter(|e| {
-                    e.file_type().map(|ft| ft.is_dir()).unwrap_or(false)
+                    e.file_type().is_ok_and(|ft| ft.is_dir())
                         && e.file_name().to_string_lossy().ends_with(suffix)
                 })
                 .count()
         })
-        .unwrap_or(0)
 }
 
 /// Count all marketplace components in `~/.claude/`.
@@ -313,7 +310,7 @@ pub fn parse_frontmatter(content: &str) -> BTreeMap<String, String> {
 }
 
 /// Extract `@use` dependencies from SKILL.md content.
-/// Only matches `@use` in ````skills` fenced code blocks.
+/// Only matches `@use` in `` ```skills `` fenced code blocks.
 pub fn extract_dependencies(content: &str) -> Vec<SkillDependency> {
     let normalized = content.replace("\r\n", "\n");
     let mut deps = Vec::new();
@@ -404,7 +401,7 @@ pub fn infer_category(name: &str) -> String {
                 "sentinel",
                 "sequential-thinking",
                 "ssh",
-                "steel",
+                "browserbase",
                 "browserbase-tester",
                 "tailscale",
                 "traffic-light",
@@ -628,9 +625,9 @@ fn scan_skills(root_dir: &Path, mp_data: &serde_json::Value) -> Vec<Skill> {
     };
 
     let mut skill_dirs: Vec<String> = entries
-        .filter_map(|e| e.ok())
+        .filter_map(std::result::Result::ok)
         .filter(|e| {
-            e.file_type().map(|ft| ft.is_dir()).unwrap_or(false)
+            e.file_type().is_ok_and(|ft| ft.is_dir())
                 && !e.file_name().to_string_lossy().starts_with('_')
         })
         .map(|e| e.file_name().to_string_lossy().to_string())
@@ -689,7 +686,7 @@ fn scan_skills(root_dir: &Path, mp_data: &serde_json::Value) -> Vec<Skill> {
 
         let priority = mp_skill
             .and_then(|s| s.get("priority"))
-            .and_then(|v| v.as_u64())
+            .and_then(serde_json::Value::as_u64)
             .map(|v| v as u32);
 
         let allowed_tools: Vec<String> = fm
@@ -762,7 +759,9 @@ fn scan_agents(root_dir: &Path, mp_data: &serde_json::Value) -> Vec<Agent> {
                 .unwrap_or("")
                 .to_string();
 
-            let description = if !file.is_empty() {
+            let description = if file.is_empty() {
+                String::new()
+            } else {
                 let agent_path = agents_dir.join(&file);
                 fs::read_to_string(&agent_path)
                     .ok()
@@ -771,8 +770,6 @@ fn scan_agents(root_dir: &Path, mp_data: &serde_json::Value) -> Vec<Agent> {
                         fm.get("description").cloned().unwrap_or_default()
                     })
                     .unwrap_or_default()
-            } else {
-                String::new()
             };
 
             Agent {
@@ -793,9 +790,9 @@ fn scan_commands(root_dir: &Path) -> Vec<CommandDef> {
     };
 
     let mut command_files: Vec<String> = entries
-        .filter_map(|e| e.ok())
+        .filter_map(std::result::Result::ok)
         .filter(|e| {
-            e.file_type().map(|ft| ft.is_file()).unwrap_or(false)
+            e.file_type().is_ok_and(|ft| ft.is_file())
                 && e.file_name().to_string_lossy().ends_with(".md")
         })
         .map(|e| e.file_name().to_string_lossy().to_string())
@@ -851,7 +848,7 @@ fn scan_mcp_servers(mp_data: &serde_json::Value) -> Vec<McpServer> {
                         .and_then(|v| v.as_str())
                         .unwrap_or("stdio")
                         .to_string(),
-                    optional: m.get("optional").and_then(|v| v.as_bool()).unwrap_or(false),
+                    optional: m.get("optional").and_then(serde_json::Value::as_bool).unwrap_or(false),
                 })
                 .collect()
         })
@@ -874,8 +871,6 @@ fn run_validation(
     mcp_servers: &[McpServer],
     start: Instant,
 ) -> ValidationReport {
-    let mut results: Vec<ValidationResult> = Vec::new();
-
     let actual_counts: HashMap<&str, usize> = HashMap::from([
         ("skills", skills.len()),
         ("hooks", hooks.len()),
@@ -883,7 +878,35 @@ fn run_validation(
         ("mcpServers", mcp_servers.len()),
     ]);
 
-    // --- Category 1: Component Count Consistency ---
+    let mut results = Vec::new();
+    validate_count_consistency(mp_data, &actual_counts, &mut results);
+    validate_file_cross_references(root_dir, mp_data, skills, hooks, &mut results);
+    validate_frontmatter(skills, &mut results);
+    validate_dependency_graph(skills, &mut results);
+    validate_doc_counts(root_dir, &actual_counts, &mut results);
+    validate_skill_banners(root_dir, skills, &mut results);
+
+    let duration_ms = start.elapsed().as_millis() as u64;
+    let passed = results.iter().filter(|r| r.status == "pass").count();
+    let failed = results.iter().filter(|r| r.status == "fail").count();
+    let warned = results.iter().filter(|r| r.status == "warn").count();
+
+    ValidationReport {
+        timestamp: chrono::Utc::now().to_rfc3339(),
+        duration_ms,
+        passed,
+        failed,
+        warned,
+        results,
+    }
+}
+
+/// Category 1: check that counts in marketplace.json description match filesystem actuals.
+fn validate_count_consistency(
+    mp_data: &serde_json::Value,
+    actual_counts: &HashMap<&str, usize>,
+    results: &mut Vec<ValidationResult>,
+) {
     let desc = mp_data
         .get("description")
         .and_then(|v| v.as_str())
@@ -922,8 +945,16 @@ fn run_validation(
             }
         }
     }
+}
 
-    // --- Category 2: File Existence Cross-Reference ---
+/// Category 2: cross-reference registered skills/hooks/agents against the filesystem.
+fn validate_file_cross_references(
+    root_dir: &Path,
+    mp_data: &serde_json::Value,
+    skills: &[Skill],
+    hooks: &[Hook],
+    results: &mut Vec<ValidationResult>,
+) {
     let registered_skill_names: HashSet<String> = mp_data
         .get("skills")
         .and_then(|v| v.as_array())
@@ -985,7 +1016,6 @@ fn run_validation(
 
     // Sentinel hooks.toml
     let hooks_toml_path = root_dir.join("sentinel").join("config").join("hooks.toml");
-
     if hooks_toml_path.exists() {
         results.push(ValidationResult {
             category: "File Cross-Reference".to_string(),
@@ -1056,8 +1086,10 @@ fn run_validation(
             }
         }
     }
+}
 
-    // --- Category 3: Frontmatter Integrity ---
+/// Category 3: check that each skill has a valid semver version and a unique priority.
+fn validate_frontmatter(skills: &[Skill], results: &mut Vec<ValidationResult>) {
     let semver_re = regex::Regex::new(r"^\d+\.\d+\.\d+$").unwrap();
     let mut priority_map: HashMap<u32, String> = HashMap::new();
 
@@ -1102,8 +1134,11 @@ fn run_validation(
             priority_map.insert(priority, skill.name.clone());
         }
     }
+}
 
-    // --- Category 4: Dependency Graph Validity ---
+/// Category 4: verify every skill dependency resolves to an existing skill (no dangling refs or
+/// self-references).
+fn validate_dependency_graph(skills: &[Skill], results: &mut Vec<ValidationResult>) {
     let all_skill_names: HashSet<&str> = skills.iter().map(|s| s.name.as_str()).collect();
 
     for skill in skills {
@@ -1132,8 +1167,14 @@ fn run_validation(
             }
         }
     }
+}
 
-    // --- Category 5: Documentation Count Scanning ---
+/// Category 5: scan CLAUDE.md and README.md for stale component count mentions.
+fn validate_doc_counts(
+    root_dir: &Path,
+    actual_counts: &HashMap<&str, usize>,
+    results: &mut Vec<ValidationResult>,
+) {
     let docs_to_scan = ["CLAUDE.md", "README.md"];
     let total_count_patterns: &[(&str, &str, usize)] = &[
         ("skills", r"(\d+)\s+skills", 10),
@@ -1173,14 +1214,17 @@ fn run_validation(
             }
         }
     }
+}
 
-    // --- Category 6: Skill Activation Banner ---
-    // skill_router prepends an activation banner to its detection message
-    // when the skill's SKILL.md has a `## Activation Banner` section.
-    // Skills without one fall through to a bare `[Skill Router] Detected
-    // skill: X` line, which is the inconsistency we want to flag here.
-    // Status is `warn` not `fail` so this doesn't break CI for skills
-    // that haven't been migrated yet.
+/// Category 6: warn for any skill whose SKILL.md lacks an `## Activation Banner` section.
+///
+/// `skill_router` falls back to a bare detection message for skills without a banner, so
+/// this is flagged as `warn` (not `fail`) to track migration progress without breaking CI.
+fn validate_skill_banners(
+    root_dir: &Path,
+    skills: &[Skill],
+    results: &mut Vec<ValidationResult>,
+) {
     for skill in skills {
         let skill_md = root_dir.join("skills").join(&skill.name).join("SKILL.md");
         let Ok(content) = fs::read_to_string(&skill_md) else {
@@ -1209,21 +1253,6 @@ fn run_validation(
             });
         }
     }
-
-    // --- Summary ---
-    let duration_ms = start.elapsed().as_millis() as u64;
-    let passed = results.iter().filter(|r| r.status == "pass").count();
-    let failed = results.iter().filter(|r| r.status == "fail").count();
-    let warned = results.iter().filter(|r| r.status == "warn").count();
-
-    ValidationReport {
-        timestamp: chrono::Utc::now().to_rfc3339(),
-        duration_ms,
-        passed,
-        failed,
-        warned,
-        results,
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1238,7 +1267,7 @@ pub struct ExtendedCounts {
     pub scripts: usize,
     pub docs: usize,
     pub templates: usize,
-    pub steel_tools: usize,
+    pub browserbase_tools: usize,
 }
 
 /// Count extended marketplace components (core + local extras).
@@ -1247,31 +1276,30 @@ pub fn count_extended(root_dir: &Path) -> ExtendedCounts {
     let scripts = count_files_with_ext(&root_dir.join("scripts"), ".js");
     let docs = count_files_with_ext(&root_dir.join("docs"), ".md");
     let templates = count_all_non_hidden(&root_dir.join("templates"));
-    let steel_tools = parse_steel_tools(root_dir);
+    let browserbase_tools = parse_browserbase_tools(root_dir);
 
     ExtendedCounts {
         core,
         scripts,
         docs,
         templates,
-        steel_tools,
+        browserbase_tools,
     }
 }
 
 /// Count all non-hidden entries in a directory.
 fn count_all_non_hidden(dir: &Path) -> usize {
     fs::read_dir(dir)
-        .map(|entries| {
+        .map_or(0, |entries| {
             entries
-                .filter_map(|e| e.ok())
+                .filter_map(std::result::Result::ok)
                 .filter(|e| !e.file_name().to_string_lossy().starts_with('.'))
                 .count()
         })
-        .unwrap_or(0)
 }
 
-/// Parse steel tool count from marketplace.json MCP description.
-fn parse_steel_tools(root_dir: &Path) -> usize {
+/// Parse Browserbase tool count from marketplace.json MCP description.
+fn parse_browserbase_tools(root_dir: &Path) -> usize {
     let mp_path = root_dir.join("marketplace.json");
     let Ok(content) = fs::read_to_string(&mp_path) else {
         return 48; // default
@@ -1283,10 +1311,14 @@ fn parse_steel_tools(root_dir: &Path) -> usize {
     data.get("mcp")
         .and_then(|v| v.as_array())
         .and_then(|arr| {
-            arr.iter()
-                .find(|m| m.get("name").and_then(|n| n.as_str()) == Some("steel"))
+            arr.iter().find(|m| {
+                matches!(
+                    m.get("name").and_then(|n| n.as_str()),
+                    Some("browserbase" | "steel")
+                )
+            })
         })
-        .and_then(|steel| steel.get("description").and_then(|d| d.as_str()))
+        .and_then(|entry| entry.get("description").and_then(|d| d.as_str()))
         .and_then(|desc| {
             let re = regex::Regex::new(r"(\d+)\s*tools").ok()?;
             re.captures(desc).and_then(|cap| cap[1].parse().ok())
@@ -1314,10 +1346,31 @@ pub fn sync_counts(root_dir: &Path, dry_run: bool) -> SyncCountsReport {
     let ext = count_extended(root_dir);
     let c = &ext.core;
 
-    // Universal patterns (applied to ALL text files)
+    let mut changed_files: Vec<String> = Vec::new();
+
+    apply_universal_patterns(root_dir, c, &ext, dry_run, &mut changed_files);
+    apply_targeted_updates(root_dir, c, &ext, dry_run, &mut changed_files);
+
+    changed_files.sort();
+    changed_files.dedup();
+
+    SyncCountsReport {
+        files_changed: changed_files,
+        dry_run,
+    }
+}
+
+/// Build the universal (pattern, replacement) list applied to every text file.
+///
+/// The skills pattern is returned separately because it requires a closure
+/// (capture-group prefix preservation) that doesn't fit the plain `&str` replacement API.
+fn build_universal_patterns(
+    c: &ComponentCounts,
+    ext: &ExtendedCounts,
+) -> Vec<(regex::Regex, String)> {
     // Note: regex crate doesn't support lookahead, so MCP server pattern
     // uses a simple match. The targeted updates handle specific files.
-    let universal: Vec<(regex::Regex, String)> = vec![
+    vec![
         (
             regex::Regex::new(r"All \d+ hooks").unwrap(),
             format!("All {} hooks", c.hooks),
@@ -1331,14 +1384,25 @@ pub fn sync_counts(root_dir: &Path, dry_run: bool) -> SyncCountsReport {
             format!("{} MCP servers", c.mcp_servers),
         ),
         (
-            regex::Regex::new(r"Steel MCP \(\d+ tools\)").unwrap(),
-            format!("Steel MCP ({} tools)", ext.steel_tools),
+            regex::Regex::new(r"Browserbase MCP \(\d+ tools\)").unwrap(),
+            format!("Browserbase MCP ({} tools)", ext.browserbase_tools),
         ),
         (
             regex::Regex::new(r"browser automation \(\d+ MCP tools\)").unwrap(),
-            format!("browser automation ({} MCP tools)", ext.steel_tools),
+            format!("browser automation ({} MCP tools)", ext.browserbase_tools),
         ),
-    ];
+    ]
+}
+
+/// Walk every text file under `root_dir` and apply universal count-replacement patterns.
+fn apply_universal_patterns(
+    root_dir: &Path,
+    c: &ComponentCounts,
+    ext: &ExtendedCounts,
+    dry_run: bool,
+    changed_files: &mut Vec<String>,
+) {
+    let universal = build_universal_patterns(c, ext);
 
     // Skills pattern needs special handling (preserve prefix)
     let skills_re =
@@ -1353,14 +1417,11 @@ pub fn sync_counts(root_dir: &Path, dry_run: bool) -> SyncCountsReport {
         .copied()
         .collect();
 
-    let mut changed_files: Vec<String> = Vec::new();
-
-    // Walk and apply universal patterns
     walk_text_files(root_dir, &skip_dirs, &text_exts, &mut |path| {
         let rel = path.strip_prefix(root_dir).unwrap_or(path);
         let rel_str = rel.to_string_lossy().replace('\\', "/");
 
-        // Skip this script equivalent and changelogs
+        // Skip changelogs
         if rel_str.starts_with("CHANGELOG") {
             return;
         }
@@ -1371,7 +1432,6 @@ pub fn sync_counts(root_dir: &Path, dry_run: bool) -> SyncCountsReport {
         let original = content.clone();
         let mut result = content;
 
-        // Apply universal patterns
         for (re, replacement) in &universal {
             if replacement.is_empty() {
                 continue; // Skip the skills placeholder
@@ -1393,8 +1453,20 @@ pub fn sync_counts(root_dir: &Path, dry_run: bool) -> SyncCountsReport {
             changed_files.push(rel_str);
         }
     });
+}
 
-    // Targeted updates for specific files
+/// Apply targeted regex replacements to specific well-known files.
+///
+/// Each file gets a hand-crafted set of patterns that capture file-specific
+/// structure (section headings, JSON keys, table rows, etc.) where the universal
+/// walk would either miss or over-replace.
+fn apply_targeted_updates(
+    root_dir: &Path,
+    c: &ComponentCounts,
+    ext: &ExtendedCounts,
+    dry_run: bool,
+    changed_files: &mut Vec<String>,
+) {
     let desc_line = format!(
         "{} skills + {} agents + 1 sentinel engine ({} hooks) + {} MCP servers ({} repos) + {} CLIs + hot-reload via Vulcan mcp-router for the full software development lifecycle",
         c.skills, c.agents, c.hooks, c.mcp_servers, c.mcp_repos, c.cli_repos
@@ -1405,10 +1477,10 @@ pub fn sync_counts(root_dir: &Path, dry_run: bool) -> SyncCountsReport {
         root_dir,
         "marketplace.json",
         dry_run,
-        &mut changed_files,
+        changed_files,
         &[(
             r#""description":\s*"[^"]*""#,
-            &format!(r#""description": "{}""#, desc_line),
+            &format!(r#""description": "{desc_line}""#),
         )],
     );
 
@@ -1417,10 +1489,10 @@ pub fn sync_counts(root_dir: &Path, dry_run: bool) -> SyncCountsReport {
         root_dir,
         ".claude-plugin/plugin.json",
         dry_run,
-        &mut changed_files,
+        changed_files,
         &[(
             r#""description":\s*"[^"]*""#,
-            &format!(r#""description": "{}""#, desc_line),
+            &format!(r#""description": "{desc_line}""#),
         )],
     );
 
@@ -1429,7 +1501,7 @@ pub fn sync_counts(root_dir: &Path, dry_run: bool) -> SyncCountsReport {
         root_dir,
         ".claude-plugin/marketplace.json",
         dry_run,
-        &mut changed_files,
+        changed_files,
         &[(
             r#""summary":\s*"[^"]*""#,
             &format!(
@@ -1444,10 +1516,10 @@ pub fn sync_counts(root_dir: &Path, dry_run: bool) -> SyncCountsReport {
         root_dir,
         "README.md",
         dry_run,
-        &mut changed_files,
+        changed_files,
         &[
             (
-                r#"> \*\*\d+ skills \+ \d+ agents \+ 1 sentinel engine \(\d+ hooks\) \+ \d+ MCP servers\*\*"#,
+                r"> \*\*\d+ skills \+ \d+ agents \+ 1 sentinel engine \(\d+ hooks\) \+ \d+ MCP servers\*\*",
                 &format!(
                     "> **{} skills + {} agents + 1 sentinel engine ({} hooks) + {} MCP servers**",
                     c.skills, c.agents, c.hooks, c.mcp_servers
@@ -1520,10 +1592,10 @@ pub fn sync_counts(root_dir: &Path, dry_run: bool) -> SyncCountsReport {
         root_dir,
         "CLAUDE.md",
         dry_run,
-        &mut changed_files,
+        changed_files,
         &[
             (
-                r#"> \*\*\d+ skills \+ \d+ agents \+ 1 sentinel engine \(\d+ hooks\) \+ \d+ MCP servers\*\*"#,
+                r"> \*\*\d+ skills \+ \d+ agents \+ 1 sentinel engine \(\d+ hooks\) \+ \d+ MCP servers\*\*",
                 &format!(
                     "> **{} skills + {} agents + 1 sentinel engine ({} hooks) + {} MCP servers**",
                     c.skills, c.agents, c.hooks, c.mcp_servers
@@ -1578,7 +1650,7 @@ pub fn sync_counts(root_dir: &Path, dry_run: bool) -> SyncCountsReport {
         root_dir,
         "docs/marketplace-architecture.md",
         dry_run,
-        &mut changed_files,
+        changed_files,
         &[(
             r"ecosystem of \d+ skills, \d+ agents, \d+ hooks, \d+ commands, and \d+ MCP servers",
             &format!(
@@ -1587,15 +1659,6 @@ pub fn sync_counts(root_dir: &Path, dry_run: bool) -> SyncCountsReport {
             ),
         )],
     );
-
-    // Deduplicate
-    changed_files.sort();
-    changed_files.dedup();
-
-    SyncCountsReport {
-        files_changed: changed_files,
-        dry_run,
-    }
 }
 
 /// Apply targeted regex replacements to a specific file.
@@ -1641,15 +1704,15 @@ fn walk_text_files(
         return;
     };
 
-    for entry in entries.filter_map(|e| e.ok()) {
+    for entry in entries.filter_map(std::result::Result::ok) {
         let name = entry.file_name();
         let name_str = name.to_string_lossy();
 
-        if entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
+        if entry.file_type().is_ok_and(|ft| ft.is_dir()) {
             if !skip_dirs.contains(name_str.as_ref()) {
                 walk_text_files(&entry.path(), skip_dirs, text_exts, callback);
             }
-        } else if entry.file_type().map(|ft| ft.is_file()).unwrap_or(false) {
+        } else if entry.file_type().is_ok_and(|ft| ft.is_file()) {
             if let Some(ext) = entry.path().extension().and_then(|e| e.to_str()) {
                 if text_exts.contains(ext) {
                     callback(&entry.path());
@@ -1745,11 +1808,11 @@ fn walk_manifest_files(
         return;
     };
 
-    for entry in entries.filter_map(|e| e.ok()) {
+    for entry in entries.filter_map(std::result::Result::ok) {
         let full_path = entry.path();
         let name = entry.file_name();
         let name_str = name.to_string_lossy();
-        let rel_path = format!("{}/{}", base_path, name_str);
+        let rel_path = format!("{base_path}/{name_str}");
 
         // Check exclusions
         if exclude_patterns
@@ -1759,9 +1822,9 @@ fn walk_manifest_files(
             continue;
         }
 
-        if entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
+        if entry.file_type().is_ok_and(|ft| ft.is_dir()) {
             walk_manifest_files(&full_path, &rel_path, extensions, exclude_patterns, files);
-        } else if entry.file_type().map(|ft| ft.is_file()).unwrap_or(false) {
+        } else if entry.file_type().is_ok_and(|ft| ft.is_file()) {
             // Check extension filter
             if let Some(exts) = extensions {
                 let has_ext = exts.iter().any(|ext| name_str.ends_with(ext));
@@ -1788,6 +1851,466 @@ fn walk_manifest_files(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use tempfile::TempDir;
+
+    // ---------------------------------------------------------------------------
+    // Fixture helpers
+    // ---------------------------------------------------------------------------
+
+    /// Build a minimal marketplace fixture directory under a TempDir.
+    ///
+    /// Returns `(TempDir, root_path)` — caller must hold `TempDir` alive.
+    fn build_fixture_dir() -> (TempDir, std::path::PathBuf) {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        // marketplace.json
+        fs::write(
+            root.join("marketplace.json"),
+            r#"{
+  "version": "1.0.0",
+  "description": "2 skills + 1 agents + 1 sentinel engine (2 hooks) + 1 MCP servers",
+  "skills": [
+    {"name": "alpha", "priority": 1},
+    {"name": "beta",  "priority": 2}
+  ],
+  "agents": [
+    {"name": "my-agent", "model": "claude-3-5-sonnet", "file": "my-agent.md"}
+  ],
+  "mcp": [
+    {"name": "linear", "command": "mcp-router --single linear-mcp", "transport": "stdio", "optional": false}
+  ]
+}"#,
+        )
+        .unwrap();
+
+        // skills/alpha/SKILL.md
+        let alpha_dir = root.join("skills").join("alpha");
+        fs::create_dir_all(&alpha_dir).unwrap();
+        fs::write(
+            alpha_dir.join("SKILL.md"),
+            r#"---
+name: alpha
+version: 1.2.3
+description: Alpha skill
+icon: A
+---
+## Activation Banner
+
+```skills
+@use beta [helper_fn]
+```
+"#,
+        )
+        .unwrap();
+
+        // skills/beta/SKILL.md
+        let beta_dir = root.join("skills").join("beta");
+        fs::create_dir_all(&beta_dir).unwrap();
+        fs::write(
+            beta_dir.join("SKILL.md"),
+            r#"---
+name: beta
+version: 2.0.0
+description: Beta skill
+icon: B
+---
+## Activation Banner
+"#,
+        )
+        .unwrap();
+
+        // agents/my-agent.md
+        let agents_dir = root.join("agents");
+        fs::create_dir_all(&agents_dir).unwrap();
+        fs::write(
+            agents_dir.join("my-agent.md"),
+            r#"---
+description: My test agent
+---
+"#,
+        )
+        .unwrap();
+
+        // sentinel/config/hooks.toml
+        let hooks_cfg = root.join("sentinel").join("config");
+        fs::create_dir_all(&hooks_cfg).unwrap();
+        fs::write(
+            hooks_cfg.join("hooks.toml"),
+            r#"[[hooks]]
+id = "skill_router"
+event = "UserPromptSubmit"
+description = "Route to skills"
+depends_on = []
+has_api_call = false
+matcher = []
+
+[[hooks]]
+id = "git_hygiene"
+event = "PreToolUse"
+description = "Git checks"
+depends_on = []
+has_api_call = false
+matcher = ["Edit", "Write"]
+"#,
+        )
+        .unwrap();
+
+        (tmp, root)
+    }
+
+    // ---------------------------------------------------------------------------
+    // GOLDEN TESTS — scan_marketplace / run_validation
+    // ---------------------------------------------------------------------------
+
+    /// Golden: snapshot shape + key field values from scan_marketplace.
+    #[test]
+    fn golden_scan_marketplace_shape() {
+        let (_tmp, root) = build_fixture_dir();
+        let snap = scan_marketplace(&root);
+
+        // Version + description come from marketplace.json
+        assert_eq!(snap.version, "1.0.0");
+        assert!(snap.description.contains("2 skills"));
+
+        // Skills
+        assert_eq!(snap.skills.len(), 2);
+        let alpha = snap.skills.iter().find(|s| s.name == "alpha").unwrap();
+        assert_eq!(alpha.version, "1.2.3");
+        assert_eq!(alpha.description, "Alpha skill");
+        assert_eq!(alpha.priority, Some(1));
+        assert_eq!(alpha.has_sub_modules, false);
+        // alpha depends on beta
+        assert_eq!(alpha.dependencies.len(), 1);
+        assert_eq!(alpha.dependencies[0].skill, "beta");
+        assert_eq!(alpha.dependencies[0].patterns, vec!["helper_fn"]);
+
+        let beta = snap.skills.iter().find(|s| s.name == "beta").unwrap();
+        assert_eq!(beta.version, "2.0.0");
+        assert!(beta.dependencies.is_empty());
+
+        // Hooks
+        assert_eq!(snap.hooks.len(), 2);
+        let router = snap.hooks.iter().find(|h| h.name == "skill_router").unwrap();
+        assert_eq!(router.event, "UserPromptSubmit");
+        assert_eq!(router.engine, "sentinel");
+        let hygiene = snap.hooks.iter().find(|h| h.name == "git_hygiene").unwrap();
+        assert_eq!(hygiene.matcher, "Edit, Write");
+
+        // Agents
+        assert_eq!(snap.agents.len(), 1);
+        assert_eq!(snap.agents[0].name, "my-agent");
+        assert_eq!(snap.agents[0].description, "My test agent");
+
+        // MCP servers
+        assert_eq!(snap.mcp_servers.len(), 1);
+        assert_eq!(snap.mcp_servers[0].name, "linear");
+        assert_eq!(snap.mcp_servers[0].transport, "stdio");
+        assert_eq!(snap.mcp_servers[0].optional, false);
+
+        // Dependency edges
+        assert_eq!(snap.dependency_edges.len(), 1);
+        assert_eq!(snap.dependency_edges[0].from, "alpha");
+        assert_eq!(snap.dependency_edges[0].to, "beta");
+
+        // Counts
+        assert_eq!(snap.counts.skills, 2);
+        assert_eq!(snap.counts.hooks, 2);
+        assert_eq!(snap.counts.agents, 1);
+        assert_eq!(snap.counts.mcp_servers, 1);
+    }
+
+    /// Golden: validation rules fired + pass/fail/warn counts from run_validation.
+    #[test]
+    fn golden_validation_categories_and_counts() {
+        let (_tmp, root) = build_fixture_dir();
+        let snap = scan_marketplace(&root);
+        let v = &snap.validation;
+
+        // No failures expected with our well-formed fixture
+        assert_eq!(v.failed, 0, "Unexpected failures: {:?}",
+            v.results.iter().filter(|r| r.status == "fail").collect::<Vec<_>>());
+
+        // Count Consistency: marketplace.json description mentions "2 skills", "2 hooks",
+        // "1 agents", "1 MCP servers" — all match actuals, so all should pass.
+        let count_checks: Vec<_> = v.results.iter()
+            .filter(|r| r.category == "Count Consistency")
+            .collect();
+        assert!(!count_checks.is_empty(), "Expected Count Consistency checks");
+        assert!(count_checks.iter().all(|r| r.status == "pass"),
+            "Some Count Consistency checks failed: {:?}", count_checks);
+
+        // File Cross-Reference: alpha + beta are both registered + have SKILL.md
+        let cross_ref: Vec<_> = v.results.iter()
+            .filter(|r| r.category == "File Cross-Reference")
+            .collect();
+        assert!(!cross_ref.is_empty());
+        assert!(cross_ref.iter().all(|r| r.status == "pass"),
+            "Some File Cross-Reference checks failed: {:?}", cross_ref);
+
+        // Frontmatter: alpha=1.2.3 and beta=2.0.0 are valid semver → no fails
+        let fm_checks: Vec<_> = v.results.iter()
+            .filter(|r| r.category == "Frontmatter")
+            .collect();
+        // No version failures (both are valid semver)
+        assert!(fm_checks.iter().all(|r| r.status != "fail"),
+            "Unexpected Frontmatter failures: {:?}", fm_checks);
+
+        // Dependencies: alpha→beta is valid (beta exists); no self-reference
+        let dep_checks: Vec<_> = v.results.iter()
+            .filter(|r| r.category == "Dependencies")
+            .collect();
+        // alpha→beta is valid — no results emitted for valid cross-deps (only fail/warn emitted)
+        assert!(dep_checks.iter().all(|r| r.status != "fail"),
+            "Unexpected dep failures: {:?}", dep_checks);
+
+        // Skill Banner: both alpha and beta have "## Activation Banner"
+        let banner_checks: Vec<_> = v.results.iter()
+            .filter(|r| r.category == "Skill Banner")
+            .collect();
+        assert_eq!(banner_checks.len(), 2);
+        assert!(banner_checks.iter().all(|r| r.status == "pass"),
+            "Expected all banner checks to pass: {:?}", banner_checks);
+
+        // Summary counts
+        assert!(v.passed > 0);
+        assert_eq!(v.failed, 0);
+    }
+
+    /// Golden: validation correctly detects a missing SKILL.md (fail status).
+    #[test]
+    fn golden_validation_missing_skill_md_emits_fail() {
+        let (_tmp, root) = build_fixture_dir();
+        // Register a third skill in marketplace.json that doesn't exist on disk
+        fs::write(
+            root.join("marketplace.json"),
+            r#"{
+  "version": "1.0.0",
+  "description": "2 skills + 1 agents + 1 sentinel engine (2 hooks) + 1 MCP servers",
+  "skills": [
+    {"name": "alpha", "priority": 1},
+    {"name": "beta",  "priority": 2},
+    {"name": "ghost", "priority": 3}
+  ],
+  "agents": [
+    {"name": "my-agent", "model": "claude-3-5-sonnet", "file": "my-agent.md"}
+  ],
+  "mcp": [
+    {"name": "linear", "command": "mcp-router --single linear-mcp", "transport": "stdio", "optional": false}
+  ]
+}"#,
+        )
+        .unwrap();
+
+        let snap = scan_marketplace(&root);
+        let v = &snap.validation;
+
+        // Should have at least one fail for "ghost" not existing on disk
+        let ghost_fail = v.results.iter()
+            .find(|r| r.status == "fail" && r.message.contains("ghost"));
+        assert!(ghost_fail.is_some(), "Expected a fail for ghost skill missing from disk");
+    }
+
+    /// Golden: validation detects duplicate priorities (fail status).
+    #[test]
+    fn golden_validation_duplicate_priority_emits_fail() {
+        let (_tmp, root) = build_fixture_dir();
+        // Give alpha and beta the same priority
+        fs::write(
+            root.join("marketplace.json"),
+            r#"{
+  "version": "1.0.0",
+  "description": "2 skills + 1 agents + 1 sentinel engine (2 hooks) + 1 MCP servers",
+  "skills": [
+    {"name": "alpha", "priority": 5},
+    {"name": "beta",  "priority": 5}
+  ],
+  "agents": [
+    {"name": "my-agent", "model": "claude-3-5-sonnet", "file": "my-agent.md"}
+  ],
+  "mcp": [
+    {"name": "linear", "command": "mcp-router --single linear-mcp", "transport": "stdio", "optional": false}
+  ]
+}"#,
+        )
+        .unwrap();
+
+        let snap = scan_marketplace(&root);
+        let v = &snap.validation;
+        let dup_fail = v.results.iter()
+            .find(|r| r.status == "fail" && r.category == "Frontmatter" && r.message.contains("5"));
+        assert!(dup_fail.is_some(), "Expected a fail for duplicate priority 5");
+    }
+
+    /// Golden: validation emits warn for skill missing activation banner.
+    #[test]
+    fn golden_validation_missing_banner_emits_warn() {
+        let (_tmp, root) = build_fixture_dir();
+        // Overwrite alpha's SKILL.md without an activation banner
+        fs::write(
+            root.join("skills").join("alpha").join("SKILL.md"),
+            r#"---
+name: alpha
+version: 1.2.3
+description: Alpha skill
+icon: A
+---
+# No banner here
+"#,
+        )
+        .unwrap();
+
+        let snap = scan_marketplace(&root);
+        let v = &snap.validation;
+        let warn = v.results.iter()
+            .find(|r| r.category == "Skill Banner" && r.status == "warn" && r.rule.contains("alpha"));
+        assert!(warn.is_some(), "Expected a warn for alpha missing activation banner");
+    }
+
+    /// Golden: validation emits warn for invalid semver version.
+    #[test]
+    fn golden_validation_invalid_semver_emits_warn() {
+        let (_tmp, root) = build_fixture_dir();
+        fs::write(
+            root.join("skills").join("alpha").join("SKILL.md"),
+            r#"---
+name: alpha
+version: not-semver
+description: Alpha skill
+icon: A
+---
+## Activation Banner
+"#,
+        )
+        .unwrap();
+
+        let snap = scan_marketplace(&root);
+        let v = &snap.validation;
+        let warn = v.results.iter()
+            .find(|r| r.category == "Frontmatter" && r.status == "warn" && r.message.contains("not-semver"));
+        assert!(warn.is_some(), "Expected a warn for invalid semver in alpha");
+    }
+
+    // ---------------------------------------------------------------------------
+    // GOLDEN TESTS — sync_counts
+    // ---------------------------------------------------------------------------
+
+    /// Golden: sync_counts dry_run returns changed files without writing.
+    #[test]
+    fn golden_sync_counts_dry_run_no_writes() {
+        let (_tmp, root) = build_fixture_dir();
+
+        // Write a README.md with a stale count
+        fs::write(
+            root.join("README.md"),
+            "# Test\n\n> **99 skills + 1 agents + 1 sentinel engine (2 hooks) + 1 MCP servers**\n",
+        )
+        .unwrap();
+
+        let report = sync_counts(&root, true /* dry_run */);
+        assert!(report.dry_run);
+
+        // In dry_run mode, nothing on disk should change
+        let readme_after = fs::read_to_string(root.join("README.md")).unwrap();
+        assert!(
+            readme_after.contains("99 skills"),
+            "dry_run must not write: content should still say 99 skills"
+        );
+
+        // But the report should flag README.md as something that would change
+        assert!(
+            report.files_changed.iter().any(|f| f.contains("README")),
+            "Expected README.md in files_changed: {:?}", report.files_changed
+        );
+    }
+
+    /// Golden: sync_counts live mode rewrites stale count in README.md.
+    #[test]
+    fn golden_sync_counts_live_rewrites_readme() {
+        let (_tmp, root) = build_fixture_dir();
+
+        fs::write(
+            root.join("README.md"),
+            "# Test\n\n> **99 skills + 1 agents + 1 sentinel engine (2 hooks) + 1 MCP servers**\n",
+        )
+        .unwrap();
+
+        let report = sync_counts(&root, false /* live */);
+        assert!(!report.dry_run);
+
+        // File should now have the correct count (2 skills from fixture)
+        let readme_after = fs::read_to_string(root.join("README.md")).unwrap();
+        assert!(
+            readme_after.contains("2 skills"),
+            "Expected 2 skills after live sync, got: {readme_after}"
+        );
+        assert!(
+            !readme_after.contains("99 skills"),
+            "Old count should be gone"
+        );
+    }
+
+    /// Golden: sync_counts updates marketplace.json description.
+    #[test]
+    fn golden_sync_counts_updates_marketplace_description() {
+        let (_tmp, root) = build_fixture_dir();
+
+        // Overwrite marketplace.json description with wrong counts
+        fs::write(
+            root.join("marketplace.json"),
+            r#"{
+  "version": "1.0.0",
+  "description": "99 skills + 1 agents + 1 sentinel engine (99 hooks) + 99 MCP servers (99 repos) + 99 CLIs + hot-reload via Vulcan mcp-router for the full software development lifecycle",
+  "skills": [
+    {"name": "alpha", "priority": 1},
+    {"name": "beta",  "priority": 2}
+  ],
+  "agents": [
+    {"name": "my-agent", "model": "claude-3-5-sonnet", "file": "my-agent.md"}
+  ],
+  "mcp": [
+    {"name": "linear", "command": "mcp-router --single linear-mcp", "transport": "stdio", "optional": false}
+  ]
+}"#,
+        )
+        .unwrap();
+
+        sync_counts(&root, false);
+
+        let mp_after = fs::read_to_string(root.join("marketplace.json")).unwrap();
+        // Skills should be updated to 2 (the actual count from fixture)
+        assert!(
+            mp_after.contains("2 skills"),
+            "marketplace.json description should have 2 skills: {mp_after}"
+        );
+        assert!(
+            !mp_after.contains("99 skills"),
+            "Old count should be gone from marketplace.json"
+        );
+    }
+
+    /// Golden: sync_counts reports no changes for a file whose content already matches.
+    #[test]
+    fn golden_sync_counts_no_changes_when_current() {
+        let (_tmp, root) = build_fixture_dir();
+        // Write a README that has NO count patterns — sync_counts should leave it alone.
+        fs::write(
+            root.join("README.md"),
+            "# Test project\n\nNo counts here.\n",
+        )
+        .unwrap();
+        let report = sync_counts(&root, false);
+        // README.md has no count patterns → should NOT appear in changed_files
+        assert!(
+            !report.files_changed.iter().any(|f| f.contains("README")),
+            "README.md with no count patterns should not be touched, got: {:?}", report.files_changed
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // Existing tests preserved below
+    // ---------------------------------------------------------------------------
 
     #[test]
     fn test_parse_frontmatter_basic() {

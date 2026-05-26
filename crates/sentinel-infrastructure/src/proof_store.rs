@@ -7,6 +7,7 @@
 //! files), mirroring the `state_store` integrity pattern. Without this, an attacker
 //! could inject forged proofs into JSONL files to fake phase completion evidence.
 
+use std::io::Write as _;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
@@ -65,7 +66,6 @@ pub fn append_proof(session_id: &str, proof: &PhaseProof) -> Result<()> {
     let path = dir.join(format!("{session_id}.jsonl"));
     let line = serde_json::to_string(proof)? + "\n";
 
-    use std::io::Write;
     let mut file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)

@@ -1,6 +1,6 @@
 //! Agent Revocation Kill Switch
 //!
-//! AEGIS-borrowed safety control. PreToolUse hook that denies any tool
+//! AEGIS-borrowed safety control. `PreToolUse` hook that denies any tool
 //! call carrying a revoked `agent_id`. Operators trigger revocation via
 //! `sentinel agent revoke <id>`; the sentinel CLI mutates [`SessionState::revoke_agent`]
 //! and this hook reads from it on every subsequent tool call.
@@ -27,11 +27,11 @@
 use sentinel_domain::events::{HookInput, HookOutput};
 use sentinel_domain::state::SessionState;
 
-/// Process a PreToolUse event. Returns:
-/// - [`HookOutput::allow`] when no agent_id is present, or when the
-///   agent_id isn't on the revocation list.
-/// - [`HookOutput::deny`] when the agent_id is revoked. The deny
-///   message names the revoked agent_id so the user has unambiguous
+/// Process a `PreToolUse` event. Returns:
+/// - [`HookOutput::allow`] when no `agent_id` is present, or when the
+///   `agent_id` isn't on the revocation list.
+/// - [`HookOutput::deny`] when the `agent_id` is revoked. The deny
+///   message names the revoked `agent_id` so the user has unambiguous
 ///   feedback in tool-result text.
 pub fn process(input: &HookInput, state: &SessionState) -> HookOutput {
     let agent_id = match input.agent_id.as_deref() {
@@ -144,10 +144,16 @@ mod tests {
     fn unrevoke_lifts_the_block() {
         let mut state = SessionState::new("test");
         state.revoke_agent("agent-x");
-        assert!(is_deny(&process(&input_with_agent(Some("agent-x")), &state)));
+        assert!(is_deny(&process(
+            &input_with_agent(Some("agent-x")),
+            &state
+        )));
 
         let removed = state.unrevoke_agent("agent-x");
-        assert!(removed, "unrevoke returned true for previously-revoked agent");
+        assert!(
+            removed,
+            "unrevoke returned true for previously-revoked agent"
+        );
 
         assert!(
             is_allow(&process(&input_with_agent(Some("agent-x")), &state)),

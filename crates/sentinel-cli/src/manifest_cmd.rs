@@ -83,7 +83,7 @@ pub struct VerifyReport {
 
 impl VerifyReport {
     #[must_use]
-    pub fn ok(&self) -> bool {
+    pub const fn ok(&self) -> bool {
         self.failures.is_empty()
     }
 }
@@ -142,7 +142,7 @@ fn load_manifest(config_dir: &Path) -> Result<StepConfigManifest> {
     toml::from_str(&body).with_context(|| format!("parse {}", path.display()))
 }
 
-/// Resolve an Ed25519 SigningKey from a 32-byte hex seed in an env var.
+/// Resolve an Ed25519 `SigningKey` from a 32-byte hex seed in an env var.
 fn signing_key_from_env(env_var: &str) -> Result<SigningKey> {
     let raw = std::env::var(env_var)
         .with_context(|| format!("env var {env_var} not set — needed for signing"))?;
@@ -224,7 +224,7 @@ pub fn run_verify(opts: VerifyOptions) -> Result<VerifyReport> {
 
     // Default strict to true if any entry is signed AND we have a key.
     let has_signed = manifest.entries.iter().any(|e| e.signature.is_some());
-    let strict = opts.strict.unwrap_or(has_signed && verifying.is_some());
+    let strict = opts.strict.unwrap_or_else(|| has_signed && verifying.is_some());
 
     let mut report = VerifyReport::default();
     let steps_dir = opts.config_dir.join("steps");
@@ -272,9 +272,7 @@ pub fn run_show(config_dir: &Path) -> Result<()> {
     let unsigned = manifest.entries.len() - signed;
     let key_summary = manifest
         .public_key
-        .as_deref()
-        .map(|k| format!("public_key = {}…{}", &k[..8], &k[k.len() - 8..]))
-        .unwrap_or_else(|| "public_key = (none)".to_string());
+        .as_deref().map_or_else(|| "public_key = (none)".to_string(), |k| format!("public_key = {}…{}", &k[..8], &k[k.len() - 8..]));
     println!(
         "manifest version {} | {} entries ({signed} signed, {unsigned} unsigned) | {key_summary}",
         manifest.version,

@@ -1,6 +1,6 @@
 //! Tasks.md Auto-Block Guard
 //!
-//! PreToolUse gate that blocks `Edit` / `Write` tool calls which would mutate
+//! `PreToolUse` gate that blocks `Edit` / `Write` tool calls which would mutate
 //! content **inside** the `<!-- SENTINEL:TASKS:START --> ... <!-- SENTINEL:TASKS:END -->`
 //! marker block in any project's `tasks.md`.
 //!
@@ -99,7 +99,7 @@ fn marker_range(content: &str) -> Option<(usize, usize)> {
 
 /// Extract the bytes between the markers (markers excluded). Returns `""`
 /// when there is no block.
-fn block_inner<'a>(content: &'a str) -> &'a str {
+fn block_inner(content: &str) -> &str {
     let Some((s, e)) = marker_range(content) else {
         return "";
     };
@@ -141,7 +141,7 @@ fn edit_overlaps_block(existing: &str, old_string: &str) -> bool {
 /// New file (or no existing block) → allow only if the new content has a
 /// well-formed (non-empty markers, end-after-start) block.
 fn write_changes_block(existing: Option<&str>, new_content: &str) -> bool {
-    let existing_inner = existing.map(block_inner).unwrap_or("");
+    let existing_inner = existing.map_or("", block_inner);
     let new_inner = block_inner(new_content);
 
     // No existing block → any well-formed new block is allowed (creating the
@@ -169,16 +169,17 @@ fn block_message(file_path: &str, action: &str) -> String {
          - To edit hand-written content, edit OUTSIDE the marker block — \
            anything before `SENTINEL:TASKS:START` or after `SENTINEL:TASKS:END` \
            is preserved verbatim.",
-        action = action,
-        file_path = file_path,
     )
 }
 
-/// Process a PreToolUse event. Returns `HookOutput::block(msg)` when the call
+/// Process a `PreToolUse` event. Returns `HookOutput::block(msg)` when the call
 /// would mutate the auto block; `HookOutput::allow()` otherwise.
 pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     let tool_name = input.tool_name.as_deref().unwrap_or("");
-    if !GUARDED_TOOLS.iter().any(|t| t.eq_ignore_ascii_case(tool_name)) {
+    if !GUARDED_TOOLS
+        .iter()
+        .any(|t| t.eq_ignore_ascii_case(tool_name))
+    {
         return HookOutput::allow();
     }
 

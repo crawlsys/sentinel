@@ -1,0 +1,45 @@
+# Example operator config for the `constitution_gate` PreToolUse hook
+# (Item K from the Phase 2 punch list).
+#
+# Place a customised copy at `~/.claude/sentinel/config/constitution-gate.toml`
+# to opt in. The shipped sentinel binary loads it at startup; missing file =
+# gate stays inert.
+#
+# Schema: each `[[rule]]` table defines a "protected path × banned patterns"
+# pair. A Write / Edit / MultiEdit / NotebookEdit whose target path matches
+# `path_prefix` (+ optional `path_suffix`) AND whose new content contains
+# any `banned_patterns` literal substring is denied with a
+# [Sentinel-Authority] error citing `reason` (+ optional `citation`).
+#
+# The rules below are illustrative — taken from the consul/legatus
+# constitution. Adapt to your own project's structural rules.
+
+[[rule]]
+name = "consul-domain-purity"
+path_prefix = "crates/consul-domain/"
+path_suffix = ".rs"
+banned_patterns = [
+    "sqlx::",
+    "tokio::net::",
+    "reqwest::",
+    "hyper::",
+]
+reason = "Constitution Rule 1: consul-domain has zero I/O dependencies. All I/O goes through ports."
+citation = ".specify/memory/constitution.md#rule-1"
+
+[[rule]]
+name = "consul-protocol-vendor-free"
+path_prefix = "crates/consul-protocol/"
+path_suffix = ".rs"
+banned_patterns = [
+    "anthropic",
+    "openai",
+    "gemini",
+    "xai_grok",
+    "ollama",
+]
+reason = "Constitution Rule 2: no vendor names in consul-protocol. The wire is vendor-agnostic."
+citation = ".specify/memory/constitution.md#rule-2"
+
+# Add more rules as the project's structural rules grow. The gate
+# evaluates them in declaration order and denies on the first match.

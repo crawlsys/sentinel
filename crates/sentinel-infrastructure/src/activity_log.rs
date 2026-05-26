@@ -3,6 +3,7 @@
 //! JSONL activity log with auto-truncation.
 //! Mirrors the Node.js activity-log.js pattern.
 
+use std::io::Write as _;
 use std::path::PathBuf;
 
 use anyhow::Result;
@@ -46,7 +47,6 @@ pub fn log_activity(entry: &ActivityEntry) -> Result<()> {
     }
 
     let line = serde_json::to_string(entry)? + "\n";
-    use std::io::Write;
     let mut file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -75,8 +75,11 @@ fn truncate_log(path: &std::path::Path) -> Result<()> {
     let keep = lines.len() / 2;
     let trimmed: String = lines[lines.len() - keep..]
         .iter()
-        .map(|l| format!("{l}\n"))
-        .collect();
+        .fold(String::new(), |mut s, l| {
+            s.push_str(l);
+            s.push('\n');
+            s
+        });
     std::fs::write(path, trimmed)?;
     Ok(())
 }

@@ -125,7 +125,7 @@ impl PolicySuggestion {
                 "unknown mode '{other}' — accepted: 'verified' (default) or 'provenance'"
             ),
         };
-        Ok(PolicySuggestion { requirement })
+        Ok(Self { requirement })
     }
 
     /// Render this suggestion as a TOML fragment ready to paste into

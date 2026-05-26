@@ -1,4 +1,4 @@
-//! StopFailure hook — detect API errors and rate limits.
+//! `StopFailure` hook — detect API errors and rate limits.
 //!
 //! Called when a turn ends due to an API error rather than normal completion.
 //! For rate limits, this hook now rotates the active Claude account
@@ -13,15 +13,14 @@
 //! - `"You've used 87% of your session limit · resets 4pm (CDT)"`
 //! - `"You're now using extra usage · Your session limit resets 4pm (CDT)"`
 //!
-//! The `error` field is `"rate_limit"` and the content/error_details contains
+//! The `error` field is `"rate_limit"` and the `content/error_details` contains
 //! the human-readable message above.
 
 use sentinel_domain::events::{HookInput, HookOutput};
 
-
 const DEFAULT_RATE_LIMIT_COOLDOWN_MINUTES: u64 = 300;
 
-/// Parse error_details to extract a cooldown duration in minutes.
+/// Parse `error_details` to extract a cooldown duration in minutes.
 ///
 /// Handles patterns from Anthropic rate limit errors:
 /// - "resets 4pm (CDT)" / "resets 4:30pm (CDT)" — Claude Code's actual format
@@ -29,7 +28,7 @@ const DEFAULT_RATE_LIMIT_COOLDOWN_MINUTES: u64 = 300;
 /// - "resets at 4:00 PM" / "resets at 16:00" — absolute time
 /// - "retry after 3600" / "retry-after: 3600" — seconds
 /// - "resets in 4h 30m" / "resets in 270 minutes" — relative duration
-/// - "rate_limit_error" with no parseable time — returns None (caller defaults to 5hr)
+/// - "`rate_limit_error`" with no parseable time — returns None (caller defaults to 5hr)
 fn parse_reset_minutes(error_details: &str) -> Option<u64> {
     let lower = error_details.to_lowercase();
 
@@ -40,7 +39,7 @@ fn parse_reset_minutes(error_details: &str) -> Option<u64> {
     {
         let after = &lower[idx..];
         if let Some(secs) = extract_first_number(after) {
-            let minutes = (secs + 59) / 60; // round up
+            let minutes = secs.div_ceil(60); // round up
             if minutes > 0 && minutes <= 600 {
                 return Some(minutes);
             }
@@ -124,7 +123,7 @@ fn parse_relative_duration(s: &str) -> Option<u64> {
     }
 }
 
-/// Parse flexible absolute time formats from Claude Code's NP6() formatter:
+/// Parse flexible absolute time formats from Claude Code's `NP6()` formatter:
 /// - "4pm (CDT)" → extract hour
 /// - "4:30pm (CDT)" → extract hour:minute
 /// - "Apr 3, 4pm (CDT)" → skip date part, extract time
@@ -244,7 +243,7 @@ fn summarize_process_failure(output: &super::ProcessOutput) -> String {
     "accounts rotate exited unsuccessfully".to_string()
 }
 
-/// Process StopFailure event
+/// Process `StopFailure` event
 ///
 /// Logs the error, rotates accounts on rate limits, and requests a clean
 /// relaunch so the handler can resume on the next account automatically.
@@ -263,6 +262,40 @@ pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
 
     tracing::warn!(error, error_details, "Turn ended with API error");
 
+    // Per-instruction Result reporting on the API-error path: any
+    // operator-relayed instructions still pending at the moment of
+    // failure get an `InstructionResult { Failure { error } }` so
+    // the operator sees a failed ping instead of waiting on a
+    // never-arriving Result. `take_pending_instructions` clears the
+    // file; `take_turn_signals` clears the signals file too so a
+    // subsequent normal Stop doesn't double-fire on stale state.
+    // Error string carries enough detail (`<error>: <error_details>`)
+    // for the operator to understand what broke without sentinel
+    // having to classify the failure further.
+    if let Some(session_id) = input.session_id.as_deref() {
+        let pending = crate::legatus_client::take_pending_instructions(session_id);
+        if !pending.is_empty() {
+            let _ = crate::legatus_client::take_turn_signals(session_id);
+            // Drain the tool-call trace for this turn too — even
+            // on failure paths the operator wants to see which
+            // tools fired before the failure (Item E).
+            let _ = crate::legatus_client::take_tool_calls(session_id);
+            let combined = if error_details.is_empty() {
+                error.to_owned()
+            } else {
+                format!("{error}: {error_details}")
+            };
+            let outcome = crate::legatus_client::classify_outcome(&[], Some(&combined), None);
+            for instruction_id in pending {
+                crate::legatus_client::report_result_fire_and_forget(
+                    instruction_id,
+                    outcome.clone(),
+                    None,
+                );
+            }
+        }
+    }
+
     // Log to errors.jsonl for diagnostics
     if let Some(home) = ctx.fs.home_dir() {
         let metrics_dir = super::metrics_dir(&home);
@@ -274,7 +307,7 @@ pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
             "ts": chrono::Utc::now().to_rfc3339(),
         });
 
-        let line = format!("{}\n", entry);
+        let line = format!("{entry}\n");
         let _ = ctx
             .fs
             .append(&metrics_dir.join("errors.jsonl"), line.as_bytes());
@@ -887,6 +920,76 @@ mod tests {
         // turn-aborted ntfy push and HookOutput::allow().
         assert!(output.system_message.is_none());
         assert!(output.continue_.is_none() || output.continue_ == Some(true));
+    }
+
+    /// When the API-error Stop fires for a session with pending
+    /// operator-relayed instructions, the hook clears the pending
+    /// file so a subsequent normal Stop doesn't double-fire on
+    /// stale state. The actual InstructionResult report happens
+    /// via `report_result_fire_and_forget` (spawned thread, no
+    /// daemon in tests → silent no-op), so this test only pins
+    /// the side-effect we can observe: `take_pending_instructions`
+    /// returns empty after `process` runs.
+    #[test]
+    fn test_stop_failure_clears_pending_instructions() {
+        use sentinel_legatus::InstructionId;
+
+        let session_id = format!("stop-failure-test-{}", uuid::Uuid::new_v4());
+        // Seed a pending instruction.
+        crate::legatus_client::note_pending_instruction(&session_id, InstructionId::new());
+        crate::legatus_client::note_pending_instruction(&session_id, InstructionId::new());
+
+        let mut input = HookInput::default();
+        input.session_id = Some(session_id.clone());
+        input
+            .extra
+            .insert("error".to_string(), serde_json::json!("invalid_request"));
+        input.extra.insert(
+            "error_details".to_string(),
+            serde_json::json!("400 prompt is too long"),
+        );
+
+        let ctx = crate::hooks::test_support::stub_ctx();
+        let _ = process(&input, &ctx);
+
+        // Pending file should be drained.
+        let remaining = crate::legatus_client::take_pending_instructions(&session_id);
+        assert!(
+            remaining.is_empty(),
+            "stop_failure should have drained pending instructions"
+        );
+    }
+
+    /// stop_failure also clears any turn signals so they don't
+    /// linger and influence the next turn's normal-Stop
+    /// classification.
+    #[test]
+    fn test_stop_failure_clears_turn_signals() {
+        use sentinel_legatus::InstructionId;
+
+        use crate::legatus_client::{note_turn_signal, take_turn_signals, TurnSignal};
+
+        let session_id = format!("stop-failure-signals-test-{}", uuid::Uuid::new_v4());
+        // Seed both a pending instruction and a turn signal — the
+        // clear path only fires when there's at least one pending.
+        crate::legatus_client::note_pending_instruction(&session_id, InstructionId::new());
+        note_turn_signal(
+            &session_id,
+            &TurnSignal::PermissionDenied {
+                tool: "Bash".into(),
+            },
+        );
+
+        let mut input = HookInput::default();
+        input.session_id = Some(session_id.clone());
+        input
+            .extra
+            .insert("error".to_string(), serde_json::json!("invalid_request"));
+
+        let ctx = crate::hooks::test_support::stub_ctx();
+        let _ = process(&input, &ctx);
+
+        assert!(take_turn_signals(&session_id).is_empty());
     }
 
     /// 401 error_details payloads (the form Claude Code reports when

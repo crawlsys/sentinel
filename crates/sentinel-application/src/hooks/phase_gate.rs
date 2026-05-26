@@ -4,7 +4,7 @@
 //! Uses the workflow state machine to determine if a tool should be blocked.
 //!
 //! Enhanced features (ported from Node.js phase-gate.js):
-//! - Tracks Read() calls on phase files via SessionState
+//! - Tracks `Read()` calls on phase files via `SessionState`
 //! - Formatted block messages with visual boxes
 //! - Post-merge skip detection (review done but qa-handoff not loaded)
 //! - Allows tools within 1 phase gap (mid-phase), blocks at 2+ gap
@@ -18,14 +18,21 @@ use sentinel_domain::workflow::SkillWorkflow;
 use std::collections::HashMap;
 
 fn block_with_context(input: &HookInput, reason: impl Into<String>) -> HookOutput {
-    HookOutput::block(super::block_context::append_block_context(reason, input))
+    let full = super::block_context::append_block_context(reason, input);
+    // Also signal upstream so operators on remote surfaces see
+    // their agent stuck. Fire-and-forget; daemon outage is a
+    // silent no-op (preserves the local block behavior).
+    super::upstream_block::signal_upstream("phase_gate", &full);
+    HookOutput::block(full)
 }
 
 fn deny_with_context(input: &HookInput, reason: impl Into<String>) -> HookOutput {
-    HookOutput::deny(super::block_context::append_block_context(reason, input))
+    let full = super::block_context::append_block_context(reason, input);
+    super::upstream_block::signal_upstream("phase_gate", &full);
+    HookOutput::deny(full)
 }
 
-/// Extracted phase file info from a Read() tool_input path.
+/// Extracted phase file info from a `Read()` `tool_input` path.
 #[derive(Debug, Clone)]
 struct PhaseFileInfo {
     /// The phase filename (e.g., "claim.md")
@@ -37,22 +44,22 @@ struct PhaseFileInfo {
     /// recorded for tracking but do NOT advance workflow state.
     trusted: bool,
     /// **Attack #141 fix**: The canonicalized absolute path to the phase file.
-    /// Used for content hashing instead of the user-supplied tool_input path
-    /// to close a TOCTOU gap where a symlink swap between canonicalize() and
-    /// read_to_string() could feed different content than what we validated.
+    /// Used for content hashing instead of the user-supplied `tool_input` path
+    /// to close a TOCTOU gap where a symlink swap between `canonicalize()` and
+    /// `read_to_string()` could feed different content than what we validated.
     canonical_path: Option<std::path::PathBuf>,
 }
 
-/// Extract the phase file name AND skill name from a Read() tool_input path.
+/// Extract the phase file name AND skill name from a `Read()` `tool_input` path.
 /// Matches paths like `~/.claude/skills/linear/phases/claim.md`
 /// or `C:\Users\...\.claude\skills\linear\phases\claim.md`.
 ///
 /// Returns `Some(PhaseFileInfo)` if the path is a valid phase file.
 /// Validates:
 /// - Path components match `skills/{name}/phases/{file}.md` pattern
-/// - No `ParentDir` (`..`) components (checked via Path::components())
+/// - No `ParentDir` (`..`) components (checked via `Path::components()`)
 /// - Skill name and file name contain only safe ASCII characters
-/// - Symlinks resolve to a path still under `~/.claude/skills/` (PathBuf API)
+/// - Symlinks resolve to a path still under `~/.claude/skills/` (`PathBuf` API)
 /// - `trusted` flag indicates whether canonical validation passed
 fn extract_phase_file(
     fs: &dyn super::FileSystemPort,
@@ -111,7 +118,10 @@ fn extract_phase_file(
     }
 
     // Must be a .md file
-    if !phase_file.ends_with(".md") {
+    if !std::path::Path::new(phase_file)
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("md"))
+    {
         return None;
     }
 
@@ -174,11 +184,13 @@ fn extract_phase_file(
 // across hooks. Re-export so call sites here don't need to qualify.
 use sentinel_domain::path_safety::is_safe_name;
 
-/// Process a phase-gate hook event (PreToolUse)
+/// Process a phase-gate hook event (`PreToolUse`)
 ///
 /// This function handles two responsibilities:
-/// 1. Track Read() calls on phase files (recording them in state)
+/// 1. Track `Read()` calls on phase files (recording them in state)
 /// 2. Gate non-safe tool calls based on workflow phase progress
+#[allow(clippy::implicit_hasher)] // call sites in hook_cmd.rs are outside edit scope
+#[allow(clippy::too_many_lines)] // security gate: cannot split without losing context
 pub fn process(
     input: &HookInput,
     state: &mut SessionState,
@@ -202,7 +214,7 @@ pub fn process(
                 detail: input
                     .tool_input
                     .as_ref()
-                    .and_then(|v| v.get("command").or(v.get("file_path")))
+                    .and_then(|v| v.get("command").or_else(|| v.get("file_path")))
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string(),
@@ -220,17 +232,17 @@ pub fn process(
         let first = tool_name.chars().next().unwrap_or('_');
         if !first.is_ascii_uppercase() {
             eprintln!(
-                "[sentinel] WARNING: Unexpected tool name casing '{}'. \
-                 Expected PascalCase or mcp__prefix. Treating as non-safe.",
-                tool_name
+                "[sentinel] WARNING: Unexpected tool name casing '{tool_name}'. \
+                 Expected PascalCase or mcp__prefix. Treating as non-safe."
             );
         }
     }
 
     // **Attack #200 fix**: MCP tools with write/exec capabilities MUST go through
     // phase gate enforcement. Previously ALL mcp__ tools were auto-allowed, letting
-    // any MCP server (codex, steel, etc.) bypass workflow restrictions by writing
-    // files, running commands, or applying patches through their own tools.
+    // any MCP server (codex, browserbase, cdp, legacy steel, etc.) bypass workflow
+    // restrictions by writing files, running commands, or applying patches through
+    // their own tools.
     //
     // Dangerous MCP tool suffixes — any mcp__*__<suffix> matching these is treated
     // as a non-safe tool and subject to the same gate enforcement as Bash/Edit/Write.
@@ -238,8 +250,7 @@ pub fn process(
         if is_dangerous_mcp_tool(tool_name) {
             // Fall through to gate enforcement below (same as Bash/Edit/Write)
             eprintln!(
-                "[sentinel] MCP tool '{}' classified as dangerous — applying gate enforcement",
-                tool_name
+                "[sentinel] MCP tool '{tool_name}' classified as dangerous — applying gate enforcement"
             );
         } else {
             // Safe/read-only MCP tool — allow without gate check
@@ -308,24 +319,49 @@ pub fn process(
 
                     let canonical_key = format!("{}/{}", info.skill, info.file);
                     if let Err(tamper_msg) = state.record_phase_file_hash(&canonical_key, &hash) {
-                        eprintln!("[sentinel] SECURITY: {}", tamper_msg);
-                        return block_with_context(
-                            input,
-                            format!(
-                                "+============================================================+\n\
+                        // Phase-gate override escape hatch: when an HMAC-signed
+                        // phase-gate override token is active (Gary said
+                        // "override phase gate" / "refactor skills" within the
+                        // last 60s), accept the new hash and proceed. This is
+                        // for legitimate marketplace-wide skill refactors where
+                        // phase file content must change mid-session.
+                        let session_id = input.session_id.as_deref().unwrap_or("unknown");
+                        let override_path = super::hygiene_override::phase_gate_override_path(
+                            fs, session_id,
+                        );
+                        if super::hygiene_override::is_signed_override_active(
+                            fs,
+                            &override_path,
+                            "phase-gate",
+                            session_id,
+                        ) {
+                            eprintln!(
+                                "[sentinel] phase_gate_override: accepting new hash for '{canonical_key}' (was tampering)",
+                            );
+                            // Force-update the recorded hash so subsequent reads
+                            // in this session see the new content as canonical.
+                            state
+                                .phase_file_hashes
+                                .insert(canonical_key.clone(), hash.clone());
+                        } else {
+                            eprintln!("[sentinel] SECURITY: {tamper_msg}");
+                            return block_with_context(
+                                input,
+                                format!(
+                                    "+============================================================+\n\
                              |  BLOCKED: Phase File Tampering Detected                    |\n\
                              +============================================================+\n\
-                             |  {:<57}|\n\
+                             |  {canonical_key:<57}|\n\
                              |                                                            |\n\
                              |  The content of a phase file changed since it was first     |\n\
                              |  read in this session. This may indicate an attempt to      |\n\
                              |  weaken phase requirements mid-workflow.                    |\n\
                              |                                                            |\n\
                              |  Session must be restarted to proceed.                     |\n\
-                             +============================================================+",
-                                canonical_key
-                            ),
-                        );
+                             +============================================================+"
+                                ),
+                            );
+                        }
                     }
                 }
 
@@ -368,8 +404,7 @@ pub fn process(
                     // arbitrary state manipulation via crafted filenames.
                     let is_known_phase = workflows
                         .get(&skill_name)
-                        .map(|w| w.phases.iter().any(|p| p.id == phase_id))
-                        .unwrap_or(false);
+                        .is_some_and(|w| w.phases.iter().any(|p| p.id == phase_id));
 
                     if is_known_phase {
                         // Ensure workflow state exists for this skill
@@ -432,12 +467,10 @@ pub fn process(
             let skill = state.active_skill.as_deref().unwrap_or("unknown");
             let completed = state
                 .active_workflow()
-                .map(|w| w.completed_phases.len())
-                .unwrap_or(0);
+                .map_or(0, |w| w.completed_phases.len());
             let total = workflows
                 .get(skill)
-                .map(|w| w.phases.iter().filter(|p| p.required).count())
-                .unwrap_or(0);
+                .map_or(0, |w| w.phases.iter().filter(|p| p.required).count());
 
             let message = format_block_box(
                 skill,
@@ -456,8 +489,9 @@ pub fn process(
 ///
 /// **Layer 1 — Obfuscation detection**: Catch shell tricks that defeat regex
 /// matching: `eval`, `base64 -d`, `$'\xHH'` hex escapes, variable-based
-/// command construction (`cmd="steel"; $cmd-mcp`). If detected AND a
-/// workflow with blocked patterns or an allowlist is active, hard-deny.
+/// command construction (e.g. `cmd="browserbase"; $cmd-mcp` or the legacy
+/// `cmd="steel"; $cmd-mcp` attack pattern). If detected AND a workflow with
+/// blocked patterns or an allowlist is active, hard-deny.
 ///
 /// **Layer 2 — Allowlist (nuclear option)**: If ANY active workflow has a
 /// non-empty `bash_allowlist`, the command MUST match at least one allowlist
@@ -469,6 +503,8 @@ pub fn process(
 ///
 /// Checks patterns across ALL workflows with active state (not just
 /// `active_skill`), preventing the skill-switch bypass.
+#[allow(clippy::too_many_lines)] // security function: multi-layer bash analysis cannot be split
+#[allow(clippy::items_after_statements)] // static LazyLock regex items are placed near first use for readability
 fn check_blocked_bash_patterns(
     fs: &dyn super::FileSystemPort,
     state: &SessionState,
@@ -540,10 +576,11 @@ fn check_blocked_bash_patterns(
                     Regex::new(r"\$'\\[0-7]{3}").unwrap(),
                 ),
                 // Variable-based command construction + execution:
-                // cmd="steel-mcp"; $cmd  OR  cmd+="mcp"; $cmd
+                // cmd="browserbase-mcp"; $cmd  OR  cmd+="mcp"; $cmd
+                // (legacy: cmd="steel-mcp" — still caught defensively)
                 (
                     "variable command execution",
-                    Regex::new(r#";\s*\$\w+"#).unwrap(),
+                    Regex::new(r";\s*\$\w+").unwrap(),
                 ),
                 // base64 decode piped to shell: | base64 -d | bash (or --decode)
                 (
@@ -596,13 +633,12 @@ fn check_blocked_bash_patterns(
                     "+============================================================+\n\
                  |  BLOCKED: Shell Obfuscation Detected                       |\n\
                  +============================================================+\n\
-                 |  Pattern: {:<48}|\n\
+                 |  Pattern: {desc:<48}|\n\
                  |                                                            |\n\
                  |  Commands using shell obfuscation techniques (eval, base64,|\n\
                  |  hex escapes, variable construction) are blocked when       |\n\
                  |  workflow enforcement is active.                           |\n\
                  +============================================================+",
-                    desc,
                 ),
             ));
         }
@@ -625,7 +661,7 @@ fn check_blocked_bash_patterns(
             std::sync::LazyLock::new(|| Regex::new(r"(?:\$\([^)]+\)|`[^`]+`)").unwrap());
         let segments: Vec<&str> = SEGMENT_SPLIT
             .split(cmd)
-            .map(|s| s.trim())
+            .map(str::trim)
             .filter(|s| !s.is_empty())
             .collect();
 
@@ -675,13 +711,12 @@ fn check_blocked_bash_patterns(
                             "+============================================================+\n\
                          |  BLOCKED: Command Substitution in Allowlisted Context      |\n\
                          +============================================================+\n\
-                         |  Segment: {:<48}|\n\
+                         |  Segment: {seg_display:<48}|\n\
                          |                                                            |\n\
                          |  Commands containing $(...) or backtick substitution are    |\n\
                          |  blocked because the inner command escapes allowlist        |\n\
                          |  enforcement. Only $(cat <<EOF ...) heredocs are allowed.   |\n\
                          +============================================================+",
-                            seg_display,
                         ),
                     ));
                 }
@@ -731,13 +766,12 @@ fn check_blocked_bash_patterns(
                         "+============================================================+\n\
                      |  BLOCKED: Command Segment Not in Bash Allowlist            |\n\
                      +============================================================+\n\
-                     |  Segment: {:<48}|\n\
+                     |  Segment: {seg_display:<48}|\n\
                      |                                                            |\n\
                      |  An active workflow restricts Bash to allowlisted commands  |\n\
                      |  only. Each chained segment (&&, ||, ;, |, \\n) must        |\n\
                      |  individually match the allowlist.                          |\n\
                      +============================================================+",
-                        seg_display,
                     ),
                 ));
             }
@@ -819,8 +853,7 @@ fn check_blocked_bash_patterns(
             Ok(r) => r,
             Err(e) => {
                 eprintln!(
-                    "[sentinel] WARNING: Invalid blocked_bash_pattern '{}': {}",
-                    pattern, e
+                    "[sentinel] WARNING: Invalid blocked_bash_pattern '{pattern}': {e}"
                 );
                 continue;
             }
@@ -835,15 +868,14 @@ fn check_blocked_bash_patterns(
                         "+============================================================+\n\
                      |  BLOCKED: Bash Command Matches Blocked Pattern             |\n\
                      +============================================================+\n\
-                     |  Skill: {:<50}|\n\
-                     |  Pattern: {:<48}|\n\
-                     |  Command: {:<48}|\n\
+                     |  Skill: {skill_name:<50}|\n\
+                     |  Pattern: {pattern:<48}|\n\
+                     |  Command: {cmd_display:<48}|\n\
                      |                                                            |\n\
                      |  This command is blocked because it could bypass the        |\n\
                      |  workflow's phase-gated tool enforcement.                   |\n\
                      |  Use the workflow's native MCP tools instead.              |\n\
                      +============================================================+",
-                        skill_name, pattern, cmd_display,
                     ),
                 ));
             }
@@ -870,12 +902,8 @@ fn normalize_shell_quoting(cmd: &str) -> String {
 
     while i < chars.len() {
         match chars[i] {
-            // Skip standalone double quotes (quote-split concatenation)
-            '"' => {
-                i += 1;
-            }
-            // Skip standalone single quotes
-            '\'' => {
+            // Skip standalone double and single quotes (quote-split concatenation)
+            '"' | '\'' => {
                 i += 1;
             }
             // Backslash: if followed by a normal char, skip the backslash
@@ -885,15 +913,12 @@ fn normalize_shell_quoting(cmd: &str) -> String {
                 let next = chars[i + 1];
                 // If next char is alphanumeric or hyphen, it's an evasion attempt
                 // like s\t\e\e\l → steel. Strip the backslash.
-                if next.is_ascii_alphanumeric() || next == '-' || next == '_' {
-                    result.push(next);
-                    i += 2;
-                } else {
+                if !(next.is_ascii_alphanumeric() || next == '-' || next == '_') {
                     // Preserve the backslash for actual escape sequences
                     result.push('\\');
-                    result.push(next);
-                    i += 2;
                 }
+                result.push(next);
+                i += 2;
             }
             // Process substitution: <(...) — extract inner content
             '<' if i + 1 < chars.len() && chars[i + 1] == '(' => {
@@ -1086,6 +1111,24 @@ fn check_protected_path_write(
             }
         }
 
+        // Phase-gate override escape hatch (HMAC-signed, 60s TTL).
+        // Only suppresses the two skill/phase reasons — sentinel
+        // config/state, settings.json, and hooks.toml remain protected
+        // even with an active override.
+        if reason == "phase file modification" || reason == "skill definition file" {
+            let session_id = input.session_id.as_deref().unwrap_or("unknown");
+            let override_path = super::hygiene_override::phase_gate_override_path(fs, session_id);
+            if super::hygiene_override::is_signed_override_active_with_ttl(
+                fs,
+                &override_path,
+                "phase-gate",
+                session_id,
+                super::hygiene_override::PHASE_GATE_OVERRIDE_TTL_SECS,
+            ) {
+                return None; // Allow: valid phase-gate override token present
+            }
+        }
+
         let display_path = if normalized.len() > 45 {
             &normalized[normalized.len() - 45..]
         } else {
@@ -1095,15 +1138,14 @@ fn check_protected_path_write(
             "+============================================================+\n\
              |  BLOCKED: Protected Path Modification Attempt               |\n\
              +============================================================+\n\
-             |  Tool: {:<51}|\n\
-             |  Target: {:<49}|\n\
-             |  Reason: {:<49}|\n\
+             |  Tool: {tool_name:<51}|\n\
+             |  Target: {display_path:<49}|\n\
+             |  Reason: {reason:<49}|\n\
              |                                                            |\n\
              |  Modifying sentinel infrastructure (phase files, config,    |\n\
              |  hooks, state, settings) is prohibited during active        |\n\
              |  workflow sessions.                                        |\n\
              +============================================================+",
-            tool_name, display_path, reason,
         );
         return Some(deny_with_context(input, message));
     }
@@ -1137,7 +1179,9 @@ fn check_protected_textual(normalized: &str) -> Option<&'static str> {
         if let Some(skills_idx) = parts.iter().position(|p| *p == "skills") {
             if skills_idx + 3 < parts.len()
                 && parts[skills_idx + 2] == "phases"
-                && parts[skills_idx + 3].ends_with(".md")
+                && std::path::Path::new(parts[skills_idx + 3])
+                    .extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("md"))
             {
                 return Some("phase file modification");
             }
@@ -1365,8 +1409,7 @@ fn check_post_merge_skip(
     let review_complete = state
         .workflows
         .get(&skill)
-        .map(|w| w.is_phase_complete("review"))
-        .unwrap_or(false);
+        .is_some_and(|w| w.is_phase_complete("review"));
 
     if (review_read || review_complete) && !qa_read {
         let message = format!(
@@ -1379,9 +1422,8 @@ fn check_post_merge_skip(
 |  After code review, you MUST load the QA handoff phase     |
 |  before making any further tool calls.                     |
 |                                                            |
-|  MANDATORY: Read(\"~/.claude/skills/{}/phases/qa-handoff.md\")|
-+============================================================+",
-            skill
+|  MANDATORY: Read(\"~/.claude/skills/{skill}/phases/qa-handoff.md\")|
++============================================================+"
         );
         return Some(deny_with_context(input, message));
     }
@@ -1643,15 +1685,17 @@ mod tests {
         assert!(output.blocked.is_none());
 
         if claim_path.exists() {
-            // File exists on disk -> trusted -> record happens AND
+            // File exists on disk → trusted → record happens AND
             // workflow advances.
             assert!(state.has_phase_been_read("linear", "claim.md"));
             let wf_state = state.workflows.get("linear").unwrap();
             assert!(wf_state.is_phase_complete("claim"));
         } else {
-            // File doesn't exist (CI/other machines) -> untrusted ->
-            // NO record AND no advance. This pins the security hardening:
-            // untrusted phase paths must not inflate phase progress.
+            // File doesn't exist (CI/other machines) → untrusted →
+            // NO record AND no advance (production
+            // `phase_gate::process` rejects untrusted phase reads
+            // up-front to prevent phantom phase completion via
+            // crafted paths).
             assert!(!state.has_phase_been_read("linear", "claim.md"));
             assert!(
                 state.workflows.get("linear").is_none()
@@ -1688,13 +1732,15 @@ mod tests {
         assert!(output.blocked.is_none());
 
         if claim_path.exists() {
-            // File exists -> trusted -> recorded AND advances "linear"
-            // (from path), not "some-other-skill".
+            // File exists → trusted → recorded AND advances
+            // "linear" (from path), not "some-other-skill".
             assert!(state.has_phase_been_read("linear", "claim.md"));
             let wf_state = state.workflows.get("linear").unwrap();
             assert!(wf_state.is_phase_complete("claim"));
         } else {
-            // File doesn't exist -> untrusted -> not recorded, no advance.
+            // File doesn't exist → untrusted → not recorded, no
+            // advance. Pins the security hardening: untrusted
+            // reads never touch state.
             assert!(!state.has_phase_been_read("linear", "claim.md"));
         }
     }
@@ -1866,8 +1912,11 @@ mod tests {
 
     #[test]
     fn test_untrusted_file_does_not_advance_workflow() {
-        // A phase file path that doesn't exist on disk is untrusted: it must
-        // NOT be recorded in phases_read AND must NOT advance workflow state.
+        // A phase file path that doesn't exist on disk is
+        // untrusted: it must NOT be recorded in phases_read AND
+        // must NOT advance workflow state. The early-return-on-
+        // !trusted in `process` is the security boundary that
+        // prevents crafted paths from inflating phase progress.
         let mut state = SessionState::new("sess-1");
         state.set_active_skill("linear");
         let mut workflows = HashMap::new();
@@ -1875,14 +1924,13 @@ mod tests {
 
         // Construct a path that definitely doesn't exist so the test is
         // independent of whether the developer has real marketplace skills
-        // installed under ~/.claude.
-        let fake_path = dirs::home_dir().unwrap().join(format!(
-            ".claude/skills/linear/phases/nonexistent-{}.md",
-            uuid::Uuid::new_v4(),
-        ));
+        // installed under ~/.claude, while still using a real workflow phase.
+        let temp = tempfile::tempdir().unwrap();
+        let fake_path = temp.path().join(".claude/skills/linear/phases/claim.md");
+        std::fs::create_dir_all(fake_path.parent().unwrap()).unwrap();
         assert!(
             !fake_path.exists(),
-            "test setup: random path should not exist"
+            "test setup: claim.md should not exist in temporary skills tree"
         );
 
         let input = HookInput {
@@ -1895,8 +1943,8 @@ mod tests {
         let output = process(&input, &mut state, &workflows, &test_fs());
         assert!(output.blocked.is_none());
 
-        let file_name = fake_path.file_name().and_then(|s| s.to_str()).unwrap();
-        assert!(!state.has_phase_been_read("linear", file_name));
+        // Untrusted -> not recorded and no workflow advance.
+        assert!(!state.has_phase_been_read("linear", "claim.md"));
         assert!(
             state.workflows.get("linear").is_none()
                 || !state
@@ -1923,31 +1971,36 @@ mod tests {
 
     #[test]
     fn test_dangerous_mcp_tools_classified_correctly() {
-        // Write/exec tools are dangerous
+        // Untrusted exec servers (NOT on TRUSTED_MCP_SERVERS) — write/exec
+        // tools stay dangerous, fail-closed by verb.
         assert!(is_dangerous_mcp_tool("mcp__codex__shell"));
         assert!(is_dangerous_mcp_tool("mcp__codex__write_file"));
         assert!(is_dangerous_mcp_tool("mcp__codex__apply_patch"));
-        assert!(is_dangerous_mcp_tool("mcp__steel__click"));
-        assert!(is_dangerous_mcp_tool("mcp__steel__evaluate_js"));
-        assert!(is_dangerous_mcp_tool("mcp__steel__navigate"));
-        assert!(is_dangerous_mcp_tool("mcp__linear__create_issue"));
-        assert!(is_dangerous_mcp_tool("mcp__linear__update_issue"));
-        assert!(is_dangerous_mcp_tool("mcp__linear__delete_issue"));
         assert!(is_dangerous_mcp_tool("mcp__doppler__set_secret"));
 
-        // Read-only tools are safe
-        assert!(!is_dangerous_mcp_tool("mcp__linear__get_issue"));
-        assert!(!is_dangerous_mcp_tool("mcp__linear__list_issues"));
-        assert!(!is_dangerous_mcp_tool("mcp__linear__search"));
-        assert!(!is_dangerous_mcp_tool("mcp__steel__screenshot"));
+        // Trusted operator-registered servers (Gary: "MCPs are safe") — all
+        // their tools are trusted, including browser navigate/evaluate/click
+        // and linear mutations, because the operator controls these servers.
+        assert!(!is_dangerous_mcp_tool("mcp__steel__click"));
+        assert!(!is_dangerous_mcp_tool("mcp__steel__evaluate_js"));
+        assert!(!is_dangerous_mcp_tool("mcp__steel__navigate"));
+        assert!(!is_dangerous_mcp_tool("mcp__browserbase__evaluate"));
+        assert!(!is_dangerous_mcp_tool("mcp__browserbase__navigate"));
+        assert!(!is_dangerous_mcp_tool("mcp__cdp__evaluate"));
+        assert!(!is_dangerous_mcp_tool("mcp__linear__create_issue"));
+        assert!(!is_dangerous_mcp_tool("mcp__linear__delete_issue"));
+
+        // Read-only verbs on untrusted servers are still safe (verb-level).
         assert!(!is_dangerous_mcp_tool("mcp__codex__read_file"));
         assert!(!is_dangerous_mcp_tool("mcp__codex__list_dir"));
-        assert!(!is_dangerous_mcp_tool("mcp__sentinel__get_proof_chain"));
-        assert!(!is_dangerous_mcp_tool("mcp__sentinel__get_workflow_status"));
-        assert!(!is_dangerous_mcp_tool("mcp__sentinel__verify_chain"));
-        assert!(!is_dangerous_mcp_tool("mcp__sentinel__mcp_restart_server"));
+        assert!(!is_dangerous_mcp_tool("mcp__doppler__get_secret"));
 
-        // Unknown suffixes default to dangerous (fail-closed)
+        // Trusted-server reads (also covered by trust short-circuit).
+        assert!(!is_dangerous_mcp_tool("mcp__linear__get_issue"));
+        assert!(!is_dangerous_mcp_tool("mcp__sentinel__get_proof_chain"));
+        assert!(!is_dangerous_mcp_tool("mcp__sentinel__verify_chain"));
+
+        // Unknown/untrusted servers with unknown verbs default to dangerous.
         assert!(is_dangerous_mcp_tool("mcp__evil__pwn_system"));
         assert!(is_dangerous_mcp_tool("mcp__unknown__do_thing"));
     }

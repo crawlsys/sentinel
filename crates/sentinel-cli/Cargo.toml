@@ -20,6 +20,8 @@ path = "src/launcher.rs"
 sentinel-domain = { workspace = true }
 sentinel-application = { workspace = true }
 sentinel-infrastructure = { workspace = true }
+sentinel-legatus = { path = "../sentinel-legatus" }
+uuid = { workspace = true }
 tokio = { workspace = true }
 clap = { workspace = true }
 serde = { workspace = true }
@@ -40,8 +42,10 @@ sha2 = { workspace = true }
 hex = { workspace = true }
 ed25519-dalek = { workspace = true }
 
+
 [dev-dependencies]
 tempfile = "3"
+async-trait = { workspace = true }
 
 [lints]
 workspace = true

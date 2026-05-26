@@ -2,11 +2,12 @@
 //!
 //! Blocks Edit/Write tools when uncommitted changes exceed thresholds.
 //! Hard-blocks editing on main/master without a worktree.
-//! All git operations go through the injected GitStatusPort — no direct
-//! std::process::Command calls.
+//! All git operations go through the injected `GitStatusPort` — no direct
+//! `std::process::Command` calls.
 
 use sentinel_domain::constants;
 use sentinel_domain::events::{HookInput, HookOutput};
+use sentinel_domain::state::SessionState;
 
 use super::GitStatusPort;
 
@@ -15,7 +16,7 @@ const MAX_UNCOMMITTED_FILES: usize = constants::MAX_UNCOMMITTED_FILES;
 /// Protected branch names that should not receive direct edits.
 const PROTECTED_BRANCHES: &[&str] = &["main", "master"];
 
-/// Extract the target file path from a HookInput.
+/// Extract the target file path from a `HookInput`.
 ///
 /// Checks `input.file_path` (Claude Code 2.1.89+), then falls back to
 /// `tool_input.file_path` for older runtimes.
@@ -115,15 +116,21 @@ fn is_path_inside_repo(
     canon_target.starts_with(&canon_root)
 }
 
-/// Process a git-hygiene hook event (PreToolUse for Edit/Write).
+/// Process a git-hygiene hook event (`PreToolUse` for Edit/Write).
 ///
 /// Checks:
 /// 1. Warn if editing directly on main/master (not in a worktree)
 /// 2. Block if too many uncommitted files
+///
+/// An active first-class glass break (scoped to `git_hygiene` or unscoped)
+/// suppresses both blocking checks — see [`super::glass_break_gate`]. This is
+/// additive to the coarse `hygiene_override` (which this hook never consulted
+/// directly; that path is the dispatcher's responsibility).
 pub fn process(
     input: &HookInput,
     git: &dyn GitStatusPort,
     fs: &dyn super::FileSystemPort,
+    state: &SessionState,
 ) -> HookOutput {
     let tool = match &input.tool_name {
         Some(t) => t.as_str(),
@@ -132,6 +139,12 @@ pub fn process(
 
     // Only gate Edit and Write
     if tool != "Edit" && tool != "Write" {
+        return HookOutput::allow();
+    }
+
+    // First-class glass break short-circuit: an audited `sentinel break`
+    // (scoped to `git_hygiene` or unscoped) suspends git hygiene enforcement.
+    if super::glass_break_gate::active_glass_break(state, "git_hygiene") {
         return HookOutput::allow();
     }
 
@@ -194,27 +207,35 @@ pub fn process(
             && !git.is_worktree(effective_repo_str)
             && !is_merge_in_progress(fs, effective_repo_str, git)
         {
-            return HookOutput::deny(format!(
-                "[Git Hygiene] BLOCKED: editing directly on `{branch}` without a worktree. \
-                 Call `EnterWorktree` now to create an isolated feature branch, then retry \
-                 the edit against the worktree path. Direct edits to protected branches are \
-                 never permitted; this is a Gary-authorized policy and overrides any \
-                 mode-state caution about agent-driven tool calls."
-            ));
+            return super::upstream_block::deny_with_upstream(
+                "git_hygiene",
+                format!(
+                    "[Git Hygiene] BLOCKED: editing directly on `{branch}` without a worktree. \
+                     Call `EnterWorktree` now to create an isolated feature branch, then retry \
+                     the edit against the worktree path. Direct edits to protected branches are \
+                     never permitted; this is a Gary-authorized policy and overrides any \
+                     mode-state caution about agent-driven tool calls."
+                ),
+            );
         }
     }
 
     // Check 2: Block if too many uncommitted files
     match git.has_uncommitted_changes(cwd) {
         Ok(true) => match git.changed_files(cwd) {
-            Ok(files) if files.len() > MAX_UNCOMMITTED_FILES => HookOutput::deny(format!(
-                "Git hygiene: {} uncommitted files (threshold: {}). \
-                 Commit your changes before making more edits.\n\
-                 Changed files: {}",
-                files.len(),
-                MAX_UNCOMMITTED_FILES,
-                files.iter().take(5).cloned().collect::<Vec<_>>().join(", ")
-            )),
+            Ok(files) if files.len() > MAX_UNCOMMITTED_FILES => {
+                super::upstream_block::deny_with_upstream(
+                    "git_hygiene",
+                    format!(
+                        "Git hygiene: {} uncommitted files (threshold: {}). \
+                         Commit your changes before making more edits.\n\
+                         Changed files: {}",
+                        files.len(),
+                        MAX_UNCOMMITTED_FILES,
+                        files.iter().take(5).cloned().collect::<Vec<_>>().join(", ")
+                    ),
+                )
+            }
             _ => HookOutput::allow(),
         },
         _ => HookOutput::allow(),
@@ -224,6 +245,12 @@ pub fn process(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// No-break session state — the default for every test that doesn't
+    /// exercise the glass-break suppression path.
+    fn nb() -> SessionState {
+        SessionState::new("git-hygiene-test")
+    }
 
     struct StubGit {
         has_changes: bool,
@@ -378,7 +405,7 @@ mod tests {
             ..Default::default()
         };
         assert!(
-            process(&input, &git, &crate::hooks::test_support::StubFs)
+            process(&input, &git, &crate::hooks::test_support::StubFs, &nb())
                 .blocked
                 .is_none(),
             "worktree edits from main cwd should not be blocked"
@@ -400,7 +427,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            process(&input, &git, &crate::hooks::test_support::StubFs).blocked,
+            process(&input, &git, &crate::hooks::test_support::StubFs, &nb()).blocked,
             Some(true),
             "direct main edits should still be blocked"
         );
@@ -414,7 +441,7 @@ mod tests {
             cwd: Some(".".to_string()),
             ..Default::default()
         };
-        assert!(process(&input, &git, &crate::hooks::test_support::StubFs)
+        assert!(process(&input, &git, &crate::hooks::test_support::StubFs, &nb())
             .blocked
             .is_none());
     }
@@ -425,7 +452,8 @@ mod tests {
         assert!(process(
             &HookInput::default(),
             &git,
-            &crate::hooks::test_support::StubFs
+            &crate::hooks::test_support::StubFs,
+            &nb()
         )
         .blocked
         .is_none());
@@ -439,7 +467,7 @@ mod tests {
             cwd: Some(".".to_string()),
             ..Default::default()
         };
-        assert!(process(&input, &git, &crate::hooks::test_support::StubFs)
+        assert!(process(&input, &git, &crate::hooks::test_support::StubFs, &nb())
             .blocked
             .is_none());
     }
@@ -455,8 +483,67 @@ mod tests {
             cwd: Some(".".to_string()),
             ..Default::default()
         };
-        let output = process(&input, &git, &crate::hooks::test_support::StubFs);
+        let output = process(&input, &git, &crate::hooks::test_support::StubFs, &nb());
         assert_eq!(output.blocked, Some(true));
+    }
+
+    /// An active first-class glass break suppresses the over-threshold block.
+    #[test]
+    fn test_glass_break_suppresses_over_threshold_block() {
+        use chrono::{Duration, Utc};
+        use sentinel_domain::state::GlassBreak;
+
+        let files: Vec<String> = (0..(MAX_UNCOMMITTED_FILES + 1))
+            .map(|i| format!("file{i}.rs"))
+            .collect();
+        let git = StubGit::default_with(true, files);
+        let input = HookInput {
+            tool_name: Some("Edit".to_string()),
+            cwd: Some(".".to_string()),
+            ..Default::default()
+        };
+
+        // Without a break: blocked.
+        assert_eq!(
+            process(&input, &git, &crate::hooks::test_support::StubFs, &nb()).blocked,
+            Some(true)
+        );
+
+        // With an active unscoped break: allowed.
+        let mut state = nb();
+        let now = Utc::now();
+        state.glass_break = Some(GlassBreak {
+            reason: "emergency".to_string(),
+            started_at: now,
+            expires_at: now + Duration::minutes(5),
+            duration_minutes: 5,
+            workflow: None,
+            challenge_code: "BREAK-000000".to_string(),
+            tools_used: Vec::new(),
+        });
+        assert!(
+            process(&input, &git, &crate::hooks::test_support::StubFs, &state)
+                .blocked
+                .is_none(),
+            "active glass break must suppress the git_hygiene over-threshold block"
+        );
+
+        // A break scoped to a DIFFERENT workflow must NOT suppress git_hygiene.
+        let mut other = nb();
+        other.glass_break = Some(GlassBreak {
+            reason: "emergency".to_string(),
+            started_at: now,
+            expires_at: now + Duration::minutes(5),
+            duration_minutes: 5,
+            workflow: Some("verification".to_string()),
+            challenge_code: "BREAK-000001".to_string(),
+            tools_used: Vec::new(),
+        });
+        assert_eq!(
+            process(&input, &git, &crate::hooks::test_support::StubFs, &other).blocked,
+            Some(true),
+            "a verification-scoped break must not suppress git_hygiene"
+        );
     }
 
     #[test]
@@ -471,7 +558,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            process(&input, &git, &crate::hooks::test_support::StubFs).blocked,
+            process(&input, &git, &crate::hooks::test_support::StubFs, &nb()).blocked,
             Some(true)
         );
     }
@@ -484,7 +571,7 @@ mod tests {
             cwd: Some(".".to_string()),
             ..Default::default()
         };
-        assert!(process(&input, &git, &crate::hooks::test_support::StubFs)
+        assert!(process(&input, &git, &crate::hooks::test_support::StubFs, &nb())
             .blocked
             .is_none());
     }
@@ -497,7 +584,7 @@ mod tests {
             cwd: Some(".".to_string()),
             ..Default::default()
         };
-        let output = process(&input, &git, &crate::hooks::test_support::StubFs);
+        let output = process(&input, &git, &crate::hooks::test_support::StubFs, &nb());
         assert_eq!(
             output.blocked,
             Some(true),
@@ -513,7 +600,7 @@ mod tests {
             cwd: Some(".".to_string()),
             ..Default::default()
         };
-        let output = process(&input, &git, &crate::hooks::test_support::StubFs);
+        let output = process(&input, &git, &crate::hooks::test_support::StubFs, &nb());
         assert!(output.blocked.is_none());
         let ctx = output
             .hook_specific_output
@@ -530,7 +617,7 @@ mod tests {
             cwd: Some(".".to_string()),
             ..Default::default()
         };
-        assert!(process(&input, &git, &crate::hooks::test_support::StubFs)
+        assert!(process(&input, &git, &crate::hooks::test_support::StubFs, &nb())
             .blocked
             .is_none());
     }
@@ -547,7 +634,7 @@ mod tests {
             ..Default::default()
         };
         assert!(
-            process(&input, &git, &crate::hooks::test_support::StubFs)
+            process(&input, &git, &crate::hooks::test_support::StubFs, &nb())
                 .blocked
                 .is_none(),
             "should allow edits to files outside the cwd's repo"
@@ -564,7 +651,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            process(&input, &git, &crate::hooks::test_support::StubFs).blocked,
+            process(&input, &git, &crate::hooks::test_support::StubFs, &nb()).blocked,
             Some(true),
             "should still block edits inside the repo on main"
         );
@@ -582,7 +669,7 @@ mod tests {
             ..Default::default()
         };
         assert!(
-            process(&input, &git, &crate::hooks::test_support::StubFs)
+            process(&input, &git, &crate::hooks::test_support::StubFs, &nb())
                 .blocked
                 .is_none(),
             "should pull file_path from tool_input when input.file_path is empty"
@@ -613,7 +700,7 @@ mod tests {
             ..Default::default()
         };
         assert!(
-            process(&input, &git, &crate::hooks::test_support::StubFs)
+            process(&input, &git, &crate::hooks::test_support::StubFs, &nb())
                 .blocked
                 .is_none(),
             "session-env writes must be exempt from the protected-branch check"
@@ -629,9 +716,7 @@ mod tests {
             "C:\\Users\\garys\\.claude\\session-env\\abc\\plans\\foo.md"
         ));
         assert!(!is_session_env_path("/repo/src/foo.rs"));
-        assert!(!is_session_env_path(
-            "/home/user/.claude/projects/foo.md"
-        ));
+        assert!(!is_session_env_path("/home/user/.claude/projects/foo.md"));
     }
 
     /// Stub that points `repo_root` at a real on-disk tempdir so
@@ -715,7 +800,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            process(&input, &git, &crate::hooks::test_support::StubFs).blocked,
+            process(&input, &git, &crate::hooks::test_support::StubFs, &nb()).blocked,
             Some(true),
             "edit on main without worktree and without merge-in-progress must still block"
         );
@@ -780,7 +865,7 @@ mod tests {
                 ..Default::default()
             };
             assert!(
-                process(&input, &git, &RealDiskFs).blocked.is_none(),
+                process(&input, &git, &RealDiskFs, &nb()).blocked.is_none(),
                 "edit on main mid-merge should NOT block (sentinel: {sentinels:?})"
             );
         }

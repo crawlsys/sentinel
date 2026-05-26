@@ -1,20 +1,20 @@
 //! Tool Usage Gate
 //!
-//! PreToolUse hook that blocks Edit/Write if required preconditions aren't met:
+//! `PreToolUse` hook that blocks Edit/Write if required preconditions aren't met:
 //! 1. Sequential thinking must have been used this session
 //! 2. At least one task must have been created this session
 //! 3. A plan must have been approved this session (ExitPlanMode/EnterPlanMode
 //!    called, OR a recent `plans/*.md` exists)
-//! 4. A task must be actively in_progress
+//! 4. A task must be actively `in_progress`
 //!
 //! State is tracked via marker files in the temp directory, keyed by session ID.
-//! Marker files are written by the PostToolUse dispatcher when it detects
+//! Marker files are written by the `PostToolUse` dispatcher when it detects
 //! the relevant tool calls.
 //!
 //! Plan-mode detection (primary): read the session transcript at
 //! `input.transcript_path` and walk it to find the last `EnterPlanMode` or
 //! `ExitPlanMode` `tool_use` entry. If `EnterPlanMode` appears after the
-//! last `ExitPlanMode` (or there is no ExitPlanMode), the session is
+//! last `ExitPlanMode` (or there is no `ExitPlanMode`), the session is
 //! currently in plan mode and check #3 is satisfied directly by the real
 //! Claude Code 2.1.114 signal. This replaces the old `SENTINEL_AUTOPILOT`
 //! env-var bypass — see `detect_plan_mode_from_transcript`.
@@ -26,7 +26,7 @@
 //!
 //! Plan-file fallback: when a session is resumed, `ExitPlanMode` may have
 //! been called in a prior session and the transcript may not be available,
-//! so no PLAN_MARKER exists. Detect this by scanning for recently-written
+//! so no `PLAN_MARKER` exists. Detect this by scanning for recently-written
 //! `*.md` files in any `plans/` directory between `{cwd}` and the
 //! containing repo root. We walk upward from cwd until we find a `.git`
 //! entry (file or directory — worktrees use a file) and check every
@@ -41,6 +41,8 @@
 //!   - cwd is a nested subdirectory   → walks up checking each level
 
 use sentinel_domain::events::{HookInput, HookOutput};
+use sentinel_domain::ports::ReversibilityClassifierPort;
+use sentinel_domain::ReversibilityClass;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
@@ -52,8 +54,7 @@ use super::{EnvPort, FileSystemPort};
 /// authoritative signal and this env var is ignored.
 fn is_autopilot(env: &dyn EnvPort) -> bool {
     env.var("SENTINEL_AUTOPILOT")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
+        .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
 }
 
 /// Walk the transcript newest-to-oldest looking for the most recent
@@ -61,9 +62,9 @@ fn is_autopilot(env: &dyn EnvPort) -> bool {
 /// the last one is `EnterPlanMode` — meaning the session is currently in
 /// plan mode.
 ///
-/// Claude Code 2.1.114 records plan-mode entry as an assistant tool_use
+/// Claude Code 2.1.114 records plan-mode entry as an assistant `tool_use`
 /// block with `name: "EnterPlanMode"` (real tool — binary handler `r7H` —
-/// though omitted from `sdk-tools.d.ts`). Exit is a tool_use with
+/// though omitted from `sdk-tools.d.ts`). Exit is a `tool_use` with
 /// `name: "ExitPlanMode"`. Between those two calls the permission context
 /// carries `mode: "plan"`.
 ///
@@ -121,10 +122,10 @@ const SEQUENTIAL_MARKER_PREFIX: &str = "claude-sequential-used-";
 /// Marker file prefix for task creation.
 const TASK_MARKER_PREFIX: &str = "claude-task-created-";
 
-/// Marker file prefix for plan approval (ExitPlanMode was called).
+/// Marker file prefix for plan approval (`ExitPlanMode` was called).
 const PLAN_MARKER_PREFIX: &str = "claude-plan-approved-";
 
-/// Marker file prefix for active task (TaskUpdate set a task to in_progress).
+/// Marker file prefix for active task (`TaskUpdate` set a task to `in_progress`).
 const TASK_ACTIVE_PREFIX: &str = "claude-task-active-";
 
 /// Check if a marker file exists for this session.
@@ -156,8 +157,7 @@ fn plans_dir_has_recent_md(fs: &dyn FileSystemPort, dir: &Path, now: SystemTime)
         {
             Ok(modified) => now
                 .duration_since(modified)
-                .map(|age| age <= PLAN_FILE_FRESH_WINDOW)
-                .unwrap_or(false),
+                .is_ok_and(|age| age <= PLAN_FILE_FRESH_WINDOW),
             Err(_) => false,
         }
     })
@@ -208,12 +208,12 @@ pub fn mark_task_created(fs: &dyn FileSystemPort, session_id: &str) {
     write_marker(fs, TASK_MARKER_PREFIX, session_id);
 }
 
-/// Write the plan-approved marker for this session (ExitPlanMode was called).
+/// Write the plan-approved marker for this session (`ExitPlanMode` was called).
 pub fn mark_plan_approved(fs: &dyn FileSystemPort, session_id: &str) {
     write_marker(fs, PLAN_MARKER_PREFIX, session_id);
 }
 
-/// Write the task-active marker for this session (a task is in_progress).
+/// Write the task-active marker for this session (a task is `in_progress`).
 pub fn mark_task_active(fs: &dyn FileSystemPort, session_id: &str) {
     write_marker(fs, TASK_ACTIVE_PREFIX, session_id);
 }
@@ -239,7 +239,9 @@ fn persistent_store_has_active_task(fs: &dyn FileSystemPort) -> bool {
     // migrates lazily, so during the migration window data may live in
     // either location.
     let roots = [
-        home.join(".claude").join("sentinel").join("persistent-tasks"),
+        home.join(".claude")
+            .join("sentinel")
+            .join("persistent-tasks"),
         home.join(".claude").join("persistent-tasks"),
     ];
 
@@ -325,7 +327,7 @@ fn recent_pending_task_hint(fs: &dyn FileSystemPort, _session_id: &str) -> Optio
             let id = task
                 .get("id")
                 .and_then(|v| v.as_str())
-                .or_else(|| task.get("id").and_then(|v| v.as_i64()).map(|_| "?"))
+                .or_else(|| task.get("id").and_then(serde_json::Value::as_i64).map(|_| "?"))
                 .unwrap_or("?");
             let subject = task
                 .get("subject")
@@ -337,301 +339,63 @@ fn recent_pending_task_hint(fs: &dyn FileSystemPort, _session_id: &str) -> Optio
     None
 }
 
-/// Strip leading `cd <dir> && ` / `cd <dir>; ` prefixes so the classifier
-/// sees the meaningful payload of compound commands like `cd repo && rm -rf .`
-fn strip_cd_prefix(cmd: &str) -> &str {
-    let trimmed = cmd.trim_start();
-    if !trimmed.starts_with("cd ") {
-        return trimmed;
-    }
-    // Find the connector (`&&` or `;`) and keep what's after it.
-    let split_idx = trimmed
-        .find("&&")
-        .map(|i| i + 2)
-        .or_else(|| trimmed.find(';').map(|i| i + 1));
-    match split_idx {
-        Some(i) => trimmed[i..].trim_start(),
-        None => trimmed,
-    }
-}
-
-/// Read-only Bash prefixes — these never need a task. Conservative list:
-/// only commands that genuinely don't change repo / system state.
-const READ_ONLY_BASH_PREFIXES: &[&str] = &[
-    "ls",
-    "ll",
-    "cat",
-    "head",
-    "tail",
-    "wc",
-    "find",
-    "tree",
-    "du",
-    "stat",
-    "pwd",
-    "which",
-    "whoami",
-    "id",
-    "uname",
-    "date",
-    "echo",
-    "printf",
-    "git status",
-    "git log",
-    "git diff",
-    "git show",
-    "git branch -a",
-    "git branch -r",
-    "git branch -v",
-    "git ls-files",
-    "git rev-parse",
-    "git config --get",
-    "git config --list",
-    "git remote -v",
-    "git worktree list",
-    "git stash list",
-    "git tag",
-    "git describe",
-    "git blame",
-    "git shortlog",
-    "git reflog",
-    "gh pr view",
-    "gh pr list",
-    "gh pr checks",
-    "gh pr diff",
-    "gh issue view",
-    "gh issue list",
-    "gh run view",
-    "gh run list",
-    "gh repo view",
-    "gh release list",
-    "gh auth status",
-    "gh api",
-    "cargo check",
-    "cargo clippy",
-    "cargo metadata",
-    "cargo tree",
-    "cargo doc --no-deps",
-    "cargo fmt --check",
-    "cargo --version",
-    "cargo search",
-    "npm ls",
-    "npm view",
-    "npm outdated",
-    "npm config get",
-    "pnpm ls",
-    "yarn list",
-    "rustc --version",
-    "rustup show",
-    "node --version",
-    "python --version",
-    "docker ps",
-    "docker images",
-    "docker version",
-    "kubectl get",
-    "kubectl describe",
-];
-
-/// Mutating Bash prefixes / patterns — these must be gated.
-/// Order: longest/most-specific first so prefix matches don't shadow.
-const MUTATING_BASH_PATTERNS: &[&str] = &[
-    "git commit",
-    "git push",
-    "git merge",
-    "git rebase",
-    "git reset --hard",
-    "git clean -f",
-    "git branch -d",
-    "git branch -D",
-    "git restore",
-    "git checkout --",
-    "git checkout -b",
-    "git tag -d",
-    "git stash drop",
-    "git stash clear",
-    "git stash pop",
-    "git stash apply",
-    "git worktree remove",
-    "git worktree add",
-    "gh pr create",
-    "gh pr merge",
-    "gh pr close",
-    "gh pr edit",
-    "gh pr review",
-    "gh issue create",
-    "gh issue close",
-    "gh issue edit",
-    "gh release create",
-    "gh release edit",
-    "gh release delete",
-    "cargo build",
-    "cargo run",
-    "cargo install",
-    "cargo update",
-    "cargo publish",
-    "cargo test",
-    "cargo bench",
-    "npm install",
-    "npm i ",
-    "npm run",
-    "npm publish",
-    "npm uninstall",
-    "yarn install",
-    "yarn add",
-    "yarn remove",
-    "yarn run",
-    "pnpm install",
-    "pnpm add",
-    "pnpm remove",
-    "pnpm run",
-    "pip install",
-    "pip uninstall",
-    "rm ",
-    "rm -",
-    "mv ",
-    "cp ",
-    "mkdir ",
-    "touch ",
-    "chmod ",
-    "chown ",
-    "ln -",
-    "make ",
-    "make\n",
-    "docker run",
-    "docker build",
-    "docker push",
-    "docker rm",
-    "docker rmi",
-    "kubectl apply",
-    "kubectl delete",
-    "kubectl create",
-    "kubectl edit",
-];
-
-/// Decide whether a Bash tool call is mutating (and therefore should be
-/// gated by the task-creation requirement).
+/// Process a `PreToolUse` event. Routes by reversibility class (A6, per
+/// `docs/a6-reversibility-graded-tripwires.md`):
 ///
-/// Algorithm:
-/// 1. Strip a leading `cd <dir> && ` so we see the real command.
-/// 2. If it starts with any read-only prefix → not mutating.
-/// 3. If it contains an output redirection (`>`, `>>`) → mutating.
-/// 4. If it starts with any mutating prefix → mutating.
-/// 5. Otherwise → not mutating (default-allow on uncertainty so we don't
-///    nag on novel-but-harmless commands).
-fn bash_command_is_mutating(input: &HookInput) -> bool {
-    let cmd = match input
-        .tool_input
-        .as_ref()
-        .and_then(|v| v.get("command"))
-        .and_then(|v| v.as_str())
-    {
-        Some(c) => c,
-        None => return false,
-    };
-    let payload = strip_cd_prefix(cmd);
-    let lower = payload.to_lowercase();
-
-    // Output redirection always counts as mutating, regardless of the
-    // command prefix — `echo hi > /tmp/file` writes to disk even though
-    // `echo` is otherwise read-only. Skip stderr-merge (`2>&1`) and pipes
-    // by requiring the char immediately before `>` to be a non-digit
-    // (so `2>` isn't treated as a real redirection target marker).
-    let bytes = payload.as_bytes();
-    for (i, &c) in bytes.iter().enumerate() {
-        if c == b'>' {
-            let prev = if i == 0 { b' ' } else { bytes[i - 1] };
-            // `2>&1` / `2>/dev/null` start with a digit — not what we want
-            // to flag. `>>` is append redirection — flag the first `>`,
-            // but check the char before the run of `>`s.
-            if !prev.is_ascii_digit() {
-                return true;
-            }
-        }
-    }
-
-    // Read-only prefix list — `git status`, `ls`, `cargo check`, etc.
-    for ro in READ_ONLY_BASH_PREFIXES {
-        if lower.starts_with(ro) {
-            return false;
-        }
-    }
-
-    for m in MUTATING_BASH_PATTERNS {
-        if lower.starts_with(m) {
-            return true;
-        }
-    }
-
-    false
-}
-
-/// MCP tool names follow the `mcp__<server>__<verb>_<resource>` convention.
-/// Tools containing read-only verbs are allowed; everything else is gated.
-fn is_mutating_mcp_tool(tool: &str) -> bool {
-    // Strip `mcp__<server>__` so we're matching against the verb part.
-    let verb_part = tool
-        .strip_prefix("mcp__")
-        .and_then(|rest| rest.split_once("__").map(|(_, v)| v))
-        .unwrap_or(tool)
-        .to_lowercase();
-
-    // Read-only verb fragments — if the tool name contains any of these,
-    // treat as read-only and let it through without a task.
-    const READ_ONLY_FRAGMENTS: &[&str] = &[
-        "_get",
-        "get_",
-        "_list",
-        "list_",
-        "_view",
-        "view_",
-        "_search",
-        "_check",
-        "_status",
-        "_show",
-        "_describe",
-        "_inspect",
-        "_health",
-        "_count",
-        "_query",
-        "_resolve",
-        "_fetch",
-        "_read",
-        "whoami",
-        "_info",
-        "_export",
-        "current_account",
-        "list_accounts",
-    ];
-    for f in READ_ONLY_FRAGMENTS {
-        if verb_part.contains(f) {
-            return false;
-        }
-    }
-    // Default: assume mutating for the long tail of MCP tools so the gate
-    // catches new write surfaces without needing to enumerate every verb.
-    true
-}
-
-/// Process a PreToolUse event. Blocks Edit/Write — and now also clearly-
-/// mutating Bash commands and MCP write tools — if preconditions aren't met.
-/// Read-only Bash (`git status`, `ls`, `cargo check`, …) and read-only MCP
-/// tools (`*_get_*`, `*_list_*`, …) are still allowed without a task so the
-/// gate doesn't block exploration.
-pub fn process(input: &HookInput, fs: &dyn FileSystemPort, env: &dyn EnvPort) -> HookOutput {
+/// - `TriviallyReversible` → allow silently (memory writes, plan files,
+///   read-only ops, list/get MCP tools per the shipped TOML).
+/// - `ReversibleWithEffort` → run the four-check stack (sequential-thinking
+///   marker + task created + plan mode + active task `in_progress`).
+/// - `Irreversible` / `Catastrophic` → when `a3_enabled` is `true`,
+///   short-circuit to `allow()` so the A3 `dry_run_then_commit` hook
+///   handles the gating via its separate-model-family auditor. When
+///   `a3_enabled` is `false` (no `OPENROUTER_API_KEY` configured at
+///   session start), fall through to the four-check stack as the
+///   strongest available gate.
+pub fn process(
+    input: &HookInput,
+    fs: &dyn FileSystemPort,
+    env: &dyn EnvPort,
+    classifier: &dyn ReversibilityClassifierPort,
+    a3_enabled: bool,
+) -> HookOutput {
     let tool = match &input.tool_name {
         Some(t) => t.as_str(),
         None => return HookOutput::allow(),
     };
 
-    // Decide whether this specific tool call is in scope.
-    let in_scope = match tool {
-        "Edit" | "Write" => true,
-        "Bash" => bash_command_is_mutating(input),
-        other if other.starts_with("mcp__") => is_mutating_mcp_tool(other),
-        _ => false,
-    };
-    if !in_scope {
-        return HookOutput::allow();
+    // A6 Phase 4b + A3 Phase 4 — class-based dispatch with A3 hand-off.
+    //
+    // The shared reversibility classifier (per docs/a6-reversibility-graded-tripwires.md)
+    // decides whether this call enters the four-check stack:
+    //
+    // - TriviallyReversible → allow silently (memory writes, plan files,
+    //   read-only ops, list/get MCP tools per the shipped TOML).
+    // - ReversibleWithEffort → run the four-check stack (Edit/Write/local
+    //   mutations).
+    // - Irreversible / Catastrophic:
+    //     * `a3_enabled` (the production caller in hook_cmd.rs sets this
+    //       when `RigAuditor::from_env()` succeeded) → allow silently;
+    //       the A3 `dry_run_then_commit` hook owns these classes via its
+    //       separate-model-family auditor.
+    //     * Otherwise → fall through to the four-check stack so the
+    //       pre-A3 gate is still the strongest available defence.
+    //
+    // The shipped reversibility-defaults.toml is the substrate;
+    // operator overrides extend it.
+    let null_input = serde_json::Value::Null;
+    let tool_input_ref = input.tool_input.as_ref().unwrap_or(&null_input);
+    match classifier.classify(tool, tool_input_ref) {
+        ReversibilityClass::TriviallyReversible => return HookOutput::allow(),
+        ReversibilityClass::ReversibleWithEffort => {
+            // Fall through to the four-check stack below.
+        }
+        ReversibilityClass::Irreversible | ReversibilityClass::Catastrophic => {
+            if a3_enabled {
+                return HookOutput::allow();
+            }
+            // Fall through to the four-check stack below.
+        }
     }
 
     let session_id = match &input.session_id {
@@ -911,39 +675,20 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_allows_bash_without_command_field() {
-        // Bash with no `command` in tool_input — bash_command_is_mutating
-        // returns false defensively, so the gate stays out of the way.
-        let fs = MockFs::new();
-        let input = HookInput {
-            tool_name: Some("Bash".to_string()),
-            session_id: Some("test-session".to_string()),
-            ..Default::default()
-        };
-        assert!(
-            process(&input, &fs, &crate::hooks::test_support::StubEnv::new())
-                .blocked
-                .is_none()
-        );
-    }
-
-    #[test]
-    fn test_allows_read_only_bash_commands() {
-        // `git status` is read-only — should not be gated even with no
-        // sequential-thinking marker / no task / no plan.
-        let fs = MockFs::new();
-        let input = HookInput {
-            tool_name: Some("Bash".to_string()),
-            tool_input: Some(serde_json::json!({"command": "git status"})),
-            session_id: Some("test-session".to_string()),
-            ..Default::default()
-        };
-        assert!(
-            process(&input, &fs, &crate::hooks::test_support::StubEnv::new())
-                .blocked
-                .is_none()
-        );
+    /// Test classifier that defaults every tool to `ReversibleWithEffort`.
+    ///
+    /// This preserves the pre-Phase-4a gate behavior in tests that haven't
+    /// been updated to opt into specific class-based semantics: the
+    /// Trivially short-circuit at the top of `process()` never fires
+    /// (nothing classifies as `TriviallyReversible`), so existing tests
+    /// run the same in_scope match + four-check stack they always have.
+    ///
+    /// Tests that specifically exercise the Trivially short-circuit (new
+    /// in Phase 4a) construct their own [`StaticReversibilityClassifier`]
+    /// with `.with(tool, ReversibilityClass::TriviallyReversible)` entries.
+    fn permissive_classifier() -> crate::reversibility_classifier::StaticReversibilityClassifier {
+        crate::reversibility_classifier::StaticReversibilityClassifier::empty()
+            .with_default(ReversibilityClass::ReversibleWithEffort)
     }
 
     #[test]
@@ -957,27 +702,17 @@ mod tests {
             session_id: Some("test-session".to_string()),
             ..Default::default()
         };
-        let output = process(&input, &fs, &crate::hooks::test_support::StubEnv::new());
+        let output = process(
+            &input,
+            &fs,
+            &crate::hooks::test_support::StubEnv::new(),
+            &permissive_classifier(),
+            false,
+        );
         assert_eq!(
             output.blocked,
             Some(true),
             "mutating bash should be gated; got: {output:?}",
-        );
-    }
-
-    #[test]
-    fn test_allows_read_only_mcp_tools() {
-        // `mcp__linear__list_issues` is read-only — bypasses the gate.
-        let fs = MockFs::new();
-        let input = HookInput {
-            tool_name: Some("mcp__linear__list_issues".to_string()),
-            session_id: Some("test-session".to_string()),
-            ..Default::default()
-        };
-        assert!(
-            process(&input, &fs, &crate::hooks::test_support::StubEnv::new())
-                .blocked
-                .is_none()
         );
     }
 
@@ -990,58 +725,18 @@ mod tests {
             session_id: Some("test-session".to_string()),
             ..Default::default()
         };
-        let output = process(&input, &fs, &crate::hooks::test_support::StubEnv::new());
+        let output = process(
+            &input,
+            &fs,
+            &crate::hooks::test_support::StubEnv::new(),
+            &permissive_classifier(),
+            false,
+        );
         assert_eq!(
             output.blocked,
             Some(true),
             "mutating MCP tool should be gated; got: {output:?}",
         );
-    }
-
-    #[test]
-    fn test_bash_classifier_strips_cd_prefix() {
-        let input = HookInput {
-            tool_input: Some(serde_json::json!({"command": "cd /tmp && rm -rf old/"})),
-            ..Default::default()
-        };
-        assert!(bash_command_is_mutating(&input));
-    }
-
-    #[test]
-    fn test_bash_classifier_detects_redirection() {
-        let input = HookInput {
-            tool_input: Some(serde_json::json!({"command": "echo hi > /tmp/foo"})),
-            ..Default::default()
-        };
-        assert!(bash_command_is_mutating(&input));
-    }
-
-    #[test]
-    fn test_bash_classifier_treats_pipe_as_read_only() {
-        let input = HookInput {
-            tool_input: Some(serde_json::json!({"command": "git log --oneline | head -5"})),
-            ..Default::default()
-        };
-        assert!(!bash_command_is_mutating(&input));
-    }
-
-    #[test]
-    fn test_mcp_classifier_recognizes_get_and_list() {
-        assert!(!is_mutating_mcp_tool("mcp__linear__list_issues"));
-        assert!(!is_mutating_mcp_tool("mcp__doppler__get_secret"));
-        assert!(!is_mutating_mcp_tool("mcp__sentry__list_issues"));
-        assert!(!is_mutating_mcp_tool("mcp__github__pr_view"));
-        assert!(!is_mutating_mcp_tool("mcp__accounts__current_account"));
-    }
-
-    #[test]
-    fn test_mcp_classifier_blocks_unknown_verbs_by_default() {
-        assert!(is_mutating_mcp_tool("mcp__linear__create_issue"));
-        assert!(is_mutating_mcp_tool("mcp__doppler__set_secret"));
-        assert!(is_mutating_mcp_tool("mcp__github__pr_merge"));
-        // A novel verb we haven't enumerated should default to mutating
-        // so new write tools don't slip through unguarded.
-        assert!(is_mutating_mcp_tool("mcp__future__commit_changes"));
     }
 
     #[test]
@@ -1051,11 +746,15 @@ mod tests {
             tool_name: Some("Edit".to_string()),
             ..Default::default()
         };
-        assert!(
-            process(&input, &fs, &crate::hooks::test_support::StubEnv::new())
-                .blocked
-                .is_none()
-        );
+        assert!(process(
+            &input,
+            &fs,
+            &crate::hooks::test_support::StubEnv::new(),
+            &permissive_classifier(),
+            false,
+        )
+        .blocked
+        .is_none());
     }
 
     #[test]
@@ -1065,6 +764,8 @@ mod tests {
             &edit_input("test-session"),
             &fs,
             &crate::hooks::test_support::StubEnv::new(),
+            &permissive_classifier(),
+            false,
         );
         assert_eq!(output.blocked, Some(true));
     }
@@ -1076,6 +777,8 @@ mod tests {
             &write_input("test-session"),
             &fs,
             &crate::hooks::test_support::StubEnv::new(),
+            &permissive_classifier(),
+            false,
         );
         assert_eq!(output.blocked, Some(true));
     }
@@ -1087,6 +790,8 @@ mod tests {
             &edit_input("test-session"),
             &fs,
             &crate::hooks::test_support::StubEnv::new(),
+            &permissive_classifier(),
+            false,
         );
         assert_eq!(output.blocked, Some(true));
     }
@@ -1101,6 +806,8 @@ mod tests {
             &edit_input("test-session"),
             &fs,
             &crate::hooks::test_support::StubEnv::new(),
+            &permissive_classifier(),
+            false,
         );
         assert_eq!(output.blocked, Some(true));
         let reason = output
@@ -1142,6 +849,8 @@ mod tests {
             &edit_input("test-session"),
             &fs,
             &crate::hooks::test_support::StubEnv::new(),
+            &permissive_classifier(),
+            false,
         );
         let reason = output
             .hook_specific_output
@@ -1172,6 +881,8 @@ mod tests {
             &edit_input("test-session"),
             &fs,
             &crate::hooks::test_support::StubEnv::new(),
+            &permissive_classifier(),
+            false,
         );
         assert_eq!(output.blocked, Some(true));
         let reason = output
@@ -1192,6 +903,8 @@ mod tests {
             &edit_input("test-session"),
             &fs,
             &crate::hooks::test_support::StubEnv::new(),
+            &permissive_classifier(),
+            false,
         );
         assert!(output.blocked.is_none());
     }
@@ -1203,6 +916,8 @@ mod tests {
             &write_input("test-session"),
             &fs,
             &crate::hooks::test_support::StubEnv::new(),
+            &permissive_classifier(),
+            false,
         );
         assert!(output.blocked.is_none());
     }
@@ -1311,11 +1026,7 @@ mod tests {
         assert!(persistent_store_has_active_task(&fs));
 
         // Bare-array shape (older snapshot format).
-        std::fs::write(
-            &tasks_file,
-            r#"[{"id":"1","status":"in_progress"}]"#,
-        )
-        .unwrap();
+        std::fs::write(&tasks_file, r#"[{"id":"1","status":"in_progress"}]"#).unwrap();
         assert!(persistent_store_has_active_task(&fs));
 
         // Malformed JSON → degrades to false (caller falls back to marker).
@@ -1330,6 +1041,8 @@ mod tests {
             &edit_input("session-b"),
             &fs,
             &crate::hooks::test_support::StubEnv::new(),
+            &permissive_classifier(),
+            false,
         );
         assert_eq!(output.blocked, Some(true));
     }
@@ -1410,6 +1123,8 @@ mod tests {
             &input,
             &fs_port,
             &crate::hooks::test_support::StubEnv::new(),
+            &permissive_classifier(),
+            false,
         );
         assert!(
             output.blocked.is_none(),
@@ -1436,7 +1151,13 @@ mod tests {
         );
         // `edit_input` omits transcript_path, so the None-branch fallback
         // kicks in and honours SENTINEL_AUTOPILOT.
-        let output = process(&edit_input("test-session"), &fs, &autopilot_env());
+        let output = process(
+            &edit_input("test-session"),
+            &fs,
+            &autopilot_env(),
+            &permissive_classifier(),
+            false,
+        );
         assert!(
             output.blocked.is_none(),
             "autopilot env var must still work when no transcript is available"
@@ -1463,7 +1184,13 @@ mod tests {
             transcript_path: Some(t.path().to_string_lossy().into_owned()),
             ..Default::default()
         };
-        let output = process(&input, &fs, &autopilot_env());
+        let output = process(
+            &input,
+            &fs,
+            &autopilot_env(),
+            &permissive_classifier(),
+            false,
+        );
         assert_eq!(
             output.blocked,
             Some(true),
@@ -1478,7 +1205,13 @@ mod tests {
             "test-session",
             &[SEQUENTIAL_MARKER_PREFIX, TASK_MARKER_PREFIX],
         );
-        let output = process(&edit_input("test-session"), &fs, &autopilot_env());
+        let output = process(
+            &edit_input("test-session"),
+            &fs,
+            &autopilot_env(),
+            &permissive_classifier(),
+            false,
+        );
         // Plan check skipped, but task-active still blocks.
         assert_eq!(output.blocked, Some(true));
         let reason = output
@@ -1775,7 +1508,13 @@ mod tests {
             transcript_path: Some(t.path().to_string_lossy().into_owned()),
             ..Default::default()
         };
-        let output = process(&input, &fs, &crate::hooks::test_support::StubEnv::new());
+        let output = process(
+            &input,
+            &fs,
+            &crate::hooks::test_support::StubEnv::new(),
+            &permissive_classifier(),
+            false,
+        );
         assert!(
             output.blocked.is_none(),
             "transcript EnterPlanMode signal must satisfy plan check #3"
@@ -1800,7 +1539,13 @@ mod tests {
             transcript_path: Some(t.path().to_string_lossy().into_owned()),
             ..Default::default()
         };
-        let output = process(&input, &fs, &crate::hooks::test_support::StubEnv::new());
+        let output = process(
+            &input,
+            &fs,
+            &crate::hooks::test_support::StubEnv::new(),
+            &permissive_classifier(),
+            false,
+        );
         assert_eq!(
             output.blocked,
             Some(true),
@@ -1884,6 +1629,8 @@ mod tests {
             &input,
             &fs_port,
             &crate::hooks::test_support::StubEnv::new(),
+            &permissive_classifier(),
+            false,
         );
         assert!(
             output.blocked.is_none(),
@@ -2042,5 +1789,188 @@ mod tests {
             !detect_plan_mode_from_transcript(&RealTestFs, f.path()),
             "last line is ExitPlanMode so result must be false (last signal wins)"
         );
+    }
+
+    // ---- A6 Phase 4a: Trivially short-circuit ----
+    //
+    // These tests exercise the new class-based short-circuit at the top of
+    // `process()`. They construct classifiers that explicitly mark the
+    // tool under test as `TriviallyReversible` and assert the gate
+    // short-circuits to `allow()` regardless of session state (no markers,
+    // no plan, no task — all the preconditions the four-check stack would
+    // otherwise demand are skipped).
+
+    #[test]
+    fn a6_trivially_classified_edit_short_circuits_to_allow() {
+        // Edit normally requires all four preconditions; here we mark it
+        // trivially-reversible (as if writing to a memory file or plan
+        // file under the proper substrate) — must skip the gate stack.
+        let fs = MockFs::new();
+        let classifier = crate::reversibility_classifier::StaticReversibilityClassifier::empty()
+            .with("Edit", ReversibilityClass::TriviallyReversible);
+        let output = process(
+            &edit_input("test-session"),
+            &fs,
+            &crate::hooks::test_support::StubEnv::new(),
+            &classifier,
+            false,
+        );
+        assert!(
+            output.blocked.is_none(),
+            "Trivially classification must short-circuit before any precondition check"
+        );
+    }
+
+    #[test]
+    fn a6_trivially_classified_bash_short_circuits_regardless_of_command() {
+        // Bash with a normally-mutating command (rm -rf .) classifies as
+        // Trivially via the test classifier — short-circuit fires before
+        // the in_scope logic ever runs.
+        let fs = MockFs::new();
+        let input = HookInput {
+            tool_name: Some("Bash".to_string()),
+            session_id: Some("test-session".to_string()),
+            tool_input: Some(serde_json::json!({ "command": "rm -rf ." })),
+            ..Default::default()
+        };
+        let classifier = crate::reversibility_classifier::StaticReversibilityClassifier::empty()
+            .with("Bash", ReversibilityClass::TriviallyReversible);
+        let output = process(
+            &input,
+            &fs,
+            &crate::hooks::test_support::StubEnv::new(),
+            &classifier,
+            false,
+        );
+        assert!(
+            output.blocked.is_none(),
+            "Bash classified Trivially short-circuits before in_scope mutation check"
+        );
+    }
+
+    #[test]
+    fn a6_non_trivially_classified_still_runs_existing_in_scope_logic() {
+        // The opposite case: classifier returns ReversibleWithEffort
+        // (the default in `permissive_classifier()`) — the short-circuit
+        // does NOT fire, and the four-check stack runs as before.
+        // Edit without preconditions blocks per existing behavior.
+        let fs = MockFs::new();
+        let output = process(
+            &edit_input("test-session"),
+            &fs,
+            &crate::hooks::test_support::StubEnv::new(),
+            &permissive_classifier(),
+            false,
+        );
+        assert_eq!(
+            output.blocked,
+            Some(true),
+            "non-Trivially class preserves existing gate-stack behavior"
+        );
+    }
+
+    #[test]
+    fn a6_short_circuit_only_fires_for_trivially_class() {
+        // Confirm the comparison is exact-equality to TriviallyReversible,
+        // not >= or any other relation. RWE / Irreversible / Catastrophic
+        // all fall through to the in_scope logic.
+        let fs = MockFs::new();
+        for class in [
+            ReversibilityClass::ReversibleWithEffort,
+            ReversibilityClass::Irreversible,
+            ReversibilityClass::Catastrophic,
+        ] {
+            let classifier =
+                crate::reversibility_classifier::StaticReversibilityClassifier::empty()
+                    .with("Edit", class);
+            let output = process(
+                &edit_input("test-session"),
+                &fs,
+                &crate::hooks::test_support::StubEnv::new(),
+                &classifier,
+                false,
+            );
+            assert_eq!(
+                output.blocked,
+                Some(true),
+                "class {class:?} must NOT short-circuit; existing gate stack should block"
+            );
+        }
+    }
+
+    #[test]
+    fn a3_enabled_defers_irreversible_to_a3() {
+        // A3 Phase 4 — when `a3_enabled = true`, Irreversible and
+        // Catastrophic classes short-circuit to allow() so the
+        // dry_run_then_commit hook owns those classes. The four-check
+        // stack is bypassed for these classes (it still runs for
+        // ReversibleWithEffort).
+        let fs = MockFs::new();
+        for class in [
+            ReversibilityClass::Irreversible,
+            ReversibilityClass::Catastrophic,
+        ] {
+            let classifier =
+                crate::reversibility_classifier::StaticReversibilityClassifier::empty()
+                    .with("Edit", class);
+            let output = process(
+                &edit_input("test-session"),
+                &fs,
+                &crate::hooks::test_support::StubEnv::new(),
+                &classifier,
+                true,
+            );
+            assert!(
+                output.blocked.is_none(),
+                "class {class:?} must short-circuit when a3_enabled; \
+                 dry_run_then_commit owns it"
+            );
+        }
+    }
+
+    #[test]
+    fn a3_enabled_still_gates_reversible_with_effort() {
+        // A3 Phase 4 — `a3_enabled = true` only affects Irreversible/
+        // Catastrophic. ReversibleWithEffort (the bulk of edits) keeps
+        // running the four-check stack regardless.
+        let fs = MockFs::new();
+        let classifier = crate::reversibility_classifier::StaticReversibilityClassifier::empty()
+            .with("Edit", ReversibilityClass::ReversibleWithEffort);
+        let output = process(
+            &edit_input("test-session"),
+            &fs,
+            &crate::hooks::test_support::StubEnv::new(),
+            &classifier,
+            true,
+        );
+        assert_eq!(
+            output.blocked,
+            Some(true),
+            "ReversibleWithEffort still runs the four-check stack even with a3_enabled"
+        );
+    }
+
+    #[test]
+    fn a6_short_circuit_works_with_no_tool_input() {
+        // The Trivially short-circuit handles `tool_input: None` by
+        // passing `Value::Null` to the classifier. Confirm no panic
+        // and the short-circuit still fires.
+        let fs = MockFs::new();
+        let input = HookInput {
+            tool_name: Some("Read".to_string()),
+            session_id: Some("test-session".to_string()),
+            tool_input: None,
+            ..Default::default()
+        };
+        let classifier = crate::reversibility_classifier::StaticReversibilityClassifier::empty()
+            .with("Read", ReversibilityClass::TriviallyReversible);
+        let output = process(
+            &input,
+            &fs,
+            &crate::hooks::test_support::StubEnv::new(),
+            &classifier,
+            false,
+        );
+        assert!(output.blocked.is_none());
     }
 }

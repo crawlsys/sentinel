@@ -17,14 +17,14 @@ pub fn router() -> Router<AppState> {
 
 /// Read and parse a JSON state file, returning `null` if missing or invalid.
 fn read_state_file(filename: &str) -> serde_json::Value {
-    let path = match dirs::home_dir() {
-        Some(h) => h
-            .join(".claude")
-            .join("sentinel")
-            .join("state")
-            .join(filename),
-        None => return serde_json::Value::Null,
+    let Some(home) = dirs::home_dir() else {
+        return serde_json::Value::Null;
     };
+    let path = home
+        .join(".claude")
+        .join("sentinel")
+        .join("state")
+        .join(filename);
 
     match std::fs::read_to_string(&path) {
         Ok(content) => serde_json::from_str(&content).unwrap_or(serde_json::Value::Null),
@@ -68,12 +68,10 @@ async fn status() -> Json<serde_json::Value> {
         .to_string();
 
     // Check freshness
-    let fresh = if let Ok(ts) = chrono::DateTime::parse_from_rfc3339(&precomputed_ts) {
+    let fresh = chrono::DateTime::parse_from_rfc3339(&precomputed_ts).is_ok_and(|ts| {
         let age = (chrono::Utc::now() - ts.with_timezone(&chrono::Utc)).num_seconds();
         age <= 300
-    } else {
-        false
-    };
+    });
 
     // Check config
     let config_exists =

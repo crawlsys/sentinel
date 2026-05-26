@@ -4,12 +4,12 @@
 //! at the type-system boundary. The validating smart constructor centralizes
 //! the formerly-duplicated `sanitize_session_id` logic that lived in both
 //! `state_store` and `proof_store` (Attack #121 — path traversal via
-//! malicious session_id).
+//! malicious `session_id`).
 
 use serde::{Deserialize, Serialize};
 
 /// Maximum length of a session identifier in characters. Prevents pathological
-/// long-string DoS in path-handling code.
+/// long-string `DoS` in path-handling code.
 pub const SESSION_ID_MAX_LEN: usize = 128;
 
 /// Reasons a string fails to qualify as a `SessionId`.

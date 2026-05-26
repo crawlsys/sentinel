@@ -242,16 +242,16 @@ fn apply_removals(root: &Path, buckets: &HashMap<String, Status>) -> Result<usiz
 #[derive(Debug)]
 #[allow(dead_code)]
 enum TaskStatus {
-    /// session_id appears as a `<id>.jsonl` under some project — live
+    /// `session_id` appears as a `<id>.jsonl` under some project — live
     /// session, keep its tasks dir.
     Live { transcript: PathBuf },
-    /// session_id has no matching `.jsonl` anywhere AND the dir mtime
+    /// `session_id` has no matching `.jsonl` anywhere AND the dir mtime
     /// is older than the cutoff — safe to remove.
     Orphan {
         age_days: u64,
         size_bytes: u64,
     },
-    /// session_id has no matching `.jsonl` but the dir mtime is within
+    /// `session_id` has no matching `.jsonl` but the dir mtime is within
     /// the cutoff — could be a fresh session whose transcript hasn't
     /// been written yet. Kept to avoid races.
     YoungerThanCutoff { age_days: u64 },
@@ -285,9 +285,7 @@ pub fn run_session_tasks(older_than_days: u64, apply: bool) -> Result<()> {
     }
 
     let live_sessions = collect_live_session_ids(&projects_root);
-    let cutoff_secs = older_than_days
-        .checked_mul(86_400)
-        .unwrap_or(u64::MAX);
+    let cutoff_secs = older_than_days.saturating_mul(86_400);
     let now = std::time::SystemTime::now();
 
     let mut entries: Vec<(String, TaskStatus)> = Vec::new();
@@ -321,7 +319,7 @@ pub fn run_session_tasks(older_than_days: u64, apply: bool) -> Result<()> {
 }
 
 /// Walk `~/.claude/projects/*/` for `*.jsonl` files. Each filename stem is
-/// a session_id. Missing or unreadable project dirs are silently skipped
+/// a `session_id`. Missing or unreadable project dirs are silently skipped
 /// (it's a "what's currently alive" snapshot — better to miss a few than
 /// fail loud and prevent any cleanup at all).
 fn collect_live_session_ids(projects_root: &Path) -> std::collections::HashSet<String> {
@@ -369,8 +367,7 @@ fn classify_session_task(
     let age_secs = match path.metadata().and_then(|m| m.modified()) {
         Ok(mtime) => now
             .duration_since(mtime)
-            .map(|d| d.as_secs())
-            .unwrap_or(0),
+            .map_or(0, |d| d.as_secs()),
         Err(_) => 0,
     };
     let age_days = age_secs / 86_400;
@@ -440,7 +437,7 @@ fn print_report_tasks(entries: &[(String, TaskStatus)], cutoff_days: u64) {
             }
         }
     }
-    orphans.sort_by(|a, b| b.1.cmp(&a.1)); // oldest first
+    orphans.sort_by_key(|b| std::cmp::Reverse(b.1)); // oldest first
 
     println!("Session-tasks audit (cutoff: {cutoff_days} days):");
     println!("  total directories: {}", entries.len());

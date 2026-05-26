@@ -1,11 +1,11 @@
-//! Commit Message Validator — PreToolUse hook
+//! Commit Message Validator — `PreToolUse` hook
 //!
 //! Validates that `git commit` commands:
 //!   1. Use conventional commit format (feat:, fix:, chore:, etc.)
 //!   2. When running inside a configured project (e.g. Firefly Pro),
 //!      include a Linear issue reference for one of the teams.
 //!
-//! Fires on PreToolUse for Bash tool calls containing `git commit`.
+//! Fires on `PreToolUse` for Bash tool calls containing `git commit`.
 //! Blocks on malformed messages or missing Linear refs in gated projects.
 
 use regex::Regex;
@@ -19,7 +19,7 @@ use std::path::PathBuf;
 use sentinel_domain::commit::{has_linear_ref, is_conventional};
 
 fn extract_commit_message(command: &str) -> Option<String> {
-    let heredoc_re = Regex::new(r#"(?s)<<'?EOF'?\s*\n(.*?)\n\s*EOF"#).ok()?;
+    let heredoc_re = Regex::new(r"(?s)<<'?EOF'?\s*\n(.*?)\n\s*EOF").ok()?;
     if let Some(caps) = heredoc_re.captures(command) {
         return Some(caps[1].trim().to_string());
     }
@@ -29,7 +29,7 @@ fn extract_commit_message(command: &str) -> Option<String> {
         return Some(caps[1].trim().to_string());
     }
 
-    let unquoted_re = Regex::new(r#"-m\s+(\S+)"#).ok()?;
+    let unquoted_re = Regex::new(r"-m\s+(\S+)").ok()?;
     if let Some(caps) = unquoted_re.captures(command) {
         return Some(caps[1].trim().to_string());
     }
@@ -125,7 +125,7 @@ fn cwd_matches_tokens(cwd: &str, tokens: &[String]) -> bool {
         .to_lowercase()
         .split('/')
         .filter(|s| !s.is_empty())
-        .map(|s| s.to_string())
+        .map(std::string::ToString::to_string)
         .collect();
     tokens.iter().any(|t| segments.iter().any(|s| s == t))
 }
@@ -266,9 +266,7 @@ pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
                     .collect::<Vec<_>>()
                     .join(", ");
                 let example = prefixes
-                    .first()
-                    .map(|p| format!("{p}-123"))
-                    .unwrap_or_else(|| "FPCRM-123".into());
+                    .first().map_or_else(|| "FPCRM-123".into(), |p| format!("{p}-123"));
                 let reason = format!(
                     "Commit is missing a Linear issue reference.\n\
                      Project `{project}` (cwd: {cwd}) requires one of: {list}.\n\

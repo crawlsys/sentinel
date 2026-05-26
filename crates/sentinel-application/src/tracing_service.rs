@@ -14,19 +14,19 @@
 //!
 //! # Span lifecycle
 //!
-//! 1. **`start_span`** at PreToolUse — returns a [`SpanHandle`] that the
+//! 1. **`start_span`** at `PreToolUse` — returns a [`SpanHandle`] that the
 //!    caller threads through the step. Sets the active span so child
 //!    spans correlate.
 //! 2. **`record_event`** any time during the span — bag of structured
 //!    attributes (e.g. `verdict.sufficient = true`, `evidence.token_count = 42`).
-//! 3. **`end_span`** at PostToolUse — closes the span with optional
+//! 3. **`end_span`** at `PostToolUse` — closes the span with optional
 //!    status. Idempotent.
 //!
 //! # Correlation with proof chain
 //!
 //! [`SpanHandle::trace_context`] returns the W3C [`TraceContext`] for
-//! the active span. The hook stamps that context onto the StepProof it
-//! emits — making the proof chain queryable by trace_id, and giving
+//! the active span. The hook stamps that context onto the `StepProof` it
+//! emits — making the proof chain queryable by `trace_id`, and giving
 //! Tempo / Honeycomb dashboards a back-link via `step_id` / `phase_id`
 //! attributes.
 
@@ -119,7 +119,7 @@ impl From<bool> for AttributeValue {
 pub struct SpanHandle {
     /// Stable identifier for this span within the process. The exporter
     /// uses this to correlate the start / record / end events; it's
-    /// distinct from the W3C span_id (which is part of `trace_context`)
+    /// distinct from the W3C `span_id` (which is part of `trace_context`)
     /// because exporters may choose their own internal IDs for
     /// efficiency.
     pub local_id: u64,
@@ -175,12 +175,7 @@ pub trait TracingPort: Send + Sync {
     /// `parent` is the inbound trace context (e.g. parsed from a
     /// `traceparent` header). `None` makes this a root span — the
     /// implementation generates fresh trace + span IDs.
-    fn start_span(
-        &self,
-        name: &str,
-        kind: SpanKind,
-        parent: Option<&TraceContext>,
-    ) -> SpanHandle;
+    fn start_span(&self, name: &str, kind: SpanKind, parent: Option<&TraceContext>) -> SpanHandle;
 
     /// Set a single key-value attribute on the active span.
     /// No-op if `span` was already ended (idempotent behavior).
@@ -189,12 +184,7 @@ pub trait TracingPort: Send + Sync {
     /// Record a structured event within the span. Events are points
     /// in time during the span (`evidence.gathered`, `judge.dispatched`).
     /// `attributes` is an optional bag of key-values for the event.
-    fn record_event(
-        &self,
-        span: &SpanHandle,
-        name: &str,
-        attributes: &[(String, AttributeValue)],
-    );
+    fn record_event(&self, span: &SpanHandle, name: &str, attributes: &[(String, AttributeValue)]);
 
     /// Close the span with the given status. Implementations should
     /// be idempotent — calling `end_span` twice on the same handle
@@ -208,22 +198,14 @@ pub trait TracingPort: Send + Sync {
 pub struct NoOpTracer;
 
 impl TracingPort for NoOpTracer {
-    fn start_span(
-        &self,
-        name: &str,
-        kind: SpanKind,
-        parent: Option<&TraceContext>,
-    ) -> SpanHandle {
+    fn start_span(&self, name: &str, kind: SpanKind, parent: Option<&TraceContext>) -> SpanHandle {
         // Synthesize a context so callers get something to thread —
         // even with tracing off, the StepProof can still record a
         // (fake-but-stable) trace_context for shape consistency.
         // Real implementations generate cryptographically random IDs;
         // the no-op uses a deterministic value so tests can assert.
         let trace_context = parent.cloned().unwrap_or_else(|| {
-            TraceContext::new_root(
-                "00000000000000000000000000000001",
-                "0000000000000001",
-            )
+            TraceContext::new_root("00000000000000000000000000000001", "0000000000000001")
         });
         SpanHandle::new(0, trace_context, kind, name)
     }
@@ -325,10 +307,7 @@ pub mod recording {
             // IDs. Deterministic IDs in the recorder make assertions
             // straightforward.
             let trace_context = parent.cloned().unwrap_or_else(|| {
-                TraceContext::new_root(
-                    format!("{local_id:032x}"),
-                    format!("{local_id:016x}"),
-                )
+                TraceContext::new_root(format!("{local_id:032x}"), format!("{local_id:016x}"))
             });
             self.ops
                 .lock()
@@ -386,10 +365,7 @@ mod tests {
     use super::*;
 
     fn valid_ctx() -> TraceContext {
-        TraceContext::new_root(
-            "0af7651916cd43dd8448eb211c80319c",
-            "b7ad6b7169203331",
-        )
+        TraceContext::new_root("0af7651916cd43dd8448eb211c80319c", "b7ad6b7169203331")
     }
 
     // ── NoOpTracer ────────────────────────────────────────────────────
@@ -499,9 +475,7 @@ mod tests {
         let _h = t.start_span("child", SpanKind::Internal, Some(&parent));
         let ops = t.ops();
         match &ops[0] {
-            RecordedOp::Started {
-                parent_span_id, ..
-            } => {
+            RecordedOp::Started { parent_span_id, .. } => {
                 assert_eq!(parent_span_id.as_deref(), Some(parent.span_id.as_str()));
             }
             other => panic!("expected Started, got {other:?}"),

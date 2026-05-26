@@ -1,6 +1,6 @@
-//! Task Rehydrate Hook — inject persistent tasks on SessionStart
+//! Task Rehydrate Hook — inject persistent tasks on `SessionStart`
 //!
-//! Fires on SessionStart. Reads `~/.claude/sentinel/persistent-tasks/{project_hash}/tasks.json`
+//! Fires on `SessionStart`. Reads `~/.claude/sentinel/persistent-tasks/{project_hash}/tasks.json`
 //! and injects incomplete tasks into context as a system reminder so Claude
 //! sees prior work and can continue where the previous session left off.
 //! (Legacy `~/.claude/persistent-tasks/` data is migrated automatically on
@@ -11,6 +11,7 @@
 
 use chrono::Utc;
 use sentinel_domain::events::{HookEvent, HookInput, HookOutput};
+use std::fmt::Write as _;
 use std::path::PathBuf;
 
 use super::{FileSystemPort, HookContext};
@@ -56,7 +57,7 @@ struct PersistMeta {
     session_id: String,
 }
 
-/// Compute project hash (must match task_persist.rs). Delegates to the shared
+/// Compute project hash (must match `task_persist.rs`). Delegates to the shared
 /// canonical implementation in `super::project_hash`.
 fn project_hash(cwd: &str) -> String {
     super::project_hash(cwd)
@@ -81,7 +82,7 @@ fn persistent_tasks_dir(fs: &dyn FileSystemPort, project_hash: &str) -> Option<P
 /// external editor, disk error), the rehydrator would treat it as "no tasks"
 /// and inject nothing — silent data loss with zero warning to the user.
 ///
-/// The companion fix in task_persist.rs makes the write atomic, but we still
+/// The companion fix in `task_persist.rs` makes the write atomic, but we still
 /// want defense in depth: if a parse fails for any reason (concurrent writer,
 /// disk issue, manual edit gone wrong), log a loud warning so the user knows
 /// their persistent task store is corrupt. They can then recover from the
@@ -157,7 +158,7 @@ fn relative_time(updated_at: &str) -> String {
 /// mode-aware branching can be unit-tested without a real `HookContext`.
 ///
 /// In Autopilot the agent is meant to drain the queue, not interrupt Gary
-/// every session — instruction directs immediate recreation via TaskCreate.
+/// every session — instruction directs immediate recreation via `TaskCreate`.
 /// In Planned mode, Gary may have moved on from stale work, so instruction
 /// directs the agent to ask first.
 fn format_rehydrate_instruction(
@@ -198,7 +199,7 @@ fn format_rehydrate_instruction(
     }
 }
 
-/// Process SessionStart — inject persistent tasks into context
+/// Process `SessionStart` — inject persistent tasks into context
 pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     let session_id = input.session_id.as_deref().unwrap_or("unknown");
     let cwd = input.cwd.as_deref().unwrap_or(".");
@@ -227,9 +228,7 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     }
 
     // Read meta for timestamp
-    let time_str = read_meta(ctx.fs, &proj_hash)
-        .map(|m| relative_time(&m.updated_at))
-        .unwrap_or_else(|| "unknown".to_string());
+    let time_str = read_meta(ctx.fs, &proj_hash).map_or_else(|| "unknown".to_string(), |m| relative_time(&m.updated_at));
 
     // Detect whether any task has blocking relationships
     let has_blocking = incomplete
@@ -247,15 +246,16 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
             "in_progress" => "~",
             _ => " ",
         };
-        context.push_str(&format!(
+        let _ = write!(
+            context,
             "\n#{} [{status_icon}] {} ({})",
             task.id, task.subject, task.status
-        ));
+        );
         if !task.blocks.is_empty() {
-            context.push_str(&format!(" [blocks: {}]", task.blocks.join(", ")));
+            let _ = write!(context, " [blocks: {}]", task.blocks.join(", "));
         }
         if !task.blocked_by.is_empty() {
-            context.push_str(&format!(" [blocked by: {}]", task.blocked_by.join(", ")));
+            let _ = write!(context, " [blocked by: {}]", task.blocked_by.join(", "));
         }
         // Render metadata inline
         if let Some(meta) = &task.metadata {
@@ -268,7 +268,7 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
                     meta_parts.push(format!("phase={phase}"));
                 }
                 if !meta_parts.is_empty() {
-                    context.push_str(&format!(" [{}]", meta_parts.join(", ")));
+                    let _ = write!(context, " [{}]", meta_parts.join(", "));
                 }
             }
         }
@@ -279,12 +279,13 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
             } else {
                 task.description.clone()
             };
-            context.push_str(&format!("\n  {desc}"));
+            let _ = write!(context, "\n  {desc}");
         }
         // Render checklist progress
         if !task.checklist.is_empty() {
             let done = task.checklist.iter().filter(|c| c.completed).count();
-            context.push_str(&format!(
+            let _ = write!(
+                context,
                 "\n  Checklist ({}/{}): {}",
                 done,
                 task.checklist.len(),
@@ -296,21 +297,19 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
                     })
                     .collect::<Vec<_>>()
                     .join(", ")
-            ));
+            );
         }
     }
 
     if completed_count > 0 {
-        context.push_str(&format!(
+        let _ = write!(
+            context,
             "\n\n({completed_count} completed task(s) from previous session)"
-        ));
+        );
     }
 
-    let instruction = format_rehydrate_instruction(
-        incomplete.len(),
-        has_blocking,
-        ctx.autopilot_enabled(),
-    );
+    let instruction =
+        format_rehydrate_instruction(incomplete.len(), has_blocking, ctx.autopilot_enabled());
     context.push_str(&instruction);
 
     HookOutput::inject_context(HookEvent::SessionStart, &context)

@@ -1,13 +1,13 @@
-//! Memory Verify Hook — verify stored memories against ground truth on PreCompact.
+//! Memory Verify Hook — verify stored memories against ground truth on `PreCompact`.
 //!
-//! Runs on PreCompact with a 24h cooldown. Scrolls Qdrant for memories not
+//! Runs on `PreCompact` with a 24h cooldown. Scrolls Qdrant for memories not
 //! verified in the last 7 days, extracts claims via Claude API (claude-haiku-4-5-20251001),
-//! verifies file_path claims with fs::exists(), and updates Qdrant payloads.
+//! verifies `file_path` claims with `fs::exists()`, and updates Qdrant payloads.
 //!
-//! ## Why PreCompact, not SessionStart
+//! ## Why `PreCompact`, not `SessionStart`
 //!
-//! Originally lived on SessionStart, but Qdrant scroll + per-claim Cerebras
-//! verification blocked startup for 5–20s on a cold cache. Moved to PreCompact
+//! Originally lived on `SessionStart`, but Qdrant scroll + per-claim Cerebras
+//! verification blocked startup for 5–20s on a cold cache. Moved to `PreCompact`
 //! (background, non-critical path) so latency doesn't affect user-perceived
 //! session readiness. The 24h cooldown means a long session typically
 //! verifies once, on its first compaction event of the day.
@@ -30,10 +30,10 @@ const MAX_VERIFY_PER_SESSION: usize = constants::MAX_VERIFY_PER_SESSION;
 /// Memories not verified in this many days are eligible for re-verification.
 const VERIFY_STALE_DAYS: i64 = constants::VERIFY_STALE_DAYS;
 
-/// Qdrant collection shared with memory_inject / memory_extract / memory_feedback.
+/// Qdrant collection shared with `memory_inject` / `memory_extract` / `memory_feedback`.
 const COLLECTION: &str = "claude-memory";
 
-/// 24h cooldown file path (via FileSystemPort).
+/// 24h cooldown file path (via `FileSystemPort`).
 fn cooldown_path(fs: &dyn FileSystemPort) -> Option<PathBuf> {
     fs.home_dir().map(|h| {
         h.join(".claude")
@@ -91,7 +91,7 @@ struct Claim {
     verifiable_value: String,
 }
 
-/// Scroll Qdrant for memories not verified in the last N days (via VectorStorePort).
+/// Scroll Qdrant for memories not verified in the last N days (via `VectorStorePort`).
 async fn scroll_unverified(vector_store: &dyn VectorStorePort) -> Vec<MemoryPoint> {
     let results = match vector_store.scroll(COLLECTION, None, 100).await {
         Ok(r) => r,
@@ -194,8 +194,8 @@ Return ONLY the JSON array, no other text."#
     })
 }
 
-/// Verify file_path claims with `fs.exists()` via FileSystemPort.
-/// Returns (verified, stale_reasons).
+/// Verify `file_path` claims with `fs.exists()` via `FileSystemPort`.
+/// Returns (verified, `stale_reasons`).
 fn verify_claims(fs: &dyn FileSystemPort, claims: &[Claim]) -> (bool, Vec<String>) {
     let mut stale_reasons = Vec::new();
     let mut any_stale = false;
@@ -230,7 +230,7 @@ fn verify_claims(fs: &dyn FileSystemPort, claims: &[Claim]) -> (bool, Vec<String
     (!any_stale || stale_reasons.is_empty(), stale_reasons)
 }
 
-/// Update Qdrant payload with verification results (via VectorStorePort).
+/// Update Qdrant payload with verification results (via `VectorStorePort`).
 async fn update_payload(
     vector_store: &dyn VectorStorePort,
     point_id: &str,
@@ -252,7 +252,7 @@ async fn update_payload(
     }
 }
 
-/// Process PreCompact — verify stale memories against ground truth.
+/// Process `PreCompact` — verify stale memories against ground truth.
 pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     // 1. Check 24h cooldown
     if !check_cooldown(ctx.fs) {
@@ -262,22 +262,16 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
 
     // 2. Require a configured vector store (Qdrant config now owned by the
     //    infrastructure adapter — no more local ~/.qdrant/config.json read).
-    let vector_store = match ctx.vector_store {
-        Some(vs) => vs,
-        None => {
-            debug!("No vector store configured — skipping memory verify");
-            return HookOutput::allow();
-        }
+    let vector_store = if let Some(vs) = ctx.vector_store { vs } else {
+        debug!("No vector store configured — skipping memory verify");
+        return HookOutput::allow();
     };
 
     // 3. LLM port — required for claim extraction. Skip silently if not
     //    wired (e.g. no ANTHROPIC_API_KEY in env).
-    let llm = match ctx.llm {
-        Some(l) => l,
-        None => {
-            debug!("No LLM port configured — skipping memory verify");
-            return HookOutput::allow();
-        }
+    let llm = if let Some(l) = ctx.llm { l } else {
+        debug!("No LLM port configured — skipping memory verify");
+        return HookOutput::allow();
     };
 
     let fs = ctx.fs;
@@ -324,8 +318,7 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     // 6. Inject context if stale memories found
     if stale_count > 0 {
         let msg = format!(
-            "[Qdrant Memory] {} memories flagged as potentially stale",
-            stale_count
+            "[Qdrant Memory] {stale_count} memories flagged as potentially stale"
         );
         let _ = input; // suppress unused warning
         return HookOutput::inject_context(HookEvent::PreCompact, &msg);

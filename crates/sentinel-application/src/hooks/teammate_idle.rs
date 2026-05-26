@@ -1,11 +1,11 @@
-//! TeammateIdle hook — quality gate for agent team members going idle
+//! `TeammateIdle` hook — quality gate for agent team members going idle
 //!
 //! When a teammate is about to go idle, checks if they have uncompleted tasks
 //! and reminds them to check the task list before going idle.
 
 use sentinel_domain::events::{HookEvent, HookInput, HookOutput};
 
-/// Process TeammateIdle event
+/// Process `TeammateIdle` event
 ///
 /// Injects context reminding the teammate to check for remaining work.
 pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
@@ -27,14 +27,13 @@ pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
 
     // Inject a reminder to check task list before going idle
     let context = format!(
-        "[Team Quality Gate] Teammate '{}' (team: {}) is going idle.\n\
+        "[Team Quality Gate] Teammate '{teammate_name}' (team: {team_name}) is going idle.\n\
          \n\
          Before going idle, ensure:\n\
          1. All assigned tasks are marked completed (TaskUpdate with status: completed)\n\
          2. Any blockers or issues are reported to the team lead via SendMessage\n\
          3. Check TaskList for any unblocked tasks you can claim\n\
-         4. If no more work available, acknowledge to the lead before going idle",
-        teammate_name, team_name
+         4. If no more work available, acknowledge to the lead before going idle"
     );
 
     // Emit channel event so the lead session gets a real-time push notification

@@ -21,7 +21,7 @@
 //! Multiple adapters may support the same claim type — the registry
 //! returns the first match by registration order. Cross-vendor
 //! verification (M3.3 multi-lens reviewer pattern) layers atop this
-//! by registering N adapters for the same claim_type and asking the
+//! by registering N adapters for the same `claim_type` and asking the
 //! registry for ALL receipts (not just the first); see
 //! [`EvidenceAdapterRegistry::fetch_all`].
 //!
@@ -38,9 +38,7 @@
 use async_trait::async_trait;
 use chrono::Utc;
 
-use sentinel_domain::evidence_adapter::{
-    AdapterError, EvidenceClaim, EvidenceReceipt,
-};
+use sentinel_domain::evidence_adapter::{AdapterError, EvidenceClaim, EvidenceReceipt};
 
 /// Port the registry calls. Infrastructure adapters implement this
 /// against their own external system.
@@ -128,10 +126,7 @@ impl EvidenceAdapterRegistry {
     /// before return. A buggy adapter that builds the receipt with a
     /// stale provenance hash gets caught here, not on chain
     /// verification later.
-    pub async fn fetch(
-        &self,
-        claim: &EvidenceClaim,
-    ) -> Result<EvidenceReceipt, AdapterError> {
+    pub async fn fetch(&self, claim: &EvidenceClaim) -> Result<EvidenceReceipt, AdapterError> {
         for adapter in &self.adapters {
             if adapter.supports(&claim.claim_type) {
                 let receipt = adapter.fetch(claim).await?;
@@ -148,7 +143,7 @@ impl EvidenceAdapterRegistry {
     /// and get both receipts. Caller decides what "verified" means
     /// when multiple receipts disagree (M3.3 multi-lens pattern).
     ///
-    /// Returns a vec of (adapter_name, Result<receipt, error>) so
+    /// Returns a vec of (`adapter_name`, Result<receipt, error>) so
     /// per-adapter failures don't mask other adapters' successes.
     /// Empty vec when no adapters support the claim type.
     pub async fn fetch_all(
@@ -223,10 +218,7 @@ impl EvidenceAdapter for SelfAttestedAdapter {
         true
     }
 
-    async fn fetch(
-        &self,
-        claim: &EvidenceClaim,
-    ) -> Result<EvidenceReceipt, AdapterError> {
+    async fn fetch(&self, claim: &EvidenceClaim) -> Result<EvidenceReceipt, AdapterError> {
         // Empty payload — nothing to attest, nothing to verify.
         // The receipt body still binds via the provenance hash so
         // the adapter identity + claim shape are recorded immutably.
@@ -287,10 +279,7 @@ pub mod testing {
             self.claim_types.iter().any(|t| t == claim_type)
         }
 
-        async fn fetch(
-            &self,
-            claim: &EvidenceClaim,
-        ) -> Result<EvidenceReceipt, AdapterError> {
+        async fn fetch(&self, claim: &EvidenceClaim) -> Result<EvidenceReceipt, AdapterError> {
             Ok(EvidenceReceipt::new(
                 self.name.clone(),
                 claim,
@@ -319,10 +308,7 @@ pub mod testing {
             self.claim_types.iter().any(|t| t == claim_type)
         }
 
-        async fn fetch(
-            &self,
-            _claim: &EvidenceClaim,
-        ) -> Result<EvidenceReceipt, AdapterError> {
+        async fn fetch(&self, _claim: &EvidenceClaim) -> Result<EvidenceReceipt, AdapterError> {
             Err(AdapterError::Fetch(self.error_message.clone()))
         }
     }
@@ -359,10 +345,7 @@ pub mod testing {
             self.claim_types.iter().any(|t| t == claim_type)
         }
 
-        async fn fetch(
-            &self,
-            claim: &EvidenceClaim,
-        ) -> Result<EvidenceReceipt, AdapterError> {
+        async fn fetch(&self, claim: &EvidenceClaim) -> Result<EvidenceReceipt, AdapterError> {
             self.calls
                 .lock()
                 .expect("calls lock poisoned")
@@ -475,10 +458,7 @@ mod tests {
         )));
         r.register(Box::new(SelfAttestedAdapter::new()));
 
-        let receipt = r
-            .fetch(&sample_claim("linear.transition"))
-            .await
-            .unwrap();
+        let receipt = r.fetch(&sample_claim("linear.transition")).await.unwrap();
         assert_eq!(receipt.adapter_name, "self_attested");
         assert!(!receipt.verified);
     }
@@ -580,10 +560,7 @@ mod tests {
 
     #[tokio::test]
     async fn recording_adapter_captures_each_fetch_call() {
-        let recorder = RecordingAdapter::new(
-            "recorder",
-            vec!["git.pr_opened".into()],
-        );
+        let recorder = RecordingAdapter::new("recorder", vec!["git.pr_opened".into()]);
 
         // Fan-out two distinct claims through fetch.
         let _ = recorder.fetch(&sample_claim("git.pr_opened")).await;
@@ -602,8 +579,18 @@ mod tests {
     #[test]
     fn registry_names_lists_adapters_in_registration_order() {
         let mut r = EvidenceAdapterRegistry::new();
-        r.register(Box::new(StubAdapter::new("a", vec![], false, serde_json::json!({}))));
-        r.register(Box::new(StubAdapter::new("b", vec![], false, serde_json::json!({}))));
+        r.register(Box::new(StubAdapter::new(
+            "a",
+            vec![],
+            false,
+            serde_json::json!({}),
+        )));
+        r.register(Box::new(StubAdapter::new(
+            "b",
+            vec![],
+            false,
+            serde_json::json!({}),
+        )));
         r.register(Box::new(SelfAttestedAdapter::new()));
         assert_eq!(r.names(), vec!["a", "b", "self_attested"]);
     }

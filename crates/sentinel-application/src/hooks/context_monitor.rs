@@ -3,7 +3,7 @@
 //! **Stop phase:** Reads context window usage from the Stop event payload,
 //! writes current zone to `~/.claude/metrics/context-zone.json`.
 //!
-//! **UserPromptSubmit phase:** Reads zone state, injects zone-specific
+//! **`UserPromptSubmit` phase:** Reads zone state, injects zone-specific
 //! strategy guidance when usage is above 50%.
 
 use sentinel_domain::constants;
@@ -37,7 +37,7 @@ impl Zone {
         }
     }
 
-    fn label(self) -> &'static str {
+    const fn label(self) -> &'static str {
         match self {
             Self::Green => "Green",
             Self::Yellow => "Yellow",
@@ -46,7 +46,7 @@ impl Zone {
         }
     }
 
-    fn strategy(self) -> &'static str {
+    const fn strategy(self) -> &'static str {
         match self {
             Self::Green => "",
             Self::Yellow => "Start delegating exploration to agents. Avoid reading large files directly — use agents with targeted queries instead.",
@@ -67,8 +67,7 @@ struct ContextState {
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
+        .map_or(0, |d| d.as_millis() as u64)
 }
 
 fn state_file(fs: &dyn FileSystemPort, session_id: &str) -> Option<PathBuf> {
@@ -102,11 +101,11 @@ fn write_cooldown(fs: &dyn FileSystemPort, env: &dyn EnvPort) {
     let _ = fs.write(&cooldown_file(env), now_ms().to_string().as_bytes());
 }
 
-/// Extract usage percentage from context_window payload.
+/// Extract usage percentage from `context_window` payload.
 fn extract_usage_pct(context: &serde_json::Value) -> Option<f64> {
     context
         .get("percentUsed")
-        .and_then(|v| v.as_f64())
+        .and_then(serde_json::Value::as_f64)
         .or_else(|| {
             context.get("used").and_then(|used| {
                 context.get("total").and_then(|total| {

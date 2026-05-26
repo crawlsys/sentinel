@@ -4,6 +4,8 @@
 //! Pure AI classification — no regex patterns. Opus handles slash commands,
 //! natural language, typos, and everything in between.
 
+use std::fmt::Write as _;
+
 use sentinel_domain::events::{HookEvent, HookInput, HookOutput};
 
 use super::FileSystemPort;
@@ -48,7 +50,7 @@ fn extract_banner(fs: &dyn FileSystemPort, skill: &str) -> Option<String> {
 }
 
 /// Directory for telemetry state files — inside sentinel's protected config dir
-/// instead of world-writable temp_dir(). Prevents other processes/users from
+/// instead of world-writable `temp_dir()`. Prevents other processes/users from
 /// injecting fake skill names or run IDs. (Attack #51)
 fn telemetry_dir(fs: &dyn FileSystemPort) -> Option<std::path::PathBuf> {
     fs.home_dir()
@@ -56,7 +58,7 @@ fn telemetry_dir(fs: &dyn FileSystemPort) -> Option<std::path::PathBuf> {
 }
 
 /// Path to the pending-skill state file for the given session. Lives under
-/// the sentinel state directory so the `skill_invocation_gate` PreToolUse
+/// the sentinel state directory so the `skill_invocation_gate` `PreToolUse`
 /// hook can pick it up on the next tool call. Scoped per session so two
 /// concurrent agent sessions don't fight over each other's pending skills.
 pub(crate) fn pending_skill_state_path(
@@ -76,13 +78,15 @@ pub(crate) fn pending_skill_state_path(
     hasher.update(session_id.as_bytes());
     let h: String = hasher.finalize()[..6]
         .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect();
+        .fold(String::new(), |mut s, b| {
+            let _ = write!(s, "{b:02x}");
+            s
+        });
     Some(dir.join(format!("skill-pending-{h}.json")))
 }
 
 /// State written by `build_match_output` after a skill is detected.
-/// Read by `skill_invocation_gate` on the next PreToolUse call to decide
+/// Read by `skill_invocation_gate` on the next `PreToolUse` call to decide
 /// whether to block.
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub(crate) struct PendingSkillState {
@@ -115,7 +119,7 @@ fn write_pending_skill_state(
     }
 }
 
-/// Write telemetry state files so skill_telemetry can track the execution.
+/// Write telemetry state files so `skill_telemetry` can track the execution.
 fn write_telemetry_state(fs: &dyn FileSystemPort, skill: &str, run_id: &str) {
     let dir = match telemetry_dir(fs) {
         Some(d) => d,
@@ -189,10 +193,7 @@ fn strip_hook_context(prompt: &str) -> String {
     // Remove all <system-reminder>...</system-reminder> blocks (multi-line).
     let mut buf = String::with_capacity(prompt.len());
     let mut rest = prompt;
-    loop {
-        let Some(start) = rest.find("<system-reminder>") else {
-            break;
-        };
+    while let Some(start) = rest.find("<system-reminder>") {
         buf.push_str(&rest[..start]);
         let after = &rest[start + "<system-reminder>".len()..];
         if let Some(end) = after.find("</system-reminder>") {
@@ -208,10 +209,7 @@ fn strip_hook_context(prompt: &str) -> String {
     let with_reminders_stripped = buf.clone();
     let mut buf2 = String::with_capacity(with_reminders_stripped.len());
     let mut rest = with_reminders_stripped.as_str();
-    loop {
-        let Some(start) = rest.find("<channel ").or_else(|| rest.find("<channel>")) else {
-            break;
-        };
+    while let Some(start) = rest.find("<channel ").or_else(|| rest.find("<channel>")) {
         buf2.push_str(&rest[..start]);
         let after = &rest[start..];
         if let Some(end) = after.find("</channel>") {
@@ -312,7 +310,7 @@ fn build_match_output(
 ) -> HookOutput {
     let now_ms = chrono::Utc::now().timestamp_millis();
     let pid = std::process::id();
-    let run_id = format!("{}-{}", now_ms, pid % 100000);
+    let run_id = format!("{}-{}", now_ms, pid % 100_000);
 
     write_telemetry_state(fs, skill, &run_id);
     write_routing_entry(fs, skill, &run_id, source, input, prompt);
@@ -321,14 +319,14 @@ fn build_match_output(
     // Without this, the MANDATORY message below is just a polite request
     // — Claude can ignore it and use other tools without invoking the skill.
     if let Some(session_id) = input.session_id.as_deref() {
-        let skill_path_str = format!("~/.claude/skills/{}/SKILL.md", skill);
+        let skill_path_str = format!("~/.claude/skills/{skill}/SKILL.md");
         write_pending_skill_state(fs, skill, &skill_path_str, session_id);
     }
 
     // Log the routing source for diagnostics
     tracing::info!(skill = skill, source = source, "Skill routed");
 
-    let skill_path = format!("~/.claude/skills/{}/SKILL.md", skill);
+    let skill_path = format!("~/.claude/skills/{skill}/SKILL.md");
     // Always render a banner — falls back to a synthesized one built from the
     // skill's frontmatter description when the SKILL.md doesn't have an
     // explicit `## Activation Banner` section. Keeps the visual cue
@@ -336,10 +334,9 @@ fn build_match_output(
     let banner = extract_banner(fs, skill).unwrap_or_else(|| synthesize_banner(fs, skill));
 
     let context = format!(
-        "{}\n\n[Skill Router] Detected skill: {}. \
-         MANDATORY: You MUST Read(\"{}\") BEFORE responding. \
-         This is a non-negotiable requirement.",
-        banner, skill, skill_path
+        "{banner}\n\n[Skill Router] Detected skill: {skill}. \
+         MANDATORY: You MUST Read(\"{skill_path}\") BEFORE responding. \
+         This is a non-negotiable requirement."
     );
 
     HookOutput::inject_context(HookEvent::UserPromptSubmit, context)
@@ -435,7 +432,8 @@ mod tests {
 
     #[test]
     fn test_strip_hook_context_removes_channel_blocks() {
-        let input = "do the thing\n<channel source=\"sentinel\" event=\"task_completed\">noise</channel>";
+        let input =
+            "do the thing\n<channel source=\"sentinel\" event=\"task_completed\">noise</channel>";
         let cleaned = strip_hook_context(input);
         assert_eq!(cleaned, "do the thing");
     }

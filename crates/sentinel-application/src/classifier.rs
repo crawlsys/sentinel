@@ -9,6 +9,6 @@ use anyhow::Result;
 #[async_trait::async_trait]
 pub trait AiClassifier: Send + Sync {
     /// Classify a message into a skill using AI.
-    /// Returns Some(skill_name) or None for general conversation.
+    /// Returns `Some(skill_name)` or None for general conversation.
     async fn classify(&self, message: &str, candidates: &[String]) -> Result<Option<String>>;
 }

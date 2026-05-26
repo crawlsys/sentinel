@@ -123,7 +123,7 @@ blocker = true
 
 [[phases.steps]]
 id = "4.4"
-description = "Run staging app smoke test (Steel)"
+description = "Run staging app smoke test (Browserbase)"
 
 [[phases.steps]]
 id = "4.5"

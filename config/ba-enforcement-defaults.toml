@@ -1,0 +1,33 @@
+# Sentinel BA1+3 enforcement mode — shipped defaults.
+#
+# Read by `sentinel_infrastructure::ba_config::BaEnforcementConfig` at
+# sentinel startup via `include_str!`. Operators override these in
+# `~/.claude/sentinel/config/ba-enforcement.toml`; the loader merges
+# operator overrides on top.
+#
+# Per the BA1+3 design (`docs/ba1-ba3-sentinel-enforcement.md` §3),
+# the safe rollout posture is `ObserveOnly` until telemetry shows the
+# connector layer (BA6) reliably emits `provenance_audit` events AND
+# the BA-orchestrator's matrix snapshots are written to
+# `~/.claude/sentinel/state/requirement_matrix/`. After that, flip
+# each hook to `DefaultBlocking` independently. For
+# catastrophic-class output tools (board decks, signed customer
+# briefs, regulatory filings), use `StrictBlocking`.
+#
+# Mode values: ObserveOnly | DefaultBlocking | StrictBlocking.
+#
+# - `ObserveOnly`: hook runs every check + logs would-be blocks via
+#   `tracing::warn` but never returns `deny()`. The rollout posture.
+# - `DefaultBlocking`: hook blocks on the structural-violation
+#   findings (`Existence` for both hooks; `Coverage` for BA3) and
+#   warns on the rest. Steady-state for routine BA outputs.
+# - `StrictBlocking`: hook also blocks on `Freshness` (provenance) +
+#   `WithinSession` (provenance) + `Hash` (requirements). Used for
+#   catastrophic-class outputs where stale citations or
+#   recently-edited requirements are operator-stop-ship signals.
+
+[provenance_validate]
+mode = "ObserveOnly"
+
+[requirements_traceability_gate]
+mode = "ObserveOnly"

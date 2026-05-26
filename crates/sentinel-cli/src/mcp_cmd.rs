@@ -49,6 +49,29 @@ use sentinel_infrastructure::mcp_transport::{JsonRpcRequest, JsonRpcResponse};
 /// Returns `None` if no transcripts exist — in that case the caller
 /// should surface an explicit "no active session" error rather than
 /// fabricating a timestamped id that won't match any real state.
+/// Load an Ed25519 signing key from `SENTINEL_SIGNING_KEY` (32-byte hex seed).
+/// Returns `None` when unset; logs a warning and returns `None` when set but
+/// malformed (the `signing_required` flag is what turns a missing key into a
+/// hard error at seal time — this loader stays lenient so a bad env var
+/// doesn't crash MCP startup).
+fn load_signing_key_from_env() -> Option<ed25519_dalek::SigningKey> {
+    let raw = std::env::var("SENTINEL_SIGNING_KEY").ok()?;
+    let bytes = match hex::decode(raw.trim()) {
+        Ok(b) => b,
+        Err(e) => {
+            warn!(error = %e, "SENTINEL_SIGNING_KEY is not valid hex — proofs will be unsigned");
+            return None;
+        }
+    };
+    if bytes.len() != 32 {
+        warn!(len = bytes.len(), "SENTINEL_SIGNING_KEY must be a 32-byte hex seed — proofs will be unsigned");
+        return None;
+    }
+    let mut seed = [0u8; 32];
+    seed.copy_from_slice(&bytes);
+    Some(ed25519_dalek::SigningKey::from_bytes(&seed))
+}
+
 fn detect_live_session_id() -> Option<String> {
     let home = std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
@@ -136,7 +159,7 @@ fn session_id_by_tool_use_id(tool_use_id: &str) -> Option<String> {
             transcripts.push((mtime, path, stem));
         }
     }
-    transcripts.sort_by(|a, b| b.0.cmp(&a.0)); // newest first
+    transcripts.sort_by_key(|b| std::cmp::Reverse(b.0)); // newest first
 
     for (_, path, session_id) in transcripts {
         if transcript_contains_tool_use_id(&path, tool_use_id) {
@@ -475,6 +498,70 @@ fn tool_definitions() -> serde_json::Value {
                     "properties": {},
                     "required": []
                 }
+            },
+            {
+                "name": "sentinel__route_capability",
+                "description": "Consult the A2 capability router (per docs/a2-capability-aware-routing.md) to pick the best-fit agent for a unit of work, given its capability requirements. Loads agent profiles from the shipped agents-defaults.toml + optional operator overrides at ~/.claude/sentinel/config/agents.toml. Returns the full RoutingExplanation: chosen AgentId (or null when no agent satisfies), candidate set, eliminated agents with reasons, fired tie-breakers, and the requirement signature. Used by consul peers (per consul ADR-016) and any external orchestrator that needs to make the same dispatch decision sentinel's hooks make internally — keeps the routing substrate single-source-of-truth across the AI-factory.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "requirement": {
+                            "type": "object",
+                            "description": "CapabilityRequirement JSON per crates/sentinel-domain/src/capability.rs. Shape: {\"required\": [<Capability>...], \"preferred\": [<Capability>...], \"forbidden\": [<Capability>...]}. Capability variants are externally-tagged: {\"Reasoning\": \"deep\"} | {\"DifferentVendorFrom\": \"Anthropic\"} | {\"StructuredOutput\": \"AuditorVerdict\"} | {\"CostBudget\": 0.05} | etc. See docs/a2-capability-aware-routing.md §2 for the full vocabulary.",
+                            "properties": {
+                                "required": {"type": "array"},
+                                "preferred": {"type": "array"},
+                                "forbidden": {"type": "array"}
+                            },
+                            "required": ["required"]
+                        }
+                    },
+                    "required": ["requirement"]
+                }
+            },
+            {
+                "name": "sentinel__delegate_codex",
+                "description": "Delegate a focused adversarial/code-reasoning task to the Codex worker model (openai/gpt-5.5-pro) via OpenRouter — the same gateway the judge uses. Use for 'poke holes in this approach', 'review this diff for bugs/edge cases', 'is this design sound'. Returns the worker's concrete critique. Requires OPENROUTER_API_KEY.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "task": {
+                            "type": "string",
+                            "description": "What to reason about adversarially (the question / claim / approach to critique)."
+                        },
+                        "context": {
+                            "type": "string",
+                            "description": "Optional supporting material (a diff, code, design notes) the worker reads."
+                        },
+                        "max_tokens": {
+                            "type": "integer",
+                            "description": "Optional response token cap (default 2048)."
+                        }
+                    },
+                    "required": ["task"]
+                }
+            },
+            {
+                "name": "sentinel__delegate_kimi_context_scan",
+                "description": "Delegate a cheap large-context scan to the Kimi worker model (moonshotai/kimi-k2.6) via OpenRouter. Answers a specific question against a (potentially large) blob of content, extracting only the relevant facts. Use to offload 'scan this and tell me X' reads from the orchestrator's context. Requires OPENROUTER_API_KEY.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "question": {
+                            "type": "string",
+                            "description": "The specific question to answer from the content."
+                        },
+                        "content": {
+                            "type": "string",
+                            "description": "The content to scan (file contents, logs, a large blob)."
+                        },
+                        "max_tokens": {
+                            "type": "integer",
+                            "description": "Optional response token cap (default 2048)."
+                        }
+                    },
+                    "required": ["question", "content"]
+                }
             }
         ]
     })
@@ -512,7 +599,18 @@ pub async fn run() -> Result<()> {
             Arc::new(FallbackJudge)
         }
     };
-    let proof_engine = Arc::new(ProofEngine::new(state.clone(), judge.clone()));
+    // #4 — load the optional Ed25519 signing key + mandatory-signing posture.
+    // SENTINEL_SIGNING_KEY = 32-byte hex Ed25519 seed; SENTINEL_SIGNING_REQUIRED
+    // = "1"/"true" makes sealing refuse to proceed without a key (audit-grade).
+    let signing_key = load_signing_key_from_env();
+    let signing_required = matches!(
+        std::env::var("SENTINEL_SIGNING_REQUIRED").ok().as_deref(),
+        Some("1" | "true" | "TRUE" | "yes")
+    );
+    let proof_engine = Arc::new(
+        ProofEngine::new(state.clone(), judge.clone())
+            .with_signing(signing_key, signing_required),
+    );
     // Wire cross-session proof archive backing (#39): query_proof_corpus
     // walks the index at ~/.claude/sentinel/proofs/index.jsonl in addition
     // to live state. Falls back to live-only when home_dir is unavailable.
@@ -678,6 +776,28 @@ async fn handle_request(
 
             // SEN-8: WIP-by-stage snapshot read. The poller is a separate
             // task; this only surfaces whatever the file contains right now.
+            if tool_name == "sentinel__route_capability" {
+                return handle_route_capability(request, &arguments);
+            }
+
+            // Worker delegation (#2): hand a unit of work to a worker model.
+            if tool_name == "sentinel__delegate_codex" {
+                return handle_delegate(
+                    request,
+                    &arguments,
+                    sentinel_application::delegation_service::Worker::Codex,
+                )
+                .await;
+            }
+            if tool_name == "sentinel__delegate_kimi_context_scan" {
+                return handle_delegate(
+                    request,
+                    &arguments,
+                    sentinel_application::delegation_service::Worker::Kimi,
+                )
+                .await;
+            }
+
             if tool_name == "sentinel__get_wip_snapshot" {
                 return match sentinel_application::wip_snapshot::read() {
                     Ok(Some(snap)) => JsonRpcResponse::success(
@@ -756,6 +876,170 @@ async fn handle_request(
     }
 }
 
+/// Handle `sentinel__route_capability` — A2 capability router exposure.
+///
+/// Loads the shipped agent profiles + optional operator overrides
+/// (`~/.claude/sentinel/config/agents.toml`), runs the requirement
+/// through the pure routing algorithm, and returns the full
+/// [`sentinel_domain::agent_routing::RoutingExplanation`].
+///
+/// Synchronous: no async I/O on the hot path (TOML load + in-memory
+/// pick). The MCP dispatcher's overall arm is `async fn`; this helper
+/// borrows that context but doesn't await.
+fn handle_route_capability(
+    request: &JsonRpcRequest,
+    args: &serde_json::Value,
+) -> JsonRpcResponse {
+    use sentinel_domain::capability::CapabilityRequirement;
+    use sentinel_domain::ports::CapabilityRouterPort;
+    use sentinel_infrastructure::capability_router::TomlCapabilityRouter;
+
+    let requirement: CapabilityRequirement = match args.get("requirement") {
+        Some(v) => match serde_json::from_value(v.clone()) {
+            Ok(r) => r,
+            Err(err) => {
+                return JsonRpcResponse::success(
+                    request.id.clone(),
+                    mcp_tool_result(
+                        false,
+                        serde_json::json!({
+                            "error": format!(
+                                "could not parse `requirement` field as CapabilityRequirement: {err}. \
+                                 Shape: {{\"required\": [<Capability>...], \"preferred\": [], \"forbidden\": []}}. \
+                                 See docs/a2-capability-aware-routing.md §2."
+                            )
+                        }),
+                    ),
+                );
+            }
+        },
+        None => {
+            return JsonRpcResponse::success(
+                request.id.clone(),
+                mcp_tool_result(
+                    false,
+                    serde_json::json!({
+                        "error": "missing required argument: `requirement` (CapabilityRequirement JSON)"
+                    }),
+                ),
+            );
+        }
+    };
+
+    let overrides_path = dirs::home_dir().map(|h| {
+        h.join(".claude")
+            .join("sentinel")
+            .join("config")
+            .join("agents.toml")
+    });
+    let router = match TomlCapabilityRouter::with_shipped_and_overrides(
+        overrides_path.as_deref(),
+    ) {
+        Ok(r) => r,
+        Err(err) => {
+            return JsonRpcResponse::success(
+                request.id.clone(),
+                mcp_tool_result(
+                    false,
+                    serde_json::json!({
+                        "error": format!("failed to load agent profiles: {err}")
+                    }),
+                ),
+            );
+        }
+    };
+
+    let explanation = router.explain(&requirement);
+    JsonRpcResponse::success(
+        request.id.clone(),
+        mcp_tool_result(
+            true,
+            serde_json::to_value(&explanation).unwrap_or_else(|err| {
+                serde_json::json!({
+                    "serialization_error": err.to_string(),
+                })
+            }),
+        ),
+    )
+}
+
+/// Handle `sentinel__delegate_codex` / `sentinel__delegate_kimi_context_scan`
+/// (#2). Hands a unit of work to a worker model via the standardized
+/// `OpenRouterLlm` path and returns the structured result.
+///
+/// Codex reads `task` + optional `context`; Kimi reads `question` + `content`
+/// (mapped onto the same `task`/`context` slots of the delegation request).
+async fn handle_delegate(
+    request: &JsonRpcRequest,
+    args: &serde_json::Value,
+    worker: sentinel_application::delegation_service::Worker,
+) -> JsonRpcResponse {
+    use sentinel_application::delegation_service::{
+        delegate, DelegationRequest, Worker, DEFAULT_MAX_TOKENS,
+    };
+
+    // Codex uses task/context; Kimi uses question/content. Normalize both onto
+    // the request's task/context fields.
+    let (task_key, ctx_key) = match worker {
+        Worker::Codex => ("task", "context"),
+        Worker::Kimi => ("question", "content"),
+    };
+    let Some(task) = args.get(task_key).and_then(|v| v.as_str()) else {
+        return JsonRpcResponse::success(
+            request.id.clone(),
+            mcp_tool_result(
+                false,
+                serde_json::json!({"error": format!("missing required argument: `{task_key}`")}),
+            ),
+        );
+    };
+    let context = args.get(ctx_key).and_then(|v| v.as_str()).unwrap_or("");
+    let max_tokens = args
+        .get("max_tokens")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|n| u32::try_from(n).ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(DEFAULT_MAX_TOKENS);
+
+    let llm = match sentinel_infrastructure::openrouter_llm::OpenRouterLlm::from_env() {
+        Ok(l) => l,
+        Err(e) => {
+            return JsonRpcResponse::success(
+                request.id.clone(),
+                mcp_tool_result(
+                    false,
+                    serde_json::json!({
+                        "error": format!("worker delegation unavailable: {e} (set OPENROUTER_API_KEY)")
+                    }),
+                ),
+            );
+        }
+    };
+
+    let req = DelegationRequest {
+        worker,
+        task: task.to_string(),
+        context: context.to_string(),
+        max_tokens,
+    };
+    match delegate(&llm, &req).await {
+        Ok(res) => JsonRpcResponse::success(
+            request.id.clone(),
+            mcp_tool_result(
+                true,
+                serde_json::json!({ "worker": res.worker, "output": res.output }),
+            ),
+        ),
+        Err(e) => JsonRpcResponse::success(
+            request.id.clone(),
+            mcp_tool_result(
+                false,
+                serde_json::json!({"error": format!("worker delegation failed: {e}")}),
+            ),
+        ),
+    }
+}
+
 /// Handle `sentinel__submit_phase_complete`
 async fn handle_submit_phase(
     request: &JsonRpcRequest,
@@ -816,15 +1100,17 @@ async fn handle_submit_phase(
     let (judge_model, phase_objectives) = workflow_configs
         .get(&skill)
         .and_then(|wf| wf.phases.iter().find(|p| p.id == phase_id))
-        .map(|phase| {
-            let desc = if phase.description.is_empty() {
-                format!("Complete the {phase_id} phase")
-            } else {
-                phase.description.clone()
-            };
-            (phase.judge, desc)
-        })
-        .unwrap_or((JudgeModel::Sonnet, format!("Complete the {phase_id} phase")));
+        .map_or_else(
+            || (JudgeModel::Sonnet, format!("Complete the {phase_id} phase")),
+            |phase| {
+                let desc = if phase.description.is_empty() {
+                    format!("Complete the {phase_id} phase")
+                } else {
+                    phase.description.clone()
+                };
+                (phase.judge, desc)
+            },
+        );
 
     // Build evidence from the summary + state context
     let evidence = {
@@ -1650,4 +1936,151 @@ mod tests {
     /// Tests mutate process env (`HOME/USERPROFILE/SENTINEL_STATE_DIR`) and
     /// must serialize — cargo test runs in parallel by default.
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    // ---- A2 Phase 5: route_capability MCP tool ----
+
+    fn route_capability_request(requirement: serde_json::Value) -> JsonRpcRequest {
+        JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(serde_json::json!(1)),
+            method: "tools/call".to_string(),
+            params: serde_json::json!({
+                "name": "sentinel__route_capability",
+                "arguments": { "requirement": requirement },
+            }),
+        }
+    }
+
+    fn extract_result(response: &JsonRpcResponse) -> &serde_json::Value {
+        response
+            .result
+            .as_ref()
+            .expect("expected success response")
+    }
+
+    /// Extract the inner data JSON from the wrapped `mcp_tool_result`
+    /// response. `mcp_tool_result(success, data)` wraps `data` as the
+    /// stringified contents of `content[0].text` and sets `isError =
+    /// !success` on the outer object. Tests assert against the outer
+    /// `isError` flag and the parsed inner data.
+    fn extract_data_and_is_error(response: &JsonRpcResponse) -> (serde_json::Value, bool) {
+        let result = extract_result(response);
+        let is_error = result.get("isError").and_then(|v| v.as_bool()).unwrap_or(false);
+        let text = result
+            .get("content")
+            .and_then(|c| c.as_array())
+            .and_then(|a| a.first())
+            .and_then(|c| c.get("text"))
+            .and_then(|t| t.as_str())
+            .unwrap_or("");
+        let data: serde_json::Value =
+            serde_json::from_str(text).unwrap_or(serde_json::Value::Null);
+        (data, is_error)
+    }
+
+    #[test]
+    fn route_capability_handles_missing_requirement() {
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(serde_json::json!(1)),
+            method: "tools/call".to_string(),
+            params: serde_json::json!({
+                "name": "sentinel__route_capability",
+                "arguments": {},
+            }),
+        };
+        let args = req.params.get("arguments").cloned().unwrap_or_default();
+        let resp = handle_route_capability(&req, &args);
+        let (data, is_error) = extract_data_and_is_error(&resp);
+        assert!(is_error, "missing requirement should flag isError=true");
+        let err = data.get("error").and_then(|e| e.as_str()).unwrap_or("");
+        assert!(
+            err.contains("requirement"),
+            "error should name the missing field; got: {err}"
+        );
+    }
+
+    #[test]
+    fn route_capability_handles_malformed_requirement() {
+        let req = route_capability_request(serde_json::json!({
+            "required": "not-an-array",
+        }));
+        let args = req.params.get("arguments").cloned().unwrap_or_default();
+        let resp = handle_route_capability(&req, &args);
+        let (data, is_error) = extract_data_and_is_error(&resp);
+        assert!(is_error, "malformed requirement should flag isError=true");
+        let err = data.get("error").and_then(|e| e.as_str()).unwrap_or("");
+        assert!(
+            err.contains("CapabilityRequirement") || err.contains("parse"),
+            "error should mention CapabilityRequirement / parse: {err}"
+        );
+    }
+
+    #[test]
+    fn route_capability_returns_routing_explanation_for_valid_requirement() {
+        // Shipped agents-defaults.toml includes a Standard-reasoning
+        // non-Anthropic profile (kimi-k2-6-ollama-cloud), so this
+        // requirement should resolve to a chosen agent.
+        let req = route_capability_request(serde_json::json!({
+            "required": [
+                { "Reasoning": "standard" },
+                { "DifferentVendorFrom": "Anthropic" },
+                { "StructuredOutput": "AuditorVerdict" },
+            ],
+            "preferred": [],
+            "forbidden": [],
+        }));
+        let args = req.params.get("arguments").cloned().unwrap_or_default();
+        let resp = handle_route_capability(&req, &args);
+        let (data, is_error) = extract_data_and_is_error(&resp);
+        assert!(!is_error, "valid requirement should succeed; data: {data}");
+        // RoutingExplanation shape: { chosen, candidates, eliminated,
+        // tie_breakers_applied, requirement_signature }.
+        assert!(data.get("chosen").is_some(), "RoutingExplanation must have chosen field");
+        assert!(data.get("candidates").is_some());
+        assert!(data.get("requirement_signature").is_some());
+        let candidates = data.get("candidates").unwrap().as_array().unwrap();
+        assert!(
+            !candidates.is_empty(),
+            "shipped defaults should provide at least one non-Anthropic Standard candidate"
+        );
+    }
+
+    #[test]
+    fn route_capability_returns_chosen_null_when_no_agent_satisfies() {
+        // Require capabilities no shipped profile satisfies:
+        // OpenWeights + Catastrophic-class qualification AND a custom
+        // schema none of the shipped profiles declare.
+        let req = route_capability_request(serde_json::json!({
+            "required": [
+                "OpenWeights",
+                { "ReversibilityClass": "Catastrophic" },
+                { "StructuredOutput": { "Named": "TotallyMadeUp" } },
+            ],
+            "preferred": [],
+            "forbidden": [],
+        }));
+        let args = req.params.get("arguments").cloned().unwrap_or_default();
+        let resp = handle_route_capability(&req, &args);
+        let (data, is_error) = extract_data_and_is_error(&resp);
+        assert!(!is_error, "explain() always succeeds (even when chosen=null)");
+        assert!(
+            data.get("chosen").is_some_and(serde_json::Value::is_null),
+            "no agent should satisfy contrived requirement; data: {data}"
+        );
+    }
+
+    #[test]
+    fn route_capability_is_listed_in_tool_definitions() {
+        let defs = tool_definitions();
+        let tools = defs.get("tools").unwrap().as_array().unwrap();
+        let names: Vec<&str> = tools
+            .iter()
+            .filter_map(|t| t.get("name").and_then(|n| n.as_str()))
+            .collect();
+        assert!(
+            names.contains(&"sentinel__route_capability"),
+            "route_capability must appear in tool_definitions; got: {names:?}"
+        );
+    }
 }

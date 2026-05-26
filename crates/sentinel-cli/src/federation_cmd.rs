@@ -107,7 +107,7 @@ pub struct ComposeReport {
 impl ComposeReport {
     /// True when no errors were found (warnings ok).
     #[must_use]
-    pub fn ok(&self) -> bool {
+    pub const fn ok(&self) -> bool {
         self.error_count == 0
     }
 }
@@ -237,7 +237,9 @@ fn check_skill(
         for step in &phase.steps {
             report.total_steps += 1;
             let coord = (phase.phase_id.clone(), step.id.clone());
-            if seen_coords.contains_key(&coord) {
+            if let std::collections::hash_map::Entry::Vacant(e) = seen_coords.entry(coord) {
+                e.insert(());
+            } else {
                 report.findings.push(ComposeFinding {
                     severity: ComposeSeverity::Error,
                     skill: Some(skill.into()),
@@ -250,8 +252,6 @@ fn check_skill(
                         step_id = step.id,
                     ),
                 });
-            } else {
-                seen_coords.insert(coord, ());
             }
         }
     }

@@ -21,11 +21,10 @@ use super::EnvPort;
 /// Check if autopilot mode is active via env var.
 fn is_autopilot(env: &dyn EnvPort) -> bool {
     env.var("SENTINEL_AUTOPILOT")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
+        .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
 }
 
-/// Process a PreToolUse Bash event. Warns on `gh pr merge` but allows it.
+/// Process a `PreToolUse` Bash event. Warns on `gh pr merge` but allows it.
 pub fn process(input: &HookInput, env: &dyn EnvPort) -> HookOutput {
     let cmd = match extract_bash_command(input) {
         Some(c) => c,

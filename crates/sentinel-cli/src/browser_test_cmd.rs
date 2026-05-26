@@ -1,10 +1,13 @@
-//! Steel Test CLI — record and check browser test state
+//! Browser Test CLI — record and check browser test state
 //!
 //! Used by Claude Code to mark a browser test as passed when the test was run
-//! via CDP, Puppeteer, or any method other than the Steel MCP server.
+//! via CDP, Puppeteer, Playwright, or any method other than an MCP server
+//! that already has its own `PostToolUse` recorder.
 //!
-//! The `pre_push_browser_test` hook checks for a state file written by this command
-//! (or by the `PostToolUse` handler for `mcp__steel__release_session`).
+//! The `pre_push_browser_test` hook checks for a state file written by this
+//! command (or by the `PostToolUse` handler for
+//! `mcp__browserbase__release_session`, `mcp__cdp__close_instance`, or
+//! legacy `mcp__steel__release_session`).
 //!
 //! Usage:
 //!   sentinel browser-test record --session <id>   # Mark test as passed

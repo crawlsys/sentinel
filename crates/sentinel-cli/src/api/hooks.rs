@@ -14,13 +14,22 @@ pub fn router() -> Router<AppState> {
 }
 
 async fn stats(State(state): State<AppState>) -> Json<serde_json::Value> {
-    let session = state.session.read().await;
-    let stats = &session.hook_stats;
+    // Drop the read-guard before building the response to release it early.
+    let (total_invocations, total_blocked, per_hook, per_hook_time_ms) = {
+        let session = state.session.read().await;
+        let hook_stats = &session.hook_stats;
+        (
+            hook_stats.total_invocations,
+            hook_stats.total_blocked,
+            hook_stats.per_hook.clone(),
+            hook_stats.per_hook_time_ms.clone(),
+        )
+    };
     Json(serde_json::json!({
-        "total_invocations": stats.total_invocations,
-        "total_blocked": stats.total_blocked,
-        "per_hook": stats.per_hook,
-        "per_hook_time_ms": stats.per_hook_time_ms,
+        "total_invocations": total_invocations,
+        "total_blocked": total_blocked,
+        "per_hook": per_hook,
+        "per_hook_time_ms": per_hook_time_ms,
     }))
 }
 

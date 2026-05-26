@@ -67,7 +67,7 @@ id = "qa-handoff"
 file = "qa-handoff.md"
 required = true
 judge = "opus"
-description = "QA testing on staging, Steel smoke test"
+description = "QA testing on staging, Browserbase smoke test"
 
 [[workflows.phases]]
 id = "cleanup"
@@ -91,14 +91,14 @@ description = "Verify branch clean, tests pass, remote accessible"
 id = "version"
 file = "version.md"
 required = true
-judge = "haiku"
+judge = "codex"
 description = "Detect version files, calculate bump, update version strings"
 
 [[workflows.phases]]
 id = "changelog"
 file = "changelog.md"
 required = true
-judge = "haiku"
+judge = "codex"
 description = "Move unreleased items, add version header and date"
 
 [[workflows.phases]]
@@ -113,13 +113,13 @@ id = "validate"
 file = "validate.md"
 required = true
 judge = "opus"
-description = "Poll health endpoint, Steel smoke test, verify deployment"
+description = "Poll health endpoint, Browserbase smoke test, verify deployment"
 
 [[workflows.phases]]
 id = "report"
 file = "report.md"
 required = false
-judge = "haiku"
+judge = "codex"
 description = "Update Linear status, post deployment comment, notify"
 
 # --- incident (7 phases) ---
@@ -144,7 +144,7 @@ description = "Assess severity, blast radius, affected users, recent deploys"
 id = "communicate"
 file = "communicate.md"
 required = true
-judge = "haiku"
+judge = "codex"
 description = "Update status channel, notify stakeholders, set timeline"
 
 [[workflows.phases]]
@@ -172,7 +172,7 @@ description = "Build timeline, document root cause, create action items"
 id = "follow-up"
 file = "follow-up.md"
 required = false
-judge = "haiku"
+judge = "codex"
 description = "Create tracking issues, schedule review, close incident"
 
 # --- migrate (6 phases) ---
@@ -229,7 +229,7 @@ skill = "doppler"
 id = "discover"
 file = "discover.md"
 required = true
-judge = "haiku"
+judge = "codex"
 description = "List projects, identify target, check current config"
 
 [[workflows.phases]]
@@ -264,25 +264,27 @@ description = "Download secrets, validate format, test with app"
 id = "document"
 file = "document.md"
 required = false
-judge = "haiku"
+judge = "codex"
 description = "Update docs, log changes, notify team"
 
-# --- steel (6 phases) ---
+# --- browserbase (6 phases) ---
+# Renamed from 'steel' — Browserbase is the cloud product, "Steel" was just our
+# nickname for it. Phase files live in ~/.claude/skills/browserbase/phases/.
 [[workflows]]
-skill = "steel"
+skill = "browserbase"
 
 [[workflows.phases]]
 id = "setup"
 file = "setup.md"
 required = true
-judge = "haiku"
+judge = "codex"
 description = "Create browser session, configure options, verify active"
 
 [[workflows.phases]]
 id = "navigate"
 file = "navigate.md"
 required = true
-judge = "haiku"
+judge = "codex"
 description = "Navigate to URL, wait for load, handle redirects"
 
 [[workflows.phases]]
@@ -310,7 +312,7 @@ description = "Check console errors, verify elements, compare against expected"
 id = "cleanup"
 file = "cleanup.md"
 required = true
-judge = "haiku"
+judge = "codex"
 description = "Release session, save artifacts, report results"
 
 # --- api-design (6 phases) ---
@@ -356,7 +358,7 @@ description = "Write contract tests, run against spec, verify error responses"
 id = "document"
 file = "document.md"
 required = false
-judge = "haiku"
+judge = "codex"
 description = "Generate API docs, create examples, publish"
 
 # ==============================================================================
@@ -371,7 +373,7 @@ skill = "debug"
 id = "gather"
 file = "gather.md"
 required = true
-judge = "haiku"
+judge = "codex"
 description = "Collect error message, stack trace, repro steps, environment info"
 
 [[workflows.phases]]
@@ -424,7 +426,7 @@ skill = "review"
 id = "gather"
 file = "gather.md"
 required = true
-judge = "haiku"
+judge = "codex"
 description = "Get changed files, read PR description, detect linked issues"
 
 [[workflows.phases]]
@@ -452,7 +454,7 @@ description = "Merge findings from both stages, prioritize, format, extract Loom
 id = "track"
 file = "track.md"
 required = false
-judge = "haiku"
+judge = "codex"
 description = "Create todos for findings, tag with severity, report summary"
 
 # --- test (5 phases) ---
@@ -463,7 +465,7 @@ skill = "test"
 id = "discover"
 file = "discover.md"
 required = true
-judge = "haiku"
+judge = "codex"
 description = "Detect test framework, find existing tests, identify coverage gaps"
 
 [[workflows.phases]]
@@ -491,7 +493,7 @@ description = "Execute all tests, capture output, measure coverage"
 id = "analyze"
 file = "analyze.md"
 required = false
-judge = "haiku"
+judge = "codex"
 description = "Compare coverage before/after, identify remaining gaps"
 
 # --- security (4 phases) ---
@@ -523,7 +525,7 @@ description = "Verify findings with code evidence, eliminate false positives, cl
 id = "report"
 file = "report.md"
 required = false
-judge = "haiku"
+judge = "codex"
 description = "Create security report, track findings as todos, recommend prevention"
 
 # --- refactor (5 phases) ---
@@ -548,7 +550,7 @@ description = "Choose strategy, identify affected tests, plan incremental steps"
 id = "baseline"
 file = "baseline.md"
 required = true
-judge = "haiku"
+judge = "codex"
 description = "Run all tests, capture coverage, verify passing"
 
 [[workflows.phases]]
@@ -573,14 +575,14 @@ skill = "document"
 id = "audit"
 file = "audit.md"
 required = true
-judge = "haiku"
+judge = "codex"
 description = "Scan for existing docs, find orphaned docs, check for stale content"
 
 [[workflows.phases]]
 id = "clean"
 file = "clean.md"
 required = true
-judge = "haiku"
+judge = "codex"
 description = "Remove orphaned docs, archive outdated content, fix broken links"
 
 [[workflows.phases]]
@@ -608,7 +610,7 @@ description = "Sync docs with code, update examples, refresh screenshots, extrac
 id = "maintain"
 file = "maintain.md"
 required = false
-judge = "haiku"
+judge = "codex"
 description = "Check links resolve, verify code examples, report coverage summary"
 
 # --- explore (4 phases) ---
@@ -619,14 +621,14 @@ skill = "explore"
 id = "classify"
 file = "classify.md"
 required = true
-judge = "haiku"
+judge = "codex"
 description = "Understand request type, determine search depth, identify target areas"
 
 [[workflows.phases]]
 id = "search"
 file = "search.md"
 required = true
-judge = "haiku"
+judge = "codex"
 description = "Run Glob patterns, Grep for keywords, scan directory structure"
 
 [[workflows.phases]]
@@ -640,7 +642,7 @@ description = "Read key files, trace code paths, identify patterns, map dependen
 id = "report"
 file = "report.md"
 required = true
-judge = "haiku"
+judge = "codex"
 description = "Summarize findings, provide file locations, answer original question"
 
 # --- plan (4 phases) ---
@@ -651,7 +653,7 @@ skill = "plan"
 id = "gather"
 file = "gather.md"
 required = true
-judge = "haiku"
+judge = "codex"
 description = "Understand requirements, explore existing code, identify constraints"
 
 [[workflows.phases]]
@@ -672,7 +674,7 @@ description = "Create implementation plan, define milestones, identify critical 
 id = "present"
 file = "present.md"
 required = true
-judge = "haiku"
+judge = "codex"
 description = "Format plan document, present for approval, incorporate feedback"
 
 # --- execute (4 phases) ---
@@ -683,7 +685,7 @@ skill = "execute"
 id = "load"
 file = "load.md"
 required = true
-judge = "haiku"
+judge = "codex"
 description = "Read task requirements, load dependencies, identify target files"
 
 [[workflows.phases]]
@@ -715,7 +717,7 @@ skill = "lint"
 id = "detect"
 file = "detect.md"
 required = true
-judge = "haiku"
+judge = "codex"
 description = "Identify languages, find lint configs, detect formatters"
 
 [[workflows.phases]]
@@ -736,7 +738,7 @@ description = "Auto-fix what's possible, manually fix remaining"
 id = "verify"
 file = "verify.md"
 required = true
-judge = "haiku"
+judge = "codex"
 description = "Re-run linters (confirm clean), run tests, commit fixes"
 
 # --- performance (4 phases) ---
@@ -779,7 +781,7 @@ skill = "quality-gate"
 id = "discover"
 file = "discover.md"
 required = true
-judge = "haiku"
+judge = "codex"
 description = "Launch 6 parallel agents: maintainability, security, architecture, style, visual/a11y, hooks"
 
 [[workflows.phases]]
@@ -811,7 +813,7 @@ skill = "reality-check"
 id = "scan"
 file = "scan.md"
 required = true
-judge = "haiku"
+judge = "codex"
 description = "Find feature declarations, route definitions, component exports"
 
 [[workflows.phases]]
@@ -843,7 +845,7 @@ skill = "tech-debt"
 id = "scan"
 file = "scan.md"
 required = true
-judge = "haiku"
+judge = "codex"
 description = "Search for TODO/FIXME/HACK markers, find deprecated usage, detect dead code"
 
 [[workflows.phases]]
@@ -864,7 +866,7 @@ description = "Rank by impact/effort ratio, group related items"
 id = "track"
 file = "track.md"
 required = false
-judge = "haiku"
+judge = "codex"
 description = "Create todos for each item, assign severity labels, report summary"
 
 # --- cleanup (4 phases) ---
@@ -875,7 +877,7 @@ skill = "cleanup"
 id = "identify"
 file = "identify.md"
 required = true
-judge = "haiku"
+judge = "codex"
 description = "Find unused exports, dead imports, unreachable code, empty files"
 
 [[workflows.phases]]
@@ -907,7 +909,7 @@ skill = "research"
 id = "scope"
 file = "scope.md"
 required = true
-judge = "haiku"
+judge = "codex"
 description = "Define research question, identify sources, determine depth"
 
 [[workflows.phases]]
@@ -939,7 +941,7 @@ skill = "estimate"
 id = "analyze"
 file = "analyze.md"
 required = true
-judge = "haiku"
+judge = "codex"
 description = "Understand requirements, explore codebase scope, identify unknowns"
 
 [[workflows.phases]]
@@ -960,7 +962,7 @@ description = "Apply estimation model, calculate ranges, identify widening risks
 id = "present"
 file = "present.md"
 required = true
-judge = "haiku"
+judge = "codex"
 description = "Format estimate with ranges, explain assumptions, recommend approach"
 
 # --- loom (4 phases) ---
@@ -971,7 +973,7 @@ skill = "loom"
 id = "fetch"
 file = "fetch.md"
 required = true
-judge = "haiku"
+judge = "codex"
 description = "Identify target video, get video details, download transcript"
 
 [[workflows.phases]]
@@ -992,7 +994,7 @@ description = "Create task list from video, cross-reference with code"
 id = "report"
 file = "report.md"
 required = false
-judge = "haiku"
+judge = "codex"
 description = "Format analysis, create Linear issues if applicable, post summary"
 
 # --- todo-manager (4 phases) ---
@@ -1003,7 +1005,7 @@ skill = "todo-manager"
 id = "load"
 file = "load.md"
 required = true
-judge = "haiku"
+judge = "codex"
 description = "Read existing todos, check task list, identify priorities"
 
 [[workflows.phases]]
@@ -1024,7 +1026,7 @@ description = "Work on highest priority items, track progress"
 id = "persist"
 file = "persist.md"
 required = true
-judge = "haiku"
+judge = "codex"
 description = "Save updated state, report completed items, identify new todos"
 
 # --- onboard (5 phases) ---
@@ -1035,7 +1037,7 @@ skill = "onboard"
 id = "map"
 file = "map.md"
 required = true
-judge = "haiku"
+judge = "codex"
 description = "Scan project structure, identify tech stack, find entry points"
 
 [[workflows.phases]]
@@ -1063,7 +1065,7 @@ description = "Build onboarding checklist, create environment setup, document go
 id = "walkthrough"
 file = "walkthrough.md"
 required = false
-judge = "haiku"
+judge = "codex"
 description = "Create annotated code tour, highlight key files, explain conventions"
 
 # --- skill-creator (5 phases) ---
@@ -1081,7 +1083,7 @@ description = "Define skill purpose, identify triggers, plan phases, choose depe
 id = "scaffold"
 file = "scaffold.md"
 required = true
-judge = "haiku"
+judge = "codex"
 description = "Create directory, generate SKILL.md from template, create config files"
 
 [[workflows.phases]]
@@ -1113,7 +1115,7 @@ skill = "project-setup"
 id = "detect"
 file = "detect.md"
 required = true
-judge = "haiku"
+judge = "codex"
 description = "Identify project type, scan for existing configs, determine services"
 
 [[workflows.phases]]
@@ -1156,7 +1158,7 @@ skill = "sequential-thinking"
 id = "setup"
 file = "setup.md"
 required = true
-judge = "haiku"
+judge = "codex"
 description = "Define problem, determine thought count, set constraints"
 
 [[workflows.phases]]
@@ -1174,7 +1176,7 @@ skill = "codex"
 id = "gather"
 file = "gather.md"
 required = true
-judge = "haiku"
+judge = "codex"
 description = "Collect code context, prepare prompt, determine reasoning effort"
 
 [[workflows.phases]]
@@ -1188,7 +1190,7 @@ description = "Send to Codex MCP, parse response"
 id = "apply"
 file = "apply.md"
 required = false
-judge = "haiku"
+judge = "codex"
 description = "Apply recommendations, verify changes, report results"
 
 # --- traffic-light (3 phases) ---
@@ -1199,7 +1201,7 @@ skill = "traffic-light"
 id = "discover"
 file = "discover.md"
 required = true
-judge = "haiku"
+judge = "codex"
 description = "List integrations, detect API endpoints, check existing status"
 
 [[workflows.phases]]
@@ -1213,7 +1215,7 @@ description = "Test each integration, measure response times, classify status"
 id = "report"
 file = "report.md"
 required = true
-judge = "haiku"
+judge = "codex"
 description = "Format traffic light report, update tracking, flag degraded"
 
 # --- session-resume (2 phases) ---
@@ -1224,7 +1226,7 @@ skill = "session-resume"
 id = "find"
 file = "find.md"
 required = true
-judge = "haiku"
+judge = "codex"
 description = "Locate session logs, identify last session, read JSONL entries"
 
 [[workflows.phases]]
@@ -1249,7 +1251,7 @@ description = "Understand prompt, produce diverse ideas, explore edge cases"
 id = "synthesize"
 file = "synthesize.md"
 required = true
-judge = "haiku"
+judge = "codex"
 description = "Group by theme, rank by feasibility, present top recommendations"
 
 # --- quickstart (3 phases) ---
@@ -1260,7 +1262,7 @@ skill = "quickstart"
 id = "detect"
 file = "detect.md"
 required = true
-judge = "haiku"
+judge = "codex"
 description = "Identify environment, check prerequisites, find missing tools"
 
 [[workflows.phases]]
@@ -1274,7 +1276,7 @@ description = "Install components, set up configs, initialize settings"
 id = "verify"
 file = "verify.md"
 required = true
-judge = "haiku"
+judge = "codex"
 description = "Run validation checks, confirm working state, present next steps"
 
 # --- auto-setup (3 phases) ---
@@ -1285,7 +1287,7 @@ skill = "auto-setup"
 id = "detect"
 file = "detect.md"
 required = true
-judge = "haiku"
+judge = "codex"
 description = "Scan system, identify OS, check existing installs"
 
 [[workflows.phases]]
@@ -1299,7 +1301,7 @@ description = "Install skills, configure hooks, set up MCP servers"
 id = "verify"
 file = "verify.md"
 required = true
-judge = "haiku"
+judge = "codex"
 description = "Validate installation, check hook registration, confirm working"
 
 # --- skill-sync (3 phases) ---
@@ -1310,7 +1312,7 @@ skill = "skill-sync"
 id = "fetch"
 file = "fetch.md"
 required = true
-judge = "haiku"
+judge = "codex"
 description = "Git fetch origin, compare local vs remote, identify changes"
 
 [[workflows.phases]]
@@ -1324,7 +1326,7 @@ description = "Copy updated files, remove deleted files, update registry"
 id = "verify"
 file = "verify.md"
 required = true
-judge = "haiku"
+judge = "codex"
 description = "Validate skills load, check counts match, report changes"
 
 # --- git (6 phases, 2 workflows) ---
@@ -1335,7 +1337,7 @@ skill = "git"
 id = "analyze"
 file = "analyze.md"
 required = true
-judge = "haiku"
+judge = "codex"
 description = "Check branch state, detect changes, load commit style reference"
 
 [[workflows.phases]]
@@ -1356,7 +1358,7 @@ description = "Stage files, create commit, verify in log"
 id = "pr-gather"
 file = "pr-gather.md"
 required = false
-judge = "haiku"
+judge = "codex"
 description = "Get branch, list commits since main, get files changed"
 
 [[workflows.phases]]
@@ -1381,7 +1383,7 @@ skill = "git-worktree"
 id = "create"
 file = "create.md"
 required = true
-judge = "haiku"
+judge = "codex"
 description = "Determine branch name, create worktree directory, checkout branch"
 
 [[workflows.phases]]
@@ -1395,7 +1397,7 @@ description = "Install dependencies, verify working state, hand off"
 id = "cleanup"
 file = "cleanup.md"
 required = false
-judge = "haiku"
+judge = "codex"
 description = "Remove worktree, delete branch if merged, prune references"
 
 # --- ssh (2 phases) ---
@@ -1406,7 +1408,7 @@ skill = "ssh"
 id = "connect"
 file = "connect.md"
 required = true
-judge = "haiku"
+judge = "codex"
 description = "Load host config, establish connection, verify access"
 
 [[workflows.phases]]
@@ -1424,14 +1426,14 @@ skill = "tailscale"
 id = "connect"
 file = "connect.md"
 required = true
-judge = "haiku"
+judge = "codex"
 description = "Check Tailscale status, identify target device, verify network path"
 
 [[workflows.phases]]
 id = "transfer"
 file = "transfer.md"
 required = true
-judge = "haiku"
+judge = "codex"
 description = "Send/receive files via Taildrop, verify transfer, report completion"
 
 # --- chrome-extension-loader (2 phases) ---
@@ -1442,7 +1444,7 @@ skill = "chrome-extension-loader"
 id = "load"
 file = "load.md"
 required = true
-judge = "haiku"
+judge = "codex"
 description = "Detect extension path, launch Chrome for Testing, load unpacked"
 
 [[workflows.phases]]
@@ -1460,7 +1462,7 @@ skill = "cloudflare-tunnel"
 id = "setup"
 file = "setup.md"
 required = true
-judge = "haiku"
+judge = "codex"
 description = "Detect local server, check cloudflared installed, determine port"
 
 [[workflows.phases]]
@@ -1474,19 +1476,21 @@ description = "Start tunnel, capture public URL, verify connectivity"
 id = "cleanup"
 file = "cleanup.md"
 required = false
-judge = "haiku"
+judge = "codex"
 description = "Stop tunnel, release resources, report URL used"
 
-# --- steel-tester (8 phases) ---
+# --- browserbase-tester (8 phases) ---
+# Renamed from 'steel-tester'. Localhost runs via CDP (mcp__cdp__*);
+# remote URLs (staging, production) run via Browserbase MCP.
 [[workflows]]
-skill = "steel-tester"
+skill = "browserbase-tester"
 
 [[workflows.phases]]
 id = "setup"
 file = "setup.md"
 required = true
-judge = "haiku"
-description = "Determine target, load config, get credentials, create Steel session"
+judge = "codex"
+description = "Determine target, load config, get credentials, create browser session (CDP for localhost, Browserbase for remote)"
 
 [[workflows.phases]]
 id = "crawl"
@@ -1527,15 +1531,15 @@ description = "Determine severity, check duplicates, create Linear issues"
 id = "report"
 file = "report.md"
 required = true
-judge = "haiku"
+judge = "codex"
 description = "Compile evidence, generate summary report"
 
 [[workflows.phases]]
 id = "cleanup"
 file = "cleanup.md"
 required = true
-judge = "haiku"
-description = "Release Steel session, kill Cloudflare tunnel"
+judge = "codex"
+description = "Release Browserbase session (remote mode) or close CDP instance (local mode)"
 
 # --- telemetry (2 phases) ---
 [[workflows]]
@@ -1545,14 +1549,14 @@ skill = "telemetry"
 id = "collect"
 file = "collect.md"
 required = true
-judge = "haiku"
+judge = "codex"
 description = "Read metrics files, parse JSONL entries, aggregate statistics"
 
 [[workflows.phases]]
 id = "report"
 file = "report.md"
 required = true
-judge = "haiku"
+judge = "codex"
 description = "Format analytics, identify trends, present skill usage summary"
 
 # --- mcp-manager (3 phases) ---
@@ -1563,7 +1567,7 @@ skill = "mcp-manager"
 id = "detect"
 file = "detect.md"
 required = true
-judge = "haiku"
+judge = "codex"
 description = "List configured servers, check health status, identify issues"
 
 [[workflows.phases]]
@@ -1577,7 +1581,7 @@ description = "Install/update servers, configure settings, fix broken connection
 id = "verify"
 file = "verify.md"
 required = true
-judge = "haiku"
+judge = "codex"
 description = "Health check all servers, verify tool counts, report status"
 
 # --- gemini-video (2 phases) ---
@@ -1588,7 +1592,7 @@ skill = "gemini-video"
 id = "send"
 file = "send.md"
 required = true
-judge = "haiku"
+judge = "codex"
 description = "Identify media source, prepare prompt, send to Gemini MCP"
 
 [[workflows.phases]]

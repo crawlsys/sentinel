@@ -1,13 +1,13 @@
-//! PostCompact hook — restore critical state after context compaction
+//! `PostCompact` hook — restore critical state after context compaction
 //!
-//! Called after compaction completes. Receives compact_summary.
+//! Called after compaction completes. Receives `compact_summary`.
 //! Can inject additionalContext to restore critical information.
 
 use sentinel_domain::events::{HookEvent, HookInput, HookOutput};
 
 use super::HookContext;
 
-/// Process PostCompact event
+/// Process `PostCompact` event
 ///
 /// Restores active skill context and workflow state that may have been
 /// lost during compaction.
@@ -33,7 +33,7 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
         state
             .get("active_skill")
             .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
+            .map(std::string::ToString::to_string)
     });
 
     if let Some(skill) = &active_skill {
