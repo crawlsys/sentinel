@@ -3,9 +3,9 @@
 import { useEffect, useMemo, useState } from "react";
 
 import { EventTicker } from "../components/EventTicker";
-import { GraphCanvas } from "../components/GraphCanvas";
 import { PanelInspector } from "../components/PanelInspector";
 import { SessionConsole } from "../components/SessionConsole";
+import { SessionStripsPanel } from "../components/SessionStripsPanel";
 import { SettingsModal } from "../components/SettingsModal";
 import { StatusBar } from "../components/StatusBar";
 import { sessionColorMap } from "../lib/session-colors";
@@ -98,19 +98,22 @@ export default function Page() {
     const allSids = new Set<string>([...newestEventTs.keys(), ...nodeStatus.keys()]);
     for (const sid of allSids) {
       const status = nodeStatus.get(sid);
-      if (status === "awaiting_user") continue; // always keep stuck sessions
-      if (status === "dead") {
-        set.add(sid);
-        continue;
-      }
+      // Stuck sessions always visible.
+      if (status === "awaiting_user") continue;
+      // Event ts is the source of truth — the bridge's "dead"
+      // status fires after 30min idle, but a session with a 35-
+      // minute-old event is NOT dead from the operator's point
+      // of view. Only filter when both signals agree (no recent
+      // event AND the bridge already gave up on it), OR when
+      // there's clearly no recent activity.
       const newest = newestEventTs.get(sid);
-      // No event ts and no node → treat as stale.
-      if (newest == null && !nodeStatus.has(sid)) {
-        set.add(sid);
+      if (newest == null) {
+        // No event ts: defer to node status.
+        if (status === "dead") set.add(sid);
         continue;
       }
-      // Event ts age check.
-      if (newest != null && now - newest > STALE_AFTER_MS) {
+      // We have an event ts. Use it as the truth.
+      if (now - newest > STALE_AFTER_MS) {
         set.add(sid);
       }
     }
@@ -190,22 +193,26 @@ export default function Page() {
           overflow stays clipped. */}
       <div className="flex flex-col md:flex-row flex-1 min-h-0 overflow-y-auto md:overflow-hidden">
         <div className="flex-1 min-w-0 min-h-[50vh] md:min-h-0 relative">
-          <GraphCanvas
+          {/* P3-31: replaced the force-directed GraphCanvas with
+              multi-sparkline session strips. The graph showed
+              every tool call as a node; with the P3-29 backlog
+              bump that became 300-node spaghetti. Strips give a
+              denser, more legible view of per-session rhythm
+              across a configurable window. */}
+          <SessionStripsPanel
             graph={graph}
-            selectedNodeId={selectedNodeId}
-            onSelectNode={(id) => selectNode(id)}
-            sessionColors={sessionColors}
+            stuck={stuck}
+            dormantSessionIds={dormantSessionIds}
+            selectedSessionId={selectedSessionId}
+            onSelectSession={(sid) => {
+              if (!sid) {
+                selectNode(null);
+              } else {
+                selectNode(`SentinelSession#${sid}`);
+              }
+            }}
           />
           {!graph ? (
-            // Subtle, NON-blocking placeholder. Before P3-23 we
-            // rendered a centred spinner that monopolised the whole
-            // panel during cold load — same 700-900ms TTFD, but
-            // felt much worse because the operator stared at an
-            // empty page with a spinning circle. Now they see the
-            // dashboard structure (status bar, panels, ticker
-            // skeleton rows) immediately and watch it fill in.
-            // `pointer-events-none` keeps the SVG zoom/pan
-            // interactions live underneath if we want them later.
             <div
               data-testid="loading-overlay"
               className="absolute bottom-3 right-3 flex items-center gap-2 text-[#6e7681] font-mono text-[10px] uppercase tracking-wider pointer-events-none"

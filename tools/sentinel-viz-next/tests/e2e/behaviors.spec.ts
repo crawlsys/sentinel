@@ -24,9 +24,15 @@ async function waitGraphReady(page: import("@playwright/test").Page) {
     .getByTestId("loading-overlay")
     .waitFor({ state: "hidden", timeout: 15_000 })
     .catch(() => {});
+  // P3-31 replaced the SVG GraphCanvas with SessionStripsPanel.
+  // Wait for the panel to mount + either real strips OR the
+  // explicit empty state.
   await page
     .waitForFunction(
-      () => document.querySelectorAll('svg[data-testid="graph-canvas"] g.node').length > 0,
+      () =>
+        document.querySelector('[data-testid="session-strips-panel"]') !== null &&
+        (document.querySelectorAll('[data-testid="session-strip"]').length > 0 ||
+          document.querySelector('[data-testid="session-strips-empty"]') !== null),
       { timeout: 10_000 },
     )
     .catch(() => {});
@@ -81,8 +87,10 @@ test("AUTO toggle: clicking somewhere else DOES disable auto", async ({ page }) 
   await expect(btn).toHaveText(/AUTO\s+ON/i);
   // Give the post-set grace window time to expire.
   await page.waitForTimeout(800);
-  // Click the SVG canvas background.
-  await page.locator('svg[data-testid="graph-canvas"]').click({ position: { x: 5, y: 5 } });
+  // Click outside the AUTO toggle. After P3-31 the graph canvas
+  // is gone; click on the session-strips-panel header area
+  // (always present and click-safe).
+  await page.getByTestId("session-strips-panel").click({ position: { x: 5, y: 5 } });
   await expect(btn).toHaveText(/AUTO\s+OFF/i);
 });
 
@@ -230,6 +238,47 @@ test("inspector title for a session is no longer the anonymous 'session' label",
   }
 });
 
+// ──────────────────────── SESSION STRIPS (P3-31) ────────────────────────
+
+test("session strips panel renders + window selector flips between 15m/30m/1h/3h/6h", async ({
+  page,
+}) => {
+  await waitGraphReady(page);
+  const panel = page.getByTestId("session-strips-panel");
+  await expect(panel).toBeVisible();
+  // Selector exists with all 5 options.
+  for (const m of ["15m", "30m", "60m", "180m", "360m"]) {
+    await expect(page.getByTestId(`window-${m}`)).toBeVisible();
+  }
+  // Clicking a different window doesn't throw and changes the
+  // selected style.
+  await page.getByTestId("window-360m").click();
+  await page.waitForTimeout(500);
+  const text = (await panel.textContent()) ?? "";
+  expect(text).toMatch(/last\s+6h/i);
+});
+
+test("each session strip carries data-session-id + per-category sparkline rows", async ({
+  page,
+}) => {
+  await waitGraphReady(page);
+  // Bump to 6h so any DB snapshot has data — 1h windows can be
+  // empty during quiet operator periods.
+  await page.getByTestId("window-360m").click();
+  await page.waitForTimeout(1500);
+  const strips = page.getByTestId("session-strip");
+  const count = await strips.count();
+  if (count === 0) {
+    test.skip(true, "no sessions with activity in any window");
+    return;
+  }
+  // First strip carries data-session-id and at least one category row.
+  const first = strips.first();
+  expect(await first.getAttribute("data-session-id")).toMatch(/.+/);
+  const rows = first.locator('[data-testid="session-strip-category"]');
+  expect(await rows.count()).toBeGreaterThan(0);
+});
+
 // ──────────────────────── ROLLUP + SKELETON (P3-22/23/24) ────────────────────────
 
 test("ticker shows ROLLED rows (×N ▸ tools-list) on real data, not 100 individual events", async ({
@@ -368,12 +417,17 @@ test("UserPromptSubmit rows are marked data-actor=user (label still reads 'user 
 
 // ──────────────────────── PERF BUDGETS ────────────────────────
 
-test("PERF: cold load → graph populated within 3s", async ({ page }) => {
+test("PERF: cold load → strips panel populated within 3s", async ({ page }) => {
   const t0 = Date.now();
   await page.goto("/");
+  // P3-31: SessionStripsPanel replaces GraphCanvas. Wait for the
+  // panel mount + first strip OR the explicit empty state.
   await page
     .waitForFunction(
-      () => document.querySelectorAll('svg[data-testid="graph-canvas"] g.node').length > 0,
+      () =>
+        document.querySelector('[data-testid="session-strips-panel"]') !== null &&
+        (document.querySelectorAll('[data-testid="session-strip"]').length > 0 ||
+          document.querySelector('[data-testid="session-strips-empty"]') !== null),
       { timeout: 8_000 },
     )
     .catch(() => {});
@@ -409,46 +463,12 @@ test("PERF: no console errors during 6s of idle SSE traffic", async ({ page }) =
   expect(errors).toEqual([]);
 });
 
-test("PERF: GraphCanvas — nodes do not drift during 6s of steady SSE (P3-18 regression)", async ({
-  page,
-}) => {
-  await waitGraphReady(page);
-  await page.waitForTimeout(2000); // let initial settle finish
-
-  type Sample = { id: string; x: number; y: number };
-  const sample = (): Promise<Sample[]> =>
-    page.evaluate(() => {
-      return Array.from(
-        document.querySelectorAll('svg[data-testid="graph-canvas"] g.node'),
-      ).map((g) => {
-        const t = (g as SVGGElement).getAttribute("transform") ?? "";
-        const m = /translate\(\s*([-\d.]+)\s*,\s*([-\d.]+)\s*\)/.exec(t);
-        return {
-          id: (g as SVGGElement).getAttribute("data-node-id") ?? "",
-          x: m ? parseFloat(m[1]) : 0,
-          y: m ? parseFloat(m[2]) : 0,
-        };
-      });
-    });
-
-  const before = await sample();
-  await page.waitForTimeout(6_000);
-  const after = await sample();
-
-  const byId = new Map(before.map((b) => [b.id, b]));
-  const deltas: number[] = [];
-  for (const a of after) {
-    const b = byId.get(a.id);
-    if (!b) continue;
-    deltas.push(Math.hypot(a.x - b.x, a.y - b.y));
-  }
-  if (deltas.length === 0) {
-    test.skip(true, "no surviving nodes between samples");
-    return;
-  }
-  const maxDelta = Math.max(...deltas);
-  // Pinned nodes should not drift at all; allow ε for floating point.
-  expect(maxDelta).toBeLessThan(1.0);
+test.skip("PERF: GraphCanvas — nodes do not drift during 6s of steady SSE (P3-18 regression, OBSOLETE)", async () => {
+  // P3-31 replaced GraphCanvas with SessionStripsPanel; the P3-18
+  // force-simulation drift concern doesn't apply to text-mode
+  // sparklines. Kept as test.skip for the historical record so
+  // someone re-introducing a force-directed graph notices the
+  // regression budget that used to exist.
 });
 
 test("PERF: EventTicker — ticker rows do NOT re-render on the 5s now-tick (P3-17 regression)", async ({
@@ -520,13 +540,12 @@ test("no unhandled promise rejections across the warm-up + scroll + click flow",
   await page.waitForTimeout(500);
   await page.getByTestId("auto-watch-toggle").click();
   await page.waitForTimeout(500);
-  // Prefer a SentinelSession node — those are anchored deterministically
-  // near origin and unlikely to be off-screen.
-  const sessionNode = page
-    .locator('svg[data-testid="graph-canvas"] g.node[data-kind="SentinelSession"]')
-    .first();
-  if (await sessionNode.count()) {
-    await sessionNode.click({ force: true });
+  // P3-31: click a session strip instead of the (removed) SVG
+  // session node. Same intent — verify clicking a "select this
+  // session" affordance doesn't throw.
+  const firstStrip = page.getByTestId("session-strip").first();
+  if (await firstStrip.count()) {
+    await firstStrip.click();
   }
   await page.waitForTimeout(800);
   expect(rejections).toEqual([]);

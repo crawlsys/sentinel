@@ -30,21 +30,21 @@ async function waitGraphReady(page: import("@playwright/test").Page) {
 
 // ──────────────────────── MOBILE / NARROW VIEWPORT ────────────────────────
 
-test("MOBILE 375×812: graph canvas gets a usable width (≥300px), panels stack vertically", async ({
+test("MOBILE 375×812: strips panel gets a usable width (≥300px), panels stack vertically", async ({
   page,
 }) => {
   await page.setViewportSize({ width: 375, height: 812 });
   await waitGraphReady(page);
-  // Status bar must be visible and within the viewport (wraps now).
   const statusBar = page.getByTestId("status-bar");
   await expect(statusBar).toBeVisible();
   const sbBox = await statusBar.boundingBox();
   expect(sbBox?.width ?? 999).toBeLessThanOrEqual(380);
-  // Graph canvas must have real width — was 0 before P3-21.
-  const canvas = page.locator('svg[data-testid="graph-canvas"]');
-  const canvasBox = await canvas.boundingBox();
-  expect(canvasBox?.width ?? 0).toBeGreaterThan(300);
-  expect(canvasBox?.height ?? 0).toBeGreaterThan(200);
+  // P3-31 replaced GraphCanvas with SessionStripsPanel — assert
+  // the panel itself fills the available width.
+  const panel = page.getByTestId("session-strips-panel");
+  const panelBox = await panel.boundingBox();
+  expect(panelBox?.width ?? 0).toBeGreaterThan(300);
+  expect(panelBox?.height ?? 0).toBeGreaterThan(200);
 });
 
 test("MOBILE: ticker is reachable (visible OR available via interaction)", async ({ page }) => {
