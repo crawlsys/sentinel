@@ -95,7 +95,7 @@ pub fn run_once() -> Result<usize> {
                 continue;
             }
             if mid == 0 {
-                emit_record(&out, "SessionStart", "gemini_shim", &sid, ts, &repo_root, "gemini")?;
+                emit_record(&out, "SessionStart", "gemini_shim", &sid, ts, &repo_root, "gemini", "")?;
                 emitted += 1;
             }
             if typ == "user" {
@@ -107,6 +107,7 @@ pub fn run_once() -> Result<usize> {
                     ts,
                     &repo_root,
                     "gemini",
+                    "",
                 )?;
                 emitted += 1;
             }

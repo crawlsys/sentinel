@@ -89,9 +89,22 @@ export function buildSessionStrips(
 
   // sid → category → counts[numBuckets]
   const perSession = new Map<string, Map<NodeCategory, number[]>>();
+  // sid → source_harness, derived from the first hook_ingested event
+  // for the session. The graph.nodes set is often narrower than the
+  // graph.events set (the viz-api returns ~6 top-K session nodes but
+  // hundreds of events), so deriving the harness chip from events
+  // lets every visible strip carry its tag — not just the few with
+  // a node in the response.
+  const harnessBySid = new Map<string, string>();
   for (const e of graph.events) {
     const sid = typeof e.payload?.session_id === "string" ? (e.payload.session_id as string) : null;
     if (!sid) continue;
+    if (!harnessBySid.has(sid)) {
+      const h = typeof e.payload?.source_harness === "string"
+        ? (e.payload.source_harness as string)
+        : "";
+      if (h.length > 0) harnessBySid.set(sid, h);
+    }
     const t = parseEventTs(e);
     if (Number.isNaN(t)) continue;
     if (t < windowStart) continue;
@@ -160,7 +173,12 @@ export function buildSessionStrips(
     const name = opts.names?.get(sid) ?? null;
     const shortSid = sid.slice(0, 8);
     const displayName = name && name.length > 0 ? `${name} · s:${shortSid}` : `s:${shortSid}`;
-    const sourceHarness = (node?.data?.source_harness as string | undefined) ?? null;
+    // Prefer node-level tag (authoritative) but fall back to the
+    // event-derived value when the node isn't in this window.
+    const sourceHarness =
+      (node?.data?.source_harness as string | undefined) ??
+      harnessBySid.get(sid) ??
+      null;
 
     out.push({
       sessionId: sid,
@@ -193,7 +211,10 @@ export function buildSessionStrips(
         shortSid: sid.slice(0, 8),
         color: opts.colors.get(sid) ?? "#6e7681",
         status: node?.session_status ?? "awaiting_user",
-        sourceHarness: (node?.data?.source_harness as string | undefined) ?? null,
+        sourceHarness:
+          (node?.data?.source_harness as string | undefined) ??
+          harnessBySid.get(sid) ??
+          null,
         lastActivityAgeS: node?.last_activity_age_s ?? null,
         stuck: opts.stuck.get(sid) ?? null,
         rows: [],

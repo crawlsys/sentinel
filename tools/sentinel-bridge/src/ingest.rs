@@ -159,6 +159,7 @@ fn parse_hook_record(v: &Value) -> Option<HookData> {
             .and_then(|x| x.as_str())
             .unwrap_or("claude")
             .to_string(),
+        tool: v.get("tool").and_then(|x| x.as_str()).unwrap_or("").to_string(),
     })
 }
 

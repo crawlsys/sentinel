@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::sync::OnceLock;
 
 use crate::jsonl::{read_new, OffsetState};
-use crate::shims::emit_record;
+use crate::shims::{emit_record, normalize_tool};
 
 static CHAT_RE: OnceLock<Regex> = OnceLock::new();
 
@@ -61,14 +61,24 @@ pub fn run_once() -> Result<usize> {
                 "",
                 "/",
                 "qwen",
+                "",
             )?;
             emitted += 1;
         }
         let (records, new_off) = read_new(f, off)?;
         for rec in records {
             for translated in translate(&rec) {
-                let (event, hook, ts, root) = translated;
-                emit_record(&out_path(), &event, &hook, &sid, &ts, &root, "qwen")?;
+                let (event, hook, ts, root, tool) = translated;
+                emit_record(
+                    &out_path(),
+                    &event,
+                    &hook,
+                    &sid,
+                    &ts,
+                    &root,
+                    "qwen",
+                    &tool,
+                )?;
                 emitted += 1;
             }
         }
@@ -78,14 +88,20 @@ pub fn run_once() -> Result<usize> {
     Ok(emitted)
 }
 
-/// (event, hook, ts, repo_root) per qwen rollout line.
-fn translate(line: &Value) -> Vec<(String, String, String, String)> {
+/// (event, hook, ts, repo_root, tool) per qwen rollout line.
+fn translate(line: &Value) -> Vec<(String, String, String, String, String)> {
     let typ = line.get("type").and_then(|x| x.as_str()).unwrap_or("");
     let ts = line.get("timestamp").and_then(|x| x.as_str()).unwrap_or("").to_string();
     let cwd = line.get("cwd").and_then(|x| x.as_str()).unwrap_or("/").to_string();
     let mut out = vec![];
     match typ {
-        "user" => out.push(("UserPromptSubmit".into(), "qwen_shim".into(), ts, cwd)),
+        "user" => out.push((
+            "UserPromptSubmit".into(),
+            "qwen_shim".into(),
+            ts,
+            cwd,
+            String::new(),
+        )),
         "assistant" => {
             if let Some(parts) = line
                 .get("message")
@@ -94,12 +110,14 @@ fn translate(line: &Value) -> Vec<(String, String, String, String)> {
             {
                 for p in parts {
                     if let Some(fc) = p.get("functionCall") {
-                        let tool = fc.get("name").and_then(|x| x.as_str()).unwrap_or("unknown");
+                        let raw_tool = fc.get("name").and_then(|x| x.as_str()).unwrap_or("unknown");
+                        let tool = normalize_tool("qwen", raw_tool);
                         out.push((
                             "PreToolUse".into(),
-                            format!("qwen_shim_tool_{tool}"),
+                            format!("qwen_shim_tool_{raw_tool}"),
                             ts.clone(),
                             cwd.clone(),
+                            tool,
                         ));
                     }
                 }
@@ -113,12 +131,14 @@ fn translate(line: &Value) -> Vec<(String, String, String, String)> {
             {
                 for p in parts {
                     if let Some(fr) = p.get("functionResponse") {
-                        let tool = fr.get("name").and_then(|x| x.as_str()).unwrap_or("unknown");
+                        let raw_tool = fr.get("name").and_then(|x| x.as_str()).unwrap_or("unknown");
+                        let tool = normalize_tool("qwen", raw_tool);
                         out.push((
                             "PostToolUse".into(),
-                            format!("qwen_shim_tool_{tool}"),
+                            format!("qwen_shim_tool_{raw_tool}"),
                             ts.clone(),
                             cwd.clone(),
+                            tool,
                         ));
                     }
                 }

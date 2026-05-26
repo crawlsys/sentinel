@@ -23,6 +23,13 @@ use uuid::Uuid;
 /// Emit one hook-invocation record to `out`. Format mirrors the
 /// Python shims and Claude's native hook JSONL so a single bridge
 /// ingest loop covers both.
+///
+/// `tool` is the Claude-normalized tool name (Bash / Read / Edit /
+/// TaskUpdate / etc.). Per-harness shims call into [`normalize_tool`]
+/// to map their native tool taxonomy onto this set before calling
+/// here. Pass `""` for events that don't carry a tool (UserPromptSubmit,
+/// SessionStart, Stop).
+#[allow(clippy::too_many_arguments)]
 pub fn emit_record(
     out: &Path,
     event: &str,
@@ -31,6 +38,7 @@ pub fn emit_record(
     ts: &str,
     repo_root: &str,
     source_harness: &str,
+    tool: &str,
 ) -> Result<()> {
     if let Some(parent) = out.parent() {
         create_dir_all(parent).ok();
@@ -46,10 +54,51 @@ pub fn emit_record(
         "ts": ts,
         "duration_us": 0,
         "source_harness": source_harness,
+        "tool": tool,
     });
     let mut f = OpenOptions::new().create(true).append(true).open(out)?;
     writeln!(f, "{}", serde_json::to_string(&rec)?)?;
     Ok(())
+}
+
+/// Map a harness-native tool name into the Claude tool taxonomy the
+/// dashboard's categorizer expects (Bash / Read / Write / Edit /
+/// MultiEdit / Grep / Glob / TaskUpdate / TaskList / Agent /
+/// AskUserQuestion / WebFetch / WebSearch / NotebookEdit /
+/// ToolSearch). Unrecognised inputs pass through unchanged.
+pub fn normalize_tool(harness: &str, raw: &str) -> String {
+    let lower = raw.to_ascii_lowercase();
+    let mapped = match (harness, lower.as_str()) {
+        // codex (~/.codex)
+        (_, "exec_command") | (_, "exec") | (_, "shell") => "Bash",
+        (_, "apply_patch") | (_, "edit_file") | (_, "patch") => "Edit",
+        (_, "read_file") | (_, "cat") => "Read",
+        (_, "write_file") => "Write",
+        (_, "update_plan") | (_, "todo_write") => "TaskUpdate",
+        (_, "todo_read") | (_, "todo_list") => "TaskList",
+        (_, "web_search") => "WebSearch",
+        (_, "web_fetch") | (_, "fetch_url") => "WebFetch",
+        // opencode native (mostly lowercase claude-likes)
+        (_, "bash") => "Bash",
+        (_, "read") => "Read",
+        (_, "write") => "Write",
+        (_, "edit") => "Edit",
+        (_, "multiedit") => "MultiEdit",
+        (_, "grep") => "Grep",
+        (_, "glob") => "Glob",
+        (_, "task") => "Agent",
+        (_, "ask") | (_, "ask_user") => "AskUserQuestion",
+        (_, "notebookedit") | (_, "notebook_edit") => "NotebookEdit",
+        // qwen specifics
+        (_, "list_directory") | (_, "ls") => "Glob",
+        (_, "search_file_content") => "Grep",
+        _ => "",
+    };
+    if mapped.is_empty() {
+        raw.to_string()
+    } else {
+        mapped.to_string()
+    }
 }
 
 #[allow(dead_code)]

@@ -24,6 +24,12 @@ export async function fetchGraph(
 ): Promise<GraphResponse> {
   const params = new URLSearchParams({ limit: String(limit) });
   if (opts.focusedSession) params.set("focused_session", opts.focusedSession);
+  // include_hooks=true so sentinel.hook_ingested events flow through
+  // the response. The dashboard's session-strip panel groups by
+  // session_id from these events; without them, the strip list is
+  // empty for everything except sessions with a (rare) leaked
+  // sentinel.session_started event.
+  params.set("include_hooks", "true");
   const url = `${apiBase()}/api/graph?${params}`;
   const res = await fetch(url, { signal });
   if (!res.ok) throw new Error(`graph: ${res.status}`);
@@ -53,7 +59,7 @@ export async function fetchHealth(signal?: AbortSignal): Promise<HealthResponse>
 }
 
 export function streamUrl(): string {
-  return `${apiBase()}/api/stream`;
+  return `${apiBase()}/api/stream?include_hooks=true`;
 }
 
 export interface NameResponse {

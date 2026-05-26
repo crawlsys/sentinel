@@ -80,6 +80,13 @@ export function PanelInspector({ node, anchorTs, onClose }: Props) {
       ? (node.data?.session_id as string | undefined)
       : (node?.data?.session_id as string | undefined);
 
+  // /api/activity and /api/summary both read claude transcript JSONLs
+  // from ~/.claude/projects/. Non-claude harnesses don't have those,
+  // so gate the fetch by harness to avoid stuck "loading…" /
+  // "generating…" placeholders.
+  const harness = (node?.data?.source_harness as string | undefined) ?? null;
+  const harnessSupportsTranscript = !harness || harness === "claude";
+
   const activityQ = useQuery({
     queryKey: ["activity", sessionId, anchorTs ?? null],
     queryFn: ({ signal }) =>
@@ -88,7 +95,7 @@ export function PanelInspector({ node, anchorTs, onClose }: Props) {
         anchorTs ? { limit: 30, atTs: anchorTs, windowSecs: 60 } : { limit: 10 },
         signal,
       ),
-    enabled: !!sessionId,
+    enabled: !!sessionId && harnessSupportsTranscript,
     staleTime: 5_000,
   });
 
@@ -102,7 +109,7 @@ export function PanelInspector({ node, anchorTs, onClose }: Props) {
     queryKey: ["summary", sessionId, anchorTs ?? null, summaryKind],
     queryFn: ({ signal }) =>
       fetchSummary(sessionId!, { kind: summaryKind, atTs: anchorTs ?? undefined }, signal),
-    enabled: !!sessionId,
+    enabled: !!sessionId && harnessSupportsTranscript,
     staleTime: 60_000,
   });
 

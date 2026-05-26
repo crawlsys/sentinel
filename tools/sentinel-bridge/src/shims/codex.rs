@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use std::sync::OnceLock;
 
 use crate::jsonl::{read_new, OffsetState};
+use crate::shims::normalize_tool;
 
 static ROLLOUT_RE: OnceLock<Regex> = OnceLock::new();
 
@@ -57,8 +58,17 @@ fn run_inner() -> Result<usize> {
         let mut repo_root = "/".to_string();
         for rec in records {
             for translated in translate(&rec, &sid, &mut repo_root) {
-                let (event, hook, ts, root) = translated;
-                crate::shims::emit_record(&out_path(), &event, &hook, &sid, &ts, &root, "codex")?;
+                let (event, hook, ts, root, tool) = translated;
+                crate::shims::emit_record(
+                    &out_path(),
+                    &event,
+                    &hook,
+                    &sid,
+                    &ts,
+                    &root,
+                    "codex",
+                    &tool,
+                )?;
                 emitted += 1;
             }
         }
@@ -74,13 +84,15 @@ fn session_id_from(path: &std::path::Path) -> Option<String> {
 }
 
 /// Translate one rollout line into zero or more hook-invocation
-/// records: (event, hook, ts, repo_root). `repo_root` is mutated
-/// on session_meta so subsequent records inherit the working dir.
+/// records: (event, hook, ts, repo_root, tool). `repo_root` is
+/// mutated on session_meta so subsequent records inherit the
+/// working dir. `tool` is the Claude-normalized tool name (empty
+/// when the event isn't a tool call).
 fn translate(
     line: &Value,
     _session_id: &str,
     repo_root: &mut String,
-) -> Vec<(String, String, String, String)> {
+) -> Vec<(String, String, String, String, String)> {
     let typ = line.get("type").and_then(|x| x.as_str()).unwrap_or("");
     let ts = line
         .get("timestamp")
@@ -102,6 +114,7 @@ fn translate(
                 "codex_shim".into(),
                 ts,
                 repo_root.clone(),
+                String::new(),
             ));
         }
         "event_msg" => {
@@ -113,12 +126,14 @@ fn translate(
                         "codex_shim".into(),
                         ts,
                         repo_root.clone(),
+                        String::new(),
                     )),
                     "task_complete" => out.push((
                         "Stop".into(),
                         "codex_shim".into(),
                         ts,
                         repo_root.clone(),
+                        String::new(),
                     )),
                     _ => {}
                 }
@@ -129,12 +144,14 @@ fn translate(
                 let sub = p.get("type").and_then(|x| x.as_str()).unwrap_or("");
                 match sub {
                     "function_call" => {
-                        let tool = p.get("name").and_then(|x| x.as_str()).unwrap_or("exec");
+                        let raw_tool = p.get("name").and_then(|x| x.as_str()).unwrap_or("exec");
+                        let tool = normalize_tool("codex", raw_tool);
                         out.push((
                             "PreToolUse".into(),
-                            format!("codex_shim_tool_{tool}"),
+                            format!("codex_shim_tool_{raw_tool}"),
                             ts,
                             repo_root.clone(),
+                            tool,
                         ));
                     }
                     "function_call_output" => {
@@ -143,6 +160,7 @@ fn translate(
                             "codex_shim_tool_result".into(),
                             ts,
                             repo_root.clone(),
+                            String::new(),
                         ));
                     }
                     _ => {}

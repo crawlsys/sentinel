@@ -8,7 +8,7 @@ use serde_json::Value;
 use std::fs;
 use std::path::PathBuf;
 
-use crate::shims::{emit_record, ms_to_iso};
+use crate::shims::{emit_record, ms_to_iso, normalize_tool};
 
 #[derive(serde::Serialize, serde::Deserialize, Default)]
 struct State {
@@ -105,6 +105,7 @@ pub fn run_once() -> Result<usize> {
                     &ms_to_iso(t_created),
                     &repo,
                     "opencode",
+                    "",
                 )?;
                 emitted += 1;
             }
@@ -118,6 +119,7 @@ pub fn run_once() -> Result<usize> {
                         &ms_to_iso(arc),
                         &repo,
                         "opencode",
+                        "",
                     )?;
                     emitted += 1;
                 }
@@ -128,13 +130,8 @@ pub fn run_once() -> Result<usize> {
     }
 
     // 2. New messages → UserPromptSubmit for role=user.
-    //
-    // BUG-FIX: previously SELECT'd only time_created, then updated
-    // the watermark from t_created. But the WHERE filter is on
-    // time_updated. If time_created < time_updated for the row at
-    // the watermark boundary, max(t_created) never crossed prior,
-    // so the same row was emitted on every poll (with a fresh
-    // trace_id each time — bridge dedup couldn't catch it).
+    // Watermark advances on t_updated to match the WHERE filter
+    // (BUG-FIX earlier in session).
     {
         let mut stmt = conn.prepare(
             "SELECT m.id, m.session_id, m.time_created, m.time_updated, m.data, s.directory
@@ -171,6 +168,7 @@ pub fn run_once() -> Result<usize> {
                     &ms_to_iso(t_created),
                     &repo,
                     "opencode",
+                    "",
                 )?;
                 emitted += 1;
             }
@@ -207,10 +205,11 @@ pub fn run_once() -> Result<usize> {
                 .as_deref()
                 .and_then(|s| serde_json::from_str(s).ok())
                 .unwrap_or(Value::Null);
-            let tool = parsed
+            let raw_tool = parsed
                 .get("tool")
                 .and_then(|x| x.as_str())
                 .unwrap_or("unknown");
+            let tool = normalize_tool("opencode", raw_tool);
             let status = parsed
                 .get("state")
                 .and_then(|s| s.get("status"))
@@ -222,11 +221,12 @@ pub fn run_once() -> Result<usize> {
                 emit_record(
                     &out,
                     "PreToolUse",
-                    &format!("opencode_shim_tool_{tool}"),
+                    &format!("opencode_shim_tool_{raw_tool}"),
                     &sid,
                     &ms_to_iso(t_created),
                     &repo,
                     "opencode",
+                    &tool,
                 )?;
                 emitted += 1;
             }
@@ -234,11 +234,12 @@ pub fn run_once() -> Result<usize> {
                 emit_record(
                     &out,
                     "PostToolUse",
-                    &format!("opencode_shim_tool_{tool}"),
+                    &format!("opencode_shim_tool_{raw_tool}"),
                     &sid,
                     &ms_to_iso(t_updated),
                     &repo,
                     "opencode",
+                    &tool,
                 )?;
                 emitted += 1;
             }

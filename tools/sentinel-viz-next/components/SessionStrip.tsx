@@ -32,10 +32,19 @@ export function SessionStrip({ data, selected, onSelect }: Props) {
   // the session is awaiting_user — operator sees "what it's
   // waiting on" in that case, which is the higher-signal copy.
   const summaryKind = isStuck || data.status === "awaiting_user" ? "wait" : "narrative";
+  // AI summary endpoint reads claude transcript JSONLs from
+  // ~/.claude/projects/. Non-claude harnesses (codex / opencode /
+  // qwen / gemini) don't have those files, so the request would
+  // 404 or return text=null forever and the strip would render a
+  // stuck "ai · generating summary…" placeholder. Gate the query
+  // by harness so we never hit the endpoint when there's nothing
+  // to fetch.
+  const harnessSupportsSummary =
+    !data.sourceHarness || data.sourceHarness === "claude";
   const summaryQ = useQuery({
     queryKey: ["strip-summary", data.sessionId, summaryKind],
     queryFn: ({ signal }) => fetchSummary(data.sessionId, { kind: summaryKind }, signal),
-    enabled: !!data.sessionId,
+    enabled: !!data.sessionId && harnessSupportsSummary,
     staleTime: 60_000,
     refetchInterval: 60_000,
   });

@@ -243,12 +243,19 @@ impl Store {
         });
         self.write_event("object.created", &payload, &now_iso)?;
         // Domain event: a session started — preserves the
-        // sentinel.session_started event the Python bridge emitted.
-        let dom = json!({
-            "session_id": sd.session_id,
-            "ts": sd.started_at,
-        });
-        self.write_event("sentinel.session_started", &dom, &now_iso)?;
+        // sentinel.session_started event the Python bridge emitted,
+        // but ONLY for native-claude sessions where a real
+        // sessions.jsonl session_start record drove the creation.
+        // The Python bridge only ever emitted this for ~73 sessions
+        // (all claude); shim-derived sessions emitting it floods the
+        // ticker with thousands of empty "session_started" rows.
+        if sd.source_harness == "claude" {
+            let dom = json!({
+                "session_id": sd.session_id,
+                "ts": sd.started_at,
+            });
+            self.write_event("sentinel.session_started", &dom, &now_iso)?;
+        }
         Ok(obj_id)
     }
 
@@ -276,6 +283,7 @@ impl Store {
                     "repo_root": hi.repo_root,
                     "ts": hi.ts,
                     "source_harness": hi.source_harness,
+                    "tool": hi.tool,
                 },
                 "version": 1,
                 "provenance": provenance.clone(),
@@ -302,6 +310,9 @@ impl Store {
         self.write_event("relation.created", &rel_payload, &now_iso)?;
 
         // Domain event the viz-api ticker tail consumes.
+        // Includes `tool` and `source_harness` so the dashboard can
+        // categorize tool calls + tag each session strip without
+        // needing the (often out-of-window) SentinelSession node.
         let dom = json!({
             "hook": hi.hook,
             "sentinel_event": hi.event,
@@ -310,6 +321,8 @@ impl Store {
             "trace_id": hi.trace_id,
             "duration_us": hi.duration_us,
             "ts": hi.ts,
+            "tool": hi.tool,
+            "source_harness": hi.source_harness,
         });
         self.write_event("sentinel.hook_ingested", &dom, &now_iso)?;
 
@@ -474,4 +487,11 @@ pub struct HookData {
     pub repo_root: String,
     pub ts: String,
     pub source_harness: String,
+    /// Claude-normalized tool name (Bash / Read / Edit / Write / etc.).
+    /// Per-harness shims map their native tool name onto this set so
+    /// the dashboard's categorizer doesn't have to know about each
+    /// harness's local taxonomy. Empty string = no tool (e.g.
+    /// UserPromptSubmit, SessionStart).
+    #[serde(default)]
+    pub tool: String,
 }
