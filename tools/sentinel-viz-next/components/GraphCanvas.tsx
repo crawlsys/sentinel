@@ -268,9 +268,40 @@ export function GraphCanvas({ graph, selectedNodeId, onSelectNode, sessionColors
   }, []);
 
   // Memoise the desired node/link set from the graph prop.
+  // P3-30: cap to the MOST RECENT N tool-call nodes per session.
+  // After the P3-29 backlog bump (150 events/session), rendering
+  // every tool-call node produced a 300+ node spaghetti with
+  // hundreds of crisscrossing chain edges. The graph's job is
+  // "what's happening right now" — the ticker is the historical
+  // record. 12 trailing TCs per session keeps the spiral
+  // readable while preserving the session-galaxy gestalt.
   const desired = useMemo(() => {
     if (!graph) return { nodes: [] as SimNode[], links: [] as SimLink[], anchors: new Map<string, SessionAnchor>() };
-    const nodes: SimNode[] = graph.nodes.map((n) => ({
+
+    const MAX_TC_PER_SESSION = 12;
+    // Bucket all nodes — sessions always kept, hooks kept (already
+    // filtered upstream by include_hooks=false), tool-calls capped.
+    const sessionsAndOther: typeof graph.nodes = [];
+    const tcsBySid = new Map<string, typeof graph.nodes>();
+    for (const n of graph.nodes) {
+      if (n.type === "SentinelToolCall") {
+        const sid = typeof n.data?.session_id === "string" ? (n.data.session_id as string) : "";
+        const list = tcsBySid.get(sid) ?? [];
+        list.push(n);
+        tcsBySid.set(sid, list);
+      } else {
+        sessionsAndOther.push(n);
+      }
+    }
+    const keepIds = new Set<string>(sessionsAndOther.map((n) => n.id));
+    for (const tcs of tcsBySid.values()) {
+      // Newest by seq first, then keep the leading slice.
+      tcs.sort((a, b) => (b.seq ?? 0) - (a.seq ?? 0));
+      for (const tc of tcs.slice(0, MAX_TC_PER_SESSION)) keepIds.add(tc.id);
+    }
+    const filteredGraphNodes = graph.nodes.filter((n) => keepIds.has(n.id));
+
+    const nodes: SimNode[] = filteredGraphNodes.map((n) => ({
       id: n.id,
       kind: n.type,
       outcome: typeof n.data?.outcome === "string" ? (n.data.outcome as string) : undefined,
