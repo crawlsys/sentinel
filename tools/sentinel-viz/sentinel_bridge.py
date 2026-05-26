@@ -33,6 +33,12 @@ from pathlib import Path
 METRICS_DIRS = [
     Path.home() / ".claude/sentinel/metrics",          # real Claude
     Path.home() / ".claude-sentinel/sentinel/metrics", # sandbox sentinel (autonomous loops)
+    # Non-Claude harness shims drop their translated hook-invocations
+    # JSONL into per-harness metrics dirs. Each shim daemon (see
+    # tools/sentinel-viz/harness-shims/*) tails the harness's native
+    # session output and emits bridge-compatible records here.
+    Path.home() / ".codex/sentinel/metrics",           # codex rollout shim
+    Path.home() / ".opencode/sentinel/metrics",        # opencode log shim
 ]
 HOOK_INVOCATIONS_PATHS = [d / "hook-invocations.jsonl" for d in METRICS_DIRS]
 SESSIONS_JSONL_PATHS   = [d / "sessions.jsonl"         for d in METRICS_DIRS]
