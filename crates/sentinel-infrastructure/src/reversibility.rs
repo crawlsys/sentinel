@@ -1339,6 +1339,22 @@ mod tests {
     }
 
     #[test]
+    fn shipped_defaults_linear_project_writes_not_irreversible() {
+        let c = shipped();
+        // Regression: create_project etc. were unmapped → Irreversible → A3 gate
+        // deadlock (Linear API rejects the dry-run _intent fields). Must be RWE.
+        for t in ["create_project", "update_project", "create_milestone", "create_document", "create_cycle", "create_initiative"] {
+            assert_eq!(
+                c.classify(&format!("mcp__linear__{t}"), &no_input()),
+                ReversibilityClass::ReversibleWithEffort,
+                "linear {t} should be ReversibleWithEffort, not Irreversible"
+            );
+        }
+        assert_eq!(c.classify("mcp__linear__list_projects", &no_input()), ReversibilityClass::TriviallyReversible);
+        assert_eq!(c.classify("mcp__linear__delete_project", &no_input()), ReversibilityClass::Irreversible);
+    }
+
+    #[test]
     fn shipped_defaults_neon_delete_project_is_catastrophic() {
         let c = shipped();
         assert_eq!(
