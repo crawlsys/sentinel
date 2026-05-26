@@ -55,6 +55,65 @@ const sampleEvents: RecentEvent[] = [
   },
 ];
 
+describe("EventTicker — actor distinction (P3-19)", () => {
+  it("every ticker row carries a data-actor attribute", () => {
+    render(<EventTicker events={sampleEvents} onSelectNode={() => {}} />);
+    const rows = screen.getByTestId("ticker-rows").querySelectorAll("li");
+    for (const li of Array.from(rows)) {
+      const actor = li.getAttribute("data-actor");
+      expect(["claude", "sentinel", "user"]).toContain(actor);
+    }
+  });
+
+  it("UserPromptSubmit rows carry data-actor=user with the ↩ glyph", () => {
+    render(<EventTicker events={sampleEvents} onSelectNode={() => {}} />);
+    const userRow = Array.from(screen.getByTestId("ticker-rows").querySelectorAll("li")).find(
+      (li) => li.getAttribute("data-actor") === "user",
+    );
+    expect(userRow).toBeDefined();
+    expect(userRow?.textContent).toContain("↩");
+  });
+
+  it("tool-call rows default to data-actor=claude with the ◇ glyph", () => {
+    render(<EventTicker events={sampleEvents} onSelectNode={() => {}} />);
+    const claudeRow = Array.from(screen.getByTestId("ticker-rows").querySelectorAll("li")).find(
+      (li) => li.getAttribute("data-actor") === "claude",
+    );
+    expect(claudeRow).toBeDefined();
+    expect(claudeRow?.textContent).toContain("◇");
+  });
+
+  it("legend chip is present and lists all three actor labels", () => {
+    render(<EventTicker events={sampleEvents} onSelectNode={() => {}} />);
+    const legend = screen.getByTestId("actor-legend");
+    expect(legend.textContent).toMatch(/agent/i);
+    expect(legend.textContent).toMatch(/sentinel/i);
+    expect(legend.textContent).toMatch(/user/i);
+  });
+
+  it("a deny hook row renders data-actor=sentinel and data-intervention=true", () => {
+    const denyEvent: RecentEvent[] = [
+      {
+        seq: 1,
+        type: "sentinel.hook_ingested",
+        ts: "2026-05-26T00:00:00Z",
+        payload: {
+          session_id: "sess-z",
+          sentinel_event: "PreToolUse",
+          hook: "tool_usage_gate",
+          outcome: "deny",
+          ts: "2026-05-26T00:00:00",
+        },
+      },
+    ];
+    render(<EventTicker events={denyEvent} onSelectNode={() => {}} />);
+    const row = screen.getByTestId("ticker-rows").querySelector("li");
+    expect(row?.getAttribute("data-actor")).toBe("sentinel");
+    expect(row?.getAttribute("data-intervention")).toBe("true");
+    expect(row?.className).toContain("intervention-row");
+  });
+});
+
 describe("EventTicker", () => {
   it("renders empty state without crashing", () => {
     render(<EventTicker events={[]} onSelectNode={() => {}} />);
@@ -164,6 +223,43 @@ describe("EventTicker", () => {
       render(<EventTicker events={sampleEvents} onSelectNode={() => {}} stuckMeta={stuckMeta} />);
       const reason = screen.getByTestId("stuck-reason-line");
       expect(reason.textContent).toMatch(/awaiting/);
+    });
+
+    it("intervention rows pin to top with intervention-row class when a session denies", () => {
+      const denyEvents: RecentEvent[] = [
+        // Claude tool call (background)
+        {
+          seq: 10,
+          type: "sentinel.tool_call_observed",
+          ts: "2026-05-26T00:00:00Z",
+          payload: {
+            session_id: "sess-claude",
+            sentinel_event: "PreToolUse",
+            tool: "Read",
+            tool_call_id: "SentinelToolCall#tc-read",
+            ts_sec: "2026-05-26T00:00:00",
+          },
+        },
+        // Sentinel intervention (deny)
+        {
+          seq: 11,
+          type: "sentinel.hook_ingested",
+          ts: "2026-05-26T00:00:01Z",
+          payload: {
+            session_id: "sess-sentinel",
+            sentinel_event: "PreToolUse",
+            hook: "tool_usage_gate",
+            outcome: "deny",
+            ts: "2026-05-26T00:00:01",
+          },
+        },
+      ];
+      render(<EventTicker events={denyEvents} onSelectNode={() => {}} />);
+      const rows = screen.getByTestId("ticker-rows").querySelectorAll("li");
+      // Intervention pins to top.
+      expect(rows[0].className).toContain("intervention-row");
+      expect(rows[0].getAttribute("data-intervention")).toBe("true");
+      expect(rows[0].getAttribute("data-actor")).toBe("sentinel");
     });
 
     it("only the FIRST event per stuck session is pinned (not every row from that session)", () => {

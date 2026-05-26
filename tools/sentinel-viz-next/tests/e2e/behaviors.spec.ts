@@ -188,6 +188,69 @@ test("KpiBar: present, shows active/evt-min/5m/out-5m cards", async ({ page }) =
   expect(text).toMatch(/out\/5m/i);
 });
 
+// ──────────────────────── ACTOR DISTINCTION (P3-19) ────────────────────────
+
+test("every ticker row exposes a data-actor attribute in {claude, sentinel, user}", async ({
+  page,
+}) => {
+  await waitGraphReady(page);
+  const actors = await page
+    .locator('[data-testid="ticker-rows"] li')
+    .evaluateAll((els) => els.map((el) => el.getAttribute("data-actor")));
+  expect(actors.length).toBeGreaterThan(0);
+  for (const a of actors) {
+    expect(["claude", "sentinel", "user"]).toContain(a);
+  }
+});
+
+test("ticker header shows the actor legend (◇ agent / ⚙ sentinel / ↩ user)", async ({ page }) => {
+  await waitGraphReady(page);
+  const legend = page.getByTestId("actor-legend");
+  await expect(legend).toBeVisible();
+  const text = (await legend.textContent()) ?? "";
+  expect(text).toMatch(/agent/i);
+  expect(text).toMatch(/sentinel/i);
+  expect(text).toMatch(/user/i);
+  expect(text).toContain("◇");
+  expect(text).toContain("⚙");
+  expect(text).toContain("↩");
+});
+
+test("actor glyph is rendered inside each row and lines up with its data-actor", async ({
+  page,
+}) => {
+  await waitGraphReady(page);
+  const pairs = await page
+    .locator('[data-testid="ticker-rows"] li')
+    .evaluateAll((els) =>
+      els.map((el) => ({
+        actor: el.getAttribute("data-actor"),
+        glyph: el.querySelector('[data-testid="actor-glyph"]')?.textContent?.trim() ?? null,
+      })),
+    );
+  expect(pairs.length).toBeGreaterThan(0);
+  for (const { actor, glyph } of pairs) {
+    if (actor === "claude") expect(glyph).toBe("◇");
+    else if (actor === "sentinel") expect(glyph).toBe("⚙");
+    else if (actor === "user") expect(glyph).toBe("↩");
+  }
+});
+
+test("UserPromptSubmit rows are marked data-actor=user (label still reads 'user prompt')", async ({
+  page,
+}) => {
+  await waitGraphReady(page);
+  // Find any row whose label contains the user-prompt text; verify
+  // its data-actor is "user". Skip if no user prompts in window.
+  const userRowCount = await page.locator('[data-testid="ticker-rows"] li[data-actor="user"]').count();
+  if (userRowCount === 0) {
+    test.skip(true, "no user prompts in current DB window");
+    return;
+  }
+  const firstUserRow = page.locator('[data-testid="ticker-rows"] li[data-actor="user"]').first();
+  await expect(firstUserRow).toContainText(/user prompt/i);
+});
+
 // ──────────────────────── PERF BUDGETS ────────────────────────
 
 test("PERF: cold load → graph populated within 3s", async ({ page }) => {

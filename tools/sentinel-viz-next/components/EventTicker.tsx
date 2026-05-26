@@ -38,6 +38,18 @@ interface TickerMember {
   outcome: string | null;
 }
 
+/// Who originated this row's underlying event.
+///   - "claude"   — the agent doing things (tool calls, observations,
+///                  assistant turns). The default for tool_call_observed.
+///   - "sentinel" — the control plane intervening: hook-ingested
+///                  events or any row whose outcome reflects a real
+///                  decision (deny / inject / force_stop).
+///   - "user"     — operator input. UserPromptSubmit / ask responses.
+///
+/// Derivation is deterministic from existing fields (event type +
+/// sentinel_event + outcome) — no backend change needed.
+export type RowActor = "claude" | "sentinel" | "user";
+
 interface TickerRow {
   /** Stable React key. */
   key: string;
@@ -53,8 +65,61 @@ interface TickerRow {
   toolCallId: string | null;
   outcome: string | null;
   category: NodeCategory;
+  actor: RowActor;
+  /** True when this row reflects Sentinel actively intervening
+   *  (deny / inject / force_stop) rather than passively observing.
+   *  Interventions sticky-pin to the top of the ticker with an
+   *  amber pulse — same severity tier as STUCK rows, but visually
+   *  distinct so the operator can tell at a glance which is which. */
+  isIntervention: boolean;
   members: TickerMember[];
 }
+
+const INTERVENTION_OUTCOMES = new Set([
+  "deny",
+  "denied",
+  "inject",
+  "injected",
+  "force_stop",
+  "block",
+  "blocked",
+]);
+
+/// Decide who originated an event, given the fields we already
+/// receive from the bridge. Exported for unit-testing — keep the
+/// rules tight; if they get fuzzier than this, the right move is
+/// to add a discriminator field at the bridge layer.
+export function deriveActor(
+  eventType: string,
+  sentinelEvent: string,
+  outcome: string | null,
+): RowActor {
+  if (sentinelEvent === "UserPromptSubmit") return "user";
+  if (eventType.includes("hook")) return "sentinel";
+  if (outcome && INTERVENTION_OUTCOMES.has(outcome)) return "sentinel";
+  return "claude";
+}
+
+export function isInterventionOutcome(outcome: string | null): boolean {
+  return outcome != null && INTERVENTION_OUTCOMES.has(outcome);
+}
+
+const ACTOR_GLYPH: Record<RowActor, string> = {
+  // White diamond — neutral, agent doing things. Picked over `▸`
+  // because `▸` is already used for the ×N expand toggle.
+  claude: "◇",
+  // Gear — control-plane vibe; the Sentinel logo language.
+  sentinel: "⚙",
+  // Return arrow — universal submit/enter glyph; matches user
+  // intent ("you typed something").
+  user: "↩",
+};
+
+const ACTOR_LABEL: Record<RowActor, string> = {
+  claude: "agent (Claude)",
+  sentinel: "control plane (Sentinel)",
+  user: "operator (you)",
+};
 
 export function EventTicker({ events, onSelectNode, sessionColors, stuckMeta }: Props) {
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
@@ -93,24 +158,53 @@ export function EventTicker({ events, onSelectNode, sessionColors, stuckMeta }: 
   // top of the list, then the rest in normal newest-first order.
   // The pinned rows render with a pulsing red border to make them
   // unmissable.
-  const { orderedRows, pinnedKeys } = useMemo(() => {
-    if (!stuckMeta || stuckMeta.size === 0) {
-      return { orderedRows: augmentedRows, pinnedKeys: new Set<string>() };
-    }
+  // Two-tier pin:
+  //   Tier 1 — stuck-row (red pulse): one per stuck session, freshest event.
+  //   Tier 2 — intervention-row (amber pulse): Sentinel actually
+  //            denied / injected / blocked / force-stopped. These are
+  //            the "operator MUST notice this" rows — same severity
+  //            class as stuck, but distinguishable by colour.
+  // pinnedKeys = stuck only (carries the existing stuck-row class).
+  // interventionKeys = intervention only (carries the new
+  //                     intervention-row class). The two sets are
+  //                     mutually exclusive — if a row is both, stuck
+  //                     wins so the operator sees the stronger signal
+  //                     once instead of two highlights stacking.
+  const { orderedRows, pinnedKeys, interventionKeys } = useMemo(() => {
+    const stuckSet = stuckMeta && stuckMeta.size > 0 ? stuckMeta : null;
     const seenStuckSid = new Set<string>();
-    const pinned: typeof augmentedRows = [];
+    const seenInterventionSid = new Set<string>();
+    const stuckPin: typeof augmentedRows = [];
+    const intervPin: typeof augmentedRows = [];
     const rest: typeof augmentedRows = [];
     const pinnedKeys = new Set<string>();
+    const interventionKeys = new Set<string>();
+
     for (const r of augmentedRows) {
-      if (r.sessionId && stuckMeta.has(r.sessionId) && !seenStuckSid.has(r.sessionId)) {
+      const isStuck = !!(stuckSet && r.sessionId && stuckSet.has(r.sessionId) && !seenStuckSid.has(r.sessionId));
+      if (isStuck && r.sessionId) {
         seenStuckSid.add(r.sessionId);
         pinnedKeys.add(r.key);
-        pinned.push(r);
-      } else {
-        rest.push(r);
+        stuckPin.push(r);
+        continue;
       }
+      // Intervention rows: pin one per session per intervention-batch
+      // (de-dup by sid to keep the head of the ticker tight when one
+      // session generates many denies in a row — the freshest one is
+      // still informative). Skip if already stuck-pinned above.
+      if (r.isIntervention && r.sessionId && !seenInterventionSid.has(r.sessionId)) {
+        seenInterventionSid.add(r.sessionId);
+        interventionKeys.add(r.key);
+        intervPin.push(r);
+        continue;
+      }
+      rest.push(r);
     }
-    return { orderedRows: [...pinned, ...rest], pinnedKeys };
+    return {
+      orderedRows: [...stuckPin, ...intervPin, ...rest],
+      pinnedKeys,
+      interventionKeys,
+    };
   }, [augmentedRows, stuckMeta]);
 
   function toggle(key: string) {
@@ -127,9 +221,18 @@ export function EventTicker({ events, onSelectNode, sessionColors, stuckMeta }: 
       data-testid="event-ticker"
       className="flex flex-col h-full w-[360px] border-l border-[#30363d] bg-[#0d1117] text-[#c9d1d9] text-xs font-mono"
     >
-      <header className="px-3 py-2 border-b border-[#30363d] uppercase tracking-wider text-[10px] text-[#6e7681] flex justify-between">
+      <header className="px-3 py-2 border-b border-[#30363d] uppercase tracking-wider text-[10px] text-[#6e7681] flex justify-between items-baseline gap-2">
         <span>events</span>
-        <span>{rows.length} rows · {events.length} raw</span>
+        <span
+          className="text-[9px] tracking-normal normal-case flex gap-2"
+          data-testid="actor-legend"
+          title="event origin: agent (Claude) / control plane (Sentinel) / operator (you)"
+        >
+          <span style={{ color: "#6e7681" }}>◇ agent</span>
+          <span style={{ color: "#d29922" }}>⚙ sentinel</span>
+          <span style={{ color: "#58a6ff" }}>↩ user</span>
+        </span>
+        <span>{rows.length} rows</span>
       </header>
       <ul className="overflow-y-auto flex-1" data-testid="ticker-rows">
         {orderedRows.map((row) => {
@@ -144,9 +247,15 @@ export function EventTicker({ events, onSelectNode, sessionColors, stuckMeta }: 
           return (
             <li
               key={row.key}
+              data-actor={row.actor}
+              data-intervention={row.isIntervention ? "true" : undefined}
               data-stuck={pinnedKeys.has(row.key) ? "true" : undefined}
               className={`pl-0 pr-3 py-1 border-b border-[#21262d] hover:bg-[#1f6feb22] flex ${
-                pinnedKeys.has(row.key) ? "stuck-row" : ""
+                pinnedKeys.has(row.key)
+                  ? "stuck-row"
+                  : interventionKeys.has(row.key)
+                    ? "intervention-row"
+                    : ""
               }`}
             >
               {/* Session-color tab — 4px wide, full row height, matches
@@ -163,6 +272,26 @@ export function EventTicker({ events, onSelectNode, sessionColors, stuckMeta }: 
               />
               <div className="flex-1 min-w-0">
               <div className="flex gap-2 items-baseline cursor-pointer" onClick={focus}>
+                {/* Actor glyph — disambiguates "who initiated this
+                    event" at a glance: ◇ Claude, ⚙ Sentinel, ↩ user.
+                    Fixed-width column so labels still line up.
+                    Sentinel rows get a touch of amber so they stand
+                    out without needing a new palette tier. */}
+                <span
+                  data-testid="actor-glyph"
+                  className="inline-block w-3 text-center text-[11px] shrink-0 leading-none"
+                  style={{
+                    color:
+                      row.actor === "sentinel"
+                        ? "#d29922"
+                        : row.actor === "user"
+                          ? "#58a6ff"
+                          : "#6e7681",
+                  }}
+                  title={ACTOR_LABEL[row.actor]}
+                >
+                  {ACTOR_GLYPH[row.actor]}
+                </span>
                 <span
                   className="inline-block w-2 h-2 rounded-full shrink-0"
                   style={{ backgroundColor: categoryColor(row.category) }}
@@ -298,6 +427,8 @@ function buildRows(events: RecentEvent[]): TickerRow[] {
       toolCallId: tcid,
       outcome,
       category,
+      actor: deriveActor(e.type, sentinelEvent, outcome),
+      isIntervention: isInterventionOutcome(outcome),
       members: [{ ts, toolCallId: tcid, outcome }],
     });
   }
