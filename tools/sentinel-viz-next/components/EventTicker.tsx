@@ -243,7 +243,7 @@ export function EventTicker({ events, onSelectNode, sessionColors, stuckMeta }: 
   return (
     <aside
       data-testid="event-ticker"
-      className="flex flex-col h-full w-[360px] border-l border-[#30363d] bg-[#0d1117] text-[#c9d1d9] text-xs font-mono"
+      className="flex flex-col h-full w-full md:w-[360px] border-t md:border-t-0 md:border-l border-[#30363d] bg-[#0d1117] text-[#c9d1d9] text-xs font-mono"
     >
       <header className="px-3 py-2 border-b border-[#30363d] uppercase tracking-wider text-[10px] text-[#6e7681] flex justify-between items-baseline gap-2">
         <span>events</span>

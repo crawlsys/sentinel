@@ -108,7 +108,7 @@ export function PanelInspector({ node, anchorTs, onClose }: Props) {
     return (
       <section
         data-testid="panel-inspector"
-        className="w-[360px] border-l border-[#30363d] bg-[#161b22] text-[#c9d1d9] p-4 text-xs font-mono"
+        className="w-full md:w-[360px] border-t md:border-t-0 md:border-l border-[#30363d] bg-[#161b22] text-[#c9d1d9] p-4 text-xs font-mono"
       >
         <p className="text-[#6e7681]">click a node or ticker row to inspect</p>
       </section>
@@ -118,7 +118,7 @@ export function PanelInspector({ node, anchorTs, onClose }: Props) {
   return (
     <section
       data-testid="panel-inspector"
-      className="w-[360px] border-l border-[#30363d] bg-[#161b22] text-[#c9d1d9] p-4 text-xs font-mono overflow-y-auto"
+      className="w-full md:w-[360px] border-t md:border-t-0 md:border-l border-[#30363d] bg-[#161b22] text-[#c9d1d9] p-4 text-xs font-mono overflow-y-auto"
     >
       <header className="flex items-baseline justify-between mb-3">
         <h3 className="text-[#c9d1d9] text-sm">

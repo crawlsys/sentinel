@@ -9,14 +9,32 @@ import { fetchGraph, streamUrl } from "./api";
 /// Falls back to polling /api/graph if EventSource is unavailable.
 /// Pass `focusedSession` (a data.session_id) to ask the server to
 /// expand that session's window from the default 12 nodes to 36.
+/// Three-state liveness signal — matches what an operator can act on:
+///   - "live"  — fresh data (last SSE message <5s ago)
+///   - "stale" — data is here but no fresh stream (5-30s gap)
+///   - "down"  — no data OR stream truly disconnected (>30s gap)
+///   - "init"  — never received a message yet
+///
+/// The previous boolean `connected` flag was true the whole time
+/// between message-received and the 30s timeout, so brief drops
+/// went unnoticed. The "stale" tier makes a 20s SSE blip visible
+/// without making the indicator flicker every few seconds.
+export type StreamLiveness = "live" | "stale" | "down" | "init";
+
+const STALE_AFTER_MS = 5_000;
+const DOWN_AFTER_MS = 30_000;
+const FRESHNESS_TICK_MS = 1_500;
+
 export function useGraphStream(focusedSession: string | null = null): {
   graph: GraphResponse | null;
   error: string | null;
   connected: boolean;
+  liveness: StreamLiveness;
 } {
   const [graph, setGraph] = useState<GraphResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [connected, setConnected] = useState(false);
+  const [liveness, setLiveness] = useState<StreamLiveness>("init");
   const sourceRef = useRef<EventSource | null>(null);
 
   useEffect(() => {
@@ -56,6 +74,20 @@ export function useGraphStream(focusedSession: string | null = null): {
     const es = new EventSource(streamUrl());
     sourceRef.current = es;
     let lastMessageAt = 0;
+    // Re-evaluate freshness on a small ticker so the indicator
+    // crosses live→stale→down on its own without needing a new
+    // SSE event to advance state. setLiveness is identity-safe
+    // (same value short-circuits in React).
+    const freshnessTimer = window.setInterval(() => {
+      if (cancelled) return;
+      if (lastMessageAt === 0) return; // still "init"
+      const gap = Date.now() - lastMessageAt;
+      setLiveness((prev) => {
+        const next: StreamLiveness =
+          gap < STALE_AFTER_MS ? "live" : gap < DOWN_AFTER_MS ? "stale" : "down";
+        return next === prev ? prev : next;
+      });
+    }, FRESHNESS_TICK_MS);
     // NOTE: do NOT mark connected=true in onopen. Localhost SSE socket
     // opens before the initial snapshot is parsed, which makes the
     // status bar skip the "● ready" state entirely. The status flow
@@ -65,15 +97,22 @@ export function useGraphStream(focusedSession: string | null = null): {
     es.onerror = () => {
       if (cancelled) return;
       const since = Date.now() - lastMessageAt;
-      if (lastMessageAt === 0 || since > 30_000) {
+      if (lastMessageAt === 0 || since > DOWN_AFTER_MS) {
         setConnected(false);
+        setLiveness("down");
         setError("sentinel API unreachable — auto-reconnecting");
+      } else if (since > STALE_AFTER_MS) {
+        // We have data but the stream is misbehaving. Surface
+        // stale-not-down so the operator sees the indicator change
+        // immediately on the next freshness tick.
+        setLiveness("stale");
       }
     };
     es.onmessage = (e) => {
       if (cancelled) return;
       lastMessageAt = Date.now();
       setConnected(true);
+      setLiveness("live");
       try {
         const data = JSON.parse(e.data) as GraphResponse;
         setGraph(data);
@@ -85,12 +124,13 @@ export function useGraphStream(focusedSession: string | null = null): {
     return () => {
       cancelled = true;
       abort.abort();
+      window.clearInterval(freshnessTimer);
       es.close();
       sourceRef.current = null;
     };
   }, [focusedSession]);
 
-  return { graph, error, connected };
+  return { graph, error, connected, liveness };
 }
 
 function humanError(err: unknown): string {

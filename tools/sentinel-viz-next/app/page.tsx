@@ -24,7 +24,7 @@ export default function Page() {
   // chain.
   const [pendingFocusSession, setPendingFocusSession] = useState<string | null>(null);
 
-  const { graph, error, connected } = useGraphStream(pendingFocusSession);
+  const { graph, error, connected, liveness } = useGraphStream(pendingFocusSession);
 
   const selectedNode = useMemo(() => {
     if (!graph || !selectedNodeId) return null;
@@ -104,6 +104,7 @@ export default function Page() {
       <StatusBar
         graph={graph}
         connected={connected}
+        liveness={liveness}
         error={error}
         stuckCount={stuck.length}
         onStuckClick={focusFirstStuck}
@@ -112,8 +113,13 @@ export default function Page() {
         autoReason={auto.reason}
         onToggleAuto={() => auto.set(!auto.on)}
       />
-      <div className="flex flex-1 min-h-0">
-        <div className="flex-1 min-w-0 min-h-0 relative">
+      {/* Below md (~768px) we stack the three panels vertically so
+          the graph SVG doesn't collapse to 0px under the 360px-wide
+          siblings. The outer container becomes scrollable on
+          mobile; on desktop the inner row layout returns and
+          overflow stays clipped. */}
+      <div className="flex flex-col md:flex-row flex-1 min-h-0 overflow-y-auto md:overflow-hidden">
+        <div className="flex-1 min-w-0 min-h-[50vh] md:min-h-0 relative">
           <GraphCanvas
             graph={graph}
             selectedNodeId={selectedNodeId}

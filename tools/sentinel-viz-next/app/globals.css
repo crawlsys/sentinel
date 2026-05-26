@@ -23,6 +23,22 @@ body {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 
+/* ---------- accessible focus rings (keyboard nav) ----------
+   Default browser outlines render at ~rgb(16,16,16) which is
+   essentially invisible against the #0d1117 / #161b22 panel
+   backgrounds. Use the existing accent palette and keep the
+   outline OUTSIDE the element so it doesn't shift layout. */
+button:focus-visible,
+a:focus-visible,
+[role="button"]:focus-visible,
+[tabindex]:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  /* On dark panels a faint glow makes the ring pop without the
+     2px outline needing to be thick. */
+  box-shadow: 0 0 0 4px rgba(88, 166, 255, 0.18);
+}
+
 /* ---------- graph node pulses (port of viz_server.py liveness ring) ---------- */
 
 /* Continuous per-status pulse on the node's primary circle. */
