@@ -24,27 +24,27 @@ pub(super) fn append_block_context(message: impl Into<String>, input: &HookInput
     }
 
     if let Some(session_id) = session_id {
-        let _ = write!(message, "[sentinel] session: {session_id}\n");
-        let _ = write!(
+        let _ = writeln!(message, "[sentinel] session: {session_id}");
+        let _ = writeln!(
             message,
-            "[sentinel] state: ~/.claude/sentinel/state/{session_id}.json\n"
+            "[sentinel] state: ~/.claude/sentinel/state/{session_id}.json"
         );
     }
 
     if let Some(cwd) = cwd {
-        let _ = write!(message, "[sentinel] cwd: {cwd}\n");
+        let _ = writeln!(message, "[sentinel] cwd: {cwd}");
     }
 
     if let Some(tool_name) = tool_name {
-        let _ = write!(message, "[sentinel] tool: {tool_name}\n");
+        let _ = writeln!(message, "[sentinel] tool: {tool_name}");
     }
 
     if let Some(target) = target {
-        let _ = write!(message, "[sentinel] target: {target}\n");
+        let _ = writeln!(message, "[sentinel] target: {target}");
     }
 
     if let Some(command) = command {
-        let _ = write!(message, "[sentinel] command: {command}\n");
+        let _ = writeln!(message, "[sentinel] command: {command}");
     }
 
     if message.ends_with('\n') {
