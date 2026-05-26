@@ -156,7 +156,7 @@ export default function Page() {
       ? (latest.payload.ts_sec as string)
       : (typeof latest.payload.ts === "string" ? (latest.payload.ts as string) : latest.ts);
     if (tcid) selectNode(tcid, ts);
-    else if (sid) selectNode(`SentinelSession#${sid}`, ts);
+    else if (sid) selectSessionBySid(sid, ts);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [auto.on, graph?.max_seq]);
 
@@ -164,6 +164,39 @@ export default function Page() {
     setSelectedNodeId(nodeId);
     setAnchorTs(ts ?? null);
   }
+
+  // P3-36 bug fix: session node IDs are `SentinelSession#<seq>`
+  // not `SentinelSession#<session_id>`. Centralise the lookup so
+  // every caller that wants to select a session by sid resolves
+  // it to the actual graph-node id once. Returns null when the
+  // session isn't currently in graph.nodes.
+  function selectSessionBySid(sid: string | null, ts?: string) {
+    if (!sid) {
+      selectNode(null);
+      return;
+    }
+    const node = graph?.nodes.find(
+      (n) =>
+        n.type === "SentinelSession" &&
+        typeof n.data?.session_id === "string" &&
+        (n.data.session_id as string) === sid,
+    );
+    selectNode(node?.id ?? null, ts);
+  }
+
+  // sid → graph-node id map, passed into children that take a
+  // bare session_id from their event payloads (EventTicker) and
+  // need to translate it to a clickable node-id.
+  const sessionNodeIds = useMemo(() => {
+    const m = new Map<string, string>();
+    if (!graph) return m;
+    for (const n of graph.nodes) {
+      if (n.type !== "SentinelSession") continue;
+      const sid = n.data?.session_id;
+      if (typeof sid === "string") m.set(sid, n.id);
+    }
+    return m;
+  }, [graph]);
 
   function focusFirstStuck() {
     if (stuck.length === 0) return;
@@ -204,13 +237,7 @@ export default function Page() {
             stuck={stuck}
             dormantSessionIds={dormantSessionIds}
             selectedSessionId={selectedSessionId}
-            onSelectSession={(sid) => {
-              if (!sid) {
-                selectNode(null);
-              } else {
-                selectNode(`SentinelSession#${sid}`);
-              }
-            }}
+            onSelectSession={(sid) => selectSessionBySid(sid)}
           />
           {!graph ? (
             <div
@@ -222,17 +249,43 @@ export default function Page() {
             </div>
           ) : null}
         </div>
-        <PanelInspector
-          node={selectedNode}
-          anchorTs={anchorTs}
-          onClose={() => selectNode(null)}
-        />
+        {/* P3-36: mobile-modal shell. Below md the inspector sits
+            far down the stacked column — taps on ticker / strips
+            look dead because the inspector is off-screen. Now:
+              - mobile + selection → fixed inset-0 modal overlay
+                with backdrop. Tap backdrop OR the X button closes.
+              - mobile + no selection → display:none so it doesn't
+                steal space below the events feed.
+              - md+ → `contents` lets the existing flex-row layout
+                continue rendering the inspector as a side panel
+                exactly as before. */}
+        <div
+          data-testid="inspector-shell"
+          data-modal-open={selectedNode ? "true" : undefined}
+          onClick={(e) => {
+            // Backdrop click closes — only when the click landed
+            // on the shell itself, not on the inspector content.
+            if (e.target === e.currentTarget) selectNode(null);
+          }}
+          className={`md:contents ${
+            selectedNode
+              ? "fixed inset-0 z-40 bg-black/70 flex flex-col"
+              : "hidden"
+          }`}
+        >
+          <PanelInspector
+            node={selectedNode}
+            anchorTs={anchorTs}
+            onClose={() => selectNode(null)}
+          />
+        </div>
         <EventTicker
           events={graph?.events ?? []}
           onSelectNode={(id, ts) => selectNode(id, ts)}
           sessionColors={sessionColors}
           stuckMeta={stuckMeta}
           dormantSessionIds={dormantSessionIds}
+          sessionNodeIds={sessionNodeIds}
         />
       </div>
       <SessionConsole

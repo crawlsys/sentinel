@@ -108,7 +108,7 @@ export function PanelInspector({ node, anchorTs, onClose }: Props) {
     return (
       <section
         data-testid="panel-inspector"
-        className="w-full md:w-[360px] border-t md:border-t-0 md:border-l border-[#30363d] bg-[#161b22] text-[#c9d1d9] p-4 text-xs font-mono"
+        className="w-full md:w-[360px] flex-1 md:flex-none min-h-0 max-h-screen md:max-h-none border-t md:border-t-0 md:border-l border-[#30363d] bg-[#161b22] text-[#c9d1d9] p-4 text-xs font-mono"
       >
         <p className="text-[#6e7681]">click a node or ticker row to inspect</p>
       </section>
@@ -127,7 +127,10 @@ export function PanelInspector({ node, anchorTs, onClose }: Props) {
         <button
           aria-label="close inspector"
           onClick={onClose}
-          className="text-[#6e7681] hover:text-[#c9d1d9]"
+          // Touch target sized for thumbs on mobile (≥44×44). On
+          // desktop the tighter padding still leaves a clear hit
+          // area but doesn't dominate the header.
+          className="text-[#6e7681] hover:text-[#c9d1d9] -mr-2 -my-2 px-3 py-2 text-base md:text-sm rounded hover:bg-[#21262d]"
         >
           ✕
         </button>

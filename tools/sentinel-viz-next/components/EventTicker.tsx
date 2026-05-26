@@ -39,6 +39,15 @@ interface Props {
    *  off". Stuck/awaiting_user is NOT filtered: those are signal
    *  even when old. */
   dormantSessionIds?: Set<string>;
+  /** sid → graph-node id. P3-36: ticker rows fall back to
+   *  selecting the SESSION when they don't have a tool_call_id
+   *  (e.g., user-prompt rows). The session node's id is
+   *  `SentinelSession#<seq>`, NOT `SentinelSession#<session_id>`,
+   *  so we can't reconstruct it from the row alone. The page
+   *  passes this lookup map so the fallback selectNode call hits
+   *  a real node id. Empty / undefined → fallback emits null
+   *  (no selection) instead of clicking an invalid id. */
+  sessionNodeIds?: Map<string, string>;
 }
 
 export interface StuckMeta {
@@ -192,7 +201,7 @@ const ACTOR_LABEL: Record<RowActor, string> = {
   user: "operator (you)",
 };
 
-export function EventTicker({ events, onSelectNode, sessionColors, stuckMeta, dormantSessionIds }: Props) {
+export function EventTicker({ events, onSelectNode, sessionColors, stuckMeta, dormantSessionIds, sessionNodeIds }: Props) {
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   // PERF: `now` used to live here and trigger a full list re-render
   // every 5 seconds purely to roll relative timestamps forward. The
@@ -373,8 +382,16 @@ export function EventTicker({ events, onSelectNode, sessionColors, stuckMeta, do
             // clicked on they should fly out any folds
             // automatically (dont require the fold specifically)."
             if (isRolled) toggle(row.key);
-            if (row.toolCallId) onSelectNode(row.toolCallId, row.ts);
-            else if (row.sessionId) onSelectNode(`SentinelSession#${row.sessionId}`, row.ts);
+            if (row.toolCallId) {
+              onSelectNode(row.toolCallId, row.ts);
+            } else if (row.sessionId) {
+              // P3-36: resolve sid → actual node id via the map
+              // passed from page.tsx. The session node's id is
+              // `SentinelSession#<seq>` (e.g., #8512), not
+              // `#<session_id>`.
+              const nodeId = sessionNodeIds?.get(row.sessionId);
+              if (nodeId) onSelectNode(nodeId, row.ts);
+            }
           };
           const sessionColor = row.sessionId && sessionColors
             ? sessionColors.get(row.sessionId) ?? null
