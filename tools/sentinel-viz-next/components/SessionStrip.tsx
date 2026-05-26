@@ -171,8 +171,16 @@ export function SessionStrip({ data, selected, onSelect }: Props) {
         ) : null}
         {/* When the summary is loading and we don't yet have text,
             keep the layout calm — show a tiny ghost placeholder so
-            the strip doesn't jump when the text arrives. */}
-        {!summaryAvailable && !summaryDisabled && !isStuck && summaryQ.isPending ? (
+            the strip doesn't jump when the text arrives. Suppress
+            for non-claude harnesses where the query is disabled by
+            design (TanStack Query reports pending=true forever when
+            `enabled: false`, otherwise we'd render this placeholder
+            permanently on every codex/opencode/qwen/gemini strip). */}
+        {harnessSupportsSummary &&
+          !summaryAvailable &&
+          !summaryDisabled &&
+          !isStuck &&
+          summaryQ.isPending ? (
           <div className="mt-1 text-[10px] text-[#666] italic leading-tight">
             ai · generating summary…
           </div>

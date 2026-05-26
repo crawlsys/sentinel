@@ -1,13 +1,27 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { ToggleButton, ToggleButtonGroup } from "@mui/material";
+import { Chip, Stack, ToggleButton, ToggleButtonGroup } from "@mui/material";
 
 import type { GraphResponse, Node } from "../types/api";
 import { buildSessionStrips } from "../domain/session-strips";
 import { sessionColorMap } from "../domain/session-colors";
 import { fetchSessionName } from "../adapters/http";
 import { SessionStrip } from "./SessionStrip";
+
+const HARNESS_FILTER_KEY = "sentinel-viz-harness-filter";
+const HARNESSES = ["claude", "codex", "opencode", "qwen", "gemini"] as const;
+type HarnessId = (typeof HARNESSES)[number];
+function harnessColor(h: string): string {
+  switch (h) {
+    case "claude":   return "#5B9BF6";
+    case "codex":    return "#D4A843";
+    case "opencode": return "#bc8cff";
+    case "qwen":     return "#4FB3B3";
+    case "gemini":   return "#4A9E5C";
+    default:         return "#999999";
+  }
+}
 
 interface Props {
   graph: GraphResponse | null;
@@ -51,6 +65,37 @@ export function SessionStripsPanel({
     const n = stored ? parseInt(stored, 10) : NaN;
     return Number.isFinite(n) && n > 0 ? n : DEFAULT_WINDOW;
   });
+
+  // Per-harness filter — operator can hide non-sentinel codex
+  // sessions (from other projects on the same host) without the
+  // bridge changing what it ingests. localStorage persists the
+  // preference. Default: only claude — sentinel-focused view.
+  const [enabledHarnesses, setEnabledHarnesses] = useState<Set<HarnessId>>(() => {
+    if (typeof window === "undefined") return new Set(["claude"]);
+    const raw = window.localStorage.getItem(HARNESS_FILTER_KEY);
+    if (raw) {
+      try {
+        const arr = JSON.parse(raw) as string[];
+        return new Set(arr.filter((h): h is HarnessId => HARNESSES.includes(h as HarnessId)));
+      } catch { /* fall through to default */ }
+    }
+    return new Set(["claude"]);
+  });
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(
+      HARNESS_FILTER_KEY,
+      JSON.stringify(Array.from(enabledHarnesses)),
+    );
+  }, [enabledHarnesses]);
+  const toggleHarness = (h: HarnessId) => {
+    setEnabledHarnesses((prev) => {
+      const next = new Set(prev);
+      if (next.has(h)) next.delete(h);
+      else next.add(h);
+      return next;
+    });
+  };
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -117,21 +162,65 @@ export function SessionStripsPanel({
       names: nameMap,
       stuck: stuckMap,
     });
-    if (!dormantSessionIds || dormantSessionIds.size === 0) return all;
+    // Per-harness filter — strips whose source_harness isn't in the
+    // operator's enabled set get hidden. Unknown-harness sessions
+    // (sourceHarness == null) pass through if any harness is enabled
+    // so we don't silently hide host claude sessions whose node
+    // dropped out of the API window.
+    const harnessFiltered = all.filter((s) => {
+      if (enabledHarnesses.size === 0) return true; // no filter = show everything
+      const h = (s.sourceHarness ?? "claude") as HarnessId;
+      return enabledHarnesses.has(h);
+    });
+    if (!dormantSessionIds || dormantSessionIds.size === 0) return harnessFiltered;
     // Hide dead/long-dormant sessions UNLESS they're stuck — a
     // stuck session is signal even when "old" by the bridge's
     // dormancy clock.
-    return all.filter((s) => !dormantSessionIds.has(s.sessionId) || s.stuck);
-  }, [graph, windowMinutes, sessionColors, nameMap, stuckMap, dormantSessionIds]);
+    return harnessFiltered.filter((s) => !dormantSessionIds.has(s.sessionId) || s.stuck);
+  }, [graph, windowMinutes, sessionColors, nameMap, stuckMap, dormantSessionIds, enabledHarnesses]);
 
   return (
     <section
       data-testid="session-strips-panel"
       className="flex flex-col h-full min-h-0 bg-[#000] text-[#E8E8E8] font-mono"
     >
-      <header className="flex items-baseline gap-3 px-3 py-2 border-b border-[#222] text-[10px] uppercase tracking-wider text-[#999]">
+      <header className="flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2 border-b border-[#222] text-[10px] uppercase tracking-wider text-[#999]">
         <span>sessions</span>
         <span className="text-[#666]">· last {labelForWindow(windowMinutes)}</span>
+        <Stack
+          direction="row"
+          spacing={0.5}
+          data-testid="strips-harness-filter"
+          sx={{ alignItems: "center" }}
+        >
+          {HARNESSES.map((h) => {
+            const on = enabledHarnesses.has(h);
+            return (
+              <Chip
+                key={h}
+                label={h}
+                size="small"
+                onClick={() => toggleHarness(h)}
+                data-harness={h}
+                data-on={on ? "true" : "false"}
+                title={
+                  on
+                    ? `click to hide ${h} sessions`
+                    : `click to show ${h} sessions`
+                }
+                sx={{
+                  height: 18,
+                  fontSize: 9,
+                  letterSpacing: "0.06em",
+                  borderColor: on ? harnessColor(h) : "var(--border)",
+                  color: on ? harnessColor(h) : "var(--text-disabled)",
+                  bgcolor: on ? harnessColor(h) + "1A" : "transparent",
+                  cursor: "pointer",
+                }}
+              />
+            );
+          })}
+        </Stack>
         <ToggleButtonGroup
           data-testid="strips-window-selector"
           value={windowMinutes}

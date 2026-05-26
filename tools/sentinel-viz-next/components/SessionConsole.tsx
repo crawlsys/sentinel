@@ -68,11 +68,40 @@ export function SessionConsole({
   const visibleSessionIds = useMemo(() => {
     if (!graph) return [] as string[];
     const out: string[] = [];
+    // Build a session_id → harness lookup so we can skip non-claude
+    // sessions below — /api/activity reads claude transcript JSONLs
+    // and 404s for codex/opencode/qwen/gemini. Firing it for every
+    // visible non-claude session on every 8s tick spiked load times
+    // measurably (5+ codex grinds running ≈ 5+ parallel doomed
+    // requests every tick).
+    const harnessBySid = new Map<string, string>();
+    for (const n of graph.nodes) {
+      if (n.type !== "SentinelSession") continue;
+      const sid = typeof n.data?.session_id === "string" ? (n.data.session_id as string) : null;
+      const h = typeof n.data?.source_harness === "string"
+        ? (n.data.source_harness as string)
+        : "";
+      if (sid && h) harnessBySid.set(sid, h);
+    }
+    for (const e of graph.events) {
+      const sid = typeof e.payload?.session_id === "string"
+        ? (e.payload.session_id as string)
+        : null;
+      const h = typeof e.payload?.source_harness === "string"
+        ? (e.payload.source_harness as string)
+        : "";
+      if (sid && h && !harnessBySid.has(sid)) harnessBySid.set(sid, h);
+    }
+    const isClaude = (sid: string) => {
+      const h = harnessBySid.get(sid);
+      return !h || h === "claude";
+    };
+
     // Active sessions (have SentinelSession nodes) come first.
     for (const n of graph.nodes) {
       if (n.type !== "SentinelSession") continue;
       const sid = typeof n.data?.session_id === "string" ? (n.data.session_id as string) : null;
-      if (sid && !out.includes(sid)) out.push(sid);
+      if (sid && isClaude(sid) && !out.includes(sid)) out.push(sid);
     }
     // ALSO include sessions whose events appear in the window even
     // if they don't have a node — those are older sessions whose
@@ -88,7 +117,7 @@ export function SessionConsole({
         typeof e.payload?.session_id === "string"
           ? (e.payload.session_id as string)
           : null;
-      if (sid && !out.includes(sid)) out.push(sid);
+      if (sid && isClaude(sid) && !out.includes(sid)) out.push(sid);
     }
     return out;
   }, [graph]);
