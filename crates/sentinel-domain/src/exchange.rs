@@ -6,8 +6,9 @@
 
 use crate::constants::MIN_EXCHANGE_LENGTH;
 
-/// User-side phrases that, taken alone, indicate a trivial exchange. When
-/// the user message exactly matches (case-insensitive, after trim) one of
+/// User-side phrases that, taken alone, indicate a trivial exchange.
+///
+/// When the user message exactly matches (case-insensitive, after trim) one of
 /// these AND the assistant reply is short, the exchange is dropped.
 ///
 /// The list is intentionally short; expanding it risks dropping real
@@ -38,10 +39,10 @@ pub const TRIVIAL_USER_PHRASES: &[&str] = &[
     "perfect",
 ];
 
-/// Maximum assistant-reply length (chars) for which a trivial user phrase
-/// suppresses the exchange. Longer assistant replies override the
-/// triviality heuristic — if the assistant wrote a paragraph in response
-/// to "yes", that paragraph is probably substantive context.
+/// Maximum assistant-reply length (chars) for which a trivial user phrase suppresses the exchange.
+///
+/// Longer assistant replies override the triviality heuristic — if the assistant
+/// wrote a paragraph in response to "yes", that paragraph is probably substantive context.
 pub const TRIVIAL_REPLY_MAX_LEN: usize = 200;
 
 /// Return `true` if `(user, assistant)` is substantive enough to index.

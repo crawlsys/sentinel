@@ -1,13 +1,14 @@
 //! Activity Tracker — Two-phase hook
 //!
-//! **PostToolUse phase:** Logs every tool call to
+//! **`PostToolUse` phase:** Logs every tool call to
 //! `~/.claude/metrics/activity-log.jsonl` with structured metadata.
 //!
-//! **UserPromptSubmit phase:** When context is elevated (Yellow+ zone),
+//! **`UserPromptSubmit` phase:** When context is elevated (Yellow+ zone),
 //! injects a compact session activity summary to help Claude stay oriented.
 
 use sentinel_domain::constants;
 use sentinel_domain::events::{HookEvent, HookInput, HookOutput};
+use std::cmp::Reverse;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -37,7 +38,7 @@ struct ActivityEntry {
     /// used most" impossible to answer without inferring from MCP traffic
     /// (linear -> linear skill, doppler -> doppler skill, etc — only
     /// works when a skill maps cleanly to one MCP server, which most
-    /// don't). Now captured directly from tool_input.skill.
+    /// don't). Now captured directly from `tool_input.skill`.
     #[serde(skip_serializing_if = "Option::is_none")]
     skill: Option<String>,
     session_id: String,
@@ -56,10 +57,11 @@ struct ActivitySummary {
 }
 
 fn now_ms() -> u64 {
-    SystemTime::now()
+    #[allow(clippy::cast_possible_truncation)] // millis since epoch fit in u64 for centuries
+    let ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
+        .map_or(0, |d| d.as_millis() as u64);
+    ms
 }
 
 fn metrics_dir(fs: &dyn FileSystemPort) -> Option<PathBuf> {
@@ -86,13 +88,11 @@ fn cooldown_file(env: &dyn EnvPort) -> PathBuf {
 }
 
 fn cooldown_expired(fs: &dyn FileSystemPort, env: &dyn EnvPort) -> bool {
-    let content = match fs.read_to_string(&cooldown_file(env)) {
-        Ok(c) => c,
-        Err(_) => return true,
+    let Ok(content) = fs.read_to_string(&cooldown_file(env)) else {
+        return true;
     };
-    let last: u64 = match content.trim().parse() {
-        Ok(v) => v,
-        Err(_) => return true,
+    let Ok(last) = content.trim().parse::<u64>() else {
+        return true;
     };
     now_ms().saturating_sub(last) >= COOLDOWN_MS
 }
@@ -107,33 +107,50 @@ fn extract_file_path(tool: &str, input: &serde_json::Value) -> Option<String> {
         "Edit" | "Write" | "Read" => input
             .get("file_path")
             .and_then(|v| v.as_str())
-            .map(|s| s.to_string()),
+            .map(std::string::ToString::to_string),
         "Glob" => input
             .get("pattern")
             .and_then(|v| v.as_str())
-            .map(|s| s.to_string()),
+            .map(std::string::ToString::to_string),
         "Grep" => input
             .get("path")
             .and_then(|v| v.as_str())
-            .map(|s| s.to_string()),
+            .map(std::string::ToString::to_string),
         _ => None,
     }
+}
+
+/// Truncate `s` to at most `max_bytes`, backing off to the nearest valid
+/// UTF-8 char boundary so we never split a multi-byte character.
+///
+/// **Why:** plain byte-slicing (`&s[..n]`) panics when `n` falls inside a
+/// multi-byte char (e.g., em-dash `—` is 3 bytes). Commit messages, task
+/// descriptions, and skill names routinely contain such characters.
+fn truncate_to_char_boundary(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
 }
 
 /// Extract command from Bash tool input (truncated).
 fn extract_command(input: &serde_json::Value) -> Option<String> {
     input.get("command").and_then(|v| v.as_str()).map(|s| {
         if s.len() > 120 {
-            format!("{}...", &s[..120])
+            format!("{}...", truncate_to_char_boundary(s, 120))
         } else {
             s.to_string()
         }
     })
 }
 
-/// Extract the skill name from a `Skill` tool call's tool_input.
+/// Extract the skill name from a `Skill` tool call's `tool_input`.
 ///
-/// Claude Code sends `{"skill": "<name>", "args": "..."}` as the tool_input
+/// Claude Code sends `{"skill": "<name>", "args": "..."}` as the `tool_input`
 /// for the Skill tool. Returns None for non-Skill tools or when `skill`
 /// is missing/non-string (defensive — malformed input shouldn't crash
 /// the activity tracker).
@@ -144,7 +161,7 @@ fn extract_skill_name(tool: &str, input: &serde_json::Value) -> Option<String> {
     input
         .get("skill")
         .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
+        .map(std::string::ToString::to_string)
 }
 
 /// Extract MCP server and action from tool name like `mcp__linear__create_issue`.
@@ -171,7 +188,7 @@ pub fn process_post_tool(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput
     };
 
     let session_id = input.session_id.as_deref().unwrap_or("unknown").to_string();
-    let tool_input = input.tool_input.as_ref().cloned().unwrap_or_default();
+    let tool_input = input.tool_input.clone().unwrap_or_default();
 
     let file_path = extract_file_path(&tool, &tool_input);
     let command = if tool == "Bash" {
@@ -180,8 +197,7 @@ pub fn process_post_tool(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput
         None
     };
     let (mcp_server, mcp_action) = extract_mcp_info(&tool)
-        .map(|(s, a)| (Some(s), Some(a)))
-        .unwrap_or((None, None));
+        .map_or((None, None), |(s, a)| (Some(s), Some(a)));
     let skill = extract_skill_name(&tool, &tool_input);
 
     let entry = ActivityEntry {
@@ -210,14 +226,12 @@ pub fn process_post_tool(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput
 pub fn process_stop(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     let session_id = input.session_id.as_deref().unwrap_or("unknown");
 
-    let path = match log_file(ctx.fs) {
-        Some(p) => p,
-        None => return HookOutput::allow(),
+    let Some(path) = log_file(ctx.fs) else {
+        return HookOutput::allow();
     };
 
-    let content = match ctx.fs.read_to_string(&path) {
-        Ok(c) => c,
-        Err(_) => return HookOutput::allow(),
+    let Ok(content) = ctx.fs.read_to_string(&path) else {
+        return HookOutput::allow();
     };
 
     // Filter entries for this session
@@ -240,11 +254,10 @@ pub fn process_stop(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
 
     for entry in &entries {
         // Normalize MCP tools to server level for counting
-        let count_key = if let Some(ref server) = entry.mcp_server {
-            format!("mcp__{server}__*")
-        } else {
-            entry.tool.clone()
-        };
+        let count_key = entry
+            .mcp_server
+            .as_deref()
+            .map_or_else(|| entry.tool.clone(), |server| format!("mcp__{server}__*"));
         *tool_counts.entry(count_key).or_insert(0) += 1;
 
         if let Some(ref fp) = entry.file_path {
@@ -263,7 +276,7 @@ pub fn process_stop(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
         if let Some(ref cmd) = entry.command {
             if cmd.contains("git ") {
                 let short = if cmd.len() > 80 {
-                    format!("{}...", &cmd[..80])
+                    format!("{}...", truncate_to_char_boundary(cmd, 80))
                 } else {
                     cmd.clone()
                 };
@@ -275,7 +288,7 @@ pub fn process_stop(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     }
 
     let mut sorted_counts: Vec<(String, usize)> = tool_counts.into_iter().collect();
-    sorted_counts.sort_by(|a, b| b.1.cmp(&a.1));
+    sorted_counts.sort_by_key(|&(_, count)| Reverse(count));
 
     let summary = ActivitySummary {
         session_id: session_id.to_string(),
@@ -306,14 +319,12 @@ pub fn process_stop(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
 pub fn process_prompt(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     let session_id = input.session_id.as_deref().unwrap_or("unknown");
 
-    let path = match summary_file(ctx.fs, session_id) {
-        Some(p) => p,
-        None => return HookOutput::allow(),
+    let Some(path) = summary_file(ctx.fs, session_id) else {
+        return HookOutput::allow();
     };
 
-    let content = match ctx.fs.read_to_string(&path) {
-        Ok(c) => c,
-        Err(_) => return HookOutput::allow(),
+    let Ok(content) = ctx.fs.read_to_string(&path) else {
+        return HookOutput::allow();
     };
 
     let summary: ActivitySummary = match serde_json::from_str(&content) {
@@ -345,23 +356,21 @@ pub fn process_prompt(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
 
     write_cooldown(ctx.fs, ctx.env);
 
-    let context = build_summary_context(&summary);
-    HookOutput::inject_context(HookEvent::UserPromptSubmit, context)
+    let ctx_text = build_summary_context(&summary);
+    HookOutput::inject_context(HookEvent::UserPromptSubmit, ctx_text)
 }
 
 /// Check if context monitor reported Yellow+ zone for this session.
 fn check_elevated_context(fs: &dyn FileSystemPort, session_id: &str) -> bool {
-    let path = match metrics_dir(fs) {
-        Some(d) => d.join(format!("context-zone-{session_id}.json")),
-        None => return false,
+    let Some(path) = metrics_dir(fs).map(|d| d.join(format!("context-zone-{session_id}.json")))
+    else {
+        return false;
     };
-    let content = match fs.read_to_string(&path) {
-        Ok(c) => c,
-        Err(_) => return false,
+    let Ok(content) = fs.read_to_string(&path) else {
+        return false;
     };
-    let val: serde_json::Value = match serde_json::from_str(&content) {
-        Ok(v) => v,
-        Err(_) => return false,
+    let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) else {
+        return false;
     };
 
     // Must be same session
@@ -371,7 +380,7 @@ fn check_elevated_context(fs: &dyn FileSystemPort, session_id: &str) -> bool {
 
     let pct = val
         .get("percent_used")
-        .and_then(|v| v.as_f64())
+        .and_then(serde_json::Value::as_f64)
         .unwrap_or(0.0);
     pct >= 50.0
 }
@@ -481,6 +490,56 @@ mod tests {
     }
 
     #[test]
+    fn test_truncate_to_char_boundary_handles_multibyte() {
+        // Em-dash is 3 bytes in UTF-8: E2 80 94. String layout:
+        //   'a' 'b' 'c'   —(3 bytes)   'd' 'e' 'f'
+        //    0   1   2    3  4  5      6   7   8
+        let s = "abc—def";
+        assert_eq!(s.len(), 9);
+
+        // Cutting at byte 4 would split the em-dash → back off to byte 3
+        assert_eq!(truncate_to_char_boundary(s, 4), "abc");
+        // Cutting at byte 5 also splits → back off to byte 3
+        assert_eq!(truncate_to_char_boundary(s, 5), "abc");
+        // Byte 6 is the boundary just after the em-dash
+        assert_eq!(truncate_to_char_boundary(s, 6), "abc—");
+        // Beyond length → return whole string
+        assert_eq!(truncate_to_char_boundary(s, 100), s);
+        // Edge: zero
+        assert_eq!(truncate_to_char_boundary(s, 0), "");
+    }
+
+    #[test]
+    fn test_extract_command_truncated_with_multibyte_char() {
+        // Regression: a commit message containing an em-dash at byte
+        // position 79-81 used to panic on `&s[..80]` because byte 80
+        // is mid em-dash. Reported at activity_tracker.rs:239 (now :266).
+        let mut cmd =
+            "git add -A && git commit -m \"docs(audit pass 3): CHANGELOG entry ".to_string();
+        // Pad to put an em-dash spanning the 120-byte boundary
+        while cmd.len() < 119 {
+            cmd.push('a');
+        }
+        cmd.push('—'); // bytes 119..122
+        cmd.push_str(" full Pass-3 batch\"");
+        assert!(
+            cmd.len() > 120,
+            "test setup: cmd must exceed truncation threshold"
+        );
+        let input = json!({"command": cmd});
+        // Must not panic.
+        let result = extract_command(&input).unwrap();
+        // Output is valid UTF-8 (Rust strings always are; this asserts
+        // the format!() didn't panic mid-construction).
+        assert!(result.ends_with("..."));
+        // Truncation backed off to before the em-dash (byte 119), so the
+        // body before "..." is 119 bytes of ASCII; total = 119 + 3.
+        assert_eq!(result.len(), 119 + 3);
+        // The em-dash itself must NOT appear in the truncated result.
+        assert!(!result.contains('—'));
+    }
+
+    #[test]
     fn test_extract_mcp_info() {
         let (server, action) = extract_mcp_info("mcp__linear__create_issue").unwrap();
         assert_eq!(server, "linear");
@@ -564,7 +623,10 @@ mod tests {
             ts: "2026-05-06T17:00:00Z".into(),
         };
         let json = serde_json::to_string(&entry).unwrap();
-        assert!(!json.contains("skill"), "skill field must be omitted when None, got: {json}");
+        assert!(
+            !json.contains("skill"),
+            "skill field must be omitted when None, got: {json}"
+        );
     }
 
     #[test]

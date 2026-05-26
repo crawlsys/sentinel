@@ -13,7 +13,7 @@
 ///
 /// Match is exact (case-insensitive). The list intentionally includes a
 /// few specific multi-word suffixes (e.g. `wait_for_selector`) that are
-/// common Steel/CDP read paths — generic prefix matching alone would
+/// common Browserbase/CDP read paths — generic prefix matching alone would
 /// over-match and a dedicated entry is more readable.
 pub const SAFE_METHOD_SUFFIXES: &[&str] = &[
     "get",
@@ -59,6 +59,30 @@ pub const SAFE_METHOD_PREFIXES: &[&str] = &[
     "get_", "list_", "search_", "read_", "check_", "resolve_", "verify_",
 ];
 
+/// MCP servers that are trusted operator-registered infrastructure.
+///
+/// Their tools are NOT gated as dangerous regardless of method verb. These are
+/// servers the operator controls (browser automation, reasoning, memory,
+/// sentinel's own surface, issue tracking) where the per-tool verb gate adds
+/// friction without security value. Per Gary: "MCPs are safe."
+///
+/// The fall-through (deny-by-default) is RETAINED for servers NOT on this
+/// list — notably raw code-execution servers like `codex` (`shell`,
+/// `write_file`, `apply_patch`) which run arbitrary commands and must stay
+/// gated. Trust is granted per-server, explicitly, not blanket.
+pub const TRUSTED_MCP_SERVERS: &[&str] = &[
+    "browserbase",
+    "cdp",
+    "steel", // legacy alias for the browser surface
+    "sequential-thinking",
+    "memory-mcp",
+    "sentinel",
+    "linear",
+    "qdrant",
+    "skills",
+    "agents",
+];
+
 /// Classify an MCP tool as dangerous (write/exec capability).
 ///
 /// MCP tool names follow `mcp__<server>__<method>`. The method suffix
@@ -73,6 +97,20 @@ pub const SAFE_METHOD_PREFIXES: &[&str] = &[
 /// gated, not allowed. See module docs.
 #[must_use]
 pub fn is_dangerous_mcp_tool(tool_name: &str) -> bool {
+    // Trusted-server short-circuit (Gary: "MCPs are safe"): if the tool
+    // belongs to an operator-registered trusted server, it's not gated —
+    // browser/reasoning/memory/sentinel/etc. tools are trusted infrastructure.
+    // Raw-exec servers NOT on the trust list (e.g. `codex`) still fall through
+    // to the verb-level deny-by-default below.
+    if let Some(server) = tool_name
+        .strip_prefix("mcp__")
+        .and_then(|rest| rest.split("__").next())
+    {
+        if TRUSTED_MCP_SERVERS.contains(&server) {
+            return false;
+        }
+    }
+
     let suffix = tool_name
         .rsplit("__")
         .next()

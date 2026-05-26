@@ -207,8 +207,7 @@ pub fn read_token_costs(path: &Path) -> Result<HashMap<String, f64>> {
     if !path.exists() {
         return Ok(HashMap::new());
     }
-    let raw = fs::read_to_string(path)
-        .with_context(|| format!("read {}", path.display()))?;
+    let raw = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
     let mut out = HashMap::new();
     for line in raw.lines() {
         let line = line.trim();
@@ -219,7 +218,9 @@ pub fn read_token_costs(path: &Path) -> Result<HashMap<String, f64>> {
             Ok(r) => {
                 out.insert(r.ticket, r.cost_usd);
             }
-            Err(e) => tracing::warn!(error = %e, "tokens-per-ticket.jsonl: skipping malformed line"),
+            Err(e) => {
+                tracing::warn!(error = %e, "tokens-per-ticket.jsonl: skipping malformed line");
+            }
         }
     }
     Ok(out)
@@ -247,10 +248,10 @@ pub fn compute_first_time_pass(
     for (issue, mut history) in by_issue {
         history.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
 
-        let completion = history
-            .iter()
-            .find(|e| e.to_state == "Completed");
-        let Some(completion) = completion else { continue };
+        let completion = history.iter().find(|e| e.to_state == "Completed");
+        let Some(completion) = completion else {
+            continue;
+        };
         let completed_ts = match DateTime::parse_from_rfc3339(&completion.timestamp) {
             Ok(t) => t.with_timezone(&Utc),
             Err(_) => continue,
@@ -414,8 +415,16 @@ mod tests {
             ev("Y-1", Some("Y"), "Completed", &ts),
         ];
         let s = compute_throughput(&events, now, 30);
-        let x = s.per_team.iter().find(|t| t.team.as_deref() == Some("X")).unwrap();
-        let y = s.per_team.iter().find(|t| t.team.as_deref() == Some("Y")).unwrap();
+        let x = s
+            .per_team
+            .iter()
+            .find(|t| t.team.as_deref() == Some("X"))
+            .unwrap();
+        let y = s
+            .per_team
+            .iter()
+            .find(|t| t.team.as_deref() == Some("Y"))
+            .unwrap();
         assert_eq!(x.completed_30d, 2);
         assert_eq!(y.completed_30d, 1);
     }
@@ -462,9 +471,24 @@ mod tests {
         let base = now - Duration::days(3);
         let events = vec![
             ev("X-1", Some("X"), "In Progress", &base.to_rfc3339()),
-            ev("X-1", Some("X"), "Code Review", &(base + Duration::hours(1)).to_rfc3339()),
-            ev("X-1", Some("X"), "QA Testing", &(base + Duration::hours(2)).to_rfc3339()),
-            ev("X-1", Some("X"), "Completed", &(base + Duration::hours(3)).to_rfc3339()),
+            ev(
+                "X-1",
+                Some("X"),
+                "Code Review",
+                &(base + Duration::hours(1)).to_rfc3339(),
+            ),
+            ev(
+                "X-1",
+                Some("X"),
+                "QA Testing",
+                &(base + Duration::hours(2)).to_rfc3339(),
+            ),
+            ev(
+                "X-1",
+                Some("X"),
+                "Completed",
+                &(base + Duration::hours(3)).to_rfc3339(),
+            ),
         ];
         let s = compute_first_time_pass(&events, now, 30, None);
         assert_eq!(s.tickets_completed, 1);
@@ -481,10 +505,30 @@ mod tests {
         // Review-fail loop: In Progress → Code Review → In Progress → Code Review → Completed.
         let events = vec![
             ev("X-1", Some("X"), "In Progress", &base.to_rfc3339()),
-            ev("X-1", Some("X"), "Code Review", &(base + Duration::hours(1)).to_rfc3339()),
-            ev("X-1", Some("X"), "In Progress", &(base + Duration::hours(2)).to_rfc3339()),
-            ev("X-1", Some("X"), "Code Review", &(base + Duration::hours(3)).to_rfc3339()),
-            ev("X-1", Some("X"), "Completed", &(base + Duration::hours(4)).to_rfc3339()),
+            ev(
+                "X-1",
+                Some("X"),
+                "Code Review",
+                &(base + Duration::hours(1)).to_rfc3339(),
+            ),
+            ev(
+                "X-1",
+                Some("X"),
+                "In Progress",
+                &(base + Duration::hours(2)).to_rfc3339(),
+            ),
+            ev(
+                "X-1",
+                Some("X"),
+                "Code Review",
+                &(base + Duration::hours(3)).to_rfc3339(),
+            ),
+            ev(
+                "X-1",
+                Some("X"),
+                "Completed",
+                &(base + Duration::hours(4)).to_rfc3339(),
+            ),
         ];
         let s = compute_first_time_pass(&events, now, 30, None);
         assert!(s.tickets[0].had_rework_loop);
@@ -498,12 +542,42 @@ mod tests {
         let base = now - Duration::days(3);
         let events = vec![
             ev("X-1", Some("X"), "In Progress", &base.to_rfc3339()),
-            ev("X-1", Some("X"), "Code Review", &(base + Duration::hours(1)).to_rfc3339()),
-            ev("X-1", Some("X"), "QA Testing", &(base + Duration::hours(2)).to_rfc3339()),
-            ev("X-1", Some("X"), "QA Failed", &(base + Duration::hours(3)).to_rfc3339()),
-            ev("X-1", Some("X"), "In Progress", &(base + Duration::hours(4)).to_rfc3339()),
-            ev("X-1", Some("X"), "QA Testing", &(base + Duration::hours(5)).to_rfc3339()),
-            ev("X-1", Some("X"), "Completed", &(base + Duration::hours(6)).to_rfc3339()),
+            ev(
+                "X-1",
+                Some("X"),
+                "Code Review",
+                &(base + Duration::hours(1)).to_rfc3339(),
+            ),
+            ev(
+                "X-1",
+                Some("X"),
+                "QA Testing",
+                &(base + Duration::hours(2)).to_rfc3339(),
+            ),
+            ev(
+                "X-1",
+                Some("X"),
+                "QA Failed",
+                &(base + Duration::hours(3)).to_rfc3339(),
+            ),
+            ev(
+                "X-1",
+                Some("X"),
+                "In Progress",
+                &(base + Duration::hours(4)).to_rfc3339(),
+            ),
+            ev(
+                "X-1",
+                Some("X"),
+                "QA Testing",
+                &(base + Duration::hours(5)).to_rfc3339(),
+            ),
+            ev(
+                "X-1",
+                Some("X"),
+                "Completed",
+                &(base + Duration::hours(6)).to_rfc3339(),
+            ),
         ];
         let s = compute_first_time_pass(&events, now, 30, None);
         assert!(s.tickets[0].had_rework_loop);
@@ -517,7 +591,12 @@ mod tests {
         // first In Progress is the natural starting point.
         let events = vec![
             ev("X-1", Some("X"), "In Progress", &base.to_rfc3339()),
-            ev("X-1", Some("X"), "Completed", &(base + Duration::hours(1)).to_rfc3339()),
+            ev(
+                "X-1",
+                Some("X"),
+                "Completed",
+                &(base + Duration::hours(1)).to_rfc3339(),
+            ),
         ];
         let s = compute_first_time_pass(&events, now, 30, None);
         assert!(!s.tickets[0].had_rework_loop);
@@ -529,7 +608,12 @@ mod tests {
         let base = now - Duration::days(3);
         let events = vec![
             ev("X-1", Some("X"), "In Progress", &base.to_rfc3339()),
-            ev("X-1", Some("X"), "Code Review", &(base + Duration::hours(1)).to_rfc3339()),
+            ev(
+                "X-1",
+                Some("X"),
+                "Code Review",
+                &(base + Duration::hours(1)).to_rfc3339(),
+            ),
             // never completed → skipped
         ];
         let s = compute_first_time_pass(&events, now, 30, None);
@@ -543,12 +627,32 @@ mod tests {
         let events = vec![
             // X-1: rework loop, $30 in tokens.
             ev("X-1", Some("X"), "In Progress", &base.to_rfc3339()),
-            ev("X-1", Some("X"), "Code Review", &(base + Duration::hours(1)).to_rfc3339()),
-            ev("X-1", Some("X"), "In Progress", &(base + Duration::hours(2)).to_rfc3339()),
-            ev("X-1", Some("X"), "Completed", &(base + Duration::hours(3)).to_rfc3339()),
+            ev(
+                "X-1",
+                Some("X"),
+                "Code Review",
+                &(base + Duration::hours(1)).to_rfc3339(),
+            ),
+            ev(
+                "X-1",
+                Some("X"),
+                "In Progress",
+                &(base + Duration::hours(2)).to_rfc3339(),
+            ),
+            ev(
+                "X-1",
+                Some("X"),
+                "Completed",
+                &(base + Duration::hours(3)).to_rfc3339(),
+            ),
             // X-2: clean pass, $10 in tokens (not counted in rework_cost).
             ev("X-2", Some("X"), "In Progress", &base.to_rfc3339()),
-            ev("X-2", Some("X"), "Completed", &(base + Duration::hours(1)).to_rfc3339()),
+            ev(
+                "X-2",
+                Some("X"),
+                "Completed",
+                &(base + Duration::hours(1)).to_rfc3339(),
+            ),
         ];
         let mut costs = HashMap::new();
         costs.insert("X-1".to_string(), 30.0);
@@ -565,7 +669,12 @@ mod tests {
         let base = now - Duration::days(3);
         let events = vec![
             ev("X-1", Some("X"), "In Progress", &base.to_rfc3339()),
-            ev("X-1", Some("X"), "Completed", &(base + Duration::hours(1)).to_rfc3339()),
+            ev(
+                "X-1",
+                Some("X"),
+                "Completed",
+                &(base + Duration::hours(1)).to_rfc3339(),
+            ),
         ];
         let s = compute_first_time_pass(&events, now, 30, None);
         assert_eq!(s.per_team[0].rework_cost_usd, None);

@@ -50,9 +50,7 @@ use std::time::Duration;
 use chrono::Utc;
 #[cfg(test)]
 use sentinel_domain::ba::ProvenanceClass;
-use sentinel_domain::ba::{
-    ArtifactReference, ProvenanceCheck, ProvenanceFinding, RetrievalRecord,
-};
+use sentinel_domain::ba::{ArtifactReference, ProvenanceCheck, ProvenanceFinding, RetrievalRecord};
 use sentinel_domain::events::{HookInput, HookOutput};
 use sentinel_domain::ports::ProvenancePort;
 
@@ -132,8 +130,8 @@ pub fn process_with_lookback(
 
     let session_id = input.session_id.as_deref().unwrap_or("");
     let now = Utc::now();
-    let lookback_cutoff = now
-        - chrono::Duration::from_std(lookback).unwrap_or_else(|_| chrono::Duration::hours(24));
+    let lookback_cutoff =
+        now - chrono::Duration::from_std(lookback).unwrap_or_else(|_| chrono::Duration::hours(24));
 
     let mut checks: Vec<ProvenanceCheck> = Vec::with_capacity(citations.len());
     let mut any_block = false;
@@ -387,7 +385,11 @@ mod tests {
         }
     }
 
-    fn citation(artifact_id: &str, content_hash: &str, class: ProvenanceClass) -> ArtifactReference {
+    fn citation(
+        artifact_id: &str,
+        content_hash: &str,
+        class: ProvenanceClass,
+    ) -> ArtifactReference {
         ArtifactReference {
             artifact_id: artifact_id.to_string(),
             content_hash: content_hash.to_string(),
@@ -447,8 +449,8 @@ mod tests {
 
     #[test]
     fn allows_when_port_errors() {
-        let port = StubPort::new()
-            .with_next_error(ProvenanceError::StoreUnavailable("disk full".into()));
+        let port =
+            StubPort::new().with_next_error(ProvenanceError::StoreUnavailable("disk full".into()));
         let input = input_with_citations(
             "s1",
             vec![citation("FIR-1", "h1", ProvenanceClass::SystemOfRecord)],
@@ -545,10 +547,17 @@ mod tests {
         );
         let input = input_with_citations(
             "s1",
-            vec![citation("FIR-1", "stale-hash", ProvenanceClass::SystemOfRecord)],
+            vec![citation(
+                "FIR-1",
+                "stale-hash",
+                ProvenanceClass::SystemOfRecord,
+            )],
         );
         let output = process(&input, &port, ValidationMode::DefaultBlocking);
-        assert_eq!(output.blocked, None, "Default mode warns on freshness, doesn't block");
+        assert_eq!(
+            output.blocked, None,
+            "Default mode warns on freshness, doesn't block"
+        );
     }
 
     #[test]
@@ -566,7 +575,11 @@ mod tests {
         );
         let input = input_with_citations(
             "s1",
-            vec![citation("FIR-1", "stale-hash", ProvenanceClass::SystemOfRecord)],
+            vec![citation(
+                "FIR-1",
+                "stale-hash",
+                ProvenanceClass::SystemOfRecord,
+            )],
         );
         let output = process(&input, &port, ValidationMode::StrictBlocking);
         assert_eq!(output.blocked, Some(true));
@@ -586,13 +599,7 @@ mod tests {
         let now = Utc::now();
         let port = StubPort::new().with(
             "FIR-1",
-            vec![record(
-                "FIR-1",
-                "h1",
-                ProvenanceClass::Inference,
-                "s1",
-                now,
-            )],
+            vec![record("FIR-1", "h1", ProvenanceClass::Inference, "s1", now)],
         );
         // Citation claims SystemOfRecord but connector said Inference.
         let input = input_with_citations(
@@ -749,7 +756,11 @@ mod tests {
         // Citation matches the NEW (latest) hash → should validate.
         let input = input_with_citations(
             "s1",
-            vec![citation("FIR-1", "new-hash", ProvenanceClass::SystemOfRecord)],
+            vec![citation(
+                "FIR-1",
+                "new-hash",
+                ProvenanceClass::SystemOfRecord,
+            )],
         );
         let output = process(&input, &port, ValidationMode::DefaultBlocking);
         assert_eq!(output.blocked, None);

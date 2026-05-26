@@ -31,13 +31,11 @@ pub fn is_conventional(message: &str) -> bool {
         return false;
     }
     // Type-(optional scope)-colon-space-description.
-    let prefix_re = match Regex::new(r"^(\w+)(?:\([^)]*\))?:\s*.+") {
-        Ok(re) => re,
-        Err(_) => return false,
+    let Ok(prefix_re) = Regex::new(r"^(\w+)(?:\([^)]*\))?:\s*.+") else {
+        return false;
     };
-    let caps = match prefix_re.captures(subject) {
-        Some(c) => c,
-        None => return false,
+    let Some(caps) = prefix_re.captures(subject) else {
+        return false;
     };
     let prefix = caps[1].to_lowercase();
     VALID_PREFIXES.contains(&prefix.as_str())

@@ -1,5 +1,5 @@
 //! Pydantic-style fail-fast config validation (M4.8 / task #26,
-//! ContextForge pattern).
+//! `ContextForge` pattern).
 //!
 //! `SentinelConfig` is the canonical top-level config struct that
 //! every component shares — request limits, SSRF policy, judge tier,
@@ -34,6 +34,7 @@ use crate::ssrf::SsrfPolicy;
 /// The top-level Sentinel config. All sub-configs are composable
 /// — drop in a new `Default` and the parent picks it up.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Default)]
 pub struct SentinelConfig {
     #[serde(default)]
     pub request_limits: RequestLimits,
@@ -47,17 +48,6 @@ pub struct SentinelConfig {
     pub signing: SigningConfig,
 }
 
-impl Default for SentinelConfig {
-    fn default() -> Self {
-        Self {
-            request_limits: RequestLimits::default(),
-            ssrf: SsrfPolicy::default(),
-            judge: JudgeConfig::default(),
-            proof_archive: ProofArchiveConfig::default(),
-            signing: SigningConfig::default(),
-        }
-    }
-}
 
 impl SentinelConfig {
     /// Run every sub-validator and return the complete punch list.
@@ -86,10 +76,11 @@ impl SentinelConfig {
     }
 }
 
-/// Judge-tier configuration. Today carries the default tier (used
-/// when a step config omits the `judge` field) and a flag controlling
-/// whether software-only signing is acceptable for this deployment
-/// (false ⇒ hardware signing required, ties into M1.10 follow-up).
+/// Judge-tier configuration.
+///
+/// Carries the default tier (used when a step config omits the `judge` field)
+/// and a flag controlling whether software-only signing is acceptable for this
+/// deployment (false ⇒ hardware signing required, ties into M1.10 follow-up).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JudgeConfig {
     /// Default `JudgeModel` for steps that don't declare a tier.
@@ -98,7 +89,7 @@ pub struct JudgeConfig {
     pub default_tier: JudgeModel,
 }
 
-fn default_judge_tier() -> JudgeModel {
+const fn default_judge_tier() -> JudgeModel {
     JudgeModel::default_review_tier()
 }
 
@@ -120,10 +111,11 @@ pub struct ProofArchiveConfig {
     pub aging_days: Option<u32>,
 }
 
-/// Signing-key configuration. Today the env-var name + a flag
-/// requiring hardware backing (M1.10 follow-up). When
-/// `hardware_required` is `true`, the signing backend trait must
-/// produce a non-software variant or chain submission fails.
+/// Signing-key configuration.
+///
+/// Carries the env-var name and a flag requiring hardware backing (M1.10
+/// follow-up). When `hardware_required` is `true`, the signing backend trait
+/// must produce a non-software variant or chain submission fails.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SigningConfig {
     /// Env-var name carrying the Ed25519 signing key. `None` ⇒
@@ -147,41 +139,27 @@ impl Default for SigningConfig {
     }
 }
 
-/// One validation failure. Each variant carries the offending value
-/// + the rule that was broken so a deny-banner can render an
-/// actionable line per error without parsing the enum.
+/// One validation failure.
+///
+/// Each variant carries the offending value and the rule that was broken,
+/// so a deny-banner can render an actionable line per error without parsing the enum.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConfigError {
     /// `RequestLimits.max_evidence_bytes` exceeded the safety ceiling.
-    EvidenceLimitTooLarge {
-        actual: usize,
-        ceiling: usize,
-    },
+    EvidenceLimitTooLarge { actual: usize, ceiling: usize },
     /// `RequestLimits.max_artifact_bytes` exceeded the safety ceiling.
-    ArtifactLimitTooLarge {
-        actual: usize,
-        ceiling: usize,
-    },
+    ArtifactLimitTooLarge { actual: usize, ceiling: usize },
     /// `RequestLimits.window_seconds` is zero with rate limiting
     /// otherwise enabled — the math doesn't work.
-    RateLimitWindowZero {
-        max_calls_per_window: usize,
-    },
+    RateLimitWindowZero { max_calls_per_window: usize },
     /// SSRF allowlist entry has an invalid hostname (whitespace,
     /// empty, or contains spaces).
-    SsrfAllowlistInvalidHost {
-        entry: String,
-    },
+    SsrfAllowlistInvalidHost { entry: String },
     /// SSRF denylist entry has the same problem.
-    SsrfDenylistInvalidHost {
-        entry: String,
-    },
+    SsrfDenylistInvalidHost { entry: String },
     /// Aging window is unreasonably large (sanity check, not data
     /// integrity — > 365 days is almost certainly a typo).
-    ProofArchiveAgingTooLarge {
-        actual_days: u32,
-        ceiling_days: u32,
-    },
+    ProofArchiveAgingTooLarge { actual_days: u32, ceiling_days: u32 },
     /// `signing.hardware_required = true` but no `signing_key_env`
     /// is set — there's no path to produce a signature at all.
     HardwareSigningRequiredButNoKeyEnv,
@@ -287,11 +265,10 @@ fn validate_ssrf(s: &SsrfPolicy, errors: &mut Vec<ConfigError>) {
 /// (trailing space, embedded newline) that produce silent
 /// configuration drift.
 fn is_valid_hostlike(s: &str) -> bool {
-    !s.is_empty()
-        && !s.chars().any(|c| c.is_whitespace() || c.is_control())
+    !s.is_empty() && !s.chars().any(|c| c.is_whitespace() || c.is_control())
 }
 
-fn validate_judge(_j: &JudgeConfig, _errors: &mut Vec<ConfigError>) {
+const fn validate_judge(_j: &JudgeConfig, _errors: &mut Vec<ConfigError>) {
     // `JudgeModel` is an enum — invalid variants are caught by serde
     // at deserialization time. Nothing further to validate today.
     // Future: when multi-judge tiers land (#82 Stage B), validate
@@ -332,10 +309,7 @@ mod tests {
         cfg.request_limits.max_evidence_bytes = 200 * 1024 * 1024; // 200 MiB
         let errs = cfg.validate().unwrap_err();
         assert_eq!(errs.len(), 1);
-        assert!(matches!(
-            errs[0],
-            ConfigError::EvidenceLimitTooLarge { .. }
-        ));
+        assert!(matches!(errs[0], ConfigError::EvidenceLimitTooLarge { .. }));
     }
 
     #[test]

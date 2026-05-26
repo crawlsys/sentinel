@@ -1,0 +1,36 @@
+# Sentinel A13 spec-challenge enforcement mode — shipped defaults.
+#
+# Read by `sentinel_infrastructure::spec_challenge_config::SpecChallengeConfig`
+# at sentinel startup via `include_str!`. Operators override in
+# `~/.claude/sentinel/config/spec-challenge.toml`; the loader merges
+# operator overrides on top.
+#
+# Per the A13 design (`docs/a13-spec-challenge.md` §3), the safe
+# rollout posture is `ObserveOnly` until orchestrators reliably emit
+# `extra.spec_challenge` payloads on Irreversible+ tool calls.
+# After that, flip to `DefaultBlocking`. For high-stakes domains
+# where Irreversible work should also be semantically scored, use
+# `StrictBlocking`.
+#
+# Mode values: ObserveOnly | DefaultBlocking | StrictBlocking.
+#
+# - `ObserveOnly`: hook runs the completeness check + logs would-be
+#   blocks via `tracing::info` but never returns `deny()`. Default.
+# - `DefaultBlocking`: class-graded per spec §3. TriviallyReversible
+#   skipped, ReversibleWithEffort optional, Irreversible requires a
+#   complete challenge, Catastrophic also requires every scorer
+#   axis ≥ catastrophic_axis_threshold.
+# - `StrictBlocking`: Irreversible work is also scored (treated as
+#   Catastrophic semantically). For domains where shipping with
+#   shallow alternatives or fake-empty categories is unacceptable.
+
+[spec_challenge_gate]
+mode = "ObserveOnly"
+
+# Minimum per-axis score (0.0-1.0) the scorer must return for a
+# Catastrophic-class challenge to pass. Operators tune this per
+# deployment — frontier-model judges typically calibrate around 0.6-0.8
+# on substantive challenges, so 0.7 is the v1 default. Lower values
+# admit weaker challenges; higher values demand stronger pre-action
+# articulation.
+catastrophic_axis_threshold = 0.7

@@ -8,7 +8,7 @@
 //! State is scoped by repo root to prevent cross-project bleeding.
 //! State file: `~/.claude/sentinel/state/hygiene-{repo_hash}.json`
 //!
-//! **UserPromptSubmit phase:** Reads state and injects reminders.
+//! **`UserPromptSubmit` phase:** Reads state and injects reminders.
 
 use sentinel_domain::events::{HookEvent, HookInput, HookOutput};
 use std::path::PathBuf;
@@ -45,7 +45,7 @@ fn repo_hash(repo_root: &str) -> String {
 }
 
 fn u64(b: u8) -> u64 {
-    b as u64
+    u64::from(b)
 }
 
 fn state_file(fs: &dyn FileSystemPort, repo_root: &str) -> Option<PathBuf> {

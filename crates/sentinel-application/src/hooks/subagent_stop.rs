@@ -1,11 +1,11 @@
-//! SubagentStop hook — quality gate before agent concludes
+//! `SubagentStop` hook — quality gate before agent concludes
 //!
 //! Ensures agents verify their work before finishing, similar to
-//! the TeammateIdle quality gate.
+//! the `TeammateIdle` quality gate.
 
 use sentinel_domain::events::{HookInput, HookOutput};
 
-/// Process SubagentStop event
+/// Process `SubagentStop` event
 ///
 /// Logs agent completion for telemetry and emits a channel event
 /// so the sentinel-mcp server can push a notification into the session.

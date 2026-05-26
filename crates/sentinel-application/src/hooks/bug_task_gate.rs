@@ -1,17 +1,17 @@
-//! Bug Task Gate — require a TaskCreate after a bug is observed.
+//! Bug Task Gate — require a `TaskCreate` after a bug is observed.
 //!
 //! When a tool result reveals a bug (cargo test FAILED, cargo `error[Exxxx]`,
 //! Rust panic, …), this hook records pending-bug state for the current repo.
-//! Until a `TaskCreate` (or TaskUpdate) fires with a bug-related keyword in
+//! Until a `TaskCreate` (or `TaskUpdate`) fires with a bug-related keyword in
 //! its subject/description, mutating tools are blocked. The intent is the same
 //! as the user's complaint that "tasks are not always enforced" — discovering
 //! a bug without filing it is exactly the case where a task gets skipped.
 //!
 //! Detection is conservative on purpose:
-//!   - Patterns must appear in `tool_result` (PostToolUse), not chat text.
+//!   - Patterns must appear in `tool_result` (`PostToolUse`), not chat text.
 //!   - Only three high-confidence patterns trigger: `test result: FAILED`,
 //!     `error[E0000]` codes, and Rust `panicked at`.
-//! False positives nag the user; missed signals are recoverable.
+//!   - False positives nag the user; missed signals are recoverable.
 //!
 //! State file: `~/.claude/sentinel/state/pending-bug-{repo_hash}.json`.
 //! TTL: 10 minutes — bug signals are time-sensitive.
@@ -47,7 +47,7 @@ const ALLOWED_TOOLS: &[&str] = &[
     "mcp__sequential-thinking__sequentialthinking",
 ];
 
-/// Keywords that indicate a TaskCreate / TaskUpdate is filing the bug. Match
+/// Keywords that indicate a `TaskCreate` / `TaskUpdate` is filing the bug. Match
 /// case-insensitively against subject + description fields.
 const BUG_KEYWORDS: &[&str] = &[
     "bug",
@@ -74,8 +74,7 @@ fn repo_hash(repo_root: &str) -> String {
     hasher.update(repo_root.as_bytes());
     hasher.finalize()[..4]
         .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
+        .fold(String::new(), |mut s, b| { use std::fmt::Write; write!(s, "{b:02x}").unwrap(); s })
 }
 
 fn state_file(fs: &dyn FileSystemPort, repo_root: &str) -> Option<PathBuf> {
@@ -109,7 +108,7 @@ fn is_stale(first_seen_at: &str) -> bool {
     }
 }
 
-/// Pull a string-like tool_result out of a HookInput. Tool results can be
+/// Pull a string-like `tool_result` out of a `HookInput`. Tool results can be
 /// either a top-level string or an object with a `content` field; check both.
 fn extract_tool_result_text(input: &HookInput) -> Option<String> {
     let result = input.tool_result.as_ref()?;
@@ -154,7 +153,7 @@ fn find_error_code(text: &str) -> Option<usize> {
         let abs = search_from + rel;
         let after = &text[abs + needle.len()..];
         // Validate: digits then `]:`.
-        let digit_count = after.chars().take_while(|c| c.is_ascii_digit()).count();
+        let digit_count = after.chars().take_while(char::is_ascii_digit).count();
         if digit_count > 0 {
             let after_digits = &after[digit_count..];
             if after_digits.starts_with("]:") || after_digits.starts_with("] ") {
@@ -181,7 +180,7 @@ fn snippet_around(text: &str, marker: &str) -> String {
     }
 }
 
-/// True when `tool_input` for a TaskCreate / TaskUpdate references a bug-
+/// True when `tool_input` for a `TaskCreate` / `TaskUpdate` references a bug-
 /// related keyword in its subject or description fields.
 fn task_input_mentions_bug(input: &HookInput) -> bool {
     let Some(ti) = input.tool_input.as_ref() else {
@@ -193,8 +192,8 @@ fn task_input_mentions_bug(input: &HookInput) -> bool {
     BUG_KEYWORDS.iter().any(|k| combined.contains(k))
 }
 
-/// PostToolUse handler — scans tool output for bug signals; clears state when
-/// a TaskCreate / TaskUpdate references a bug keyword.
+/// `PostToolUse` handler — scans tool output for bug signals; clears state when
+/// a `TaskCreate` / `TaskUpdate` references a bug keyword.
 pub fn process_posttool(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     let cwd = input.cwd.as_deref().unwrap_or(".");
     let repo_root = match ctx.git.repo_root(cwd) {
@@ -226,7 +225,7 @@ pub fn process_posttool(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput 
 
     let state = PendingBugState {
         first_seen_at: Utc::now().to_rfc3339(),
-        evidence: evidence.clone(),
+        evidence,
         repo_root: repo_root.clone(),
     };
     if let Some(path) = state_file(ctx.fs, &repo_root) {
@@ -237,7 +236,7 @@ pub fn process_posttool(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput 
     HookOutput::allow()
 }
 
-/// PreToolUse handler — block mutating tools when a pending bug is recorded
+/// `PreToolUse` handler — block mutating tools when a pending bug is recorded
 /// for this repo. Allowlists Task* / Read / Skill / sequential-thinking so
 /// the model can satisfy the gate.
 pub fn process_pretool(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {

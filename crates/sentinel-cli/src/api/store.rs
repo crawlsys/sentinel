@@ -57,16 +57,21 @@ fn is_valid_slug(s: &str) -> bool {
 fn get_or_clone_repo(owner: &str, repo: &str) -> Result<PathBuf, String> {
     let key = format!("{owner}/{repo}");
 
-    let mut cache = REPO_CACHE.lock().unwrap();
-    let cache_map = cache.get_or_insert_with(HashMap::new);
-
-    if let Some(entry) = cache_map.get(&key) {
-        if Instant::now() < entry.expires && entry.dir.exists() {
-            return Ok(entry.dir.clone());
+    // Check the cache; drop the guard before doing any I/O.
+    let cached = {
+        let mut cache = REPO_CACHE.lock().unwrap();
+        let cache_map = cache.get_or_insert_with(HashMap::new);
+        if let Some(entry) = cache_map.get(&key) {
+            if Instant::now() < entry.expires && entry.dir.exists() {
+                return Ok(entry.dir.clone());
+            }
+            // Expired — clean up the old dir (best-effort, ignore errors).
+            let _ = fs::remove_dir_all(&entry.dir);
+            cache_map.remove(&key);
         }
-        // Expired — clean up
-        let _ = fs::remove_dir_all(&entry.dir);
-    }
+        None::<PathBuf>
+    };
+    let _ = cached; // consumed above
 
     // **Attack #156 fix**: Use a unique temp dir name with a random suffix to
     // prevent symlink race attacks. The previous predictable name
@@ -74,7 +79,12 @@ fn get_or_clone_repo(owner: &str, repo: &str) -> Result<PathBuf, String> {
     // that path, redirecting git clone output to an arbitrary directory.
     let mut rand_bytes = [0u8; 8];
     let _ = getrandom::getrandom(&mut rand_bytes);
-    let rand_suffix: String = rand_bytes.iter().map(|b| format!("{b:02x}")).collect();
+    // fold avoids a temporary String per byte (vs format_collect pattern).
+    let rand_suffix: String = rand_bytes.iter().fold(String::with_capacity(16), |mut s, b| {
+        use std::fmt::Write as _;
+        let _ = write!(s, "{b:02x}");
+        s
+    });
     let tmp_dir = std::env::temp_dir().join(format!("skills-{owner}-{repo}-{rand_suffix}"));
 
     // Verify the path doesn't already exist (extremely unlikely with random suffix)
@@ -99,13 +109,18 @@ fn get_or_clone_repo(owner: &str, repo: &str) -> Result<PathBuf, String> {
         return Err(format!("git clone failed: {stderr}"));
     }
 
-    cache_map.insert(
-        key,
-        RepoEntry {
-            dir: tmp_dir.clone(),
-            expires: Instant::now() + REPO_CACHE_TTL,
-        },
-    );
+    // Re-acquire guard to insert the newly cloned dir.
+    REPO_CACHE
+        .lock()
+        .unwrap()
+        .get_or_insert_with(HashMap::new)
+        .insert(
+            key,
+            RepoEntry {
+                dir: tmp_dir.clone(),
+                expires: Instant::now() + REPO_CACHE_TTL,
+            },
+        );
 
     Ok(tmp_dir)
 }
@@ -134,7 +149,7 @@ fn walk_for_skills(dir: &Path, depth: usize, max_depth: usize, skills: &mut Vec<
     };
 
     for entry in entries.filter_map(std::result::Result::ok) {
-        if !entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
+        if !entry.file_type().is_ok_and(|ft| ft.is_dir()) {
             continue;
         }
         let name = entry.file_name().to_string_lossy().to_string();
@@ -269,22 +284,18 @@ async fn install(Json(body): Json<InstallRequest>) -> Json<serde_json::Value> {
         return Json(serde_json::json!({"error": "Invalid owner/repo format"}));
     }
 
-    let repo_dir = match get_or_clone_repo(&body.owner, &body.repo) {
-        Ok(d) => d,
-        Err(e) => return Json(serde_json::json!({"error": e})),
+    let Ok(repo_dir) = get_or_clone_repo(&body.owner, &body.repo) else {
+        return Json(serde_json::json!({"error": "Failed to clone repo"}));
     };
 
     let skills = discover_skills(&repo_dir);
-    let found = match skills
+    let Some(found) = skills
         .iter()
         .find(|s| s.dir_name == body.skill || s.name == body.skill)
-    {
-        Some(s) => s,
-        None => {
-            return Json(
-                serde_json::json!({"error": format!("Skill \"{}\" not found", body.skill)}),
-            )
-        }
+    else {
+        return Json(
+            serde_json::json!({"error": format!("Skill \"{}\" not found", body.skill)}),
+        );
     };
 
     let dest_dir = skills_dir().join(&found.dir_name);

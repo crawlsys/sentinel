@@ -437,7 +437,9 @@ artifact_schema = { pr_number = "int (from 3.L3.2)", merge_method = "string (squ
 [[phases]]
 id = "qa-handoff"
 
-# --- Step 0: Local Steel Smoke Test ---
+# --- Step 0: Local CDP Smoke Test ---
+# Localhost browser testing now uses CDP (edge-cdp skill) directly against
+# http://localhost:PORT. No cloudflared tunnel needed.
 
 [[phases.steps]]
 id = "3.5.0.1"
@@ -447,57 +449,45 @@ artifact_schema = { issue_id = "string (from fetch/1.1)", area_label = "string (
 
 [[phases.steps]]
 id = "3.5.0.2"
-description = "Prerequisites check (cloudflared)"
-suggested_tools = ["Bash:which cloudflared", "Bash:cloudflared --version"]
-artifact_schema = { cloudflared_installed = "bool", cloudflared_version = "string | null", skipped_reason = "string | null — populated when 3.5.0.1 needs_browser_smoke is false" }
+description = "Launch local CDP browser against localhost dev server"
+suggested_tools = ["mcp__cdp__launch"]
+artifact_schema = { local_url = "string (http://localhost:PORT)", instance_name = "string — CDP instance name passed to subsequent tools", launched_at = "string (ISO-8601)", skipped_reason = "string | null — populated when 3.5.0.1 needs_browser_smoke is false" }
 
 [[phases.steps]]
 id = "3.5.0.3"
-description = "Start Cloudflare tunnel"
-suggested_tools = ["Bash:cloudflared tunnel --url http://localhost:PORT"]
-artifact_schema = { local_url = "string (http://localhost:PORT)", tunnel_url = "string (https://*.trycloudflare.com)", tunnel_pid = "int", started_at = "string (ISO-8601)" }
+description = "Wait for page ready + screenshot homepage"
+suggested_tools = ["mcp__cdp__wait_for_selector", "mcp__cdp__screenshot"]
+artifact_schema = { instance_name = "string (from 3.5.0.2)", url_visited = "string (from 3.5.0.2 local_url)", screenshot_path = "string (absolute)", page_loaded = "bool" }
 
 [[phases.steps]]
 id = "3.5.0.4"
-description = "Create Steel session"
-suggested_tools = ["mcp__browserbase__create_session"]
-artifact_schema = { tunnel_url = "string (from 3.5.0.3)", session_id = "string (UUID)", live_view_url = "string", recording_enabled = "bool — should be true so judge gets a recording" }
+description = "Login as browser test bot"
+suggested_tools = ["mcp__cdp__navigate", "mcp__cdp__fill", "mcp__cdp__click", "mcp__doppler__get_secret"]
+artifact_schema = { instance_name = "string (from 3.5.0.2)", login_url = "string", test_user_email = "string — from project config browser_test_email", logged_in = "bool", post_login_screenshot = "string (path)" }
 
 [[phases.steps]]
 id = "3.5.0.5"
-description = "Navigate and screenshot homepage"
-suggested_tools = ["mcp__browserbase__navigate", "mcp__browserbase__screenshot"]
-artifact_schema = { session_id = "string (from 3.5.0.4)", url_visited = "string (from 3.5.0.3 tunnel_url)", screenshot_path = "string (absolute)", page_loaded = "bool" }
+description = "Navigate to feature"
+suggested_tools = ["mcp__cdp__navigate", "mcp__cdp__screenshot"]
+artifact_schema = { instance_name = "string (from 3.5.0.2)", feature_url = "string", page_loaded = "bool", screenshot_path = "string" }
 
 [[phases.steps]]
 id = "3.5.0.6"
-description = "Login as test bot"
-suggested_tools = ["mcp__browserbase__navigate", "mcp__browserbase__fill", "mcp__browserbase__click", "mcp__doppler__get_secret"]
-artifact_schema = { session_id = "string (from 3.5.0.4)", login_url = "string", test_user_email = "string — from project config qa.test_user", logged_in = "bool", post_login_screenshot = "string (path)" }
+description = "Verify elements + test flow"
+suggested_tools = ["mcp__cdp__wait_for_selector", "mcp__cdp__is_visible", "mcp__cdp__click", "mcp__cdp__get_text", "mcp__cdp__evaluate"]
+artifact_schema = { instance_name = "string (from 3.5.0.2)", elements_verified = "array of {selector, exists, visible}", flow_steps_passed = "int", flow_steps_failed = "int", console_errors = "array of strings", final_screenshot = "string (path)" }
 
 [[phases.steps]]
 id = "3.5.0.7"
-description = "Navigate to feature"
-suggested_tools = ["mcp__browserbase__navigate", "mcp__browserbase__screenshot"]
-artifact_schema = { session_id = "string (from 3.5.0.4)", feature_url = "string", page_loaded = "bool", screenshot_path = "string" }
+description = "Close CDP instance"
+suggested_tools = ["mcp__cdp__close_instance"]
+artifact_schema = { instance_name = "string (from 3.5.0.2)", instance_closed = "bool" }
 
 [[phases.steps]]
 id = "3.5.0.8"
-description = "Verify elements + test flow"
-suggested_tools = ["mcp__browserbase__wait_for_selector", "mcp__browserbase__element_exists", "mcp__browserbase__click", "mcp__browserbase__get_text"]
-artifact_schema = { session_id = "string (from 3.5.0.4)", elements_verified = "array of {selector, exists, visible}", flow_steps_passed = "int", flow_steps_failed = "int", console_errors = "array of strings", final_screenshot = "string (path)" }
-
-[[phases.steps]]
-id = "3.5.0.9"
-description = "Release session + kill cloudflared"
-suggested_tools = ["mcp__browserbase__close_tab", "Bash:taskkill", "Bash:kill"]
-artifact_schema = { session_id = "string (from 3.5.0.4)", session_released = "bool", recording_url = "string — Browserbase session recording for judge", tunnel_killed = "bool", tunnel_pid_terminated = "int (from 3.5.0.3 tunnel_pid)" }
-
-[[phases.steps]]
-id = "3.5.0.10"
-description = "Local Steel gate"
+description = "Local CDP gate"
 blocker = true
-artifact_schema = { flow_pass = "bool (from 3.5.0.8)", console_clean = "bool — no errors in 3.5.0.8 console_errors", recording_url = "string (from 3.5.0.9)", local_steel_gate_passed = "bool — must be true to advance to deploy" }
+artifact_schema = { flow_pass = "bool (from 3.5.0.6)", console_clean = "bool — no errors in 3.5.0.6 console_errors", local_cdp_gate_passed = "bool — must be true to advance to deploy" }
 
 # --- Step 1: Deploy ---
 
@@ -513,11 +503,12 @@ description = "Verify deployment health"
 suggested_tools = ["Bash:curl", "mcp__vercel__get_deployment", "mcp__railway__get_deployment"]
 artifact_schema = { deploy_id = "string (from 3.5.1.1)", deploy_status = "string ('ready'|'error'|'building')", health_check_url = "string", health_status_code = "int — usually 200", health_response_body = "string (excerpt)", deploy_healthy = "bool — must be true to advance" }
 
-# --- Step 2: Staging Steel Smoke Test ---
+# --- Step 2: Staging Browserbase Smoke Test ---
+# Staging is a remote URL — use Browserbase MCP (cloud sessions, full 48 tools).
 
 [[phases.steps]]
 id = "3.5.2.1"
-description = "Create Steel session"
+description = "Create Browserbase session"
 suggested_tools = ["mcp__browserbase__create_session"]
 artifact_schema = { staging_url = "string (from 3.5.1.1 deploy_url)", session_id = "string", live_view_url = "string", recording_enabled = "bool — true" }
 
@@ -547,16 +538,16 @@ artifact_schema = { session_id = "string (from 3.5.2.1)", session_released = "bo
 
 [[phases.steps]]
 id = "3.5.2.6"
-description = "Staging Steel gate"
+description = "Staging Browserbase gate"
 blocker = true
-artifact_schema = { flow_pass = "bool (from 3.5.2.4)", console_clean = "bool", recording_url = "string (from 3.5.2.5)", staging_steel_gate_passed = "bool — must be true to advance to Loom" }
+artifact_schema = { flow_pass = "bool (from 3.5.2.4)", console_clean = "bool", recording_url = "string (from 3.5.2.5)", staging_browserbase_gate_passed = "bool — must be true to advance to Loom" }
 
 # --- Step 3: Loom Pipeline ---
 
 [[phases.steps]]
 id = "3.5.3.1"
 description = "Collect screenshots"
-artifact_schema = { local_screenshots = "array of strings (paths from 3.5.0.5/7/8)", staging_screenshots = "array of strings (paths from 3.5.2.3/4)", combined_count = "int" }
+artifact_schema = { local_screenshots = "array of strings (paths from 3.5.0.3/5/6 — homepage, feature, flow)", staging_screenshots = "array of strings (paths from 3.5.2.3/4)", combined_count = "int" }
 
 [[phases.steps]]
 id = "3.5.3.2"

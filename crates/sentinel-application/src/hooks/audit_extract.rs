@@ -1,4 +1,4 @@
-//! BA1 — Audit-extract hook (PostToolUse).
+//! BA1 — Audit-extract hook (`PostToolUse`).
 //!
 //! Per `docs/ba1-ba3-sentinel-enforcement.md` §2.1. Lifts every
 //! successful documentation-connector call (`mcp__*` tools that emit
@@ -9,7 +9,7 @@
 //!
 //! ## Observational, never blocking
 //!
-//! `audit_extract` runs on PostToolUse and ALWAYS returns
+//! `audit_extract` runs on `PostToolUse` and ALWAYS returns
 //! [`HookOutput::allow()`]. The tool call has already completed when
 //! this hook fires; blocking would be incoherent. Write failures
 //! emit a `tracing::warn` and drop the record — the downstream
@@ -20,7 +20,7 @@
 //! ## Connector audit-event shape
 //!
 //! BA6 specifies that documentation connectors emit a structured
-//! `provenance_audit` field in their PostToolUse `extra` payload:
+//! `provenance_audit` field in their `PostToolUse` `extra` payload:
 //!
 //! ```json
 //! {
@@ -46,7 +46,7 @@ use sentinel_domain::ports::ProvenanceWritePort;
 /// Tool-name prefix that identifies MCP server tools.
 const MCP_PREFIX: &str = "mcp__";
 
-/// Process a PostToolUse event for connector audit lift.
+/// Process a `PostToolUse` event for connector audit lift.
 ///
 /// `provenance_writer` is the persistence port. Tests inject a
 /// recording stub; production passes the JSONL adapter (Phase 4).
@@ -228,7 +228,10 @@ mod tests {
         input.tool_name = Some("Bash".to_string());
         let output = process(&input, &writer);
         assert_eq!(output.blocked, None);
-        assert!(writer.recorded().is_empty(), "non-MCP tools must not produce records");
+        assert!(
+            writer.recorded().is_empty(),
+            "non-MCP tools must not produce records"
+        );
     }
 
     // ---- Skip paths (no record written) ----
@@ -238,7 +241,10 @@ mod tests {
         let writer = StubWriter::new();
         let input = mcp_input("Edit", "session-1", Some(valid_audit()));
         let _ = process(&input, &writer);
-        assert!(writer.recorded().is_empty(), "Edit is not an mcp__ tool — no record");
+        assert!(
+            writer.recorded().is_empty(),
+            "Edit is not an mcp__ tool — no record"
+        );
     }
 
     #[test]

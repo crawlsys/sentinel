@@ -50,6 +50,12 @@ pub struct ExecutionPlan {
     pub batches: Vec<Vec<HookId>>,
 }
 
+/// **Attack #180 fix**: Reject dependency chains deeper than this.
+///
+/// A long chain creates many sequential batches, delaying `phase_gate` execution.
+/// 50 levels is far beyond any legitimate hook config.
+const MAX_CHAIN_DEPTH: usize = 50;
+
 /// Resolve hook dependencies into an ordered execution plan.
 ///
 /// Hooks with no dependency edges between them are grouped into the same batch
@@ -101,11 +107,6 @@ pub fn resolve(specs: &[HookSpec]) -> Result<ExecutionPlan, DependencyError> {
             .unwrap_or(0);
         depths.insert(node_idx, max_parent_depth);
     }
-
-    // **Attack #180 fix**: Reject excessively deep dependency chains.
-    // A long chain creates many sequential batches, delaying phase_gate
-    // execution. 50 levels is far beyond any legitimate hook config.
-    const MAX_CHAIN_DEPTH: usize = 50;
 
     // Find max depth
     let max_depth = depths.values().copied().max().unwrap_or(0);

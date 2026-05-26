@@ -46,8 +46,8 @@ pub fn run(
             ext.core.mcp_servers, ext.core.mcp_repos, ext.core.cli_repos,
         );
         eprintln!(
-            "  scripts={}, docs={}, templates={}, steel_tools={}",
-            ext.scripts, ext.docs, ext.templates, ext.steel_tools,
+            "  scripts={}, docs={}, templates={}, browserbase_tools={}",
+            ext.scripts, ext.docs, ext.templates, ext.browserbase_tools,
         );
 
         let report = scanner::sync_counts(&root_dir, dry_run);
@@ -168,7 +168,7 @@ pub fn run(
             v.failed.to_string().red(),
         );
     } else {
-        eprintln!("{} Validation: all {} checks passed", "✓".green(), v.passed,);
+        eprintln!("{} Validation: all {} checks passed", "✓".green(), v.passed);
     }
 
     Ok(())

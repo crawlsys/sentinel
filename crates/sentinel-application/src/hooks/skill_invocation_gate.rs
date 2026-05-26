@@ -5,13 +5,13 @@
 //! is advisory — Claude can ignore it and call other tools without ever
 //! invoking the skill. This hook makes the rule binding:
 //!
-//! 1. **PreToolUse** — if a pending-skill state file exists for the session,
+//! 1. **`PreToolUse`** — if a pending-skill state file exists for the session,
 //!    block any tool call outside the read-only allowlist with a clear "load
 //!    the skill first" message. The allowlist includes Read/Glob/Grep so
 //!    Claude can navigate to SKILL.md, plus `Skill` itself so the invocation
 //!    that satisfies the gate isn't blocked by it.
 //!
-//! 2. **PostToolUse** — when the `Skill` tool fires with a name matching the
+//! 2. **`PostToolUse`** — when the `Skill` tool fires with a name matching the
 //!    pending skill, clear the state. State also auto-clears after a 5-minute
 //!    TTL so a skill the user explicitly skipped doesn't deadlock the session.
 
@@ -71,7 +71,7 @@ fn is_stale(detected_at: &str) -> bool {
     }
 }
 
-/// PreToolUse handler — block when there's a pending skill and the tool
+/// `PreToolUse` handler — block when there's a pending skill and the tool
 /// isn't on the allowlist.
 pub fn process_pretool(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     let session_id = match input.session_id.as_deref() {
@@ -107,7 +107,7 @@ pub fn process_pretool(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     HookOutput::block(envelope.render())
 }
 
-/// PostToolUse handler — clear the pending state once the `Skill` tool has
+/// `PostToolUse` handler — clear the pending state once the `Skill` tool has
 /// been invoked with a matching skill name. Also clears on `Read` of the
 /// SKILL.md file as a fallback so the legacy "MANDATORY: Read(...)" flow
 /// still satisfies the gate.
@@ -142,12 +142,11 @@ fn skill_arg_matches(input: &HookInput, expected_skill: &str) -> bool {
         .as_ref()
         .and_then(|v| v.get("skill"))
         .and_then(|v| v.as_str())
-        .map(|s| s == expected_skill)
-        .unwrap_or(false)
+        .is_some_and(|s| s == expected_skill)
 }
 
 /// True when the Read tool's `file_path` looks like the SKILL.md for the
-/// pending skill. Compares both the skill_path string (with tilde expanded
+/// pending skill. Compares both the `skill_path` string (with tilde expanded
 /// by the caller) and a fallback "skills/<name>/SKILL.md" suffix match so
 /// home-dir variants don't false-negative.
 fn read_target_matches(input: &HookInput, skill_path: &str, skill: &str) -> bool {

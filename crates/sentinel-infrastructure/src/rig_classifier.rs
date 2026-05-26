@@ -204,7 +204,8 @@ pub fn build_skill_catalog() -> String {
                 if let Some(desc) = desc {
                     let mut entry = format!("- {name}: {desc}");
                     if let Some(kw) = keywords {
-                        entry.push_str(&format!(" [keywords: {kw}]"));
+                        use std::fmt::Write as _;
+                        let _ = write!(entry, " [keywords: {kw}]");
                     }
                     entries.push(entry);
                 } else {
@@ -234,8 +235,8 @@ fn extract_description(content: &str) -> Option<String> {
     let after_desc = &frontmatter[desc_start + "description:".len()..];
     let trimmed = after_desc.trim_start();
 
-    if trimmed.starts_with('>') {
-        let lines: Vec<&str> = trimmed[1..]
+    if let Some(stripped) = trimmed.strip_prefix('>') {
+        let lines: Vec<&str> = stripped
             .lines()
             .skip_while(|l| l.trim().is_empty())
             .map(str::trim)

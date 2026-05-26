@@ -1,4 +1,4 @@
-//! TaskCreated hook — enrich tasks with metadata on creation
+//! `TaskCreated` hook — enrich tasks with metadata on creation
 //!
 //! When a task is created, extracts structured metadata from the task
 //! subject (priority, skill tags) and logs it for telemetry.
@@ -29,7 +29,7 @@ fn extract_skill_tags(subject: &str) -> Vec<&str> {
         .collect()
 }
 
-/// Process TaskCreated event
+/// Process `TaskCreated` event
 ///
 /// Extracts priority and skill tags from the task subject, then logs
 /// enriched metadata for telemetry tracking.
@@ -58,7 +58,7 @@ pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
         .extra
         .get("task_checklist")
         .and_then(|v| v.as_array())
-        .map_or(false, |a| !a.is_empty());
+        .is_some_and(|a| !a.is_empty());
 
     tracing::debug!(
         task_id,

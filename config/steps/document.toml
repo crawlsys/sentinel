@@ -124,7 +124,7 @@ description = "Update code examples and snippets"
 
 [[phases.steps]]
 id = "5.3"
-description = "Refresh screenshots via Steel (if UI docs)"
+description = "Refresh screenshots via Browserbase (if UI docs)"
 
 [[phases.steps]]
 id = "5.4"

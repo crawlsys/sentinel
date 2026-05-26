@@ -124,8 +124,7 @@ pub fn build_at(
     let per_stage_breakdown =
         load_section::<PerStageBreakdownSummary>(metrics_dir, "per-stage-cycle-time-summary.json");
     let throughput = load_section::<ThroughputSummary>(metrics_dir, "throughput-summary.json");
-    let first_time_pass =
-        load_section::<FtpSummary>(metrics_dir, "first-time-pass-summary.json");
+    let first_time_pass = load_section::<FtpSummary>(metrics_dir, "first-time-pass-summary.json");
 
     let cost_per_point = load_raw(metrics_dir, "cost-per-point-summary.json");
     let roi = load_raw(metrics_dir, "roi-summary.json");
@@ -166,8 +165,7 @@ pub fn build_at(
             .with_context(|| format!("create_dir_all {}", parent.display()))?;
     }
     let json = serde_json::to_string_pretty(&summary).context("serialize master summary")?;
-    fs::write(summary_path, json)
-        .with_context(|| format!("write {}", summary_path.display()))?;
+    fs::write(summary_path, json).with_context(|| format!("write {}", summary_path.display()))?;
     Ok(summary)
 }
 
@@ -264,7 +262,11 @@ mod tests {
             daily_points: vec![],
         };
         let throughput_path = tmp.path().join("throughput-summary.json");
-        fs::write(&throughput_path, serde_json::to_string(&throughput).unwrap()).unwrap();
+        fs::write(
+            &throughput_path,
+            serde_json::to_string(&throughput).unwrap(),
+        )
+        .unwrap();
         let out = tmp.path().join("master.json");
         let s = build_at(tmp.path(), &out, fixed_now()).unwrap();
         assert_eq!(s.sections_loaded, 1);

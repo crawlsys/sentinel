@@ -47,11 +47,15 @@ struct WorkflowToml {
     skill: String,
     phases: Vec<PhaseToml>,
     /// Tool name prefixes to block when this workflow is active.
-    /// E.g., ["`mcp__cdp`__", "`mcp__edge_cdp`__"] blocks CDP tools when steel is active.
+    /// E.g., a workflow that wants local browser only could block
+    /// `mcp__browserbase__` to force CDP usage.
     #[serde(default)]
     blocked_tool_prefixes: Vec<String>,
     /// Bash command patterns (regex) to block when this workflow is active.
-    /// E.g., ["steel-mcp", "chrome.*--remote-debugging"] blocks CLI escape attempts.
+    /// E.g., ["chrome.*--remote-debugging"] blocks CLI escape attempts that
+    /// would bypass the controlled CDP MCP. Legacy `steel-mcp` patterns are
+    /// still accepted here even though the steel binary is gone (defense
+    /// in depth).
     #[serde(default)]
     blocked_bash_patterns: Vec<String>,
     /// Bash command allowlist (regex). When non-empty, ONLY matching commands pass.
@@ -171,7 +175,7 @@ pub fn load_workflows(config_path: &Path) -> Result<Vec<SkillWorkflow>> {
                 required: p.required,
                 judge: match p.judge.as_str() {
                     "opus" => JudgeModel::Opus,
-                    "haiku" => JudgeModel::Haiku,
+                    "codex" => JudgeModel::Codex,
                     _ => JudgeModel::Sonnet,
                 },
                 description: p.description,
@@ -240,7 +244,7 @@ pub fn load_workflows(config_path: &Path) -> Result<Vec<SkillWorkflow>> {
 #[derive(Debug, Deserialize)]
 struct StepsConfig {
     /// Federation version (M2.7). Defaults to "1" for pre-M2.7 configs.
-    /// Bumped on breaking changes — see SkillSteps::federation_version.
+    /// Bumped on breaking changes — see `SkillSteps::federation_version`.
     #[serde(default = "default_federation_version_str")]
     federation_version: String,
     phases: Vec<StepsPhaseToml>,
@@ -268,6 +272,10 @@ struct StepToml {
     /// continue to load unchanged.
     #[serde(default)]
     baseline_threshold: u64,
+    /// Per-step judge tier (#73). See `WorkflowStep::judge`. None = use the
+    /// default tier. TOML: `judge = "codex" | "kimi" | "sonnet" | "opus"`.
+    #[serde(default)]
+    judge: Option<sentinel_domain::judge::JudgeModel>,
     /// Per-step timeout (M4.4). See `WorkflowStep::timeout_ms`. None = no timeout.
     #[serde(default)]
     timeout_ms: Option<u64>,
@@ -376,6 +384,7 @@ pub fn load_skill_steps(config_path: &Path, skill: &str) -> Result<Option<SkillS
                         description: s.description,
                         blocker: s.blocker,
                         baseline_threshold: s.baseline_threshold,
+                        judge: s.judge,
                         timeout_ms: s.timeout_ms,
                         retry_policy: s.retry_policy,
                         circuit_breaker: s.circuit_breaker,

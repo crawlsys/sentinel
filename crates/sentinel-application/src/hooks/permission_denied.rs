@@ -1,4 +1,4 @@
-//! PermissionDenied hook — handle auto-mode permission denials
+//! `PermissionDenied` hook — handle auto-mode permission denials
 //!
 //! Called when auto-mode denies a tool call. Can return `retry: true`
 //! via hookSpecificOutput to let the model retry the denied call.
@@ -14,7 +14,7 @@ use sentinel_legatus::{BlockReason, EscalationKind};
 
 use crate::legatus_client::{escalate_fire_and_forget, note_turn_signal, TurnSignal};
 
-/// Process PermissionDenied event
+/// Process `PermissionDenied` event
 ///
 /// Logs the denial. Does not auto-retry — that would bypass the
 /// permission system's intent. Observes for diagnostics, fires a

@@ -25,6 +25,11 @@ use super::{FileSystemPort, HookContext, MemoryMcpPort};
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct InjectedMemory {
     id: String,
+    /// Retrieval-event id captured by `memory_inject` from `memory_search`. This —
+    /// not `id` (the atom id) — is what `memory_record_outcome` expects, since
+    /// the retrieval log is keyed by event id.
+    #[serde(default)]
+    event_id: Option<String>,
     name: String,
     score: f64,
 }
@@ -93,7 +98,64 @@ fn detect_correction(prompt: &str) -> Option<&'static str> {
 // Memory usage detection
 // ---------------------------------------------------------------------------
 
-/// Check if any injected memory name appears in the assistant response text.
+/// Tokens too common to be evidence an atom was *used* — matching one of these
+/// in the response says nothing about whether the recalled fact was drawn on.
+/// Deliberately small: over-filtering would discard genuine domain terms.
+const USAGE_STOPWORDS: &[&str] = &[
+    "the", "and", "for", "with", "that", "this", "are", "was", "were", "has",
+    "have", "had", "its", "via", "per", "use", "uses", "used", "default",
+    "value", "count", "runs", "run", "set", "via", "into", "from", "when",
+    "not", "all", "any", "via",
+];
+
+/// Distinctive lowercase tokens from an atom's rendered name (`subject/pred=value`).
+/// Splits on non-alphanumeric, drops short tokens and stopwords, but KEEPS
+/// pure-digit tokens (e.g. a port `3011` is highly distinctive evidence).
+fn distinctive_tokens(name: &str) -> Vec<String> {
+    let lower = name.to_ascii_lowercase();
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for tok in lower.split(|c: char| !c.is_ascii_alphanumeric()) {
+        if tok.is_empty() {
+            continue;
+        }
+        let is_digits = tok.chars().all(|c| c.is_ascii_digit());
+        // Keep multi-char words and any all-digit token; drop short words + stopwords.
+        let keep = (is_digits && tok.len() >= 2) || (tok.len() > 3 && !USAGE_STOPWORDS.contains(&tok));
+        if keep && seen.insert(tok.to_string()) {
+            out.push(tok.to_string());
+        }
+    }
+    out
+}
+
+/// Decide whether an injected atom was *used* by the assistant's response.
+///
+/// The old check required the FULL rendered name (`subject/pred=value`, often
+/// 60+ chars) to appear verbatim — which essentially never happened, so the
+/// feedback loop only ever produced negative ("ignored") signal and learn could
+/// never reinforce a helpful atom. This counts distinctive-token overlap:
+///   - ≤2 distinctive tokens → ALL must appear (a tiny atom is all-or-nothing);
+///   - otherwise → at least half the distinctive tokens AND at least 2 must
+///     appear (the `≥2` guard stops a single common word from false-triggering).
+fn atom_used_in(name: &str, lower_response: &str) -> bool {
+    let tokens = distinctive_tokens(name);
+    if tokens.is_empty() {
+        return false;
+    }
+    let matched = tokens
+        .iter()
+        .filter(|t| lower_response.contains(t.as_str()))
+        .count();
+    if tokens.len() <= 2 {
+        matched == tokens.len()
+    } else {
+        matched >= 2 && matched * 2 >= tokens.len()
+    }
+}
+
+/// Check which injected memories were drawn on by the assistant response,
+/// using distinctive-token overlap (see `atom_used_in`).
 fn detect_used_memories<'a>(
     memories: &'a [InjectedMemory],
     response: &str,
@@ -101,11 +163,7 @@ fn detect_used_memories<'a>(
     let lower_response = response.to_ascii_lowercase();
     memories
         .iter()
-        .filter(|m| {
-            // Only match if the name is non-trivial (>3 chars) to avoid false positives
-            let name_lower = m.name.to_ascii_lowercase();
-            name_lower.len() > 3 && lower_response.contains(&name_lower)
-        })
+        .filter(|m| atom_used_in(&m.name, &lower_response))
         .collect()
 }
 
@@ -136,15 +194,25 @@ fn detect_used_memories<'a>(
 /// negative than "contradicted" in the EMA (see
 /// `OutcomeSignal::WeakNegative` vs `StrongNegative`).
 fn record_outcomes_unified(
+    fs: &dyn FileSystemPort,
     memory_mcp: &dyn MemoryMcpPort,
+    session_id: Option<&str>,
     injected: &[InjectedMemory],
     used: &[&InjectedMemory],
     correction_detected: bool,
+    correction_signal: Option<&str>,
 ) {
     let used_ids: std::collections::HashSet<&str> = used.iter().map(|m| m.id.as_str()).collect();
 
     let mut outcomes: Vec<(String, &'static str)> = Vec::with_capacity(injected.len());
     for memory in injected {
+        // The outcome must attach to the retrieval EVENT, not the atom. If
+        // memory_inject didn't capture an event_id (e.g. an older state file),
+        // there's no event to record against — skip rather than send an atom
+        // id the retrieval log can't resolve.
+        let Some(event_id) = memory.event_id.clone() else {
+            continue;
+        };
         let label = if used_ids.contains(memory.id.as_str()) {
             "used"
         } else if correction_detected {
@@ -152,18 +220,28 @@ fn record_outcomes_unified(
         } else {
             "ignored"
         };
-        outcomes.push((memory.id.clone(), label));
+        outcomes.push((event_id, label));
     }
 
-    // Fire-and-forget: outcomes are best-effort. A transient memory-mcp
-    // failure must not block the Stop hook. Aggregate all calls under a
-    // single tokio runtime to minimise subprocess overhead.
-    //
-    // `run_async` requires `T: Send + Default`. `()` satisfies both, and
-    // the whole path is inherently fire-and-forget (errors from
-    // individual calls are already logged at WARN inside the loop), so
-    // we unwrap to () here.
-    crate::hooks::run_async(async move {
+    // Telemetry: emit a `feedback` event with the per-atom classification so
+    // the end-to-end loop trace shows used/ignored/contradicted ratios. Emitted
+    // before the async move consumes `outcomes`. See crate::memory_telemetry.
+    crate::memory_telemetry::record_feedback(
+        fs,
+        session_id,
+        injected.len(),
+        &outcomes,
+        correction_signal,
+    );
+
+    // Fire-and-forget, but NOT under the default 3s budget: this loops one
+    // `memory_record_outcome` call per injected atom (up to ~8), and each one
+    // cold-spawns memory-mcp (~2s). Under 3s only the first call or two would
+    // land before the timeout killed the rest — which is exactly why the
+    // feedback loop never closed and Loop 4 saw `used=0`. Give it a generous
+    // budget (Stop is async; this never blocks the user's turn). Errors per
+    // call are logged at WARN inside the loop.
+    crate::hooks::run_async_timeout(async move {
         for (event_id, outcome) in outcomes {
             let mut args = serde_json::Map::new();
             args.insert(
@@ -183,7 +261,7 @@ fn record_outcomes_unified(
                 );
             }
         }
-    });
+    }, std::time::Duration::from_secs(30));
 }
 
 // ---------------------------------------------------------------------------
@@ -208,12 +286,9 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
         Err(_) => return HookOutput::allow(),
     };
 
-    let state: InjectedState = match serde_json::from_str(&state_content) {
-        Ok(s) => s,
-        Err(_) => {
-            debug!("Invalid injected-memories state file — skipping");
-            return HookOutput::allow();
-        }
+    let state: InjectedState = if let Ok(s) = serde_json::from_str(&state_content) { s } else {
+        debug!("Invalid injected-memories state file — skipping");
+        return HookOutput::allow();
     };
 
     if state.memories.is_empty() {
@@ -225,7 +300,15 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     let response = input.last_assistant_message.as_deref().unwrap_or("");
     let used = detect_used_memories(&state.memories, response);
     let correction = state.user_prompt.as_deref().and_then(detect_correction);
-    record_outcomes_unified(ctx.memory_mcp, &state.memories, &used, correction.is_some());
+    record_outcomes_unified(
+        ctx.fs,
+        ctx.memory_mcp,
+        input.session_id.as_deref(),
+        &state.memories,
+        &used,
+        correction.is_some(),
+        correction,
+    );
 
     // Never block
     HookOutput::allow()
@@ -262,11 +345,13 @@ mod tests {
         let memories = vec![
             InjectedMemory {
                 id: "id1".to_string(),
+                event_id: None,
                 name: "Firefly Pro CRM".to_string(),
                 score: 0.85,
             },
             InjectedMemory {
                 id: "id2".to_string(),
+                event_id: None,
                 name: "Sentinel Hook Engine".to_string(),
                 score: 0.75,
             },
@@ -282,6 +367,7 @@ mod tests {
     fn test_detect_used_memories_none() {
         let memories = vec![InjectedMemory {
             id: "id1".to_string(),
+            event_id: None,
             name: "Firefly Pro CRM".to_string(),
             score: 0.85,
         }];
@@ -293,9 +379,10 @@ mod tests {
 
     #[test]
     fn test_detect_used_memories_short_name_skipped() {
-        // Names <= 3 chars should be skipped to avoid false positives
+        // A 3-char token yields no distinctive tokens → never "used".
         let memories = vec![InjectedMemory {
             id: "id1".to_string(),
+            event_id: None,
             name: "api".to_string(),
             score: 0.80,
         }];
@@ -306,9 +393,61 @@ mod tests {
     }
 
     #[test]
+    fn test_detect_used_realistic_atom_name_via_token_overlap() {
+        // The real shape: subject/predicate=value. The OLD verbatim-substring
+        // check would never match this against a paraphrasing response; the
+        // token-overlap check must.
+        let memories = vec![InjectedMemory {
+            id: "id1".to_string(),
+            event_id: Some("e1".to_string()),
+            name: "memory daemon/runs on port=3011".to_string(),
+            score: 0.5,
+        }];
+        let response = "The memory daemon binds port 3011 for its HTTP endpoints.";
+        let used = detect_used_memories(&memories, response);
+        assert_eq!(used.len(), 1, "daemon + port + 3011 overlap → used");
+    }
+
+    #[test]
+    fn test_detect_used_number_is_distinctive() {
+        // A port number alone is strong evidence.
+        assert!(atom_used_in(
+            "memory daemon/runs on port=3011",
+            &"we exposed it on 3011 and the daemon answered".to_ascii_lowercase()
+        ));
+    }
+
+    #[test]
+    fn test_detect_used_single_common_word_does_not_false_positive() {
+        // Response mentions "memory" (common in these sessions) but nothing else
+        // from the atom — must NOT register as used.
+        let memories = vec![InjectedMemory {
+            id: "id1".to_string(),
+            event_id: None,
+            name: "memory daemon/has registered cron loops=consolidate, ingest-telemetry, learn, loop6".to_string(),
+            score: 0.4,
+        }];
+        let response = "I improved my working memory of the conversation.";
+        let used = detect_used_memories(&memories, response);
+        assert!(used.is_empty(), "one common token must not trigger 'used'");
+    }
+
+    #[test]
+    fn test_distinctive_tokens_drops_stopwords_keeps_digits() {
+        let toks = distinctive_tokens("memory daemon/runs on port=3011");
+        assert!(toks.contains(&"memory".to_string()));
+        assert!(toks.contains(&"daemon".to_string()));
+        assert!(toks.contains(&"3011".to_string()));
+        // "runs", "on", "port" are stopword/short → dropped.
+        assert!(!toks.contains(&"runs".to_string()));
+        assert!(!toks.contains(&"on".to_string()));
+    }
+
+    #[test]
     fn test_detect_used_memories_case_insensitive() {
         let memories = vec![InjectedMemory {
             id: "id1".to_string(),
+            event_id: None,
             name: "Qdrant Vector Database".to_string(),
             score: 0.90,
         }];

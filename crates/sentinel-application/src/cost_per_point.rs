@@ -153,8 +153,8 @@ pub fn scan_cost_per_point(
 
     // Phase 6: write outputs (overwrite — input is source of truth).
     ensure_parent(output_jsonl)?;
-    let mut jsonl_file = File::create(output_jsonl)
-        .with_context(|| format!("create {}", output_jsonl.display()))?;
+    let mut jsonl_file =
+        File::create(output_jsonl).with_context(|| format!("create {}", output_jsonl.display()))?;
     // Sort: descending cost_per_point so the most expensive points
     // surface first when scanning the JSONL by hand.
     let mut sorted_rows = rows.clone();
@@ -321,15 +321,12 @@ pub fn load_estimates(path: &Path) -> Result<HashMap<String, f64>> {
         return Ok(map);
     }
     let bytes = fs::read(path).with_context(|| format!("read {}", path.display()))?;
-    let value: serde_json::Value = serde_json::from_slice(&bytes)
-        .with_context(|| format!("parse JSON {}", path.display()))?;
+    let value: serde_json::Value =
+        serde_json::from_slice(&bytes).with_context(|| format!("parse JSON {}", path.display()))?;
 
     let issues: &[serde_json::Value] = if let Some(arr) = value.as_array() {
         arr
-    } else if let Some(arr) = value
-        .get("issues")
-        .and_then(serde_json::Value::as_array)
-    {
+    } else if let Some(arr) = value.get("issues").and_then(serde_json::Value::as_array) {
         arr
     } else {
         return Ok(map);
@@ -609,9 +606,7 @@ mod tests {
             .map(|l| serde_json::from_str(l).unwrap())
             .collect();
         let bucket_for = |id: &str| -> u64 {
-            rows.iter()
-                .find(|r| r["ticket"] == id)
-                .unwrap()["bucket"]
+            rows.iter().find(|r| r["ticket"] == id).unwrap()["bucket"]
                 .as_u64()
                 .unwrap()
         };

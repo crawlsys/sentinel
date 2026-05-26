@@ -131,7 +131,10 @@ pub enum TieBreaker {
         cost_per_input_token: f32,
     },
     /// Step 5 — latency. Fastest typical-latency wins.
-    Latency { winner: AgentId, typical_latency_ms: u32 },
+    Latency {
+        winner: AgentId,
+        typical_latency_ms: u32,
+    },
     /// Step 6 — final deterministic fallback: lexical `AgentId` order.
     StableId { winner: AgentId },
 }
@@ -364,7 +367,8 @@ mod tests {
 
     #[test]
     fn signature_changes_when_preferred_differs() {
-        let base = CapabilityRequirement::new(vec![Capability::Reasoning(ReasoningLevel::Standard)]);
+        let base =
+            CapabilityRequirement::new(vec![Capability::Reasoning(ReasoningLevel::Standard)]);
         let with_pref = base
             .clone()
             .with_preferred(Capability::StructuredOutput(SchemaRef::AuditorVerdict));
@@ -403,7 +407,10 @@ mod tests {
         ];
         let agg = AggregateStats::from_records(&records);
         assert_eq!(agg.cohort_size, 4);
-        assert!((agg.success_rate - 0.5).abs() < 1e-5, "2 of 4 strict successes");
+        assert!(
+            (agg.success_rate - 0.5).abs() < 1e-5,
+            "2 of 4 strict successes"
+        );
         assert!(
             (agg.permissive_success_rate - 0.75).abs() < 1e-5,
             "3 of 4 (S + PS) permissive successes"
@@ -431,7 +438,10 @@ mod tests {
         ];
         let agg = AggregateStats::from_records(&records);
         assert!((agg.success_rate - 0.5).abs() < 1e-5);
-        assert!((agg.permissive_success_rate - 0.5).abs() < 1e-5, "Abandoned is not partial");
+        assert!(
+            (agg.permissive_success_rate - 0.5).abs() < 1e-5,
+            "Abandoned is not partial"
+        );
     }
 
     // ---- AppraisalRecord serde ----

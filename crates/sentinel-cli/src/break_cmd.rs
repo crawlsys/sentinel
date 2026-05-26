@@ -686,7 +686,7 @@ mod tests {
         let entry = BreakLogEntry {
             timestamp: "2026-03-14T05:03:00Z".to_string(),
             reason: "test break".to_string(),
-            workflow: Some("steel".to_string()),
+            workflow: Some("browserbase".to_string()),
             duration_minutes: 5,
             challenge_code: "BREAK-123456".to_string(),
             tools_used_during_break: vec![BreakToolUseLog {

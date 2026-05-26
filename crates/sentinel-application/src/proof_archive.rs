@@ -41,10 +41,10 @@
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
 use sentinel_domain::ports::FileSystemPort;
 use sentinel_domain::proof::{ProofChain, ProofEntry};
 use sentinel_domain::state::SessionState;
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 /// Current schema version for archived chain JSONs and index entries.
@@ -63,13 +63,13 @@ pub struct ArchivedChainRecord {
     pub schema_version: u32,
     /// When the archive was written (RFC3339 UTC).
     pub archived_at: DateTime<Utc>,
-    /// The chain as it stood at archive time. Carries skill, session_id,
-    /// entries, head_hash — everything `query_proof_corpus` needs.
+    /// The chain as it stood at archive time. Carries skill, `session_id`,
+    /// entries, `head_hash` — everything `query_proof_corpus` needs.
     pub chain: ProofChain,
 }
 
 /// One line in `index.jsonl`. Compact summary used by router queries
-/// without dragging full StepProof payloads across the MCP boundary.
+/// without dragging full `StepProof` payloads across the MCP boundary.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArchivedChainSummary {
     /// Schema version of this index entry. See [`SCHEMA_VERSION`].
@@ -132,9 +132,7 @@ fn summarize(chain: &ProofChain) -> ArchivedChainSummary {
             .filter(|e| matches!(e, ProofEntry::Phase(_)))
             .count();
 
-    let all_sufficient = step_entries
-        .iter()
-        .all(|s| s.judge_verdict.sufficient)
+    let all_sufficient = step_entries.iter().all(|s| s.judge_verdict.sufficient)
         && chain.proofs.iter().all(|p| p.judge_verdict.sufficient);
 
     let step_sequence: Vec<String> = step_entries
@@ -220,17 +218,14 @@ fn archive_one_chain(
         chain: chain.clone(),
     };
 
-    let json_bytes = serde_json::to_vec_pretty(&record)
-        .context("serialize archived chain")?;
+    let json_bytes = serde_json::to_vec_pretty(&record).context("serialize archived chain")?;
 
     // Atomic write via tmp + rename. The fs.write impl handles parent dir
     // creation, but for atomicity we go through the .tmp dance ourselves so
     // a crashed Stop can't leave half-written JSON in the bucket.
     let tmp_path = path.with_file_name(format!(
         ".{}.tmp",
-        path.file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "chain".to_string())
+        path.file_name().map_or_else(|| "chain".to_string(), |n| n.to_string_lossy().into_owned())
     ));
     fs.write(&tmp_path, &json_bytes)
         .context("write archived chain tmp file")?;
@@ -369,6 +364,7 @@ mod tests {
             started_at: now,
             completed_at: now,
             duration_ms: 1,
+            actor: None,
         }
     }
 

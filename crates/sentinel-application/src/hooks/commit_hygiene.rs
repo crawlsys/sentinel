@@ -3,7 +3,7 @@
 //! **Stop phase:** Detects uncommitted changes, writes state to
 //! `~/.claude/metrics/commit-hygiene.json`.
 //!
-//! **UserPromptSubmit phase:** Reads state, checks cooldown (15 min),
+//! **`UserPromptSubmit` phase:** Reads state, checks cooldown (15 min),
 //! injects reminder with file list.
 
 use sentinel_domain::constants;
@@ -32,8 +32,7 @@ struct CommitState {
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
+        .map_or(0, |d| d.as_millis() as u64)
 }
 
 fn repo_hash(repo_root: &str) -> String {
@@ -86,23 +85,20 @@ pub fn process_stop(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     let cwd = input.cwd.as_deref().unwrap_or(".");
     let root = ctx.git.repo_root(cwd).unwrap_or_else(|| cwd.to_string());
 
-    let files = match ctx.git.has_uncommitted_changes(cwd) {
-        Ok(true) => match ctx.git.changed_files(cwd) {
-            Ok(f) if !f.is_empty() => f,
-            _ => {
-                // No changes — clear any previous state (write empty)
-                if let Some(path) = state_file(ctx.fs, &root) {
-                    let _ = ctx.fs.write(&path, b"");
-                }
-                return HookOutput::allow();
-            }
-        },
+    let files = if matches!(ctx.git.has_uncommitted_changes(cwd), Ok(true)) { match ctx.git.changed_files(cwd) {
+        Ok(f) if !f.is_empty() => f,
         _ => {
+            // No changes — clear any previous state (write empty)
             if let Some(path) = state_file(ctx.fs, &root) {
                 let _ = ctx.fs.write(&path, b"");
             }
             return HookOutput::allow();
         }
+    } } else {
+        if let Some(path) = state_file(ctx.fs, &root) {
+            let _ = ctx.fs.write(&path, b"");
+        }
+        return HookOutput::allow();
     };
 
     let state = CommitState {

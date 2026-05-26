@@ -73,9 +73,9 @@ pub struct NeighbourMatch {
 /// Tiny stop-word list to drop title noise. Kept inline so SEN-4 doesn't
 /// pull a full NLP dep just for stop-words.
 const STOP_WORDS: &[&str] = &[
-    "the", "and", "for", "with", "from", "into", "that", "this", "fix",
-    "feat", "add", "use", "via", "are", "but", "not", "you", "your",
-    "our", "all", "out", "can", "has", "had", "was", "will", "should",
+    "the", "and", "for", "with", "from", "into", "that", "this", "fix", "feat", "add", "use",
+    "via", "are", "but", "not", "you", "your", "our", "all", "out", "can", "has", "had", "was",
+    "will", "should",
 ];
 
 /// Tokenise a title into a sorted unique set. Lowercase, split on
@@ -196,7 +196,7 @@ fn median_u32(values: &[u32]) -> Option<u32> {
     v.sort_unstable();
     let n = v.len();
     if n.is_multiple_of(2) {
-        Some((v[n / 2 - 1] + v[n / 2]) / 2)
+        Some(u32::midpoint(v[n / 2 - 1], v[n / 2]))
     } else {
         Some(v[n / 2])
     }
@@ -224,7 +224,14 @@ fn mode_u8(values: &[u8]) -> Option<u8> {
 mod tests {
     use super::*;
 
-    fn issue(id: &str, title: &str, team: Option<&str>, est: Option<u32>, pri: Option<u8>, labels: &[&str]) -> HistoricalIssue {
+    fn issue(
+        id: &str,
+        title: &str,
+        team: Option<&str>,
+        est: Option<u32>,
+        pri: Option<u8>,
+        labels: &[&str],
+    ) -> HistoricalIssue {
         HistoricalIssue {
             identifier: id.to_string(),
             title: title.to_string(),
@@ -276,19 +283,55 @@ mod tests {
     #[test]
     fn suggest_picks_top_k_neighbours_by_similarity() {
         let history = vec![
-            issue("FPCRM-1", "fix login authentication bug", Some("FPCRM"), Some(3), Some(2), &["bug", "auth"]),
-            issue("FPCRM-2", "fix login validation error", Some("FPCRM"), Some(3), Some(2), &["bug", "auth"]),
-            issue("FPCRM-3", "fix login redirect after sso", Some("FPCRM"), Some(5), Some(2), &["bug"]),
-            issue("FPCRM-99", "completely unrelated payment processing fix", Some("FPCRM"), Some(8), Some(3), &["payments"]),
+            issue(
+                "FPCRM-1",
+                "fix login authentication bug",
+                Some("FPCRM"),
+                Some(3),
+                Some(2),
+                &["bug", "auth"],
+            ),
+            issue(
+                "FPCRM-2",
+                "fix login validation error",
+                Some("FPCRM"),
+                Some(3),
+                Some(2),
+                &["bug", "auth"],
+            ),
+            issue(
+                "FPCRM-3",
+                "fix login redirect after sso",
+                Some("FPCRM"),
+                Some(5),
+                Some(2),
+                &["bug"],
+            ),
+            issue(
+                "FPCRM-99",
+                "completely unrelated payment processing fix",
+                Some("FPCRM"),
+                Some(8),
+                Some(3),
+                &["payments"],
+            ),
         ];
         let s = suggest_for_title("fix login session bug", Some("FPCRM"), &history, DEFAULT_K);
-        // Three login issues match; the payments one is below MIN_SIMILARITY → dropped.
-        assert_eq!(s.neighbours_considered, 3);
-        // Median of [3, 3, 5] = 3.
+        // Query tokens (after stop-word drop): {login, session, bug}.
+        // - FPCRM-1: {login, authentication, bug} → ∩=2, ∪=4 → 0.5 ✓
+        // - FPCRM-2: {login, validation, error} → ∩=1, ∪=5 → 0.2 ✓
+        // - FPCRM-3: {login, redirect, after, sso} → ∩=1, ∪=6 → 0.167 ✗
+        // - FPCRM-99: {completely, unrelated, payment, processing} → 0 ✗
+        // So FPCRM-1 + FPCRM-2 clear MIN_SIMILARITY = 0.2; the other
+        // two drop. This pins the similarity filter — the test name
+        // `suggest_picks_top_k_neighbours_by_similarity` is still
+        // accurate, the two that survive are the top-K by similarity.
+        assert_eq!(s.neighbours_considered, 2);
+        // Median of [3, 3] = 3.
         assert_eq!(s.suggested_estimate, Some(3));
-        // Mode of [2, 2, 2] = 2.
+        // Mode of [2, 2] = 2.
         assert_eq!(s.suggested_priority, Some(2));
-        // "bug" appears 3/3 → kept; "auth" 2/3 = 67% → kept (>= ceil(3/2)=2).
+        // "bug" appears 2/2 → kept; "auth" 2/2 → kept (>= ceil(2/2)=1).
         assert!(s.suggested_labels.contains(&"bug".to_string()));
         assert!(s.suggested_labels.contains(&"auth".to_string()));
         // "payments" not on any neighbour → dropped.
@@ -298,8 +341,22 @@ mod tests {
     #[test]
     fn suggest_drops_neighbours_below_min_similarity() {
         let history = vec![
-            issue("FPCRM-1", "fix login bug", Some("FPCRM"), Some(3), Some(2), &["bug"]),
-            issue("FPCRM-2", "completely different topic about payment processing", Some("FPCRM"), Some(13), Some(1), &["payments"]),
+            issue(
+                "FPCRM-1",
+                "fix login bug",
+                Some("FPCRM"),
+                Some(3),
+                Some(2),
+                &["bug"],
+            ),
+            issue(
+                "FPCRM-2",
+                "completely different topic about payment processing",
+                Some("FPCRM"),
+                Some(13),
+                Some(1),
+                &["payments"],
+            ),
         ];
         let s = suggest_for_title("fix login session", Some("FPCRM"), &history, DEFAULT_K);
         assert_eq!(s.neighbours_considered, 1);
@@ -312,8 +369,22 @@ mod tests {
         // (FPCRM) and one not (OTHER). The team boost should rank FPCRM
         // first; with k=1 only the FPCRM neighbour drives the suggestion.
         let history = vec![
-            issue("OTHER-1", "fix calendar invite bug", Some("OTHER"), Some(8), Some(3), &["calendar"]),
-            issue("FPCRM-1", "fix calendar invite bug", Some("FPCRM"), Some(2), Some(1), &["calendar"]),
+            issue(
+                "OTHER-1",
+                "fix calendar invite bug",
+                Some("OTHER"),
+                Some(8),
+                Some(3),
+                &["calendar"],
+            ),
+            issue(
+                "FPCRM-1",
+                "fix calendar invite bug",
+                Some("FPCRM"),
+                Some(2),
+                Some(1),
+                &["calendar"],
+            ),
         ];
         let s = suggest_for_title("fix calendar invite bug", Some("FPCRM"), &history, 1);
         assert_eq!(s.suggested_estimate, Some(2));
@@ -323,9 +394,30 @@ mod tests {
     #[test]
     fn suggest_label_threshold_is_half_round_up() {
         let history = vec![
-            issue("X-1", "fix login bug", Some("X"), Some(3), Some(2), &["a", "b"]),
-            issue("X-2", "fix login bug session", Some("X"), Some(3), Some(2), &["a"]),
-            issue("X-3", "fix login bug auth", Some("X"), Some(3), Some(2), &["a"]),
+            issue(
+                "X-1",
+                "fix login bug",
+                Some("X"),
+                Some(3),
+                Some(2),
+                &["a", "b"],
+            ),
+            issue(
+                "X-2",
+                "fix login bug session",
+                Some("X"),
+                Some(3),
+                Some(2),
+                &["a"],
+            ),
+            issue(
+                "X-3",
+                "fix login bug auth",
+                Some("X"),
+                Some(3),
+                Some(2),
+                &["a"],
+            ),
         ];
         let s = suggest_for_title("fix login bug", Some("X"), &history, DEFAULT_K);
         // 3 neighbours; half = ceil(3/2) = 2. "a" appears 3 times → kept;
@@ -337,9 +429,14 @@ mod tests {
     #[test]
     fn suggest_confidence_reflects_neighbour_count() {
         // Just one neighbour above threshold → Low.
-        let history = vec![
-            issue("X-1", "fix login bug", Some("X"), Some(3), Some(2), &[]),
-        ];
+        let history = vec![issue(
+            "X-1",
+            "fix login bug",
+            Some("X"),
+            Some(3),
+            Some(2),
+            &[],
+        )];
         let s = suggest_for_title("fix login bug", Some("X"), &history, DEFAULT_K);
         assert_eq!(s.confidence, Confidence::Low);
     }

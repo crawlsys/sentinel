@@ -166,7 +166,10 @@ mod tests {
         let f = RequirementFinding::Coverage {
             recommendation_summary: "Raise prices by 8%".into(),
         };
-        assert!(f.is_block(), "BA3 coverage failure is the structural-violation case");
+        assert!(
+            f.is_block(),
+            "BA3 coverage failure is the structural-violation case"
+        );
     }
 
     #[test]

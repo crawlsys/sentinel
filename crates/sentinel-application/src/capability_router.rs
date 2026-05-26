@@ -42,9 +42,7 @@ use sentinel_domain::agent_routing::{
 use sentinel_domain::capability::{
     AgentCapabilityProfile, AgentId, Capability, CapabilityRequirement,
 };
-use sentinel_domain::ports::{
-    AppraisalStorePort, CapabilityRouterPort, RoutingError,
-};
+use sentinel_domain::ports::{AppraisalStorePort, CapabilityRouterPort, RoutingError};
 
 // ---------------------------------------------------------------------------
 // pick — the pure algorithm.
@@ -155,7 +153,13 @@ pub fn pick(
         }
     }
     if candidates.len() == 1 {
-        return finalize(candidates[0], candidate_ids, eliminated, tie_breakers, signature);
+        return finalize(
+            candidates[0],
+            candidate_ids,
+            eliminated,
+            tie_breakers,
+            signature,
+        );
     }
 
     // Step 3 — appraisal success rate (higher wins). Skipped when no
@@ -191,7 +195,13 @@ pub fn pick(
         }
     }
     if candidates.len() == 1 {
-        return finalize(candidates[0], candidate_ids, eliminated, tie_breakers, signature);
+        return finalize(
+            candidates[0],
+            candidate_ids,
+            eliminated,
+            tie_breakers,
+            signature,
+        );
     }
 
     // Step 4 — cost (cheapest wins).
@@ -210,7 +220,13 @@ pub fn pick(
         }
     }
     if candidates.len() == 1 {
-        return finalize(candidates[0], candidate_ids, eliminated, tie_breakers, signature);
+        return finalize(
+            candidates[0],
+            candidate_ids,
+            eliminated,
+            tie_breakers,
+            signature,
+        );
     }
 
     // Step 5 — latency (fastest wins).
@@ -230,7 +246,13 @@ pub fn pick(
         }
     }
     if candidates.len() == 1 {
-        return finalize(candidates[0], candidate_ids, eliminated, tie_breakers, signature);
+        return finalize(
+            candidates[0],
+            candidate_ids,
+            eliminated,
+            tie_breakers,
+            signature,
+        );
     }
 
     // Step 6 — stable AgentId ordering (lexically lowest wins).
@@ -240,7 +262,13 @@ pub fn pick(
             winner: winner.agent_id.clone(),
         });
     }
-    finalize(candidates[0], candidate_ids, eliminated, tie_breakers, signature)
+    finalize(
+        candidates[0],
+        candidate_ids,
+        eliminated,
+        tie_breakers,
+        signature,
+    )
 }
 
 fn finalize(
@@ -322,10 +350,7 @@ impl StaticCapabilityRouter {
     /// Builder-style: attach an appraisal store so tie-breaker step 3
     /// can fire.
     #[must_use]
-    pub fn with_appraisal_store(
-        mut self,
-        store: std::sync::Arc<dyn AppraisalStorePort>,
-    ) -> Self {
+    pub fn with_appraisal_store(mut self, store: std::sync::Arc<dyn AppraisalStorePort>) -> Self {
         self.appraisal_store = Some(store);
         self
     }
@@ -340,10 +365,7 @@ impl StaticCapabilityRouter {
 }
 
 impl CapabilityRouterPort for StaticCapabilityRouter {
-    fn route(
-        &self,
-        requirement: &CapabilityRequirement,
-    ) -> Result<AgentId, RoutingError> {
+    fn route(&self, requirement: &CapabilityRequirement) -> Result<AgentId, RoutingError> {
         let explanation = pick(
             &self.profiles,
             requirement,
@@ -362,10 +384,7 @@ impl CapabilityRouterPort for StaticCapabilityRouter {
         })
     }
 
-    fn candidates(
-        &self,
-        requirement: &CapabilityRequirement,
-    ) -> Vec<AgentId> {
+    fn candidates(&self, requirement: &CapabilityRequirement) -> Vec<AgentId> {
         // The pure pick() returns post-tie-break candidate set. For
         // `candidates()` we want the post-required/forbidden set
         // (before tie-breakers), so recompute that filter directly.
@@ -378,10 +397,7 @@ impl CapabilityRouterPort for StaticCapabilityRouter {
         out
     }
 
-    fn explain(
-        &self,
-        requirement: &CapabilityRequirement,
-    ) -> RoutingExplanation {
+    fn explain(&self, requirement: &CapabilityRequirement) -> RoutingExplanation {
         pick(
             &self.profiles,
             requirement,
@@ -531,10 +547,8 @@ mod tests {
     #[test]
     fn tie_breaker_step2_preferred_wins() {
         let r = static_router(vec![opus(), kimi()]);
-        let req = CapabilityRequirement::new(vec![Capability::Reasoning(
-            ReasoningLevel::Standard,
-        )])
-        .with_preferred(Capability::Reasoning(ReasoningLevel::Deep));
+        let req = CapabilityRequirement::new(vec![Capability::Reasoning(ReasoningLevel::Standard)])
+            .with_preferred(Capability::Reasoning(ReasoningLevel::Deep));
         // Both qualify on required; opus has Deep, kimi has Standard
         // → preferred score: opus=1, kimi=0.
         let chosen = r.route(&req).unwrap();
@@ -578,7 +592,11 @@ mod tests {
         let r = static_router(vec![a, b]);
         let req = CapabilityRequirement::new(vec![Capability::Reasoning(ReasoningLevel::Standard)]);
         let chosen = r.route(&req).unwrap();
-        assert_eq!(chosen, id("alpha"), "lexically lowest wins as final fallback");
+        assert_eq!(
+            chosen,
+            id("alpha"),
+            "lexically lowest wins as final fallback"
+        );
     }
 
     // ---- candidates() ----
@@ -628,10 +646,8 @@ mod tests {
     #[test]
     fn explain_records_fired_tie_breakers() {
         let r = static_router(vec![opus(), kimi()]);
-        let req = CapabilityRequirement::new(vec![Capability::Reasoning(
-            ReasoningLevel::Standard,
-        )])
-        .with_preferred(Capability::Reasoning(ReasoningLevel::Deep));
+        let req = CapabilityRequirement::new(vec![Capability::Reasoning(ReasoningLevel::Standard)])
+            .with_preferred(Capability::Reasoning(ReasoningLevel::Deep));
         let expl = r.explain(&req);
         assert_eq!(expl.chosen, Some(id("opus")));
         assert!(

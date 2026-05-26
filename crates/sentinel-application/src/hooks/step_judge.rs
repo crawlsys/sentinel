@@ -1,6 +1,6 @@
 //! Step Judge Hook
 //!
-//! PostToolUse hook that runs the AI judge against a completed step's
+//! `PostToolUse` hook that runs the AI judge against a completed step's
 //! evidence and prepares the verdict for `submit_step_complete` (M1.5) to
 //! seal into the proof chain.
 //!
@@ -27,7 +27,7 @@
 //!
 //! # What this hook does today (M1.4 stub scope)
 //!
-//! 1. Detects PostToolUse for a step tool (same `mcp__skills__<skill>__step_<id>`
+//! 1. Detects `PostToolUse` for a step tool (same `mcp__skills__<skill>__step_<id>`
 //!    naming as `step_gate`).
 //! 2. Resolves the step's description from the loaded step config (so the
 //!    judge prompt knows what "sufficient" looks like for this specific step).
@@ -38,7 +38,7 @@
 //! 5. Returns the [`JudgeVerdict`] inside a [`StepJudgeOutcome`] struct that
 //!    M1.5's `submit_step_complete` will consume.
 //!
-//! Persistence (writing the StepProof to disk, advancing the chain head)
+//! Persistence (writing the `StepProof` to disk, advancing the chain head)
 //! lives in M1.5 — this hook is the *verdict* layer; the *write* layer
 //! comes next.
 //!
@@ -56,14 +56,14 @@
 //! and emits `Outcome::Skipped` so the chain doesn't get a fake verdict
 //! during emergency bypass. The hook never blocks via `HookOutput::deny`
 //! — failed verdicts surface as a non-sufficient `JudgeVerdict` that
-//! `submit_step_complete` will refuse to seal. PostToolUse blocking is
+//! `submit_step_complete` will refuse to seal. `PostToolUse` blocking is
 //! the wrong layer for "this step didn't pass"; the chain itself is the
 //! enforcement substrate, not this hook's allow/deny return.
 
 use std::collections::HashMap;
 
-use sentinel_domain::evidence::{Evidence, ToolCallEvidence, ToolResultEvidence};
 use sentinel_domain::events::{HookInput, HookOutput};
+use sentinel_domain::evidence::{Evidence, ToolCallEvidence, ToolResultEvidence};
 use sentinel_domain::judge::{JudgeModel, JudgeVerdict};
 use sentinel_domain::state::{BaselineCounter, SessionState};
 use sentinel_domain::workflow::SkillSteps;
@@ -101,16 +101,13 @@ pub enum StepJudgeOutcome {
     NotAStepTool,
     /// Skill has no step config registered — backwards-compat, no verdict.
     NoStepConfig,
-    /// Skill has a step config but the specific step_id wasn't found in any
+    /// Skill has a step config but the specific `step_id` wasn't found in any
     /// phase. Possible misconfig or stale tool name.
-    UnknownStep {
-        skill: String,
-        step_id: String,
-    },
+    UnknownStep { skill: String, step_id: String },
     /// Glass break was active — judge skipped, no verdict.
     Skipped,
     /// Judge ran, here's the verdict + the resolved coordinates so M1.5 can
-    /// build the StepProof without reparsing the tool name.
+    /// build the `StepProof` without reparsing the tool name.
     Judged {
         skill: String,
         phase_id: String,
@@ -122,7 +119,7 @@ pub enum StepJudgeOutcome {
     },
     /// **Cold-start baseline (M1.8)**: judge ran but the step is still in
     /// its warmup window. Verdict is observational — `submit_step_complete`
-    /// must NOT seal a StepProof for this outcome (the chain only carries
+    /// must NOT seal a `StepProof` for this outcome (the chain only carries
     /// enforced verdicts). The verdict is still surfaced for telemetry so
     /// operators can watch warmup-time false-positive rates and decide
     /// when to lower the threshold.
@@ -153,7 +150,7 @@ pub enum StepJudgeOutcome {
 fn locate_step<'a>(
     skill_steps: &'a SkillSteps,
     step_id: &str,
-) -> Option<(&'a str, &'a str, u64)> {
+) -> Option<(&'a str, &'a str, u64, Option<JudgeModel>)> {
     for phase in &skill_steps.phases {
         for step in &phase.steps {
             if step.id == step_id {
@@ -161,6 +158,7 @@ fn locate_step<'a>(
                     phase.phase_id.as_str(),
                     step.description.as_str(),
                     step.baseline_threshold,
+                    step.judge,
                 ));
             }
         }
@@ -186,7 +184,7 @@ fn truncate_json_summary(v: &serde_json::Value, max: usize) -> String {
     }
 }
 
-/// Build a step-shaped Evidence blob from PostToolUse `HookInput`.
+/// Build a step-shaped Evidence blob from `PostToolUse` `HookInput`.
 ///
 /// The judge will see:
 /// - one `ToolCallEvidence` entry summarising the step tool's input
@@ -210,7 +208,7 @@ fn gather_evidence(input: &HookInput) -> Evidence {
         evidence.tool_calls.push(ToolCallEvidence {
             tool: tool_name.clone(),
             args_summary: truncate_json_summary(tool_input, 500),
-            timestamp: timestamp.clone(),
+            timestamp,
         });
     }
 
@@ -219,8 +217,8 @@ fn gather_evidence(input: &HookInput) -> Evidence {
         // or a top-level boolean false ⇒ failure. Otherwise assume success.
         // Real M1.5 evidence work will replace this with structured exit
         // codes from sentinel's tool-result capture path.
-        let success = !tool_result.get("error").is_some()
-            && tool_result.as_bool().map_or(true, |b| b);
+        let success =
+            tool_result.get("error").is_none() && tool_result.as_bool().is_none_or(|b| b);
         evidence.tool_results.push(ToolResultEvidence {
             tool: tool_name.clone(),
             result_summary: truncate_json_summary(tool_result, 500),
@@ -232,7 +230,10 @@ fn gather_evidence(input: &HookInput) -> Evidence {
     // beyond the 500-char summaries. Keyed under "step_tool_io" so future
     // hooks know to look here.
     let mut custom = serde_json::Map::new();
-    custom.insert("step_tool_name".into(), serde_json::Value::String(tool_name));
+    custom.insert(
+        "step_tool_name".into(),
+        serde_json::Value::String(tool_name),
+    );
     if let Some(tool_input) = input.tool_input.clone() {
         custom.insert("step_tool_input".into(), tool_input);
     }
@@ -244,10 +245,10 @@ fn gather_evidence(input: &HookInput) -> Evidence {
     evidence
 }
 
-/// Process a step-judge hook event (PostToolUse).
+/// Process a step-judge hook event (`PostToolUse`).
 ///
 /// Returns `(HookOutput, StepJudgeOutcome)`. The `HookOutput` is always
-/// `allow` for this hook — we don't block tool calls in PostToolUse, we
+/// `allow` for this hook — we don't block tool calls in `PostToolUse`, we
 /// just produce verdicts. The `StepJudgeOutcome` carries the verdict (or
 /// the reason no verdict was produced) up to the caller; M1.5's wiring
 /// in `hook_cmd.rs` will consume it to call `submit_step_complete` when
@@ -278,9 +279,9 @@ pub async fn process(
         None => return (HookOutput::allow(), StepJudgeOutcome::NoStepConfig),
     };
 
-    let (phase_id, step_description, baseline_threshold) =
+    let (phase_id, step_description, baseline_threshold, step_judge_model) =
         match locate_step(skill_steps, &step_ref.step_id) {
-            Some((p, d, t)) => (p.to_string(), d.to_string(), t),
+            Some((p, d, t, j)) => (p.to_string(), d.to_string(), t, j),
             None => {
                 return (
                     HookOutput::allow(),
@@ -294,10 +295,11 @@ pub async fn process(
 
     let evidence = gather_evidence(input);
 
-    // Judge model selection: until #73 lands the per-step `judge:` field,
-    // step-level eval defaults to `Sonnet` (the standard tier). When #73
-    // ships, this picks from step config metadata.
-    let model = JudgeModel::Sonnet;
+    // Judge model selection (#73): the step's `judge:` config field if set,
+    // else the balanced `Sonnet` tier (claude-sonnet-4.6, $3/$15). A
+    // routine step that doesn't pin a `judge:` uses Sonnet; cheap bulk can
+    // opt to `kimi`, and a critical step opts up to `opus` explicitly.
+    let model = step_judge_model.unwrap_or(JudgeModel::Sonnet);
 
     let result = judge
         .evaluate_step(
@@ -320,11 +322,7 @@ pub async fn process(
             // judgement that crosses the threshold would also be the
             // first one enforced — we want one clean post-threshold
             // judgement before enforcement engages.
-            let pre_baseline = state.step_baseline(
-                &step_ref.skill,
-                &phase_id,
-                &step_ref.step_id,
-            );
+            let pre_baseline = state.step_baseline(&step_ref.skill, &phase_id, &step_ref.step_id);
             let in_warmup = !pre_baseline.cleared(baseline_threshold);
 
             // Record the judgement (both passing and insufficient) so
@@ -334,6 +332,19 @@ pub async fn process(
                 &phase_id,
                 &step_ref.step_id,
                 verdict.sufficient,
+            );
+
+            // Persist the INDEPENDENT verdict (#12 — close the self-certify
+            // gap). `submit_step_complete` reads this from the same per-session
+            // state so the judge's own verdict — not the caller-supplied one —
+            // gates the seal in warn/enforce mode. An agent can no longer
+            // grade its own homework by passing `verdict: sufficient=true`.
+            state.record_independent_verdict(
+                &step_ref.skill,
+                &phase_id,
+                &step_ref.step_id,
+                verdict.sufficient,
+                verdict.confidence,
             );
 
             if in_warmup {
@@ -472,6 +483,7 @@ mod tests {
                         description: "Open PR with Ref FPCRM-XXX".into(),
                         blocker: false,
                         baseline_threshold: 0,
+                        judge: None,
                         timeout_ms: None,
                         retry_policy: Default::default(),
                         circuit_breaker: Default::default(),
@@ -493,11 +505,21 @@ mod tests {
     async fn passes_through_non_step_tools() {
         let judge = RecordingJudge::passing();
         let mut state = fresh_state();
-        let (out, outcome) =
-            process(&step_input("Read"), &mut state, &linear_step_config(), &judge, false).await;
+        let (out, outcome) = process(
+            &step_input("Read"),
+            &mut state,
+            &linear_step_config(),
+            &judge,
+            false,
+        )
+        .await;
         assert!(matches!(outcome, StepJudgeOutcome::NotAStepTool));
         assert!(out.hook_specific_output.is_none());
-        assert_eq!(judge.calls.load(Ordering::SeqCst), 0, "judge must NOT fire on non-step tools");
+        assert_eq!(
+            judge.calls.load(Ordering::SeqCst),
+            0,
+            "judge must NOT fire on non-step tools"
+        );
     }
 
     #[tokio::test]
@@ -513,7 +535,11 @@ mod tests {
         )
         .await;
         assert!(matches!(outcome, StepJudgeOutcome::Skipped));
-        assert_eq!(judge.calls.load(Ordering::SeqCst), 0, "judge must NOT fire during glass break");
+        assert_eq!(
+            judge.calls.load(Ordering::SeqCst),
+            0,
+            "judge must NOT fire during glass break"
+        );
     }
 
     #[tokio::test]
@@ -587,7 +613,11 @@ mod tests {
             }
             other => panic!("expected Judged, got {other:?}"),
         }
-        assert_eq!(judge.calls.load(Ordering::SeqCst), 1, "judge fires exactly once per step");
+        assert_eq!(
+            judge.calls.load(Ordering::SeqCst),
+            1,
+            "judge fires exactly once per step"
+        );
     }
 
     #[tokio::test]
@@ -628,7 +658,11 @@ mod tests {
         )
         .await;
         match outcome {
-            StepJudgeOutcome::JudgeError { skill, step_id, error } => {
+            StepJudgeOutcome::JudgeError {
+                skill,
+                step_id,
+                error,
+            } => {
                 assert_eq!(skill, "linear");
                 assert_eq!(step_id, "1");
                 assert!(error.contains("simulated upstream failure"), "got: {error}");
@@ -654,6 +688,7 @@ mod tests {
                         description: "Open PR with Ref FPCRM-XXX".into(),
                         blocker: false,
                         baseline_threshold: threshold,
+                        judge: None,
                         timeout_ms: None,
                         retry_policy: Default::default(),
                         circuit_breaker: Default::default(),
@@ -793,7 +828,9 @@ mod tests {
         )
         .await;
         match outcome {
-            StepJudgeOutcome::JudgedWarmup { baseline, verdict, .. } => {
+            StepJudgeOutcome::JudgedWarmup {
+                baseline, verdict, ..
+            } => {
                 assert!(!verdict.sufficient);
                 assert_eq!(baseline.successful_count, 0, "no passing yet");
                 assert_eq!(baseline.insufficient_count, 1, "this failing run counted");

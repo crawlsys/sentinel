@@ -171,21 +171,14 @@ pub fn scan_roi(
     let now = now_secs();
     let mut windows: Vec<RoiWindow> = Vec::new();
     for &wd in WINDOW_DAYS {
-        let row = build_window(
-            wd,
-            &token_rows,
-            &last_seen,
-            &estimates,
-            sen13.as_ref(),
-            now,
-        );
+        let row = build_window(wd, &token_rows, &last_seen, &estimates, sen13.as_ref(), now);
         windows.push(row);
     }
 
     // Phase 7: write outputs.
     ensure_parent(output_jsonl)?;
-    let mut jsonl_file = File::create(output_jsonl)
-        .with_context(|| format!("create {}", output_jsonl.display()))?;
+    let mut jsonl_file =
+        File::create(output_jsonl).with_context(|| format!("create {}", output_jsonl.display()))?;
     for w in &windows {
         let line = serde_json::to_string(w)?;
         writeln!(jsonl_file, "{line}")?;
@@ -234,7 +227,7 @@ fn build_window(
     sen13: Option<&Sen13Summary>,
     now_ts: u64,
 ) -> RoiWindow {
-    let label = window_days.map_or("all-time".to_string(), |d| format!("{d}d"));
+    let label = window_days.map_or_else(|| "all-time".to_string(), |d| format!("{d}d"));
 
     // Filter rows by window.
     let filtered: Vec<&TokenRow> = match window_days {
@@ -307,9 +300,7 @@ fn build_window(
             cpp,
             human,
             true,
-            format!(
-                "no estimate data; assumed {FALLBACK_AVG_POINTS_PER_TICKET:.1} pts/ticket avg"
-            ),
+            format!("no estimate data; assumed {FALLBACK_AVG_POINTS_PER_TICKET:.1} pts/ticket avg"),
         )
     } else {
         (0.0, 0.0, false, String::new())
@@ -474,10 +465,7 @@ fn load_cost_per_point(path: &Path) -> Option<Sen13Summary> {
                 .and_then(serde_json::Value::as_f64)
                 .unwrap_or(0.0);
             #[allow(clippy::cast_possible_truncation)]
-            let n = v
-                .get("n")
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or(0) as usize;
+            let n = v.get("n").and_then(serde_json::Value::as_u64).unwrap_or(0) as usize;
             bucket_medians.push((b, median, n));
         }
     }
@@ -595,9 +583,8 @@ fn build_ticket_last_seen(projects_root: &Path) -> HashMap<String, u64> {
 /// `HTTP-200`. Returns the first matching id (uppercase normalised).
 pub fn extract_ticket_from_slug(slug: &str) -> Option<String> {
     static RE: OnceLock<Regex> = OnceLock::new();
-    let re = RE.get_or_init(|| {
-        Regex::new(r"([A-Za-z]{2,7})-(\d+)").expect("ticket regex compiles")
-    });
+    let re =
+        RE.get_or_init(|| Regex::new(r"([A-Za-z]{2,7})-(\d+)").expect("ticket regex compiles"));
     for cap in re.captures_iter(slug) {
         let prefix = cap.get(1)?.as_str().to_uppercase();
         let num = cap.get(2)?.as_str();
@@ -617,8 +604,7 @@ const KNOWN_PREFIXES: &[&str] = &[
 fn now_secs() -> u64 {
     SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+        .map_or(0, |d| d.as_secs())
 }
 
 fn now_iso() -> String {
@@ -690,10 +676,7 @@ mod tests {
         path
     }
 
-    fn write_cost_per_point_jsonl(
-        dir: &Path,
-        rows: &[(&str, f64)],
-    ) -> std::path::PathBuf {
+    fn write_cost_per_point_jsonl(dir: &Path, rows: &[(&str, f64)]) -> std::path::PathBuf {
         use std::fmt::Write as _;
         let path = dir.join("cost-per-point.jsonl");
         let mut s = String::new();
@@ -722,14 +705,12 @@ mod tests {
             tokens_rows.iter().map(|(t, c)| (t.as_str(), *c)).collect();
         let tokens = write_tokens(dir.path(), &token_refs);
 
-        let est_refs: Vec<(&str, f64)> =
-            tokens_rows.iter().map(|(t, _)| (t.as_str(), 10.0_f64)).collect();
+        let est_refs: Vec<(&str, f64)> = tokens_rows
+            .iter()
+            .map(|(t, _)| (t.as_str(), 10.0_f64))
+            .collect();
         write_cost_per_point_jsonl(dir.path(), &est_refs);
-        let summary = write_cost_per_point_summary(
-            dir.path(),
-            10,
-            &[(8_u8, 32.7_f64, 10_usize)],
-        );
+        let summary = write_cost_per_point_summary(dir.path(), 10, &[(8_u8, 32.7_f64, 10_usize)]);
 
         let out_jsonl = dir.path().join("roi.jsonl");
         let out_summary = dir.path().join("roi-summary.json");
@@ -772,23 +753,14 @@ mod tests {
         let token_refs: Vec<(&str, f64)> =
             tokens_rows.iter().map(|(t, c)| (t.as_str(), *c)).collect();
         let tokens = write_tokens(dir.path(), &token_refs);
-        let est_refs: Vec<(&str, f64)> =
-            est_rows.iter().map(|(t, e)| (t.as_str(), *e)).collect();
+        let est_refs: Vec<(&str, f64)> = est_rows.iter().map(|(t, e)| (t.as_str(), *e)).collect();
         write_cost_per_point_jsonl(dir.path(), &est_refs);
-        let summary = write_cost_per_point_summary(
-            dir.path(),
-            30,
-            &[(1_u8, 33.33_f64, 30_usize)],
-        );
+        let summary = write_cost_per_point_summary(dir.path(), 30, &[(1_u8, 33.33_f64, 30_usize)]);
 
         // Build a fake projects dir so the ticket→last_seen map says all
         // tickets were active 5 days ago (within both the 7d and 30d
         // windows, but we'll mostly verify the 30d window).
-        let projects = dir
-            .path()
-            .parent()
-            .unwrap()
-            .join("projects-shadow"); // not used — we'll point the analyzer at a custom layout.
+        let projects = dir.path().parent().unwrap().join("projects-shadow"); // not used — we'll point the analyzer at a custom layout.
 
         // Easier: rely on tokens_input being elsewhere → no projects/
         // root; analyzer will collapse into all-time only.
@@ -817,13 +789,15 @@ mod tests {
             fs::write(pdir.join("session.jsonl"), b"").unwrap();
         }
 
-        let out_jsonl = canonical_tokens
-            .parent()
-            .unwrap()
-            .join("roi.jsonl");
+        let out_jsonl = canonical_tokens.parent().unwrap().join("roi.jsonl");
         let out_summary = canonical_tokens.parent().unwrap().join("roi-summary.json");
-        let report =
-            scan_roi(&canonical_tokens, &canonical_summary, &out_jsonl, &out_summary).unwrap();
+        let report = scan_roi(
+            &canonical_tokens,
+            &canonical_summary,
+            &out_jsonl,
+            &out_summary,
+        )
+        .unwrap();
 
         // 30d window contains all 30 tickets (just-touched mtime).
         let w30 = report

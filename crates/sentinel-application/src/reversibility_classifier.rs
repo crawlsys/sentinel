@@ -42,7 +42,7 @@ impl StaticReversibilityClassifier {
     /// back to [`ReversibilityClass::Irreversible`] (the conservative
     /// default the port trait specifies).
     #[must_use]
-    pub fn new(table: HashMap<String, ReversibilityClass>) -> Self {
+    pub const fn new(table: HashMap<String, ReversibilityClass>) -> Self {
         Self {
             table,
             default: ReversibilityClass::Irreversible,
@@ -63,7 +63,7 @@ impl StaticReversibilityClassifier {
     /// (e.g., to focus on a single Catastrophic case) can set the
     /// fallback explicitly.
     #[must_use]
-    pub fn with_default(mut self, default: ReversibilityClass) -> Self {
+    pub const fn with_default(mut self, default: ReversibilityClass) -> Self {
         self.default = default;
         self
     }
@@ -78,15 +78,8 @@ impl StaticReversibilityClassifier {
 }
 
 impl ReversibilityClassifierPort for StaticReversibilityClassifier {
-    fn classify(
-        &self,
-        tool_name: &str,
-        _tool_input: &serde_json::Value,
-    ) -> ReversibilityClass {
-        self.table
-            .get(tool_name)
-            .copied()
-            .unwrap_or(self.default)
+    fn classify(&self, tool_name: &str, _tool_input: &serde_json::Value) -> ReversibilityClass {
+        self.table.get(tool_name).copied().unwrap_or(self.default)
     }
 }
 
@@ -183,7 +176,10 @@ mod tests {
             .with("Read", ReversibilityClass::TriviallyReversible)
             .with("Write", ReversibilityClass::ReversibleWithEffort)
             .with("mcp__gmail__send", ReversibilityClass::Catastrophic)
-            .with("mcp__linear__list_issues", ReversibilityClass::TriviallyReversible);
+            .with(
+                "mcp__linear__list_issues",
+                ReversibilityClass::TriviallyReversible,
+            );
 
         assert_eq!(
             classifier.classify("Read", &no_input()),
@@ -230,8 +226,8 @@ mod tests {
         // Compile-time check + minimal behavior: hooks accept
         // `&dyn ReversibilityClassifierPort`, so the static helper must
         // be usable that way.
-        let classifier = StaticReversibilityClassifier::empty()
-            .with("X", ReversibilityClass::Irreversible);
+        let classifier =
+            StaticReversibilityClassifier::empty().with("X", ReversibilityClass::Irreversible);
         let port: &dyn ReversibilityClassifierPort = &classifier;
         assert_eq!(
             port.classify("X", &no_input()),

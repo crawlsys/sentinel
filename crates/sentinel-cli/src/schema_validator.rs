@@ -43,7 +43,7 @@
 //! fields are silently dropped by serde's `deny_unknown_fields`-off
 //! default. Re-parsing the TOML with a struct that knows about them
 //! is the cheapest way to validate without forcing changes to the
-//! canonical loader (which would ripple through federation_cmd's
+//! canonical loader (which would ripple through `federation_cmd`'s
 //! 1200+ lines).
 //!
 //! Long-term, M2.10 (references/ subdirs) or a unified Apollo-style
@@ -97,7 +97,7 @@ pub struct SkillReport {
 }
 
 impl SkillReport {
-    pub fn is_clean(&self) -> bool {
+    pub const fn is_clean(&self) -> bool {
         self.dangling_refs.is_empty() && self.suspicious_tools.is_empty()
     }
 }

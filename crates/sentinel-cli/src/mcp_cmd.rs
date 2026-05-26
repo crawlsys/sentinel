@@ -49,6 +49,29 @@ use sentinel_infrastructure::mcp_transport::{JsonRpcRequest, JsonRpcResponse};
 /// Returns `None` if no transcripts exist — in that case the caller
 /// should surface an explicit "no active session" error rather than
 /// fabricating a timestamped id that won't match any real state.
+/// Load an Ed25519 signing key from `SENTINEL_SIGNING_KEY` (32-byte hex seed).
+/// Returns `None` when unset; logs a warning and returns `None` when set but
+/// malformed (the `signing_required` flag is what turns a missing key into a
+/// hard error at seal time — this loader stays lenient so a bad env var
+/// doesn't crash MCP startup).
+fn load_signing_key_from_env() -> Option<ed25519_dalek::SigningKey> {
+    let raw = std::env::var("SENTINEL_SIGNING_KEY").ok()?;
+    let bytes = match hex::decode(raw.trim()) {
+        Ok(b) => b,
+        Err(e) => {
+            warn!(error = %e, "SENTINEL_SIGNING_KEY is not valid hex — proofs will be unsigned");
+            return None;
+        }
+    };
+    if bytes.len() != 32 {
+        warn!(len = bytes.len(), "SENTINEL_SIGNING_KEY must be a 32-byte hex seed — proofs will be unsigned");
+        return None;
+    }
+    let mut seed = [0u8; 32];
+    seed.copy_from_slice(&bytes);
+    Some(ed25519_dalek::SigningKey::from_bytes(&seed))
+}
+
 fn detect_live_session_id() -> Option<String> {
     let home = std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
@@ -136,7 +159,7 @@ fn session_id_by_tool_use_id(tool_use_id: &str) -> Option<String> {
             transcripts.push((mtime, path, stem));
         }
     }
-    transcripts.sort_by(|a, b| b.0.cmp(&a.0)); // newest first
+    transcripts.sort_by_key(|b| std::cmp::Reverse(b.0)); // newest first
 
     for (_, path, session_id) in transcripts {
         if transcript_contains_tool_use_id(&path, tool_use_id) {
@@ -495,6 +518,50 @@ fn tool_definitions() -> serde_json::Value {
                     },
                     "required": ["requirement"]
                 }
+            },
+            {
+                "name": "sentinel__delegate_codex",
+                "description": "Delegate a focused adversarial/code-reasoning task to the Codex worker model (openai/gpt-5.5-pro) via OpenRouter — the same gateway the judge uses. Use for 'poke holes in this approach', 'review this diff for bugs/edge cases', 'is this design sound'. Returns the worker's concrete critique. Requires OPENROUTER_API_KEY.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "task": {
+                            "type": "string",
+                            "description": "What to reason about adversarially (the question / claim / approach to critique)."
+                        },
+                        "context": {
+                            "type": "string",
+                            "description": "Optional supporting material (a diff, code, design notes) the worker reads."
+                        },
+                        "max_tokens": {
+                            "type": "integer",
+                            "description": "Optional response token cap (default 2048)."
+                        }
+                    },
+                    "required": ["task"]
+                }
+            },
+            {
+                "name": "sentinel__delegate_kimi_context_scan",
+                "description": "Delegate a cheap large-context scan to the Kimi worker model (moonshotai/kimi-k2.6) via OpenRouter. Answers a specific question against a (potentially large) blob of content, extracting only the relevant facts. Use to offload 'scan this and tell me X' reads from the orchestrator's context. Requires OPENROUTER_API_KEY.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "question": {
+                            "type": "string",
+                            "description": "The specific question to answer from the content."
+                        },
+                        "content": {
+                            "type": "string",
+                            "description": "The content to scan (file contents, logs, a large blob)."
+                        },
+                        "max_tokens": {
+                            "type": "integer",
+                            "description": "Optional response token cap (default 2048)."
+                        }
+                    },
+                    "required": ["question", "content"]
+                }
             }
         ]
     })
@@ -532,7 +599,18 @@ pub async fn run() -> Result<()> {
             Arc::new(FallbackJudge)
         }
     };
-    let proof_engine = Arc::new(ProofEngine::new(state.clone(), judge.clone()));
+    // #4 — load the optional Ed25519 signing key + mandatory-signing posture.
+    // SENTINEL_SIGNING_KEY = 32-byte hex Ed25519 seed; SENTINEL_SIGNING_REQUIRED
+    // = "1"/"true" makes sealing refuse to proceed without a key (audit-grade).
+    let signing_key = load_signing_key_from_env();
+    let signing_required = matches!(
+        std::env::var("SENTINEL_SIGNING_REQUIRED").ok().as_deref(),
+        Some("1" | "true" | "TRUE" | "yes")
+    );
+    let proof_engine = Arc::new(
+        ProofEngine::new(state.clone(), judge.clone())
+            .with_signing(signing_key, signing_required),
+    );
     // Wire cross-session proof archive backing (#39): query_proof_corpus
     // walks the index at ~/.claude/sentinel/proofs/index.jsonl in addition
     // to live state. Falls back to live-only when home_dir is unavailable.
@@ -702,6 +780,24 @@ async fn handle_request(
                 return handle_route_capability(request, &arguments);
             }
 
+            // Worker delegation (#2): hand a unit of work to a worker model.
+            if tool_name == "sentinel__delegate_codex" {
+                return handle_delegate(
+                    request,
+                    &arguments,
+                    sentinel_application::delegation_service::Worker::Codex,
+                )
+                .await;
+            }
+            if tool_name == "sentinel__delegate_kimi_context_scan" {
+                return handle_delegate(
+                    request,
+                    &arguments,
+                    sentinel_application::delegation_service::Worker::Kimi,
+                )
+                .await;
+            }
+
             if tool_name == "sentinel__get_wip_snapshot" {
                 return match sentinel_application::wip_snapshot::read() {
                     Ok(Some(snap)) => JsonRpcResponse::success(
@@ -867,6 +963,83 @@ fn handle_route_capability(
     )
 }
 
+/// Handle `sentinel__delegate_codex` / `sentinel__delegate_kimi_context_scan`
+/// (#2). Hands a unit of work to a worker model via the standardized
+/// `OpenRouterLlm` path and returns the structured result.
+///
+/// Codex reads `task` + optional `context`; Kimi reads `question` + `content`
+/// (mapped onto the same `task`/`context` slots of the delegation request).
+async fn handle_delegate(
+    request: &JsonRpcRequest,
+    args: &serde_json::Value,
+    worker: sentinel_application::delegation_service::Worker,
+) -> JsonRpcResponse {
+    use sentinel_application::delegation_service::{
+        delegate, DelegationRequest, Worker, DEFAULT_MAX_TOKENS,
+    };
+
+    // Codex uses task/context; Kimi uses question/content. Normalize both onto
+    // the request's task/context fields.
+    let (task_key, ctx_key) = match worker {
+        Worker::Codex => ("task", "context"),
+        Worker::Kimi => ("question", "content"),
+    };
+    let Some(task) = args.get(task_key).and_then(|v| v.as_str()) else {
+        return JsonRpcResponse::success(
+            request.id.clone(),
+            mcp_tool_result(
+                false,
+                serde_json::json!({"error": format!("missing required argument: `{task_key}`")}),
+            ),
+        );
+    };
+    let context = args.get(ctx_key).and_then(|v| v.as_str()).unwrap_or("");
+    let max_tokens = args
+        .get("max_tokens")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|n| u32::try_from(n).ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(DEFAULT_MAX_TOKENS);
+
+    let llm = match sentinel_infrastructure::openrouter_llm::OpenRouterLlm::from_env() {
+        Ok(l) => l,
+        Err(e) => {
+            return JsonRpcResponse::success(
+                request.id.clone(),
+                mcp_tool_result(
+                    false,
+                    serde_json::json!({
+                        "error": format!("worker delegation unavailable: {e} (set OPENROUTER_API_KEY)")
+                    }),
+                ),
+            );
+        }
+    };
+
+    let req = DelegationRequest {
+        worker,
+        task: task.to_string(),
+        context: context.to_string(),
+        max_tokens,
+    };
+    match delegate(&llm, &req).await {
+        Ok(res) => JsonRpcResponse::success(
+            request.id.clone(),
+            mcp_tool_result(
+                true,
+                serde_json::json!({ "worker": res.worker, "output": res.output }),
+            ),
+        ),
+        Err(e) => JsonRpcResponse::success(
+            request.id.clone(),
+            mcp_tool_result(
+                false,
+                serde_json::json!({"error": format!("worker delegation failed: {e}")}),
+            ),
+        ),
+    }
+}
+
 /// Handle `sentinel__submit_phase_complete`
 async fn handle_submit_phase(
     request: &JsonRpcRequest,
@@ -927,15 +1100,17 @@ async fn handle_submit_phase(
     let (judge_model, phase_objectives) = workflow_configs
         .get(&skill)
         .and_then(|wf| wf.phases.iter().find(|p| p.id == phase_id))
-        .map(|phase| {
-            let desc = if phase.description.is_empty() {
-                format!("Complete the {phase_id} phase")
-            } else {
-                phase.description.clone()
-            };
-            (phase.judge, desc)
-        })
-        .unwrap_or((JudgeModel::Sonnet, format!("Complete the {phase_id} phase")));
+        .map_or_else(
+            || (JudgeModel::Sonnet, format!("Complete the {phase_id} phase")),
+            |phase| {
+                let desc = if phase.description.is_empty() {
+                    format!("Complete the {phase_id} phase")
+                } else {
+                    phase.description.clone()
+                };
+                (phase.judge, desc)
+            },
+        );
 
     // Build evidence from the summary + state context
     let evidence = {

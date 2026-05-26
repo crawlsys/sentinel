@@ -24,19 +24,26 @@
 //!   `InstructionAck`, and the hook pops it whenever it's next
 //!   ready.
 //!
-//! Escalations remain in-memory because they are produced by hooks
-//! that have already returned to the operator's chat surface — if
-//! the daemon crashes between `escalate()` and the WS send, the
-//! event is "lost" only in the sense that the operator will see
-//! the next Stop hook fire instead. Persisting escalations is a
-//! future improvement (separate file, same lock discipline).
+//! Escalations are now also durable via
+//! [`crate::persistent_outbox::PersistentEscalationOutbox`]: when
+//! the daemon builds a handle through
+//! [`make_pair_with_persistence`], every `escalate()` call appends
+//! to a file-backed FIFO before sending to the mpsc, and the WS
+//! recv loop removes from disk only after `send_signed` succeeds.
+//! Closes the consistency gap where a daemon crash between
+//! `escalate()` and the WS send would lose the event — the
+//! headline case being the `InstructionResult { Declined }`
+//! emitted from the cancel loopback in
+//! [`crate::client::handle_inbound`].
 
+use chrono::Utc;
 use consul_domain::identity::InstructionId;
 use consul_protocol::messages::{BlockReason, InstructionOutcome, RelayInstruction};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
 use crate::persistent_inbox::PersistentInbox;
+use crate::persistent_outbox::{OutboxItem, PersistentEscalationOutbox};
 
 /// Any event the legatus wants to send to its consul over the
 /// post-handshake WS. Covers session-lifecycle escalations
@@ -113,13 +120,14 @@ pub enum EscalationKind {
 /// Runtime control surface for an in-flight legatus connection.
 ///
 /// Cheap to clone — escalation channel is internally `Arc`'d and
-/// [`PersistentInbox`] is also `Clone` (just a path). Hand a clone
-/// to every IPC route or hook that needs to push escalations or
-/// pop the inbox.
+/// both persistent file-handles are also `Clone` (just paths).
+/// Hand a clone to every IPC route or hook that needs to push
+/// escalations or pop the inbox.
 #[derive(Clone)]
 pub struct LegatusHandle {
-    escalation_tx: mpsc::UnboundedSender<EscalationKind>,
+    escalation_tx: mpsc::UnboundedSender<OutboxItem>,
     inbox: Option<PersistentInbox>,
+    outbox: Option<PersistentEscalationOutbox>,
 }
 
 /// Receiver-side of the channels — owned by the connect loop and
@@ -133,47 +141,158 @@ pub struct LegatusHandle {
 /// loopback feeds the same `escalation_rx` the loop already
 /// drains, so there's exactly one path from "event" to "WS
 /// send" — no duplicated sink handling, no second select arm.
+///
+/// `outbox` is a clone of the same file-backed escalation queue
+/// the handle uses for persistence. The WS recv loop's escalation
+/// arm calls `outbox.remove_head()` after each successful
+/// `send_signed` so the disk stays in sync with what consul has
+/// actually received.
 pub struct LegatusRuntime {
-    pub(crate) escalation_rx: mpsc::UnboundedReceiver<EscalationKind>,
-    pub(crate) escalation_loopback: mpsc::UnboundedSender<EscalationKind>,
+    pub(crate) escalation_rx: mpsc::UnboundedReceiver<OutboxItem>,
+    pub(crate) escalation_loopback: mpsc::UnboundedSender<OutboxItem>,
     pub(crate) inbox: Option<PersistentInbox>,
+    pub(crate) outbox: Option<PersistentEscalationOutbox>,
+    /// Optional approval cache the inbound `CatastrophicAck` handler
+    /// writes to. Set on the daemon path via
+    /// [`LegatusRuntime::with_approval_cache`] before the runtime
+    /// is handed to `run_connect_hosted`. Standalone CLI builds
+    /// leave it `None` (`CatastrophicAcks` are logged-only).
+    pub(crate) approval_cache: Option<std::sync::Arc<crate::approval_cache::CatastrophicApprovalCache>>,
+    /// Optional cryptographic witness verifier consulted by
+    /// `handle_inbound` BEFORE recording a `CatastrophicAck` approval
+    /// in the cache. `None` (default) preserves the v0.1 daemon-
+    /// local trust model: every ack is recorded unconditionally.
+    /// `Some(...)` enforces verification: failures are logged and
+    /// the cache is not written. Wired by the daemon via
+    /// [`LegatusRuntime::with_witness_verifier`].
+    pub(crate) witness_verifier:
+        Option<std::sync::Arc<dyn crate::witness_verifier::WitnessVerifierPort>>,
+    /// Optional spent-nonce log consulted by `handle_inbound` BEFORE
+    /// any other verification. Rejects `CatastrophicAcks` whose
+    /// `voiceprint_witness.challenge_nonce` was already seen.
+    /// `None` (default) skips replay protection. Wired by the
+    /// daemon via [`LegatusRuntime::with_spent_nonce_log`].
+    pub(crate) spent_nonces:
+        Option<std::sync::Arc<crate::spent_nonce_log::SpentNonceLog>>,
 }
 
-/// Construct a paired `(handle, runtime)` with no persistent inbox.
+impl LegatusRuntime {
+    /// Install a [`CatastrophicApprovalCache`] handle. Called from
+    /// the daemon path between `make_pair_with_persistence` and
+    /// `run_connect_hosted`. Standalone CLI invocations don't call
+    /// this; their inbound `CatastrophicAck`s are debug-logged
+    /// without altering any retry-allow state.
+    pub fn with_approval_cache(
+        mut self,
+        cache: std::sync::Arc<crate::approval_cache::CatastrophicApprovalCache>,
+    ) -> Self {
+        self.approval_cache = Some(cache);
+        self
+    }
+
+    /// Install a [`WitnessVerifierPort`]. When set, the inbound
+    /// `CatastrophicAck` handler verifies the witness BEFORE writing
+    /// to the approval cache; failed verifications are logged and
+    /// the approval is dropped. When unset (default), every ack
+    /// records an approval (the v0.1 daemon-local trust model).
+    pub fn with_witness_verifier(
+        mut self,
+        verifier: std::sync::Arc<dyn crate::witness_verifier::WitnessVerifierPort>,
+    ) -> Self {
+        self.witness_verifier = Some(verifier);
+        self
+    }
+
+    /// Install a [`SpentNonceLog`] for replay protection. When set,
+    /// the inbound `CatastrophicAck` handler checks-and-spends the
+    /// witness's `challenge_nonce` BEFORE any other processing.
+    /// Already-spent nonces yield rejection without verifier
+    /// invocation or cache write. When unset, replay protection
+    /// is skipped (production daemon paths SHOULD wire it).
+    pub fn with_spent_nonce_log(
+        mut self,
+        log: std::sync::Arc<crate::spent_nonce_log::SpentNonceLog>,
+    ) -> Self {
+        self.spent_nonces = Some(log);
+        self
+    }
+}
+
+/// Construct a paired `(handle, runtime)` with no persistent inbox
+/// or outbox.
+///
 /// Used by the standalone `sentinel legatus connect` path, where
-/// received instructions are log-only (no daemon to drain them).
+/// received instructions are log-only and outbound escalations
+/// are in-memory only (no daemon to drain them / persist them).
 #[must_use]
 pub fn make_pair() -> (LegatusHandle, LegatusRuntime) {
     let (escalation_tx, escalation_rx) = mpsc::unbounded_channel();
     let handle = LegatusHandle {
         escalation_tx: escalation_tx.clone(),
         inbox: None,
+        outbox: None,
     };
     let runtime = LegatusRuntime {
         escalation_rx,
         escalation_loopback: escalation_tx,
+        approval_cache: None,
+        witness_verifier: None,
+        spent_nonces: None,
         inbox: None,
+        outbox: None,
     };
     (handle, runtime)
 }
 
 /// Construct a paired `(handle, runtime)` backed by the given
-/// [`PersistentInbox`].
-///
-/// Both halves share the same file path; the inbox is cheap to
-/// clone (path only). Used by the sentinel daemon path so
-/// received instructions survive daemon restart.
+/// [`PersistentInbox`] (no outbox). Used by tests that exercise
+/// inbox persistence without wanting outbox file I/O.
 #[must_use]
 pub fn make_pair_with_inbox(inbox: PersistentInbox) -> (LegatusHandle, LegatusRuntime) {
     let (escalation_tx, escalation_rx) = mpsc::unbounded_channel();
     let handle = LegatusHandle {
         escalation_tx: escalation_tx.clone(),
         inbox: Some(inbox.clone()),
+        outbox: None,
     };
     let runtime = LegatusRuntime {
         escalation_rx,
         escalation_loopback: escalation_tx,
+        approval_cache: None,
+        witness_verifier: None,
+        spent_nonces: None,
         inbox: Some(inbox),
+        outbox: None,
+    };
+    (handle, runtime)
+}
+
+/// Construct a paired `(handle, runtime)` backed by both a
+/// [`PersistentInbox`] AND a [`PersistentEscalationOutbox`].
+///
+/// Used by the sentinel daemon path where both directions need
+/// crash-recovery: received instructions survive daemon restart
+/// (inbox) AND queued escalation events survive daemon restart
+/// before they reach the WS (outbox).
+#[must_use]
+pub fn make_pair_with_persistence(
+    inbox: PersistentInbox,
+    outbox: PersistentEscalationOutbox,
+) -> (LegatusHandle, LegatusRuntime) {
+    let (escalation_tx, escalation_rx) = mpsc::unbounded_channel();
+    let handle = LegatusHandle {
+        escalation_tx: escalation_tx.clone(),
+        inbox: Some(inbox.clone()),
+        outbox: Some(outbox.clone()),
+    };
+    let runtime = LegatusRuntime {
+        escalation_rx,
+        escalation_loopback: escalation_tx,
+        approval_cache: None,
+        witness_verifier: None,
+        spent_nonces: None,
+        inbox: Some(inbox),
+        outbox: Some(outbox),
     };
     (handle, runtime)
 }
@@ -183,13 +302,28 @@ impl LegatusHandle {
     /// runtime has been dropped (connection closed / process
     /// shutting down).
     ///
+    /// Persistence: when this handle was built with a
+    /// [`PersistentEscalationOutbox`] (via
+    /// [`make_pair_with_persistence`]), the event is appended to
+    /// disk BEFORE being sent to the mpsc. A daemon crash between
+    /// this call and the WS recv loop's `send_signed` is therefore
+    /// recoverable on next daemon start — the loop's startup
+    /// replay drains the outbox into the mpsc as if the events
+    /// had just been escalated. Best-effort: disk-write failures
+    /// are logged at `warn` and the mpsc send still proceeds.
+    ///
     /// # Errors
     ///
     /// Returns [`EscalationSendError`] when the legatus runtime
     /// receiver has been dropped.
     pub fn escalate(&self, event: EscalationKind) -> Result<(), EscalationSendError> {
+        let at_ms = now_ms();
+        let item = OutboxItem::new(event, at_ms);
+        if let Some(outbox) = self.outbox.as_ref() {
+            outbox.append(&item);
+        }
         self.escalation_tx
-            .send(event)
+            .send(item)
             .map_err(|_| EscalationSendError::RuntimeGone)
     }
 
@@ -215,6 +349,24 @@ impl LegatusHandle {
     pub fn persistent_inbox(&self) -> Option<&PersistentInbox> {
         self.inbox.as_ref()
     }
+
+    /// Diagnostic: borrow the underlying `PersistentEscalationOutbox`,
+    /// if any. Exposed for the daemon's `/legatus/pending` HTTP route
+    /// so operators can see how many escalations are queued on disk
+    /// for delivery.
+    #[must_use]
+    #[allow(clippy::missing_const_for_fn)] // Option::as_ref is not const.
+    pub fn persistent_outbox(&self) -> Option<&PersistentEscalationOutbox> {
+        self.outbox.as_ref()
+    }
+}
+
+/// Unix-epoch millis. Used at-append time by
+/// [`LegatusHandle::escalate`] and at-loopback time by the cancel
+/// handler in `client.rs` so the on-disk `at_ms` matches what the
+/// envelope carries on the wire.
+fn now_ms() -> u64 {
+    u64::try_from(Utc::now().timestamp_millis().max(0)).unwrap_or(0)
 }
 
 /// Returned by [`LegatusHandle::escalate`] when the runtime has
@@ -254,10 +406,13 @@ mod tests {
             })
             .unwrap();
         let received = runtime.escalation_rx.recv().await.unwrap();
-        match received {
+        match received.event {
             EscalationKind::Completed { summary } => assert_eq!(summary.as_deref(), Some("ok")),
             other => panic!("expected Completed, got {other:?}"),
         }
+        // escalate() stamps at_ms from now_ms(); the value isn't
+        // 0 unless the system clock is genuinely at 1970.
+        assert!(received.at_ms > 0, "at_ms should be stamped, got 0");
     }
 
     #[tokio::test]
@@ -309,5 +464,47 @@ mod tests {
         let second = handle.try_pop_inbox().await.unwrap();
         assert_eq!(first.content, "a");
         assert_eq!(second.content, "b");
+    }
+
+    #[tokio::test]
+    async fn persistent_outbox_accessor_returns_some_when_seeded() {
+        // The /legatus/pending HTTP route reads outbox state through
+        // this accessor — make sure it isn't accidentally None on a
+        // pair built with persistence.
+        let dir = tempdir().unwrap();
+        let inbox = PersistentInbox::new(dir.path().join("legatus-inbox.jsonl"));
+        let outbox =
+            PersistentEscalationOutbox::new(dir.path().join("legatus-escalations.jsonl"));
+        let (handle, mut runtime) = make_pair_with_persistence(inbox, outbox);
+
+        let outbox_ref = handle.persistent_outbox().expect("outbox is seeded");
+        assert_eq!(outbox_ref.len(), 0);
+
+        handle
+            .escalate(EscalationKind::Failed {
+                error: "boom".into(),
+            })
+            .unwrap();
+        // escalate() appends to the outbox synchronously before the
+        // mpsc send, so the count is visible immediately.
+        assert_eq!(handle.persistent_outbox().unwrap().len(), 1);
+        // Drain the item so the bounded mpsc doesn't keep
+        // `runtime` and its outbox-borrowing futures alive past the
+        // test (the underlying file lives in `dir`, dropped at end).
+        let _ = runtime.escalation_rx.recv().await;
+    }
+
+    #[tokio::test]
+    async fn persistent_outbox_accessor_returns_none_for_standalone_pair() {
+        // make_pair() and make_pair_with_inbox() build outbox-less
+        // pairs; the accessor must report that honestly so the
+        // pending route returns 0 rather than panicking.
+        let (handle, _runtime) = make_pair();
+        assert!(handle.persistent_outbox().is_none());
+
+        let dir = tempdir().unwrap();
+        let inbox = PersistentInbox::new(dir.path().join("legatus-inbox.jsonl"));
+        let (handle, _runtime) = make_pair_with_inbox(inbox);
+        assert!(handle.persistent_outbox().is_none());
     }
 }

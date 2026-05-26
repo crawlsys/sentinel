@@ -25,15 +25,61 @@
 # Linear — issue tracker. Read tools trivial; mutations are recoverable
 # via Linear's own undo / status-change flow; delete is rarely undone.
 [mcp.linear]
+# --- Reads (TriviallyReversible) ---
 list_issues = "TriviallyReversible"
+list_all_issues = "TriviallyReversible"
+list_issues_by_custom_view = "TriviallyReversible"
 get_issue = "TriviallyReversible"
 list_projects = "TriviallyReversible"
 get_project = "TriviallyReversible"
+list_teams = "TriviallyReversible"
+get_team = "TriviallyReversible"
+get_team_by_key = "TriviallyReversible"
+get_team_members = "TriviallyReversible"
+list_users = "TriviallyReversible"
+get_user = "TriviallyReversible"
+get_user_by_email = "TriviallyReversible"
+viewer = "TriviallyReversible"
+current_account = "TriviallyReversible"
+list_accounts = "TriviallyReversible"
+get_workflow_states = "TriviallyReversible"
+list_comments = "TriviallyReversible"
+get_comment = "TriviallyReversible"
+list_attachments = "TriviallyReversible"
+get_issue_history = "TriviallyReversible"
+get_issue_relations = "TriviallyReversible"
+list_issue_relations = "TriviallyReversible"
+list_labels = "TriviallyReversible"
+get_label = "TriviallyReversible"
+list_cycles = "TriviallyReversible"
+get_cycle = "TriviallyReversible"
+get_active_cycle = "TriviallyReversible"
+list_documents = "TriviallyReversible"
+get_document = "TriviallyReversible"
+list_notifications = "TriviallyReversible"
+list_milestones = "TriviallyReversible"
+get_milestone = "TriviallyReversible"
 search = "TriviallyReversible"
+# --- Mutations (ReversibleWithEffort) — undoable via Linear UI ---
 create_issue = "ReversibleWithEffort"
 update_issue = "ReversibleWithEffort"
+batch_create_issues = "ReversibleWithEffort"
+batch_update_issues = "ReversibleWithEffort"
+create_comment = "ReversibleWithEffort"
 add_comment = "ReversibleWithEffort"
+update_comment = "ReversibleWithEffort"
+add_issue_label = "ReversibleWithEffort"
+remove_issue_label = "ReversibleWithEffort"
+create_issue_relation = "ReversibleWithEffort"
+delete_issue_relation = "ReversibleWithEffort"
+subscribe_to_issue = "ReversibleWithEffort"
+unsubscribe_from_issue = "ReversibleWithEffort"
+switch_account = "ReversibleWithEffort"
+add_account = "ReversibleWithEffort"
+remove_account = "ReversibleWithEffort"
+# --- Irreversible ---
 delete_issue = "Irreversible"
+delete_comment = "Irreversible"
 
 # Confluence — org documentation. Pages are visible to others as soon as
 # they're published; recovery requires the wiki's version-history UX.
@@ -105,6 +151,41 @@ update_step = "ReversibleWithEffort"
 regenerate_claude_md = "ReversibleWithEffort"
 edit_claude_md_template = "ReversibleWithEffort"
 restart_all_mcps = "ReversibleWithEffort"
+# Added: mcp-router management trio + step-granularity tools (were missing,
+# so the unknown-MCP default gated mcp_health_check etc. as Irreversible).
+mcp_health_check = "TriviallyReversible"
+mcp_list_servers = "TriviallyReversible"
+mcp_restart_server = "ReversibleWithEffort"
+get_step_chain = "TriviallyReversible"
+get_step_proof = "TriviallyReversible"
+get_active_step = "TriviallyReversible"
+submit_step_complete = "ReversibleWithEffort"
+submit_linear_step = "ReversibleWithEffort"
+
+# Sequential-thinking — pure in-context reasoning. The single tool only
+# records a thought into the model's own reasoning buffer; zero external
+# side effect. Must be TriviallyReversible or the conservative MCP default
+# (Irreversible) strands it at the A3 dry-run gate — which in turn deadlocks
+# against `tool_usage_gate`, since that gate REQUIRES a sequentialthinking
+# call before code edits. Two [Sentinel-Authority] gates in direct
+# contradiction; this entry breaks the cycle.
+[mcp.sequential-thinking]
+sequentialthinking = "TriviallyReversible"
+
+# Memory engine (memory-mcp) — atom store reads + capture. Reads are
+# pure observation; capture goes through the dual-judge accept/reject gate
+# and is recoverable (atoms can be superseded/archived), so ReversibleWithEffort.
+# Without these, the conservative unknown-MCP default (Irreversible) strands
+# every memory tool at the A3 dry-run gate (the _intent/_reasoning/_expected_effect
+# fields can't be passed through the MCP tool schema — unbreakable deadlock,
+# same class as the PowerShell + sequential-thinking fixes).
+[mcp.memory-mcp]
+memory_search = "TriviallyReversible"
+memory_why = "TriviallyReversible"
+memory_audit = "TriviallyReversible"
+memory_stats = "TriviallyReversible"
+memory_capture = "ReversibleWithEffort"
+memory_record_outcome = "ReversibleWithEffort"
 
 # ---------------------------------------------------------------------------
 # Layer 3: Bash command patterns
@@ -127,6 +208,30 @@ restart_all_mcps = "ReversibleWithEffort"
 match = "^rm[[:space:]]+-rf[[:space:]]+/[[:space:]]*$"
 class = "Catastrophic"
 # rm -rf / — root-deletion.
+
+# --- PowerShell destructive verbs (shares this list with Bash via the
+# `PowerShell` dispatch arm; PS uses the same tool_input.command field) ---
+
+[[bash.pattern]]
+match = "(?i)Remove-Item[[:space:]].*-Recurse.*-Force"
+class = "Catastrophic"
+# Remove-Item -Recurse -Force — PowerShell's `rm -rf`. Order of flags
+# varies, so both orderings are caught by the next pattern too.
+
+[[bash.pattern]]
+match = "(?i)Remove-Item[[:space:]].*-Force.*-Recurse"
+class = "Catastrophic"
+# Same as above with -Force before -Recurse.
+
+[[bash.pattern]]
+match = "(?i)(Format-Volume|Clear-Disk|Remove-Partition|Initialize-Disk)"
+class = "Catastrophic"
+# Disk-level PowerShell cmdlets — wipe volumes/partitions.
+
+[[bash.pattern]]
+match = "(?i)Remove-Item[[:space:]].*(HKLM:|HKCU:|HKEY)"
+class = "Catastrophic"
+# Registry key deletion via Remove-Item on a registry PSDrive.
 
 [[bash.pattern]]
 match = "^rm[[:space:]]+-rf[[:space:]]+[^./]"
@@ -162,6 +267,73 @@ class = "Catastrophic"
 match = "(?i)DELETE[[:space:]]+FROM[[:space:]]+[a-zA-Z_]+[[:space:]]*;"
 class = "Catastrophic"
 # DELETE FROM <table>; without WHERE — full-table wipe.
+
+[[bash.pattern]]
+match = "aws[[:space:]]+s3[[:space:]]+rb[[:space:]]+.*--force"
+class = "Catastrophic"
+# `aws s3 rb --force` — bucket-with-contents deletion. The bucket
+# AND every object in it are gone; no soft-delete unless versioning
+# was on (often isn't).
+
+[[bash.pattern]]
+match = "aws[[:space:]]+rds[[:space:]]+delete-db-instance.*--skip-final-snapshot"
+class = "Catastrophic"
+# RDS instance delete without taking the final snapshot. The
+# `--skip-final-snapshot` flag is the explicit "I don't want to
+# keep the data" choice; without it, RDS keeps a snapshot you can
+# restore from.
+
+[[bash.pattern]]
+match = "aws[[:space:]]+iam[[:space:]]+delete-(user|role|policy)"
+class = "Catastrophic"
+# IAM principal deletion — breaks anything using the identity.
+# Recovery requires recreating + re-binding everywhere; in
+# practice teams declare the surface lost and migrate.
+
+[[bash.pattern]]
+match = "^gcloud[[:space:]]+projects[[:space:]]+delete"
+class = "Catastrophic"
+# GCP project delete — 30-day soft-delete, but the time window is
+# easy to miss and the action drops every service in the project.
+
+[[bash.pattern]]
+match = "kubectl[[:space:]]+delete[[:space:]]+(namespace|ns)([[:space:]]|$)"
+class = "Catastrophic"
+# Namespace delete is mass-delete: every workload, service,
+# configmap, secret, pvc in the namespace goes with it.
+
+[[bash.pattern]]
+match = "^(helm[[:space:]]+uninstall|helm[[:space:]]+delete).*(prod|production)"
+class = "Catastrophic"
+# Helm uninstall on a prod-tagged release. Removes every resource
+# the chart created.
+
+[[bash.pattern]]
+match = "^gh[[:space:]]+repo[[:space:]]+delete"
+class = "Catastrophic"
+# `gh repo delete` — repo + every fork relationship + every
+# downstream CI integration gone. Recovery is "did anyone keep a
+# clone".
+
+[[bash.pattern]]
+match = "^dropdb([[:space:]]|$)"
+class = "Catastrophic"
+# Postgres `dropdb` CLI — drops an entire database. The DROP
+# DATABASE SQL pattern above only catches the in-SQL form;
+# this catches the CLI shorthand.
+
+[[bash.pattern]]
+match = "git[[:space:]]+push[[:space:]]+(--force|-f)[[:space:]]+.*[[:space:]]+(release|prod|production)"
+class = "Catastrophic"
+# Force-push to release/prod branches. The existing rule above
+# only catches main/master; this widens to other commonly-
+# protected branch names.
+
+[[bash.pattern]]
+match = "^(chmod[[:space:]]+777|chmod[[:space:]]+-R[[:space:]]+777)[[:space:]]+/(etc|usr|var|bin|sbin)"
+class = "Catastrophic"
+# chmod 777 on a system directory — security catastrophe and
+# pragmatically irreversible (no record of prior modes).
 
 # --- Irreversible: visible outside operator control ------------------------
 

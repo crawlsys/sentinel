@@ -1,11 +1,11 @@
 //! Phase Validator Hook
 //!
-//! Runs on UserPromptSubmit and injects phase progress into the context.
+//! Runs on `UserPromptSubmit` and injects phase progress into the context.
 //! Mirrors the Node.js phase-validator.js hook behavior:
 //! - Shows current phase progress (e.g., "3/7 phases loaded")
 //! - Shows step-level progress when step configs are available
 //! - Warns when phases are being skipped
-//! - Tells Claude which phase file to Read() next
+//! - Tells Claude which phase file to `Read()` next
 
 use sentinel_domain::events::{HookEvent, HookInput, HookOutput};
 use sentinel_domain::state::SessionState;
@@ -30,7 +30,8 @@ fn skill_has_phases_dir(fs: &dyn super::FileSystemPort, skill: &str) -> bool {
     )
 }
 
-/// Process a phase-validator hook event (UserPromptSubmit)
+/// Process a phase-validator hook event (`UserPromptSubmit`)
+#[allow(clippy::implicit_hasher)] // call sites in hook_cmd.rs are outside edit scope
 pub fn process(
     _input: &HookInput,
     state: &SessionState,
@@ -39,14 +40,12 @@ pub fn process(
     fs: &dyn super::FileSystemPort,
 ) -> HookOutput {
     // Only act when there's an active skill with a workflow
-    let skill_name = match &state.active_skill {
-        Some(s) => s,
-        None => return HookOutput::allow(),
+    let Some(skill_name) = &state.active_skill else {
+        return HookOutput::allow();
     };
 
-    let workflow = match workflows.get(skill_name) {
-        Some(wf) => wf,
-        None => return HookOutput::allow(),
+    let Some(workflow) = workflows.get(skill_name) else {
+        return HookOutput::allow();
     };
 
     // If the skill has no phases/ directory on disk, it uses an alternate
@@ -63,8 +62,7 @@ pub fn process(
     let loaded = state
         .phases_read
         .get(skill_name)
-        .map(|v| v.len())
-        .unwrap_or(0);
+        .map_or(0, std::vec::Vec::len);
 
     // Find next required phase file
     let next_file = state.next_required_phase_file(workflow);
@@ -77,8 +75,7 @@ pub fn process(
         .iter()
         .find(|p| p.required)
         .or_else(|| workflow.phases.first())
-        .map(|p| p.file.as_str())
-        .unwrap_or("claim.md");
+        .map_or("claim.md", |p| p.file.as_str());
 
     // Build progress context
     let mut context = if state.tool_calls > 0 && loaded == 0 {
@@ -90,8 +87,7 @@ pub fn process(
     } else {
         // All required phases loaded
         format!(
-            "[Phase Progress] Skill: {} | All {}/{} required phases loaded. Proceed with execution.",
-            skill_name, total_required, total
+            "[Phase Progress] Skill: {skill_name} | All {total_required}/{total} required phases loaded. Proceed with execution."
         )
     };
 
@@ -116,16 +112,15 @@ fn format_warning_box(skill: &str, required: usize, total: usize, first_file: &s
 +============================================================+
 |  WARNING: Phase Execution Required                         |
 +============================================================+
-|  Skill: {:<50}|
-|  Phases loaded: 0/{} (0/{} total)                          |
+|  Skill: {skill:<50}|
+|  Phases loaded: 0/{required} (0/{total} total)                          |
 |                                                            |
 |  You are making tool calls without loading ANY phase       |
 |  files. This is a violation of the skill workflow.         |
 |                                                            |
 |  MANDATORY: Read the first phase file NOW:                 |
-|  Read(\"~/.claude/skills/{}/phases/{}\")     |
-+============================================================+",
-        skill, required, total, skill, first_file
+|  Read(\"~/.claude/skills/{skill}/phases/{first_file}\")     |
++============================================================+"
     )
 }
 
@@ -139,9 +134,8 @@ fn format_progress_box(
 ) -> String {
     // Build phase checklist
     format!(
-        "[Phase Progress] Skill: {} | Phases loaded: {}/{} (required: {}) | \
-         Next: Read(\"~/.claude/skills/{}/phases/{}\")",
-        skill, loaded, total, required, skill, next_file
+        "[Phase Progress] Skill: {skill} | Phases loaded: {loaded}/{total} (required: {required}) | \
+         Next: Read(\"~/.claude/skills/{skill}/phases/{next_file}\")"
     )
 }
 
@@ -174,6 +168,8 @@ fn format_step_progress(
             wf_state.next_required_phase(workflow).map(|p| p.id.clone())
         });
 
+    #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    // Percentages from usize→f64→u32: precision loss negligible for display; value is always 0..=100
     let pct = if total_steps > 0 {
         (completed as f64 / total_steps as f64 * 100.0) as u32
     } else {
@@ -192,18 +188,16 @@ fn format_step_progress(
             let phase_total = phase_steps.steps.len();
 
             lines.push(format!(
-                "  Phase: {} ({}/{} steps)",
-                phase_id, phase_completed, phase_total
+                "  Phase: {phase_id} ({phase_completed}/{phase_total} steps)"
             ));
 
             // Show up to 5 steps for the current phase (context window friendly)
             let step_states = wf_state.phase_step_states(phase_id);
-            let mut shown = 0;
-            for step_def in &phase_steps.steps {
+            for (shown, step_def) in phase_steps.steps.iter().enumerate() {
                 if shown >= 5 {
                     let remaining = phase_total - shown;
                     if remaining > 0 {
-                        lines.push(format!("    ... +{} more steps", remaining));
+                        lines.push(format!("    ... +{remaining} more steps"));
                     }
                     break;
                 }
@@ -211,14 +205,13 @@ fn format_step_progress(
                 let status_icon = step_states
                     .iter()
                     .find(|s| s.step_id == step_def.id)
-                    .map(|s| match s.status {
+                    .map_or("\u{25CB}", |s| match s.status {
                         StepStatus::Completed => "\u{2713}",  // checkmark
                         StepStatus::InProgress => "\u{2192}", // arrow
                         StepStatus::Skipped => "\u{2014}",    // em-dash
                         StepStatus::Blocked => "\u{2717}",    // X
                         StepStatus::Pending => "\u{25CB}",    // circle
-                    })
-                    .unwrap_or("\u{25CB}"); // default: circle (pending)
+                    }); // default: circle (pending)
 
                 let blocker_tag = if step_def.blocker { " [BLOCKER]" } else { "" };
 
@@ -226,14 +219,13 @@ fn format_step_progress(
                     .iter()
                     .find(|s| s.step_id == step_def.id)
                     .and_then(|s| s.summary.as_deref())
-                    .map(|s| format!(" \u{2014} {}", s))
+                    .map(|s| format!(" \u{2014} {s}"))
                     .unwrap_or_default();
 
                 lines.push(format!(
                     "    {} {}: {}{}{}",
                     status_icon, step_def.id, step_def.description, blocker_tag, summary
                 ));
-                shown += 1;
             }
         }
     }
@@ -299,6 +291,7 @@ mod tests {
                             description: "Look up started state".to_string(),
                             blocker: false,
                             baseline_threshold: 0,
+                            judge: None,
                             timeout_ms: None,
                             retry_policy: Default::default(),
                             circuit_breaker: Default::default(),
@@ -315,6 +308,7 @@ mod tests {
                             description: "Get current user".to_string(),
                             blocker: false,
                             baseline_threshold: 0,
+                            judge: None,
                             timeout_ms: None,
                             retry_policy: Default::default(),
                             circuit_breaker: Default::default(),
@@ -331,6 +325,7 @@ mod tests {
                             description: "Set In Progress".to_string(),
                             blocker: true,
                             baseline_threshold: 0,
+                            judge: None,
                             timeout_ms: None,
                             retry_policy: Default::default(),
                             circuit_breaker: Default::default(),
@@ -352,6 +347,7 @@ mod tests {
                             description: "Get issue".to_string(),
                             blocker: false,
                             baseline_threshold: 0,
+                            judge: None,
                             timeout_ms: None,
                             retry_policy: Default::default(),
                             circuit_breaker: Default::default(),
@@ -368,6 +364,7 @@ mod tests {
                             description: "Get comments".to_string(),
                             blocker: false,
                             baseline_threshold: 0,
+                            judge: None,
                             timeout_ms: None,
                             retry_policy: Default::default(),
                             circuit_breaker: Default::default(),

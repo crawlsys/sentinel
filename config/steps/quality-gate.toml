@@ -29,7 +29,7 @@ description = "Launch style reviewer agent"
 
 [[phases.steps]]
 id = "1.5"
-description = "Launch visual + accessibility auditor agent (Steel)"
+description = "Launch visual + accessibility auditor agent (Browserbase for remote, CDP for local)"
 
 [[phases.steps]]
 id = "1.6"

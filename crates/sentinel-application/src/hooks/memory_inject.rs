@@ -1,23 +1,25 @@
 //! Memory Inject Hook — surface relevant atoms to the model on every turn.
 //!
-//! Fires on UserPromptSubmit. Calls memory-mcp's `memory_search` tool, renders
+//! Fires on `UserPromptSubmit`. Calls memory-mcp's `memory_search` tool, renders
 //! the hits into a compact Markdown block, and injects it as additionalContext.
 //! Also writes `last-injected-memories.json` so the `memory_feedback` hook
 //! (Stop) can classify each atom's outcome (used / contradicted / ignored)
-//! and feed it back into the Memory engine's RelevanceUpdater.
+//! and feed it back into the Memory engine's `RelevanceUpdater`.
 //!
 //! No direct Qdrant traffic — every hit routes through the Memory engine's
 //! Retriever via the MCP subprocess. That pipeline already does hybrid
 //! search + project-bleed + rerank + utility/freshness, so sentinel's
-//! client-side scoring helpers (decay_lambda, temporal_score, shingle
+//! client-side scoring helpers (`decay_lambda`, `temporal_score`, shingle
 //! dedup, precompute cache) are all gone.
+
+use std::fmt::Write as _;
+use std::path::PathBuf;
 
 use chrono::Utc;
 use sentinel_domain::events::{HookEvent, HookInput, HookOutput};
-use std::path::PathBuf;
 use tracing::{debug, warn};
 
-use super::{run_async, FileSystemPort, MemoryMcpPort};
+use super::{run_async_timeout, FileSystemPort, MemoryMcpPort};
 
 // ---------------------------------------------------------------------------
 // Injected state — written so memory_feedback can classify outcomes on Stop
@@ -27,12 +29,17 @@ use super::{run_async, FileSystemPort, MemoryMcpPort};
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
 struct InjectedMemoryEntry {
     id: String,
+    /// Retrieval-event id from `memory_search` for this atom. Threaded back to
+    /// `memory_record_outcome` by `memory_feedback` so the outcome attaches to the
+    /// exact retrieval event (not the atom id, which the log isn't keyed by).
+    #[serde(default)]
+    event_id: Option<String>,
     name: String,
     score: f64,
 }
 
 /// Shape of `~/.claude/sentinel/state/last-injected-memories.json` read by
-/// memory_feedback on Stop.
+/// `memory_feedback` on Stop.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct InjectedState {
     memories: Vec<InjectedMemoryEntry>,
@@ -56,6 +63,7 @@ fn write_injected_state(fs: &dyn FileSystemPort, hits: &[UnifiedHit], user_promp
             .iter()
             .map(|h| InjectedMemoryEntry {
                 id: h.atom_id.clone(),
+                event_id: h.event_id.clone(),
                 name: format!("{}/{}={}", h.subject, h.predicate, h.value),
                 score: h.final_score,
             })
@@ -77,6 +85,8 @@ fn write_injected_state(fs: &dyn FileSystemPort, hits: &[UnifiedHit], user_promp
 #[derive(serde::Deserialize, Debug, Clone)]
 struct UnifiedHit {
     atom_id: String,
+    #[serde(default)]
+    event_id: Option<String>,
     subject: String,
     predicate: String,
     value: String,
@@ -152,8 +162,7 @@ fn compact_summary(content: &str, max_chars: usize) -> String {
     let truncate_at = collapsed
         .char_indices()
         .nth(max_chars)
-        .map(|(i, _)| i)
-        .unwrap_or(collapsed.len());
+        .map_or(collapsed.len(), |(i, _)| i);
 
     let window = &collapsed[..truncate_at];
     let cutoff = window
@@ -168,10 +177,11 @@ fn render_context(hits: &[UnifiedHit]) -> String {
     let mut out = format!("[Memory] {} relevant atom(s):\n", hits.len());
     for h in hits {
         let short = compact_summary(&h.value, 150);
-        out.push_str(&format!(
+        let _ = write!(
+            out,
             "\n- [{:.2}] **{}/{}={}** ({}):\n  {}\n",
             h.final_score, h.subject, h.predicate, h.value, h.project, short
-        ));
+        );
     }
     out
 }
@@ -196,22 +206,27 @@ fn search_memory_engine(
     args.insert("project".into(), serde_json::Value::String(project.clone()));
     args.insert("top_k".into(), serde_json::Value::Number(8u32.into()));
 
-    let payload: serde_json::Value = match run_async(async {
-        match memory_mcp.call_tool("memory_search", args).await {
-            Ok(p) => Some(p),
-            Err(e) => {
-                warn!(
-                    project = %project,
-                    error = %e,
-                    "memory-mcp search failed — skipping injection this turn"
-                );
-                None
+    // Recall search cold-starts memory-mcp + server-side embed + vector search
+    // + rerank — that routinely exceeds the default 3s hook budget, which would
+    // silently drop recall (and starve the feedback loop). Give it a dedicated
+    // 10s budget: this is the read path, so a slightly slower first prompt of a
+    // session is an acceptable trade for reliable recall.
+    let payload: serde_json::Value = run_async_timeout(
+        async {
+            match memory_mcp.call_tool("memory_search", args).await {
+                Ok(p) => Some(p),
+                Err(e) => {
+                    warn!(
+                        project = %project,
+                        error = %e,
+                        "memory-mcp search failed — skipping injection this turn"
+                    );
+                    None
+                }
             }
-        }
-    }) {
-        Some(p) => p,
-        None => return None,
-    };
+        },
+        std::time::Duration::from_secs(10),
+    )?;
 
     let hits: Vec<UnifiedHit> = payload
         .get("hits")
@@ -229,7 +244,7 @@ fn search_memory_engine(
 // Hook entry points
 // ---------------------------------------------------------------------------
 
-/// Process UserPromptSubmit — query memory-mcp and inject matching atoms.
+/// Process `UserPromptSubmit` — query memory-mcp and inject matching atoms.
 pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
     // Skip empty / too-short prompts
     let prompt = match input.prompt.as_deref() {
@@ -243,23 +258,53 @@ pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
     }
 
     let cwd = input.cwd.as_deref().unwrap_or(".");
-    match search_memory_engine(ctx.memory_mcp, prompt, cwd) {
-        Some((hits, rendered)) => {
-            write_injected_state(ctx.fs, &hits, Some(prompt));
-            debug!(atoms = hits.len(), "Injecting atoms via memory-mcp");
-            HookOutput::inject_context(HookEvent::UserPromptSubmit, &rendered)
-        }
-        None => {
-            debug!("memory-mcp returned no hits — not injecting");
-            HookOutput::allow()
-        }
+    let project = project_from_cwd(cwd);
+    let started = std::time::Instant::now();
+    let result = search_memory_engine(ctx.memory_mcp, prompt, cwd);
+    let duration_ms = started.elapsed().as_millis() as u64;
+
+    // Telemetry: emit a `recall` event whether or not anything was surfaced —
+    // a zero-hit recall is itself signal for the end-to-end trace. See
+    // crate::memory_telemetry.
+    let hits_for_telem: Vec<(String, Option<String>, String, f64)> = result
+        .as_ref()
+        .map(|(hits, _)| {
+            hits.iter()
+                .map(|h| {
+                    (
+                        h.atom_id.clone(),
+                        h.event_id.clone(),
+                        format!("{}/{}={}", h.subject, h.predicate, h.value),
+                        h.final_score,
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    crate::memory_telemetry::record_recall(
+        ctx.fs,
+        input.session_id.as_deref(),
+        &project,
+        prompt.len(),
+        result.is_some(),
+        &hits_for_telem,
+        duration_ms,
+    );
+
+    if let Some((hits, rendered)) = result {
+        write_injected_state(ctx.fs, &hits, Some(prompt));
+        debug!(atoms = hits.len(), "Injecting atoms via memory-mcp");
+        HookOutput::inject_context(HookEvent::UserPromptSubmit, &rendered)
+    } else {
+        debug!("memory-mcp returned no hits — not injecting");
+        HookOutput::allow()
     }
 }
 
 /// Process Stop — no-op.
 ///
 /// The legacy implementation precomputed Qdrant search results into a
-/// sidecar JSON file so the next UserPromptSubmit could read them without
+/// sidecar JSON file so the next `UserPromptSubmit` could read them without
 /// a live search. Under memory-mcp, the live search is fast enough (single
 /// subprocess, cold start ~2.7s) that the precompute cache is both
 /// redundant and a maintenance burden. Kept as a no-op stub so the hook
@@ -337,6 +382,7 @@ mod tests {
     fn test_render_context_single_hit() {
         let hits = vec![UnifiedHit {
             atom_id: "abc".to_string(),
+            event_id: Some("evt-1".to_string()),
             subject: "user".to_string(),
             predicate: "likes".to_string(),
             value: "rust".to_string(),
@@ -382,6 +428,7 @@ mod tests {
         let state = InjectedState {
             memories: vec![InjectedMemoryEntry {
                 id: "atom-1".to_string(),
+                event_id: Some("evt-1".to_string()),
                 name: "user/likes=rust".to_string(),
                 score: 0.9,
             }],

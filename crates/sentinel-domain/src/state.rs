@@ -37,7 +37,7 @@ pub struct SessionState {
     pub active: bool,
 
     /// Phase files that have been `Read()` by Claude, keyed by skill name.
-    /// E.g., `{"linear": ["claim.md", "fetch.md"], "steel": ["claim.md"]}`.
+    /// E.g., `{"linear": ["claim.md", "fetch.md"], "browserbase": ["setup.md"]}`.
     ///
     /// **Attack #50**: Was a global `Vec<String>` — reading skill A's `review.md`
     /// would satisfy checks for skill B's `review.md`. Now per-skill.
@@ -76,13 +76,13 @@ pub struct SessionState {
     /// **Agent revocation kill switch (AEGIS pattern)**: agent IDs that
     /// have been explicitly revoked via `sentinel agent revoke <id>` or
     /// auto-revoked by the violation policy. Tool calls bearing these
-    /// agent_ids in `HookInput.agent_id` are denied at PreToolUse with
+    /// `agent_ids` in `HookInput.agent_id` are denied at `PreToolUse` with
     /// a `[Sentinel-Authority]` message.
     ///
-    /// Per-session today; revocation does NOT persist across SessionStart
+    /// Per-session today; revocation does NOT persist across `SessionStart`
     /// because a fresh session is the natural place to give an agent
     /// another chance. Operators who want durable revocations can
-    /// re-issue `sentinel agent revoke` at SessionStart via a hook.
+    /// re-issue `sentinel agent revoke` at `SessionStart` via a hook.
     #[serde(default)]
     pub revoked_agents: HashSet<String>,
 
@@ -103,10 +103,21 @@ pub struct SessionState {
     /// (proof chain persistence) since both walk the same disk archive.
     #[serde(default)]
     pub step_baselines: HashMap<String, BaselineCounter>,
+
+    /// Independent step verdicts produced by the `step_judge` `PostToolUse`
+    /// hook, keyed by `skill:phase_id:step_id` (#12 — close the self-certify
+    /// gap). `submit_step_complete` reads these to enforce the judge's OWN
+    /// verdict over the caller-supplied one: an agent can pass any `verdict`
+    /// arg, but the independently-judged verdict here is what gates the seal
+    /// in warn/enforce mode. The hook persists this to disk via `state_store`;
+    /// the MCP handler sees it because `with_session_state` loads the same
+    /// per-session state before running the tool.
+    #[serde(default)]
+    pub independent_verdicts: HashMap<String, IndependentVerdict>,
 }
 
 /// Counter tracking successful judgements for a single
-/// `(skill, phase_id, step_id)` tuple. Used by step_judge to decide
+/// `(skill, phase_id, step_id)` tuple. Used by `step_judge` to decide
 /// whether the step has cleared its cold-start window.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct BaselineCounter {
@@ -129,12 +140,27 @@ pub struct BaselineCounter {
     pub last_observed_at: Option<DateTime<Utc>>,
 }
 
+/// The independent verdict the `step_judge` hook produced for a step,
+/// persisted so `submit_step_complete` can enforce it over the
+/// caller-supplied verdict (#12). Minimal by design — only what the seal
+/// gate needs to decide.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IndependentVerdict {
+    /// Whether the independent judge found the evidence sufficient.
+    pub sufficient: bool,
+    /// The independent judge's confidence in `sufficient`.
+    pub confidence: f64,
+    /// When the hook recorded this verdict.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub judged_at: Option<DateTime<Utc>>,
+}
+
 impl BaselineCounter {
     /// Returns true if this counter has cleared the threshold for
     /// enforcement to engage. `threshold == 0` means "enforce
     /// immediately" — return true even on a fresh counter.
     #[must_use]
-    pub fn cleared(&self, threshold: u64) -> bool {
+    pub const fn cleared(&self, threshold: u64) -> bool {
         self.successful_count >= threshold
     }
 }
@@ -225,12 +251,13 @@ impl SessionState {
             state_generation: 0,
             glass_break: None,
             step_baselines: HashMap::new(),
+            independent_verdicts: HashMap::new(),
             revoked_agents: HashSet::new(),
         }
     }
 
     /// Revoke an agent — every subsequent tool call carrying this
-    /// `agent_id` will be denied at PreToolUse. Idempotent (revoking
+    /// `agent_id` will be denied at `PreToolUse`. Idempotent (revoking
     /// an already-revoked agent is a no-op).
     pub fn revoke_agent(&mut self, agent_id: impl Into<String>) {
         self.revoked_agents.insert(agent_id.into());
@@ -242,14 +269,14 @@ impl SessionState {
         self.revoked_agents.remove(agent_id)
     }
 
-    /// Check whether an agent_id has been revoked.
+    /// Check whether an `agent_id` has been revoked.
     #[must_use]
     pub fn is_agent_revoked(&self, agent_id: &str) -> bool {
         self.revoked_agents.contains(agent_id)
     }
 
     /// Build the `(skill, phase_id, step_id)` baseline key. Static helper
-    /// so both step_judge and the persistence layer compute keys
+    /// so both `step_judge` and the persistence layer compute keys
     /// identically.
     #[must_use]
     pub fn baseline_key(skill: &str, phase_id: &str, step_id: &str) -> String {
@@ -257,7 +284,7 @@ impl SessionState {
     }
 
     /// Record a step judgement against the cold-start baseline.
-    /// Called by step_judge after every verdict — both passing and failing
+    /// Called by `step_judge` after every verdict — both passing and failing
     /// judgements bump their respective counters so telemetry shows
     /// warmup-time false-positive rates.
     ///
@@ -291,6 +318,44 @@ impl SessionState {
             .get(&Self::baseline_key(skill, phase_id, step_id))
             .cloned()
             .unwrap_or_default()
+    }
+
+    /// Record the independent `step_judge` verdict for a step (#12). Keyed
+    /// the same way as the baseline counter. Overwrites any prior verdict
+    /// for the step — the most recent independent judgement is what gates
+    /// the seal. Called by the `step_judge` hook after every judgement.
+    pub fn record_independent_verdict(
+        &mut self,
+        skill: &str,
+        phase_id: &str,
+        step_id: &str,
+        sufficient: bool,
+        confidence: f64,
+    ) {
+        let key = Self::baseline_key(skill, phase_id, step_id);
+        self.independent_verdicts.insert(
+            key,
+            IndependentVerdict {
+                sufficient,
+                confidence,
+                judged_at: Some(Utc::now()),
+            },
+        );
+    }
+
+    /// Read the independent verdict for a step, if the `step_judge` hook
+    /// recorded one. `None` means no independent judgement exists for this
+    /// step — the seal gate treats that as "no override available" and
+    /// falls back to the caller-supplied verdict.
+    #[must_use]
+    pub fn independent_verdict(
+        &self,
+        skill: &str,
+        phase_id: &str,
+        step_id: &str,
+    ) -> Option<&IndependentVerdict> {
+        self.independent_verdicts
+            .get(&Self::baseline_key(skill, phase_id, step_id))
     }
 
     /// **Attack #169 fix**: Maximum distinct skills per session.
@@ -524,7 +589,7 @@ impl SessionState {
             Some(_) => Ok(()), // Same hash — no change
             None => {
                 self.phase_file_hashes
-                    .insert(canonical_path.to_string(), content_hash.to_string());
+                    .insert(canonical_path.clone(), content_hash.to_string());
                 Ok(())
             }
         }
@@ -643,7 +708,7 @@ mod tests {
         state.record_phase_read("linear", "claim.md");
         assert_eq!(state.phases_read_count(), 1);
         assert!(state.has_phase_been_read("linear", "claim.md"));
-        assert!(!state.has_phase_been_read("steel", "claim.md")); // per-skill isolation
+        assert!(!state.has_phase_been_read("browserbase", "claim.md")); // per-skill isolation
 
         // Idempotent — recording same file twice doesn't duplicate
         state.record_phase_read("linear", "claim.md");

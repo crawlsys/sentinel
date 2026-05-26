@@ -120,7 +120,7 @@ impl MultiLensReview {
     ///
     /// - **overall**: highest-rank outcome across all lenses
     ///   (`Fail` > `Concern` > `Pass`). Empty input → `Pass`.
-    /// - **overall_severity**: highest-rank severity across all
+    /// - **`overall_severity`**: highest-rank severity across all
     ///   lenses (`Critical` > `High` > `Medium` > `Low` > `Info`).
     ///   Empty input → `Info`.
     /// - **summary**: counts of each outcome ("3 lenses: 1 fail, 2
@@ -184,13 +184,7 @@ fn build_summary(lenses: &[LensVerdict]) -> String {
 /// The canonical lens set. Agents-mcp-rust uses this when fanning
 /// out a multi-lens review request; the M7 router uses it to
 /// validate that all expected lenses ran.
-pub const DEFAULT_LENSES: &[&str] = &[
-    "security",
-    "performance",
-    "style",
-    "tests",
-    "correctness",
-];
+pub const DEFAULT_LENSES: &[&str] = &["security", "performance", "style", "tests", "correctness"];
 
 #[cfg(test)]
 mod tests {
@@ -251,11 +245,8 @@ mod tests {
         // A Pass with Critical severity is valid: "I found something
         // critical and someone fixed it." Synthesis must preserve
         // both axes, not collapse Critical → Fail.
-        let r = MultiLensReview::synthesize(vec![v(
-            "security",
-            LensOutcome::Pass,
-            Severity::Critical,
-        )]);
+        let r =
+            MultiLensReview::synthesize(vec![v("security", LensOutcome::Pass, Severity::Critical)]);
         assert_eq!(r.overall, LensOutcome::Pass);
         assert_eq!(r.overall_severity, Severity::Critical);
     }
@@ -275,11 +266,7 @@ mod tests {
 
     #[test]
     fn summary_format_pluralises_correctly() {
-        let one = MultiLensReview::synthesize(vec![v(
-            "style",
-            LensOutcome::Pass,
-            Severity::Info,
-        )]);
+        let one = MultiLensReview::synthesize(vec![v("style", LensOutcome::Pass, Severity::Info)]);
         assert_eq!(one.summary, "1 lens: 1 pass");
 
         let many = MultiLensReview::synthesize(vec![

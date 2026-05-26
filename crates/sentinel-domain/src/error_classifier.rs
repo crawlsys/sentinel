@@ -23,10 +23,10 @@
 pub const NON_ACTIONABLE_ERROR_CATEGORIES: &[&str] =
     &["rate_limit", "auth_error", "invalid_request"];
 
-/// Substrings that indicate a non-actionable error even when the category
-/// itself doesn't match the categorical list. The current entry was added
-/// because the `prompt is too long` failures from Claude Code's compactor
-/// were producing recurring noise.
+/// Substrings that indicate a non-actionable error even when the category itself doesn't match.
+///
+/// The current entry was added because the `prompt is too long` failures from
+/// Claude Code's compactor were producing recurring noise.
 pub const NON_ACTIONABLE_ERROR_SUBSTRINGS: &[&str] = &["prompt is too long"];
 
 /// Decide whether an error log entry's category is worth surfacing into

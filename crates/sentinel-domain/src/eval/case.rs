@@ -269,7 +269,10 @@ mod tests {
     #[test]
     fn eval_case_id_rejects_empty() {
         assert_eq!(EvalCaseId::new(""), Err(EvalIdError::Empty("EvalCaseId")));
-        assert_eq!(EvalCaseId::new("   "), Err(EvalIdError::Empty("EvalCaseId")));
+        assert_eq!(
+            EvalCaseId::new("   "),
+            Err(EvalIdError::Empty("EvalCaseId"))
+        );
     }
 
     #[test]
