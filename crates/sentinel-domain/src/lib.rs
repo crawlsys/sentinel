@@ -24,6 +24,7 @@ pub mod interceptor;
 pub mod judge;
 pub mod mcp_tool;
 pub mod multi_judge;
+pub mod output_compress;
 pub mod override_phrase;
 pub mod path_safety;
 pub mod ports;

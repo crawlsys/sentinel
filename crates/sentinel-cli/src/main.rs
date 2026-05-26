@@ -16,6 +16,7 @@ mod break_cmd;
 mod cache_cmd;
 mod claude_md_cmd;
 mod cleanup_cmd;
+mod compress_cmd;
 mod config_cmd;
 mod ba_cmd;
 mod cost_per_point_cmd;
@@ -428,6 +429,20 @@ enum Commands {
     Ba {
         #[command(subcommand)]
         action: BaAction,
+    },
+
+    /// Run a command and emit token-compressed output (sentinel's native
+    /// "RTK"). Runs `<cmd>` to completion, structurally compresses its
+    /// stdout/stderr (collapsing build/test/grep noise while preserving every
+    /// error/result/warning line verbatim), prints the compressed output, and
+    /// exits with the wrapped command's exit code. `SENTINEL_COMPRESS_BYPASS=1`
+    /// passes output through unchanged.
+    ///
+    /// Usage: `sentinel compress -- cargo test --workspace`
+    Compress {
+        /// The command and its args (everything after `--`).
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
+        cmd: Vec<String>,
     },
 }
 
@@ -1029,6 +1044,12 @@ async fn main() -> anyhow::Result<()> {
                 .await
             }
         },
+        Commands::Compress { cmd } => {
+            // Propagate the wrapped command's exit code so callers (and the
+            // PreToolUse rewrite) see the real success/failure.
+            let code = compress_cmd::run(&cmd)?;
+            std::process::exit(code);
+        }
         Commands::Legatus { action } => match action {
             LegatusAction::Connect {
                 consulate_url,

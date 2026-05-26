@@ -42,6 +42,7 @@ pub mod memory_inject;
 pub mod memory_turn_capture;
 pub mod memory_verify;
 pub mod orchestration_nudge;
+pub mod output_compressor;
 pub mod permission_denied;
 pub mod phase_gate;
 pub mod phase_validator;
@@ -281,6 +282,7 @@ pub const HOOK_NAMES: &[&str] = &[
     "memory_feedback",
     "memory_inject",
     "memory_verify",
+    "output_compressor",
     "permission_denied",
     "phase_gate",
     "phase_validator",
