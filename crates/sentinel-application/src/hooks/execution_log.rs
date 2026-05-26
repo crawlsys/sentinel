@@ -150,49 +150,56 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
         }
     }
 
-    if log_lines.is_empty() {
-        return HookOutput::allow();
-    }
+    // Per-instruction Result reporting runs unconditionally below,
+    // even when this turn produced no [RUN]/[STEP]/[PHASE] markers
+    // (codex P1: a Stop whose assistant text lacks markers used to
+    // bail out here, leaving operator-relayed instructions queued
+    // and getting mis-attributed to a later turn). The
+    // marker-driven side effects (JSONL append + Completed
+    // escalation) still gate on `log_lines.is_empty()` — those are
+    // only meaningful when markers exist.
+    let summary: Option<String> = if log_lines.is_empty() {
+        None
+    } else {
+        // Build JSONL entries
+        let skill = current_skill(ctx.fs);
+        let timestamp = chrono::Utc::now().to_rfc3339();
+        let log_file = metrics.join("execution-log.jsonl");
 
-    // Build JSONL entries
-    let skill = current_skill(ctx.fs);
-    let timestamp = chrono::Utc::now().to_rfc3339();
-    let log_file = metrics.join("execution-log.jsonl");
+        let mut all_lines = String::new();
+        for line in &log_lines {
+            let (marker_type, number) = classify_marker(line);
+            let context = extract_context(line);
 
-    let mut all_lines = String::new();
-    for line in &log_lines {
-        let (marker_type, number) = classify_marker(line);
-        let context = extract_context(line);
+            let entry = serde_json::json!({
+                "type": marker_type,
+                "phase": if marker_type == "phase" { number.clone() } else { None },
+                "step": if marker_type == "step" { number.clone() } else { None },
+                "context": context,
+                "line": line,
+                "skill": skill,
+                "session_id": session_id,
+                "cwd": cwd,
+                "ts": timestamp,
+            });
+            all_lines.push_str(&serde_json::to_string(&entry).unwrap_or_default());
+            all_lines.push('\n');
+        }
 
-        let entry = serde_json::json!({
-            "type": marker_type,
-            "phase": if marker_type == "phase" { number.clone() } else { None },
-            "step": if marker_type == "step" { number.clone() } else { None },
-            "context": context,
-            "line": line,
-            "skill": skill,
-            "session_id": session_id,
-            "cwd": cwd,
-            "ts": timestamp,
-        });
-        all_lines.push_str(&serde_json::to_string(&entry).unwrap_or_default());
-        all_lines.push('\n');
-    }
+        let _ = ctx.fs.append(&log_file, all_lines.as_bytes());
 
-    let _ = ctx.fs.append(&log_file, all_lines.as_bytes());
-
-    // Notify the daemon-hosted legatus (if any) that this session
-    // wrapped a run. We only fire when there was at least one
-    // execution marker — otherwise the Stop is a non-event for the
-    // operator (e.g. background tooling, first-ever invocation).
-    // Summary is the last marker line, which is whatever the
-    // session most recently surfaced as visible work.
-    let summary = log_lines.last().map(|s| truncate_summary(s, 140));
-    crate::legatus_client::escalate_fire_and_forget(
-        sentinel_legatus::EscalationKind::Completed {
-            summary: summary.clone(),
-        },
-    );
+        // Notify the daemon-hosted legatus (if any) that this
+        // session wrapped a run. Summary is the last marker line,
+        // which is whatever the session most recently surfaced as
+        // visible work.
+        let summary = log_lines.last().map(|s| truncate_summary(s, 140));
+        crate::legatus_client::escalate_fire_and_forget(
+            sentinel_legatus::EscalationKind::Completed {
+                summary: summary.clone(),
+            },
+        );
+        summary
+    };
 
     // Per-instruction Result reporting: for every operator-relayed
     // instruction the consul_inbox hook drained during this
@@ -207,6 +214,12 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     // `message` is the concatenated assistant text from this turn
     // — captured above for execution-marker extraction; reused
     // here as the deferral-detection corpus.
+    //
+    // CRITICAL: this block runs even when log_lines is empty.
+    // Pending instructions MUST drain on every Stop, otherwise
+    // they leak across turns. enrich_summary_with_tool_calls
+    // already handles a None base summary (returns just the
+    // `[tools: …]` prefix or None when both inputs are empty).
     let pending = crate::legatus_client::take_pending_instructions(session_id);
     let signals = crate::legatus_client::take_turn_signals(session_id);
     // Per-instruction tool-call attribution (Item E). One drain
@@ -351,6 +364,78 @@ mod tests {
     fn enrich_summary_falls_back_to_prefix_only_when_base_blank() {
         let summary = enrich_summary_with_tool_calls(Some("   "), &["Read".into()]);
         assert_eq!(summary.as_deref(), Some("[tools: Read]"));
+    }
+
+    /// Regression test for codex P1 review on PR #2.
+    ///
+    /// Bug: a Stop event whose assistant output contains NO
+    /// [RUN]/[STEP]/[PHASE] markers used to bail out via the early
+    /// `if log_lines.is_empty() { return ... }` before reaching the
+    /// `take_pending_instructions` drain. Operator-relayed
+    /// instructions queued via the consul_inbox hook then leaked
+    /// across turns and got mis-attributed to a later (unrelated)
+    /// session turn that did produce markers.
+    ///
+    /// Contract: after `process()` on a no-marker transcript, the
+    /// per-session pending file MUST be drained (i.e. the next
+    /// `take_pending_instructions(session_id)` returns empty).
+    /// The marker-driven side effects (JSONL append, Completed
+    /// escalation) still skip — those are only meaningful when
+    /// markers exist — but the per-instruction Result drain is
+    /// unconditional.
+    #[test]
+    fn pending_instructions_drain_even_when_no_markers() {
+        // Unique sid so the on-disk pending file is isolated from
+        // any other test or real session.
+        let session_id = format!("test-no-markers-{}", uuid::Uuid::new_v4());
+
+        // Seed two pending instructions for the session.
+        let i1 = crate::legatus_client::InstructionId::from_uuid(uuid::Uuid::new_v4());
+        let i2 = crate::legatus_client::InstructionId::from_uuid(uuid::Uuid::new_v4());
+        crate::legatus_client::note_pending_instruction(&session_id, i1);
+        crate::legatus_client::note_pending_instruction(&session_id, i2);
+        // Sanity-check the seed wrote to disk.
+        let seeded = crate::legatus_client::take_pending_instructions(&session_id);
+        assert_eq!(
+            seeded.len(),
+            2,
+            "expected the seed to land 2 instructions on disk",
+        );
+        // Re-seed since take_* drained it above.
+        crate::legatus_client::note_pending_instruction(&session_id, i1);
+        crate::legatus_client::note_pending_instruction(&session_id, i2);
+
+        // Assistant transcript with NO [RUN]/[STEP]/[PHASE]
+        // markers. The bug was that this branch hit the early
+        // return and skipped the drain.
+        let transcript = make_transcript(&[json!({
+            "type": "assistant",
+            "message": {
+                "content": [{
+                    "type": "text",
+                    "text": "Done. Acknowledged the request and wrapped up cleanly without the marker syntax."
+                }]
+            }
+        })]);
+
+        let input = HookInput {
+            transcript_path: Some(transcript.path().to_string_lossy().to_string()),
+            session_id: Some(session_id.clone()),
+            cwd: Some(".".to_string()),
+            ..Default::default()
+        };
+        let ctx = crate::hooks::test_support::stub_ctx();
+        let output = process(&input, &ctx);
+        // Hook itself returns allow (no blocking).
+        assert!(output.blocked.is_none());
+
+        // The CRITICAL assertion: pending file must be drained.
+        // Before the P1 fix this returned [i1, i2].
+        let remaining = crate::legatus_client::take_pending_instructions(&session_id);
+        assert!(
+            remaining.is_empty(),
+            "pending instructions leaked across the no-marker Stop: {remaining:?}",
+        );
     }
 
     #[test]
