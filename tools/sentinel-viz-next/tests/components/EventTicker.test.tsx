@@ -83,7 +83,10 @@ describe("EventTicker — sub-line operator phrasing (P3-20)", () => {
 describe("EventTicker — actor distinction (P3-19)", () => {
   it("every ticker row carries a data-actor attribute", () => {
     render(<EventTicker events={sampleEvents} onSelectNode={() => {}} />);
-    const rows = screen.getByTestId("ticker-rows").querySelectorAll("li");
+    // Scope to top-level row `<li>` only. Nested <li> exist inside
+    // RolledPreview / flyout sub-lists and don't carry data-actor.
+    const rows = screen.getByTestId("ticker-rows").querySelectorAll("li[data-actor]");
+    expect(rows.length).toBeGreaterThan(0);
     for (const li of Array.from(rows)) {
       const actor = li.getAttribute("data-actor");
       expect(["claude", "sentinel", "user"]).toContain(actor);

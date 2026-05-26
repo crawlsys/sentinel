@@ -40,6 +40,12 @@ interface MergedEntry {
 const REFRESH_INTERVAL_MS = 8_000;
 const MAX_ENTRIES_MERGED = 5;
 const MAX_ENTRIES_FOCUSED = 10;
+/// Display limit ≠ fetch limit. SessionConsole only shows 5 (or 10)
+/// segments but the EventTicker's flyouts can need 50+ tool calls'
+/// worth of cached summaries. Decouple: pull deep, display shallow.
+/// Bumped from 6 to 50 in P3-26 so heavy sessions' older rolled-
+/// row members stop falling back to TC# stubs.
+const CACHE_WARM_FETCH_LIMIT = 50;
 
 export function SessionConsole({
   graph,
@@ -78,8 +84,11 @@ export function SessionConsole({
       setEntries([]);
       return;
     }
-    const perSessionLimit = focused ? MAX_ENTRIES_FOCUSED : 6;
     const maxEntries = focused ? MAX_ENTRIES_FOCUSED : MAX_ENTRIES_MERGED;
+    // Always fetch DEEP (CACHE_WARM_FETCH_LIMIT) so the ticker's
+    // rolled-row flyouts have cached summaries for older members.
+    // Display still uses maxEntries for the live-log itself.
+    const perSessionLimit = CACHE_WARM_FETCH_LIMIT;
 
     async function refresh() {
       setLoading(true);

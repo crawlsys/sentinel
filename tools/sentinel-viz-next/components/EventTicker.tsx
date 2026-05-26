@@ -424,6 +424,19 @@ export function EventTicker({ events, onSelectNode, sessionColors, stuckMeta }: 
               {pinnedKeys.has(row.key) && row.sessionId && stuckMeta?.get(row.sessionId) ? (
                 <StuckReasonLine meta={stuckMeta.get(row.sessionId)!} />
               ) : null}
+              {/* Rolled rows: render 2-3 inline preview lines so the
+                  operator sees WHAT was rolled up without expanding
+                  the flyout. Skipped when the row is expanded (the
+                  flyout below already shows everything) or when the
+                  row is a singleton tool (no roll-up). Activity
+                  previews come from the activity-cache via the
+                  member's (sid, tool, ts) — cache misses fall back
+                  to bare tool names so the operator still sees
+                  variety even before SessionConsole has warmed the
+                  full cache. */}
+              {row.members.length > 1 && row.sessionId && !isOpen ? (
+                <RolledPreview row={row} />
+              ) : null}
               {isOpen ? (
                 <ul
                   className="mt-1 pl-4 border-l border-dashed border-[#30363d]"
@@ -472,6 +485,65 @@ export function compactSummaryFor(tool: string, summary: string): string {
     return compactPath(summary, 80);
   }
   return smartTrunc(tildify(summary), 80);
+}
+
+/// Inline preview lines under a rolled-up row. Operator screenshot:
+///   "the individual items here could be 2 or 3x as high, with more
+///    information (dense) to help the user understand what all was
+///    executed within that rollup"
+/// Surface 2-3 DISTINCT command/path previews from the row's
+/// members without requiring the operator to expand the flyout.
+/// Dedupe by (tool + summary) so 5 identical Bashes don't take
+/// 3 lines; show variety instead.
+const PREVIEW_LINES = 3;
+
+function RolledPreview({ row }: { row: TickerRow }) {
+  const sessionId = row.sessionId;
+  if (!sessionId) return null;
+  // Walk members newest → oldest, look up each in the activity-
+  // cache, dedupe on (tool, summary) so identical adjacent calls
+  // count once. Stop at PREVIEW_LINES distinct entries.
+  const seen = new Set<string>();
+  const lines: Array<{ tool: string; summary: string; isError: boolean }> = [];
+  for (const m of row.members) {
+    if (!m.tool) continue;
+    const tc = lookupActivityCache(sessionId, m.tool, m.ts);
+    const summary = tc?.summary ? compactSummaryFor(m.tool, tc.summary) : null;
+    const key = `${m.tool}\t${summary ?? ""}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    if (!summary) {
+      // No cache hit yet — emit a tool-only placeholder so the
+      // operator still sees "Bash" / "Edit" variety. The cache
+      // will fill in on the next 8s refresh.
+      lines.push({ tool: m.tool, summary: "", isError: false });
+    } else {
+      lines.push({ tool: m.tool, summary, isError: !!tc?.error });
+    }
+    if (lines.length >= PREVIEW_LINES) break;
+  }
+  if (lines.length === 0) return null;
+  return (
+    <ul
+      data-testid="rolled-preview"
+      className="mt-0.5 pl-3 space-y-0 text-[10px] leading-tight"
+    >
+      {lines.map((l, i) => (
+        <li
+          key={`prev-${i}`}
+          className="flex gap-1.5 items-baseline truncate"
+        >
+          <span className="text-[#484f58] shrink-0 w-10 truncate">{l.tool}</span>
+          <span
+            className={`truncate ${l.isError ? "text-[#f85149]" : "text-[#8b949e]"}`}
+            title={l.summary || l.tool}
+          >
+            {l.summary || <span className="text-[#484f58] italic">(loading…)</span>}
+          </span>
+        </li>
+      ))}
+    </ul>
+  );
 }
 
 /// One row in the ×N flyout. Looks up the activity-cache for THIS

@@ -296,6 +296,131 @@ describe("EventTicker — P3-24 smarter rollup", () => {
     expect(text).not.toContain("/home/kcrawley");
   });
 
+  it("rolled rows render inline preview lines so operator sees content without expanding (P3-26)", () => {
+    _resetActivityCache();
+    const sessionId = "sess-preview";
+    const fakeActivity: ActivityResponse = {
+      session_id: sessionId,
+      transcript: "x.jsonl",
+      events: [],
+      segments: [
+        {
+          ts: "2026-05-26T00:00:00",
+          kind: "assistant_turn",
+          label: "Bash",
+          preview: "tests",
+          tools: ["Bash", "Read", "Edit"],
+          tool_calls: [
+            {
+              id: "tc-1",
+              tool: "Bash",
+              summary: "cd /home/kcrawley/projects/x; cargo test --workspace",
+              result_preview: "test result: ok. 42 passed",
+            },
+            {
+              id: "tc-2",
+              tool: "Read",
+              summary: "/home/kcrawley/projects/x/src/lib.rs",
+              result_preview: "...",
+            },
+            {
+              id: "tc-3",
+              tool: "Edit",
+              summary: "/home/kcrawley/projects/x/src/foo.rs",
+              result_preview: "...",
+            },
+          ],
+          tool_count: 3,
+        },
+      ],
+    };
+    indexActivity(sessionId, fakeActivity);
+
+    const events: RecentEvent[] = [
+      tcEvent(10, sessionId, "Bash", "tcA"),
+      tcEvent(11, sessionId, "Read", "tcB"),
+      tcEvent(12, sessionId, "Edit", "tcC"),
+      tcEvent(13, sessionId, "Bash", "tcD"),
+    ];
+    const { container } = render(
+      <EventTicker events={events} onSelectNode={() => {}} />,
+    );
+
+    // The rolled row should embed a preview list — NO need to expand.
+    const preview = container.querySelector('[data-testid="rolled-preview"]');
+    expect(preview).not.toBeNull();
+    const lines = preview!.querySelectorAll("li");
+    expect(lines.length).toBeGreaterThanOrEqual(2);
+    const previewText = preview!.textContent ?? "";
+    // Tildified bash command (no /home/kcrawley).
+    expect(previewText).not.toContain("/home/kcrawley");
+    expect(previewText).toContain("cargo test");
+  });
+
+  it("rolled-preview dedupes identical (tool, summary) pairs — 5 identical Bashes show 1 line", () => {
+    // Strict-sig collapse produces ONE row with members.length=5
+    // and tools=[Bash]. RolledPreview renders because members>1,
+    // and dedupe collapses the 5 identical (Bash, "git status")
+    // entries into a single preview line — confirming the dedup
+    // contract.
+    _resetActivityCache();
+    const sessionId = "sess-dup";
+    const fakeActivity: ActivityResponse = {
+      session_id: sessionId,
+      transcript: "x.jsonl",
+      events: [],
+      segments: [
+        {
+          ts: "2026-05-26T00:00:00",
+          kind: "assistant_turn",
+          label: "Bash",
+          preview: "",
+          tools: ["Bash"],
+          tool_calls: [
+            { id: "tc-X", tool: "Bash", summary: "git status --short" },
+          ],
+          tool_count: 1,
+        },
+      ],
+    };
+    indexActivity(sessionId, fakeActivity);
+    const events: RecentEvent[] = [
+      tcEvent(1, sessionId, "Bash", "tcA"),
+      tcEvent(2, sessionId, "Bash", "tcB"),
+      tcEvent(3, sessionId, "Bash", "tcC"),
+      tcEvent(4, sessionId, "Bash", "tcD"),
+      tcEvent(5, sessionId, "Bash", "tcE"),
+    ];
+    const { container } = render(
+      <EventTicker events={events} onSelectNode={() => {}} />,
+    );
+    const preview = container.querySelector('[data-testid="rolled-preview"]');
+    expect(preview).not.toBeNull();
+    const lines = preview!.querySelectorAll("li");
+    // 5 identical (Bash, "git status --short") pairs → 1 line after dedup.
+    expect(lines.length).toBe(1);
+    expect((preview!.textContent ?? "")).toContain("git status");
+  });
+
+  it("rolled-preview shows '(loading…)' placeholder when cache hasn't warmed yet (P3-26)", () => {
+    _resetActivityCache(); // ensure NO cache entries
+    const sessionId = "sess-cold";
+    const events: RecentEvent[] = [
+      tcEvent(1, sessionId, "Bash", "tcA"),
+      tcEvent(2, sessionId, "Read", "tcB"),
+    ];
+    const { container } = render(
+      <EventTicker events={events} onSelectNode={() => {}} />,
+    );
+    const preview = container.querySelector('[data-testid="rolled-preview"]');
+    expect(preview).not.toBeNull();
+    // Each line should show the tool name + (loading…) placeholder.
+    const text = preview!.textContent ?? "";
+    expect(text).toContain("Bash");
+    expect(text).toContain("Read");
+    expect(text).toContain("(loading…)");
+  });
+
   it("flyout members show git diff stats chip when result_preview includes the standard footer", async () => {
     _resetActivityCache();
     const sessionId = "sess-diff";

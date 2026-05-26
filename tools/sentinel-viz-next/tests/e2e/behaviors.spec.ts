@@ -307,8 +307,10 @@ test("every ticker row exposes a data-actor attribute in {claude, sentinel, user
   page,
 }) => {
   await waitGraphReady(page);
+  // Scope to TOP-LEVEL row li only — RolledPreview + flyout render
+  // nested <li> that legitimately lack data-actor.
   const actors = await page
-    .locator('[data-testid="ticker-rows"] li')
+    .locator('[data-testid="ticker-rows"] li[data-actor]')
     .evaluateAll((els) => els.map((el) => el.getAttribute("data-actor")));
   expect(actors.length).toBeGreaterThan(0);
   for (const a of actors) {
@@ -452,23 +454,24 @@ test("PERF: GraphCanvas — nodes do not drift during 6s of steady SSE (P3-18 re
 test("PERF: EventTicker — ticker rows do NOT re-render on the 5s now-tick (P3-17 regression)", async ({
   page,
 }) => {
-  // Strategy: take a screenshot of the ticker, wait 7s (past the 5s
-  // tick), screenshot again. If the row markup is being torn down /
-  // rebuilt, we'd expect at least one `li`'s data-stuck or
-  // structural attr to change. Stable rendering implies the TimeAgo
-  // leaf isolated correctly.
+  // Strategy: take an identity snapshot of TOP-LEVEL ticker rows
+  // (data-actor li only — RolledPreview/flyout nested li are
+  // intentionally allowed to update as the cache warms). Wait 7s
+  // past the 5s now-tick. If the TimeAgo leaf were torn down each
+  // tick, the parent row's identity attrs would also reshuffle.
   await waitGraphReady(page);
-  const beforeIds = await page.evaluate(() => {
-    return Array.from(document.querySelectorAll('[data-testid="ticker-rows"] li')).map(
-      (li, i) => `${i}|${li.className}|${(li as HTMLElement).getAttribute("data-stuck") ?? ""}`,
+  const snapshot = () =>
+    page.evaluate(() =>
+      Array.from(
+        document.querySelectorAll('[data-testid="ticker-rows"] li[data-actor]'),
+      ).map(
+        (li, i) =>
+          `${i}|${li.getAttribute("data-actor")}|${li.getAttribute("data-session-id") ?? ""}|${li.getAttribute("data-stuck") ?? ""}|${li.getAttribute("data-intervention") ?? ""}`,
+      ),
     );
-  });
+  const beforeIds = await snapshot();
   await page.waitForTimeout(7_500);
-  const afterIds = await page.evaluate(() => {
-    return Array.from(document.querySelectorAll('[data-testid="ticker-rows"] li')).map(
-      (li, i) => `${i}|${li.className}|${(li as HTMLElement).getAttribute("data-stuck") ?? ""}`,
-    );
-  });
+  const afterIds = await snapshot();
   // Should be identical structure (allow length change if a new
   // event arrived — that's a legitimate render).
   if (beforeIds.length === afterIds.length) {
