@@ -21,6 +21,7 @@ pub mod filesystem;
 pub mod git;
 pub mod interceptor;
 pub mod ipc;
+pub mod llm_scorer_runtime;
 pub mod mcp_transport;
 pub mod memory_mcp_client;
 pub mod openrouter_llm;

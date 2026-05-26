@@ -48,18 +48,12 @@
 //! runtime's worker pool), which is panic-safe whether or not the caller
 //! is already inside a runtime.
 
-use std::sync::Arc;
 use std::sync::OnceLock;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use futures::future::BoxFuture;
-use rig_core::agent::AgentBuilder;
-use rig_core::completion::Prompt;
-use rig_core::prelude::CompletionClient;
-use rig_core::providers::{openai, openrouter};
 use serde::Deserialize;
-use tracing::{debug, warn};
+use tracing::debug;
 
 use sentinel_domain::capability::{
     AgentCapabilityProfile, Capability, CapabilityRequirement, ReasoningLevel, SchemaRef,
@@ -69,6 +63,14 @@ use sentinel_domain::dry_run::{
     AuditorAxes, AuditorDecision, AuditorError, AuditorVerdict, DryRunRequest,
 };
 use sentinel_domain::ports::{AuditorPort, CapabilityRouterPort};
+
+use crate::llm_scorer_runtime::{
+    self, build_ollama_prompt_fn, build_openrouter_prompt_fn, read_timeout, real_env, sidecar,
+    strip_code_fence, PromptFn,
+};
+
+// Re-export the Ollama URL constants that external callers reference.
+pub use llm_scorer_runtime::{DEFAULT_OLLAMA_CLOUD_BASE_URL, DEFAULT_OLLAMA_LOCAL_BASE_URL};
 
 /// Default auditor model for the `openrouter` provider.
 ///
@@ -81,34 +83,12 @@ pub const DEFAULT_OPENROUTER_MODEL: &str = "anthropic/claude-opus-4.7";
 #[deprecated(note = "use DEFAULT_OPENROUTER_MODEL — name disambiguates per-provider defaults")]
 pub const DEFAULT_AUDITOR_MODEL: &str = DEFAULT_OPENROUTER_MODEL;
 
-/// Default base URL for local Ollama's OpenAI-compatible endpoint.
-/// Local Ollama exposes `/v1/chat/completions` on the standard daemon port.
-pub const DEFAULT_OLLAMA_LOCAL_BASE_URL: &str = "http://localhost:11434/v1";
-
-/// Default base URL for Ollama Cloud's OpenAI-compatible endpoint.
-/// Override with `OLLAMA_BASE_URL` if Ollama relocates the endpoint.
-pub const DEFAULT_OLLAMA_CLOUD_BASE_URL: &str = "https://ollama.com/v1";
-
-/// Dummy bearer token sent to local Ollama (which ignores the value on
-/// its OpenAI-compat endpoint). Documented so operators searching for
-/// `"ollama-local"` in logs find this constant.
-const OLLAMA_LOCAL_DUMMY_KEY: &str = "ollama-local";
-
 /// Default timeout for an auditor call. 30s is comfortable for frontier
 /// reasoning models; operator can override via `SENTINEL_AUDITOR_TIMEOUT_SECS`.
 pub const DEFAULT_AUDITOR_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Default provider when `SENTINEL_AUDITOR_PROVIDER` is unset.
 pub const DEFAULT_AUDITOR_PROVIDER: &str = "openrouter";
-
-/// Type-erased prompt function: `(model_id, system, user_msg) -> response_text`.
-/// Matches the `rig_judge` [`PromptFn`] shape — single seam every adapter
-/// flavor consults.
-type PromptFn = Arc<
-    dyn Fn(String, String, String) -> BoxFuture<'static, anyhow::Result<String>>
-        + Send
-        + Sync,
->;
 
 /// Rig-backed [`AuditorPort`] implementation.
 ///
@@ -233,26 +213,12 @@ impl RigAuditor {
             .context("OPENROUTER_API_KEY not set (required for openrouter auditor)")?;
         let model_id = env("SENTINEL_AUDITOR_MODEL")
             .unwrap_or_else(|| DEFAULT_OPENROUTER_MODEL.to_string());
-        let timeout = read_timeout(&env);
-
-        let client = Arc::new(
-            openrouter::Client::new(&key)
-                .map_err(|e| anyhow::anyhow!("failed to build OpenRouter client: {e}"))?,
-        );
-        let prompt_fn: PromptFn = Arc::new(move |model_id, system, user_msg| {
-            let client = client.clone();
-            Box::pin(async move {
-                let agent = AgentBuilder::new(client.completion_model(&model_id))
-                    .preamble(&system)
-                    .build();
-                let result: anyhow::Result<String, _> = agent.prompt(user_msg).await;
-                result.map_err(|e| anyhow::anyhow!("openrouter auditor ({model_id}): {e}"))
-            })
-        });
+        let timeout = read_timeout(&env, "SENTINEL_AUDITOR_TIMEOUT_SECS", DEFAULT_AUDITOR_TIMEOUT);
+        let (prompt_fn, provider_prefix) = build_openrouter_prompt_fn(&key, "auditor")?;
         Ok(Self {
             prompt_fn,
             model_id,
-            provider_prefix: "openrouter".to_string(),
+            provider_prefix,
             timeout,
         })
     }
@@ -265,47 +231,8 @@ impl RigAuditor {
             "SENTINEL_AUDITOR_MODEL not set (required for ollama auditor; no sensible default — \
              pick what you've pulled, e.g. moonshotai/kimi-k2 or qwen3:8b)",
         )?;
-        let timeout = read_timeout(&env);
-
-        let (base_url, api_key, provider_prefix) = env("OLLAMA_API_KEY").map_or_else(
-            || {
-                let host =
-                    env("OLLAMA_HOST").unwrap_or_else(|| "http://localhost:11434".to_string());
-                let base = format!("{}/v1", host.trim_end_matches('/'));
-                (
-                    base,
-                    OLLAMA_LOCAL_DUMMY_KEY.to_string(),
-                    "ollama-local".to_string(),
-                )
-            },
-            |key| {
-                let base = env("OLLAMA_BASE_URL")
-                    .unwrap_or_else(|| DEFAULT_OLLAMA_CLOUD_BASE_URL.to_string());
-                (base, key, "ollama-cloud".to_string())
-            },
-        );
-
-        let client = Arc::new(
-            openai::Client::builder()
-                .api_key(&api_key)
-                .base_url(&base_url)
-                .build()
-                .map_err(|e| {
-                    anyhow::anyhow!("failed to build ollama client (base_url={base_url}): {e}")
-                })?,
-        );
-        let prompt_fn_provider = provider_prefix.clone();
-        let prompt_fn: PromptFn = Arc::new(move |model_id, system, user_msg| {
-            let client = client.clone();
-            let provider = prompt_fn_provider.clone();
-            Box::pin(async move {
-                let agent = AgentBuilder::new(client.completion_model(&model_id))
-                    .preamble(&system)
-                    .build();
-                let result: anyhow::Result<String, _> = agent.prompt(user_msg).await;
-                result.map_err(|e| anyhow::anyhow!("{provider} auditor ({model_id}): {e}"))
-            })
-        });
+        let timeout = read_timeout(&env, "SENTINEL_AUDITOR_TIMEOUT_SECS", DEFAULT_AUDITOR_TIMEOUT);
+        let (prompt_fn, provider_prefix) = build_ollama_prompt_fn(&env, "auditor")?;
         Ok(Self {
             prompt_fn,
             model_id,
@@ -344,57 +271,14 @@ impl RigAuditor {
     where
         F: Fn(&str) -> Option<String>,
     {
-        let timeout = read_timeout(&env);
+        let timeout = read_timeout(&env, "SENTINEL_AUDITOR_TIMEOUT_SECS", DEFAULT_AUDITOR_TIMEOUT);
         let model_id = profile.model_id.clone();
 
         // Exhaustive match (no wildcard) so a new VendorClass variant
         // forces a compile-time decision about how to route it.
         match profile.vendor.true_vendor() {
             VendorClass::Ollama => {
-                let (base_url, api_key, provider_prefix) =
-                    env("OLLAMA_API_KEY").map_or_else(
-                        || {
-                            let host = env("OLLAMA_HOST")
-                                .unwrap_or_else(|| "http://localhost:11434".to_string());
-                            let base = format!("{}/v1", host.trim_end_matches('/'));
-                            (
-                                base,
-                                OLLAMA_LOCAL_DUMMY_KEY.to_string(),
-                                "ollama-local".to_string(),
-                            )
-                        },
-                        |key| {
-                            let base = env("OLLAMA_BASE_URL")
-                                .unwrap_or_else(|| DEFAULT_OLLAMA_CLOUD_BASE_URL.to_string());
-                            (base, key, "ollama-cloud".to_string())
-                        },
-                    );
-                let client = Arc::new(
-                    openai::Client::builder()
-                        .api_key(&api_key)
-                        .base_url(&base_url)
-                        .build()
-                        .map_err(|e| {
-                            anyhow::anyhow!(
-                                "failed to build ollama client for profile {} (base_url={base_url}): {e}",
-                                profile.agent_id
-                            )
-                        })?,
-                );
-                let prompt_fn_provider = provider_prefix.clone();
-                let prompt_fn: PromptFn = Arc::new(move |model_id, system, user_msg| {
-                    let client = client.clone();
-                    let provider = prompt_fn_provider.clone();
-                    Box::pin(async move {
-                        let agent = AgentBuilder::new(client.completion_model(&model_id))
-                            .preamble(&system)
-                            .build();
-                        let result: anyhow::Result<String, _> = agent.prompt(user_msg).await;
-                        result.map_err(|e| {
-                            anyhow::anyhow!("{provider} auditor ({model_id}): {e}")
-                        })
-                    })
-                });
+                let (prompt_fn, provider_prefix) = build_ollama_prompt_fn(&env, "auditor")?;
                 Ok(Self {
                     prompt_fn,
                     model_id,
@@ -421,28 +305,17 @@ impl RigAuditor {
                         profile.agent_id, profile.vendor
                     )
                 })?;
-                let client = Arc::new(openrouter::Client::new(&key).map_err(|e| {
-                    anyhow::anyhow!(
-                        "failed to build OpenRouter client for profile {}: {e}",
-                        profile.agent_id
-                    )
-                })?);
-                let prompt_fn: PromptFn = Arc::new(move |model_id, system, user_msg| {
-                    let client = client.clone();
-                    Box::pin(async move {
-                        let agent = AgentBuilder::new(client.completion_model(&model_id))
-                            .preamble(&system)
-                            .build();
-                        let result: anyhow::Result<String, _> = agent.prompt(user_msg).await;
-                        result.map_err(|e| {
-                            anyhow::anyhow!("openrouter auditor ({model_id}): {e}")
-                        })
-                    })
-                });
+                let (prompt_fn, provider_prefix) =
+                    build_openrouter_prompt_fn(&key, "auditor").map_err(|e| {
+                        anyhow::anyhow!(
+                            "failed to build OpenRouter client for profile {}: {e}",
+                            profile.agent_id
+                        )
+                    })?;
                 Ok(Self {
                     prompt_fn,
                     model_id,
-                    provider_prefix: "openrouter".to_string(),
+                    provider_prefix,
                     timeout,
                 })
             }
@@ -510,42 +383,12 @@ impl RigAuditor {
     }
 }
 
-/// Default env resolver — wraps `std::env::var` for the public
-/// `*_from_env` constructors. Tests inject HashMap-backed closures via
-/// the private `*_from_env_with` variants instead, avoiding the
-/// process-wide env mutation that Rust 2024 marks as `unsafe`.
-fn real_env(key: &str) -> Option<String> {
-    std::env::var(key).ok()
-}
-
-/// Read `SENTINEL_AUDITOR_TIMEOUT_SECS` from the supplied env resolver,
-/// falling back to [`DEFAULT_AUDITOR_TIMEOUT`] on absent or unparseable
-/// values.
-fn read_timeout<F>(env: &F) -> Duration
-where
-    F: Fn(&str) -> Option<String>,
-{
-    env("SENTINEL_AUDITOR_TIMEOUT_SECS")
-        .and_then(|s| s.parse::<u64>().ok())
-        .map_or(DEFAULT_AUDITOR_TIMEOUT, Duration::from_secs)
-}
-
 /// Lazily-built sidecar tokio runtime used to drive rig's async calls
 /// from sync `AuditorPort::score`. Single multi-thread runtime per
 /// process; reused across all `RigAuditor` instances.
-fn sidecar_runtime() -> Option<&'static tokio::runtime::Runtime> {
+fn auditor_sidecar() -> Option<&'static tokio::runtime::Runtime> {
     static SIDECAR: OnceLock<Option<tokio::runtime::Runtime>> = OnceLock::new();
-    SIDECAR
-        .get_or_init(|| {
-            tokio::runtime::Builder::new_multi_thread()
-                .worker_threads(2)
-                .enable_all()
-                .thread_name("sentinel-auditor-sidecar")
-                .build()
-                .map_err(|e| warn!(?e, "failed to build auditor sidecar runtime"))
-                .ok()
-        })
-        .as_ref()
+    sidecar(&SIDECAR, "sentinel-auditor-sidecar")
 }
 
 impl AuditorPort for RigAuditor {
@@ -553,7 +396,7 @@ impl AuditorPort for RigAuditor {
         let system_prompt = build_system_prompt();
         let user_prompt = build_user_prompt(dry_run);
 
-        let runtime = sidecar_runtime().ok_or_else(|| {
+        let runtime = auditor_sidecar().ok_or_else(|| {
             AuditorError::Other("auditor sidecar runtime unavailable".to_string())
         })?;
 
@@ -570,22 +413,14 @@ impl AuditorPort for RigAuditor {
         // so the runtime-entry guard is never tripped. The work itself still
         // runs on the shared sidecar runtime via its `Handle`.
         let handle = runtime.handle().clone();
-        let response_text = std::thread::scope(|s| {
-            s.spawn(move || {
-                handle.block_on(async move {
-                    let call = prompt_fn(model_id.clone(), system_prompt, user_prompt);
-                    match tokio::time::timeout(timeout, call).await {
-                        Ok(Ok(text)) => Ok(text),
-                        Ok(Err(err)) => Err(AuditorError::Unavailable(format!("{err:#}"))),
-                        Err(_elapsed) => Err(AuditorError::TimedOut(timeout)),
-                    }
-                })
-            })
-            .join()
-            .unwrap_or_else(|_| {
-                Err(AuditorError::Other("auditor worker thread panicked".to_string()))
-            })
-        })?;
+        let response_text: String = llm_scorer_runtime::run_blocking(
+            handle,
+            timeout,
+            prompt_fn(model_id, system_prompt, user_prompt),
+            |msg: String| AuditorError::Unavailable(msg),
+            |dur: Duration| AuditorError::TimedOut(dur),
+            || AuditorError::Other("auditor worker thread panicked".to_string()),
+        )?;
 
         let auditor_model = format!("{}:{}", self.provider_prefix, self.model_id);
         debug!(
@@ -702,17 +537,6 @@ fn parse_verdict(text: &str, auditor_model: &str) -> Result<AuditorVerdict, Audi
     })
 }
 
-fn strip_code_fence(text: &str) -> String {
-    let trimmed = text.trim();
-    if let Some(rest) = trimmed.strip_prefix("```json") {
-        return rest.trim_end_matches("```").trim().to_string();
-    }
-    if let Some(rest) = trimmed.strip_prefix("```") {
-        return rest.trim_end_matches("```").trim().to_string();
-    }
-    trimmed.to_string()
-}
-
 // ---------------------------------------------------------------------------
 // Wire schema — what the model is asked to return.
 // ---------------------------------------------------------------------------
@@ -749,7 +573,7 @@ struct RawAxes {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
 
     use chrono::Utc;
 

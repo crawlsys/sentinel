@@ -30,34 +30,26 @@
 //! check + (for Catastrophic class) every axis above the operator-
 //! configured threshold.
 
-use std::sync::Arc;
 use std::sync::OnceLock;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use futures::future::BoxFuture;
-use rig_core::agent::AgentBuilder;
-use rig_core::completion::Prompt;
-use rig_core::prelude::CompletionClient;
-use rig_core::providers::{openai, openrouter};
 use serde::Deserialize;
-use tracing::{debug, warn};
+use tracing::debug;
 
 use sentinel_domain::ports::{
     SpecChallengeScore, SpecChallengeScorerError, SpecChallengeScorerPort,
 };
 use sentinel_domain::spec_challenge::SpecChallenge;
 
+use crate::llm_scorer_runtime::{
+    self, build_ollama_prompt_fn, build_openrouter_prompt_fn, preview, read_timeout, real_env,
+    sidecar, strip_code_fence, PromptFn,
+};
+
 pub const DEFAULT_SCORER_PROVIDER: &str = "openrouter";
 pub const DEFAULT_SCORER_OPENROUTER_MODEL: &str = "anthropic/claude-opus-4.7";
 pub const DEFAULT_SCORER_TIMEOUT: Duration = Duration::from_secs(60);
-const OLLAMA_LOCAL_DUMMY_KEY: &str = "ollama-local";
-
-type PromptFn = Arc<
-    dyn Fn(String, String, String) -> BoxFuture<'static, anyhow::Result<String>>
-        + Send
-        + Sync,
->;
 
 /// Rig-backed `SpecChallengeScorerPort` implementation.
 pub struct LlmSpecChallengeScorer {
@@ -140,28 +132,17 @@ impl LlmSpecChallengeScorer {
         )?;
         let model_id = env("SENTINEL_SPEC_CHALLENGE_SCORER_MODEL")
             .unwrap_or_else(|| DEFAULT_SCORER_OPENROUTER_MODEL.to_string());
-        let timeout = read_timeout(&env);
-
-        let client = Arc::new(
-            openrouter::Client::new(&key)
-                .map_err(|e| anyhow::anyhow!("failed to build OpenRouter client: {e}"))?,
+        let timeout = read_timeout(
+            &env,
+            "SENTINEL_SPEC_CHALLENGE_SCORER_TIMEOUT_SECS",
+            DEFAULT_SCORER_TIMEOUT,
         );
-        let prompt_fn: PromptFn = Arc::new(move |model_id, system, user_msg| {
-            let client = client.clone();
-            Box::pin(async move {
-                let agent = AgentBuilder::new(client.completion_model(&model_id))
-                    .preamble(&system)
-                    .build();
-                let result: anyhow::Result<String, _> = agent.prompt(user_msg).await;
-                result.map_err(|e| {
-                    anyhow::anyhow!("openrouter spec-challenge scorer ({model_id}): {e}")
-                })
-            })
-        });
+        let (prompt_fn, provider_prefix) =
+            build_openrouter_prompt_fn(&key, "spec-challenge scorer")?;
         Ok(Self {
             prompt_fn,
             model_id,
-            provider_prefix: "openrouter".to_string(),
+            provider_prefix,
             timeout,
         })
     }
@@ -174,49 +155,13 @@ impl LlmSpecChallengeScorer {
             "SENTINEL_SPEC_CHALLENGE_SCORER_MODEL not set (required for ollama scorer; \
              no sensible default — pick what you've pulled)",
         )?;
-        let timeout = read_timeout(&env);
-
-        let (base_url, api_key, provider_prefix) = env("OLLAMA_API_KEY").map_or_else(
-            || {
-                let host =
-                    env("OLLAMA_HOST").unwrap_or_else(|| "http://localhost:11434".to_string());
-                let base = format!("{}/v1", host.trim_end_matches('/'));
-                (
-                    base,
-                    OLLAMA_LOCAL_DUMMY_KEY.to_string(),
-                    "ollama-local".to_string(),
-                )
-            },
-            |key| {
-                let base = env("OLLAMA_BASE_URL")
-                    .unwrap_or_else(|| "https://ollama.com/v1".to_string());
-                (base, key, "ollama-cloud".to_string())
-            },
+        let timeout = read_timeout(
+            &env,
+            "SENTINEL_SPEC_CHALLENGE_SCORER_TIMEOUT_SECS",
+            DEFAULT_SCORER_TIMEOUT,
         );
-
-        let client = Arc::new(
-            openai::Client::builder()
-                .api_key(&api_key)
-                .base_url(&base_url)
-                .build()
-                .map_err(|e| {
-                    anyhow::anyhow!("failed to build ollama client (base_url={base_url}): {e}")
-                })?,
-        );
-        let provider_for_prompt = provider_prefix.clone();
-        let prompt_fn: PromptFn = Arc::new(move |model_id, system, user_msg| {
-            let client = client.clone();
-            let provider = provider_for_prompt.clone();
-            Box::pin(async move {
-                let agent = AgentBuilder::new(client.completion_model(&model_id))
-                    .preamble(&system)
-                    .build();
-                let result: anyhow::Result<String, _> = agent.prompt(user_msg).await;
-                result.map_err(|e| {
-                    anyhow::anyhow!("{provider} spec-challenge scorer ({model_id}): {e}")
-                })
-            })
-        });
+        let (prompt_fn, provider_prefix) =
+            build_ollama_prompt_fn(&env, "spec-challenge scorer")?;
         Ok(Self {
             prompt_fn,
             model_id,
@@ -226,32 +171,9 @@ impl LlmSpecChallengeScorer {
     }
 }
 
-fn real_env(key: &str) -> Option<String> {
-    std::env::var(key).ok()
-}
-
-fn read_timeout<F>(env: &F) -> Duration
-where
-    F: Fn(&str) -> Option<String>,
-{
-    env("SENTINEL_SPEC_CHALLENGE_SCORER_TIMEOUT_SECS")
-        .and_then(|s| s.parse::<u64>().ok())
-        .map_or(DEFAULT_SCORER_TIMEOUT, Duration::from_secs)
-}
-
-fn sidecar_runtime() -> Option<&'static tokio::runtime::Runtime> {
+fn spec_challenge_sidecar() -> Option<&'static tokio::runtime::Runtime> {
     static RUNTIME: OnceLock<Option<tokio::runtime::Runtime>> = OnceLock::new();
-    RUNTIME
-        .get_or_init(|| {
-            tokio::runtime::Builder::new_multi_thread()
-                .worker_threads(2)
-                .enable_all()
-                .thread_name("sentinel-spec-challenge-scorer-sidecar")
-                .build()
-                .map_err(|e| warn!(?e, "failed to build spec-challenge scorer sidecar runtime"))
-                .ok()
-        })
-        .as_ref()
+    sidecar(&RUNTIME, "sentinel-spec-challenge-scorer-sidecar")
 }
 
 impl SpecChallengeScorerPort for LlmSpecChallengeScorer {
@@ -262,7 +184,7 @@ impl SpecChallengeScorerPort for LlmSpecChallengeScorer {
         let system_prompt = build_system_prompt();
         let user_prompt = build_user_prompt(challenge);
 
-        let runtime = sidecar_runtime().ok_or_else(|| {
+        let runtime = spec_challenge_sidecar().ok_or_else(|| {
             SpecChallengeScorerError::Configuration(
                 "spec-challenge scorer sidecar runtime unavailable".to_string(),
             )
@@ -276,27 +198,23 @@ impl SpecChallengeScorerPort for LlmSpecChallengeScorer {
         // panic when `score` is reached from inside the CLI's #[tokio::main]
         // runtime. The work runs on the shared sidecar runtime via its Handle.
         let handle = runtime.handle().clone();
-        let response_text = std::thread::scope(|s| {
-            s.spawn(move || {
-                handle.block_on(async move {
-                    let call = prompt_fn(model_id, system_prompt, user_prompt);
-                    match tokio::time::timeout(timeout, call).await {
-                        Ok(Ok(text)) => Ok(text),
-                        Ok(Err(err)) => Err(SpecChallengeScorerError::Backend(format!("{err:#}"))),
-                        Err(_elapsed) => Err(SpecChallengeScorerError::Backend(format!(
-                            "spec-challenge scorer timed out after {}s",
-                            timeout.as_secs()
-                        ))),
-                    }
-                })
-            })
-            .join()
-            .unwrap_or_else(|_| {
-                Err(SpecChallengeScorerError::Backend(
-                    "spec-challenge scorer worker thread panicked".to_string(),
+        let response_text: String = llm_scorer_runtime::run_blocking(
+            handle,
+            timeout,
+            prompt_fn(model_id, system_prompt, user_prompt),
+            |msg: String| SpecChallengeScorerError::Backend(msg),
+            |dur: Duration| {
+                SpecChallengeScorerError::Backend(format!(
+                    "spec-challenge scorer timed out after {}s",
+                    dur.as_secs()
                 ))
-            })
-        })?;
+            },
+            || {
+                SpecChallengeScorerError::Backend(
+                    "spec-challenge scorer worker thread panicked".to_string(),
+                )
+            },
+        )?;
 
         debug!(
             response_len = response_text.len(),
@@ -384,26 +302,6 @@ fn parse_score(text: &str) -> Result<SpecChallengeScore, SpecChallengeScorerErro
     ))
 }
 
-fn strip_code_fence(text: &str) -> String {
-    let trimmed = text.trim();
-    if let Some(rest) = trimmed.strip_prefix("```json") {
-        return rest.trim_end_matches("```").trim().to_string();
-    }
-    if let Some(rest) = trimmed.strip_prefix("```") {
-        return rest.trim_end_matches("```").trim().to_string();
-    }
-    trimmed.to_string()
-}
-
-fn preview(text: &str, max_chars: usize) -> String {
-    if text.chars().count() <= max_chars {
-        text.to_string()
-    } else {
-        let truncated: String = text.chars().take(max_chars).collect();
-        format!("{truncated}...")
-    }
-}
-
 #[derive(Debug, Deserialize)]
 struct RawJudge {
     axes: RawAxes,
@@ -427,6 +325,8 @@ struct RawAxes {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
     use chrono::{TimeZone, Utc};
     use sentinel_domain::reversibility::ReversibilityClass;
@@ -628,7 +528,11 @@ mod tests {
     #[test]
     fn read_timeout_falls_back_to_default_on_missing() {
         let env = |_: &str| None;
-        let t = read_timeout(&env);
+        let t = read_timeout(
+            &env,
+            "SENTINEL_SPEC_CHALLENGE_SCORER_TIMEOUT_SECS",
+            DEFAULT_SCORER_TIMEOUT,
+        );
         assert_eq!(t, DEFAULT_SCORER_TIMEOUT);
     }
 
@@ -641,7 +545,11 @@ mod tests {
                 None
             }
         };
-        let t = read_timeout(&env);
+        let t = read_timeout(
+            &env,
+            "SENTINEL_SPEC_CHALLENGE_SCORER_TIMEOUT_SECS",
+            DEFAULT_SCORER_TIMEOUT,
+        );
         assert_eq!(t, Duration::from_secs(10));
     }
 

@@ -12,15 +12,33 @@
 //!   - File content is a signed token: `{timestamp}:{hmac}` where HMAC is
 //!     computed over `{type}:{session_id}:{timestamp}` with a secret salt.
 //!     A simple `touch` produces an empty/invalid file that fails verification.
+//!
+//! **Signature scheme (v2)**:
+//!   HMAC-SHA256 keyed on `b"sentinel-override-sig-v2"`.  Message is
+//!   `"{type}:{session_id}:{timestamp}"`.  Verification uses
+//!   `hmac::Mac::verify_slice` which is constant-time, eliminating the
+//!   timing-oracle present in the previous string-equality check.
+//!   Tokens produced by the old SHA-256(salt||msg) scheme will fail
+//!   verification (fail-closed); since TTL is ≤ 3600 s any in-flight
+//!   tokens expire naturally within an hour.
 
 use std::fmt::Write as _;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use hmac::{Hmac, Mac};
 use sentinel_domain::events::{HookInput, HookOutput};
 use sha2::{Digest, Sha256};
 
 use super::{FileSystemPort, HookContext};
+
+/// HMAC key for override token signing (v2).
+///
+/// Keying material is embedded in the binary.  The key is intentionally
+/// short and static — the security goal is *tamper-detection* (an attacker
+/// who can write arbitrary files cannot forge a valid token without knowing
+/// the key), not cryptographic secrecy of the session ID.
+const HMAC_KEY: &[u8] = b"sentinel-override-sig-v2";
 
 /// Override files directory — under sentinel's protected path
 fn override_dir(fs: &dyn FileSystemPort) -> PathBuf {
@@ -72,19 +90,22 @@ fn sha256_hash(input: &str) -> String {
     })
 }
 
-/// Compute HMAC-like signature for override content.
-/// Uses SHA-256(salt + type + `session_id` + timestamp) as a simple MAC.
-/// Not a true HMAC (no hmac crate in this crate) but sufficient since
-/// the salt is embedded in the binary and not observable.
+/// Compute an HMAC-SHA256 signature for an override token.
+///
+/// The HMAC is keyed on [`HMAC_KEY`].  The message is the concatenation
+/// `"{override_type}:{session_id}:{timestamp}"`.  The result is encoded as
+/// 64 lowercase hex characters (full 256-bit MAC — no truncation).
+///
+/// On-disk token format is unchanged: `{timestamp}:{sig}`.
 fn compute_override_sig(override_type: &str, session_id: &str, timestamp: u64) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(b"sentinel-override-sig-v1:");
-    hasher.update(override_type.as_bytes());
-    hasher.update(b":");
-    hasher.update(session_id.as_bytes());
-    hasher.update(b":");
-    hasher.update(timestamp.to_string().as_bytes());
-    let result = hasher.finalize();
+    let mut mac =
+        Hmac::<Sha256>::new_from_slice(HMAC_KEY).expect("HMAC accepts any key length");
+    mac.update(override_type.as_bytes());
+    mac.update(b":");
+    mac.update(session_id.as_bytes());
+    mac.update(b":");
+    mac.update(timestamp.to_string().as_bytes());
+    let result = mac.finalize().into_bytes();
     result.iter().fold(String::new(), |mut s, b| {
         let _ = write!(s, "{b:02x}");
         s
@@ -92,19 +113,32 @@ fn compute_override_sig(override_type: &str, session_id: &str, timestamp: u64) -
 }
 
 /// Verify an override file's content is a valid signed token.
-/// Format: `{timestamp}:{signature}`
+///
+/// Format: `{timestamp}:{signature}` where `{signature}` is 64 hex chars.
+///
+/// Verification re-computes the HMAC and compares in **constant time** via
+/// [`hmac::Mac::verify_slice`], which prevents timing-oracle attacks that
+/// would have been possible with the previous `parts[1] == expected_sig`
+/// string equality.
 fn verify_override_content(content: &str, override_type: &str, session_id: &str) -> Option<u64> {
     let parts: Vec<&str> = content.trim().splitn(2, ':').collect();
     if parts.len() != 2 {
         return None;
     }
     let timestamp: u64 = parts[0].parse().ok()?;
-    let expected_sig = compute_override_sig(override_type, session_id, timestamp);
-    if parts[1] == expected_sig {
-        Some(timestamp)
-    } else {
-        None
-    }
+    // Decode the on-disk hex signature into raw bytes for constant-time comparison.
+    let sig_bytes = hex::decode(parts[1]).ok()?;
+    // Re-derive the expected MAC and compare in constant time.
+    let mut mac =
+        Hmac::<Sha256>::new_from_slice(HMAC_KEY).expect("HMAC accepts any key length");
+    mac.update(override_type.as_bytes());
+    mac.update(b":");
+    mac.update(session_id.as_bytes());
+    mac.update(b":");
+    mac.update(timestamp.to_string().as_bytes());
+    // `verify_slice` returns Err on mismatch; the comparison is constant-time.
+    mac.verify_slice(&sig_bytes).ok()?;
+    Some(timestamp)
 }
 
 fn now_secs() -> u64 {
@@ -431,5 +465,56 @@ mod tests {
         let ctx = crate::hooks::test_support::stub_ctx();
         let output = process(&input, &ctx);
         assert!(output.blocked.is_none());
+    }
+
+    /// Round-trip: a freshly computed token verifies successfully.
+    #[test]
+    fn test_valid_sig_verifies() {
+        let session = "test-valid-sig";
+        let ts = now_secs();
+        let sig = compute_override_sig("hygiene", session, ts);
+        let token = format!("{ts}:{sig}");
+        assert!(
+            verify_override_content(&token, "hygiene", session).is_some(),
+            "valid token must verify"
+        );
+    }
+
+    /// A tampered signature (one hex digit flipped) must be rejected.
+    #[test]
+    fn test_tampered_sig_fails() {
+        let session = "test-tampered-sig";
+        let ts = now_secs();
+        let sig = compute_override_sig("hygiene", session, ts);
+        // Flip the last hex digit to produce an invalid MAC.
+        let mut bad_sig = sig.clone();
+        let last = bad_sig.pop().unwrap_or('0');
+        let flipped = if last == '0' { '1' } else { '0' };
+        bad_sig.push(flipped);
+        let token = format!("{ts}:{bad_sig}");
+        assert!(
+            verify_override_content(&token, "hygiene", session).is_none(),
+            "tampered signature must be rejected"
+        );
+    }
+
+    /// A token for one override type must not verify as a different type.
+    #[test]
+    fn test_wrong_type_fails() {
+        let session = "test-wrong-type";
+        let ts = now_secs();
+        let sig = compute_override_sig("hygiene", session, ts);
+        let token = format!("{ts}:{sig}");
+        assert!(
+            verify_override_content(&token, "verification", session).is_none(),
+            "token for 'hygiene' must not verify as 'verification'"
+        );
+    }
+
+    /// An empty or truncated file must be rejected.
+    #[test]
+    fn test_empty_content_fails() {
+        assert!(verify_override_content("", "hygiene", "any-session").is_none());
+        assert!(verify_override_content("12345", "hygiene", "any-session").is_none());
     }
 }
