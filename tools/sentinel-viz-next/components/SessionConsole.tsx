@@ -5,9 +5,9 @@ import { Chip } from "@mui/material";
 import ExpandMoreIcon from "@mui/icons-material/ExpandMoreRounded";
 import ChevronRightIcon from "@mui/icons-material/ChevronRightRounded";
 
-import { fetchActivity } from "../lib/api";
-import { indexActivity } from "../lib/activity-cache";
-import { colorForSession } from "../lib/session-colors";
+import { fetchActivity } from "../adapters/http";
+import { indexActivity } from "../adapters/activity-cache";
+import { colorForSession } from "../domain/session-colors";
 import type { GraphResponse, Segment } from "../types/api";
 
 interface Props {

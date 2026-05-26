@@ -2,10 +2,10 @@
 
 import { useQuery } from "@tanstack/react-query";
 
-import { bucketsToSparkline } from "../lib/session-strips";
-import type { SessionStripData } from "../lib/session-strips";
-import { fetchSummary } from "../lib/api";
-import { categoryColor, categoryLabel, statusColor } from "../lib/format";
+import { bucketsToSparkline } from "../domain/session-strips";
+import type { SessionStripData } from "../domain/session-strips";
+import { fetchSummary } from "../adapters/http";
+import { categoryColor, categoryLabel, statusColor } from "../domain/format";
 
 interface Props {
   data: SessionStripData;

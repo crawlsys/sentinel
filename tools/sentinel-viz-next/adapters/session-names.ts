@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 
-import { fetchSessionName } from "./api";
+import { fetchSessionName } from "./http";
 
 /// Cache of session_id → display name. Populated lazily as the
 /// GraphCanvas requests labels for each SentinelSession node.

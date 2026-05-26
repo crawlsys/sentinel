@@ -17,7 +17,7 @@ import {
 } from "@mui/material";
 import CloseIcon from "@mui/icons-material/CloseRounded";
 
-import { fetchConfig, setConfig } from "../lib/api";
+import { fetchConfig, setConfig } from "../adapters/http";
 
 interface Props {
   open: boolean;

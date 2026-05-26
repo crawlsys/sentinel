@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 
-import { buildSessionStrips, bucketsToSparkline } from "../../lib/session-strips";
+import { buildSessionStrips, bucketsToSparkline } from "../../domain/session-strips";
 import type { GraphResponse, RecentEvent } from "../../types/api";
 
 /// Reference time well inside the past so events stamped relative

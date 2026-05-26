@@ -8,7 +8,7 @@ import {
   isStuck,
   maybeFireStuckAlert,
   stuckSessions,
-} from "../../lib/stuck";
+} from "../../domain/stuck";
 import type { GraphResponse, Node } from "../../types/api";
 
 function sessionNode(id: string, status: string, age: number, q = "still here?"): Node {

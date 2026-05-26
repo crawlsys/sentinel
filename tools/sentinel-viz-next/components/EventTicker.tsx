@@ -7,8 +7,8 @@ import {
   lookup as lookupActivityCache,
   lookupUserPrompt,
   subscribe as subscribeActivityCache,
-} from "../lib/activity-cache";
-import { categoryColor, categoryLabel, tickerTime } from "../lib/format";
+} from "../adapters/activity-cache";
+import { categoryColor, categoryLabel, tickerTime } from "../domain/format";
 import {
   compactBashCommand,
   compactPath,
@@ -16,7 +16,7 @@ import {
   parseGitDiffStats,
   smartTrunc,
   tildify,
-} from "../lib/format-text";
+} from "../domain/format-text";
 
 interface Props {
   events: RecentEvent[];

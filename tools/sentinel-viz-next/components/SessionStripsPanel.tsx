@@ -4,9 +4,9 @@ import { useEffect, useMemo, useState } from "react";
 import { ToggleButton, ToggleButtonGroup } from "@mui/material";
 
 import type { GraphResponse, Node } from "../types/api";
-import { buildSessionStrips } from "../lib/session-strips";
-import { sessionColorMap } from "../lib/session-colors";
-import { fetchSessionName } from "../lib/api";
+import { buildSessionStrips } from "../domain/session-strips";
+import { sessionColorMap } from "../domain/session-colors";
+import { fetchSessionName } from "../adapters/http";
 import { SessionStrip } from "./SessionStrip";
 
 interface Props {

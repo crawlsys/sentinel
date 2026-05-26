@@ -7,7 +7,7 @@ import type { ActivityResponse, GraphResponse, Segment } from "../../types/api";
 /// Mock fetchActivity so each test can stage what the API returns
 /// per session and observe how the console scopes/merges results.
 const fetchSpy = vi.fn();
-vi.mock("../../lib/api", () => ({
+vi.mock("../../adapters/http", () => ({
   fetchActivity: (...args: unknown[]) => fetchSpy(...args),
 }));
 

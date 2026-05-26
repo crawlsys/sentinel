@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { act, fireEvent, render, renderHook, screen } from "@testing-library/react";
 
-import { useAutoWatch, AUTO_WATCH_IGNORE_ATTR } from "../../lib/auto-watch";
+import { useAutoWatch, AUTO_WATCH_IGNORE_ATTR } from "../../hooks/auto-watch";
 
 /// These tests pin down the exact behaviors the operator complained
 /// about — particularly the bug where the toggle would flip back to

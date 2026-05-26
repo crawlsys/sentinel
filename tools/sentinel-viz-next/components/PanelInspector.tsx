@@ -6,9 +6,9 @@ import { IconButton, Tooltip } from "@mui/material";
 import CloseIcon from "@mui/icons-material/CloseRounded";
 
 import type { Node } from "../types/api";
-import { fetchActivity, fetchSummary } from "../lib/api";
-import { indexActivity } from "../lib/activity-cache";
-import { categoryColor, categoryLabel, relTime, statusColor } from "../lib/format";
+import { fetchActivity, fetchSummary } from "../adapters/http";
+import { indexActivity } from "../adapters/activity-cache";
+import { categoryColor, categoryLabel, relTime, statusColor } from "../domain/format";
 
 export function friendlyTitle(node: Node): string {
   switch (node.type) {

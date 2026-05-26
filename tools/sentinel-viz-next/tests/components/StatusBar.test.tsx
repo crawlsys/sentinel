@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 import { fireEvent, render, screen } from "@testing-library/react";
 
 import { StatusBar } from "../../components/StatusBar";
-import { AUTO_WATCH_IGNORE_ATTR } from "../../lib/auto-watch";
+import { AUTO_WATCH_IGNORE_ATTR } from "../../hooks/auto-watch";
 import type { GraphResponse } from "../../types/api";
 
 const fakeGraph: GraphResponse = {

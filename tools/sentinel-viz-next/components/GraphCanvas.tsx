@@ -7,8 +7,8 @@ import "d3-transition"; // side-effect: extends Selection.prototype.transition
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import type { Edge, GraphResponse, Node } from "../types/api";
-import { nodeColor, statusColor } from "../lib/format";
-import { ensureName, subscribe as subscribeSessionNames } from "../lib/session-names";
+import { nodeColor, statusColor } from "../domain/format";
+import { ensureName, subscribe as subscribeSessionNames } from "../adapters/session-names";
 
 interface SimNode extends d3Force.SimulationNodeDatum {
   id: string;

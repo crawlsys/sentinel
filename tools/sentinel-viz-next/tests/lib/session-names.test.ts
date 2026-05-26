@@ -1,9 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import * as api from "../../lib/api";
-import { _resetSessionNames, ensureName, getCachedName, subscribe } from "../../lib/session-names";
+import * as api from "../../adapters/http";
+import { _resetSessionNames, ensureName, getCachedName, subscribe } from "../../adapters/session-names";
 
-vi.mock("../../lib/api", () => ({
+vi.mock("../../adapters/http", () => ({
   fetchSessionName: vi.fn(),
 }));
 

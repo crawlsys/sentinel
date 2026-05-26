@@ -121,3 +121,46 @@ export async function fetchSummary(
   if (!res.ok) throw new Error(`summary: ${res.status}`);
   return res.json();
 }
+
+// ─────────────────────────────────────────────────────────────────
+// Port adapter object
+//
+// Bundles the free functions above into a single object that
+// satisfies the port interfaces from ports/repos.ts. Components
+// still import the free functions directly today; the bundled
+// adapter is the seam a future ServicesProvider context will plug
+// into when a second adapter (mock, WebSocket, etc.) exists.
+
+import type {
+  ActivityRepo,
+  ConfigRepo,
+  GraphRepo,
+  HealthRepo,
+  KpiRepo,
+  SessionNameRepo,
+  SummaryRepo,
+} from "../ports/repos";
+
+async function fetchKpis(): ReturnType<KpiRepo["fetchKpis"]> {
+  const res = await fetch(`${apiBase()}/api/kpis`);
+  if (!res.ok) throw new Error(`kpis: ${res.status}`);
+  return res.json();
+}
+
+export const httpAdapter: GraphRepo &
+  ActivityRepo &
+  SummaryRepo &
+  ConfigRepo &
+  SessionNameRepo &
+  HealthRepo &
+  KpiRepo = {
+  fetchGraph,
+  streamUrl,
+  fetchActivity,
+  fetchSummary,
+  fetchConfig,
+  setConfig,
+  fetchSessionName,
+  fetchHealth,
+  fetchKpis,
+};

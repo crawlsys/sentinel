@@ -8,10 +8,10 @@ import { SessionConsole } from "../components/SessionConsole";
 import { SessionStripsPanel } from "../components/SessionStripsPanel";
 import { SettingsModal } from "../components/SettingsModal";
 import { StatusBar } from "../components/StatusBar";
-import { sessionColorMap } from "../lib/session-colors";
-import { useGraphStream } from "../lib/sse";
-import { maybeFireStuckAlert, stuckSessions } from "../lib/stuck";
-import { useAutoWatch } from "../lib/auto-watch";
+import { sessionColorMap } from "../domain/session-colors";
+import { useGraphStream } from "../adapters/sse";
+import { maybeFireStuckAlert, stuckSessions } from "../domain/stuck";
+import { useAutoWatch } from "../hooks/auto-watch";
 
 export default function Page() {
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);

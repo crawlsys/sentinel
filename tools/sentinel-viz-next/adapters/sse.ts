@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 
 import type { GraphResponse } from "../types/api";
-import { fetchGraph, streamUrl } from "./api";
+import { fetchGraph, streamUrl } from "./http";
 
 /// Subscribes to /api/stream and yields the most recent full snapshot.
 /// Falls back to polling /api/graph if EventSource is unavailable.

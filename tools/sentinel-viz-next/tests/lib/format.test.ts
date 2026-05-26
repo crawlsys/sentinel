@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 
-import { nodeColor, relTime, shortTime, statusColor, tickerTime } from "../../lib/format";
+import { nodeColor, relTime, shortTime, statusColor, tickerTime } from "../../domain/format";
 
 describe("format helpers", () => {
   it("relTime under one minute", () => {

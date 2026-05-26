@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 import { fireEvent, render, screen } from "@testing-library/react";
 
 import { EventTicker, shouldShowSubLine, compactSummaryFor } from "../../components/EventTicker";
-import { indexActivity, _resetActivityCache } from "../../lib/activity-cache";
+import { indexActivity, _resetActivityCache } from "../../adapters/activity-cache";
 import type { ActivityResponse, RecentEvent } from "../../types/api";
 
 /// P3-24: smarter rollup. Adjacent ROUTINE claude tool-call events

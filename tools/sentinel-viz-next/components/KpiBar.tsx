@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { Box, Stack, Tooltip, Typography } from "@mui/material";
 
-import { apiBase } from "../lib/api";
+import { apiBase } from "../adapters/http";
 
 interface Kpis {
   sessions_active: number;

@@ -7,7 +7,7 @@ import {
   lookup,
   lookupUserPrompt,
   subscribe,
-} from "../../lib/activity-cache";
+} from "../../adapters/activity-cache";
 import type { ActivityResponse } from "../../types/api";
 
 function activityFor(sid: string, segments: Array<{ts: string; tools: string[]; summary: string}>): ActivityResponse {

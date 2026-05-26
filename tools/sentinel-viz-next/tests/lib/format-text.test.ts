@@ -9,7 +9,7 @@ import {
   stripCdPrefix,
   tildify,
   truncTail,
-} from "../../lib/format-text";
+} from "../../domain/format-text";
 
 describe("tildify", () => {
   it("collapses /home/<user>/ to ~/", () => {

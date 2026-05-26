@@ -4,8 +4,8 @@ import { Box, Chip, IconButton, Stack, Tooltip, Typography } from "@mui/material
 import SettingsIcon from "@mui/icons-material/SettingsOutlined";
 
 import type { GraphResponse } from "../types/api";
-import { AUTO_WATCH_IGNORE_ATTR } from "../lib/auto-watch";
-import type { StreamLiveness } from "../lib/sse";
+import { AUTO_WATCH_IGNORE_ATTR } from "../hooks/auto-watch";
+import type { StreamLiveness } from "../adapters/sse";
 import { KpiBar } from "./KpiBar";
 
 interface Props {
