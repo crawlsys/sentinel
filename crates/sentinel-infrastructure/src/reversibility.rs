@@ -1262,4 +1262,101 @@ mod tests {
             ReversibilityClass::TriviallyReversible
         );
     }
+
+    // ---- Regression: previously-unmapped MCP servers stranded read-only
+    // calls at the A3 dry-run gate (unknown-MCP default = Irreversible).
+    // These assert the five servers added in fix/reversibility-mcp-servers
+    // classify reads as Trivial (out of A3 scope) while keeping destructive
+    // tools gated. ----
+
+    #[test]
+    fn shipped_defaults_cdp_reads_are_trivial_interactions_rwe() {
+        let c = shipped();
+        for t in ["navigate", "get_tabs", "evaluate", "screenshot", "get_text"] {
+            assert_eq!(
+                c.classify(&format!("mcp__cdp__{t}"), &no_input()),
+                ReversibilityClass::TriviallyReversible,
+                "cdp {t} should be TriviallyReversible (read/observe)"
+            );
+        }
+        // Page interactions are recoverable → RWE (and thus out of A3 scope).
+        assert_eq!(
+            c.classify("mcp__cdp__click", &no_input()),
+            ReversibilityClass::ReversibleWithEffort
+        );
+    }
+
+    #[test]
+    fn shipped_defaults_browserbase_reads_trivial_delete_irreversible() {
+        let c = shipped();
+        assert_eq!(
+            c.classify("mcp__browserbase__screenshot", &no_input()),
+            ReversibilityClass::TriviallyReversible
+        );
+        assert_eq!(
+            c.classify("mcp__browserbase__create_session", &no_input()),
+            ReversibilityClass::TriviallyReversible
+        );
+        assert_eq!(
+            c.classify("mcp__browserbase__delete_context", &no_input()),
+            ReversibilityClass::Irreversible
+        );
+    }
+
+    #[test]
+    fn shipped_defaults_doppler_get_secret_is_trivial_delete_irreversible() {
+        let c = shipped();
+        // Reading a secret value is observation, not a state change.
+        assert_eq!(
+            c.classify("mcp__doppler__get_secret", &no_input()),
+            ReversibilityClass::TriviallyReversible
+        );
+        assert_eq!(
+            c.classify("mcp__doppler__set_secret", &no_input()),
+            ReversibilityClass::ReversibleWithEffort
+        );
+        assert_eq!(
+            c.classify("mcp__doppler__delete_project", &no_input()),
+            ReversibilityClass::Irreversible
+        );
+    }
+
+    #[test]
+    fn shipped_defaults_auth0_reads_trivial_delete_irreversible() {
+        let c = shipped();
+        assert_eq!(
+            c.classify("mcp__auth0__list_connections", &no_input()),
+            ReversibilityClass::TriviallyReversible
+        );
+        assert_eq!(
+            c.classify("mcp__auth0__update_connection", &no_input()),
+            ReversibilityClass::ReversibleWithEffort
+        );
+        assert_eq!(
+            c.classify("mcp__auth0__delete_connection", &no_input()),
+            ReversibilityClass::Irreversible
+        );
+    }
+
+    #[test]
+    fn shipped_defaults_neon_delete_project_is_catastrophic() {
+        let c = shipped();
+        assert_eq!(
+            c.classify("mcp__neon__list_projects", &no_input()),
+            ReversibilityClass::TriviallyReversible
+        );
+        assert_eq!(
+            c.classify("mcp__neon__create_branch", &no_input()),
+            ReversibilityClass::ReversibleWithEffort
+        );
+        assert_eq!(
+            c.classify("mcp__neon__delete_database", &no_input()),
+            ReversibilityClass::Irreversible
+        );
+        // Dropping the whole Postgres project is high-blast + data loss.
+        assert_eq!(
+            c.classify("mcp__neon__delete_project", &no_input()),
+            ReversibilityClass::Catastrophic
+        );
+    }
 }
