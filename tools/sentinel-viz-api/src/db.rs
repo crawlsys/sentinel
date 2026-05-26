@@ -5,7 +5,7 @@ use rusqlite::{Connection, OpenFlags};
 
 use crate::model::Event;
 
-/// Default location of the bridge's SQLite store, overridable via env.
+/// Default location of the bridge's `SQLite` store, overridable via env.
 ///
 /// WORKSTREAM: sentinel-bridge — this path is owned by
 /// `tools/sentinel-viz/sentinel_bridge.py`, which writes the file.
@@ -14,7 +14,7 @@ use crate::model::Event;
 pub const DEFAULT_DB_ENV: &str = "SENTINEL_VIZ_DB";
 const DEFAULT_DB_REL: &str = ".agents/scratch/activegraph-bridge/sentinel.db";
 
-/// Resolve the SQLite path from `$SENTINEL_VIZ_DB`, falling back to
+/// Resolve the `SQLite` path from `$SENTINEL_VIZ_DB`, falling back to
 /// `$HOME/.agents/scratch/activegraph-bridge/sentinel.db`.
 pub fn default_db_path() -> Result<PathBuf> {
     if let Ok(p) = std::env::var(DEFAULT_DB_ENV) {
@@ -24,7 +24,7 @@ pub fn default_db_path() -> Result<PathBuf> {
     Ok(home.join(DEFAULT_DB_REL))
 }
 
-/// Open the bridge SQLite store read-only. The bridge owns writes.
+/// Open the bridge `SQLite` store read-only. The bridge owns writes.
 pub fn open_ro(path: &Path) -> Result<Connection> {
     Connection::open_with_flags(
         path,

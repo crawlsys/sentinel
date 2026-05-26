@@ -4,13 +4,16 @@
 name = "sentinel-viz-api"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.83"
+rust-version = "1.87"
 license = "MIT"
 description = "Rust API serving the Sentinel activity-graph viz (replaces tools/sentinel-viz/viz_server.py)"
 
 [dependencies]
 axum = "0.8"
-tokio = { version = "1", features = ["full"] }
+# Trimmed from `full` to the features actually used: the multi-thread
+# runtime (#[tokio::main] + axum::serve), TCP listener (net), the
+# macro entrypoint, and timers (sse.rs sleeps).
+tokio = { version = "1", features = ["rt-multi-thread", "net", "macros", "time"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -20,6 +23,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 tower-http = { version = "0.6", features = ["cors", "trace"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+url = "2"
 dirs = "6"
 chrono = { version = "0.4", features = ["serde", "clock"] }
 futures = "0.3"
@@ -27,3 +31,53 @@ futures = "0.3"
 [dev-dependencies]
 insta = { version = "1", features = ["json"] }
 tempfile = "3"
+tower = { version = "0.5", features = ["util"] }
+
+# This crate is a detached `[workspace]`, so it can't inherit the root
+# sentinel workspace lints via `lints.workspace = true`. Mirror them
+# here, with the same documented exceptions.
+[lints.rust]
+# `deny` (not `forbid`) so the test modules can scope an
+# `#[allow(unsafe_code)]` over their `std::env::set_var` calls; all
+# non-test code stays unsafe-free.
+unsafe_code = "deny"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+# Allow common patterns (mirrors the root workspace).
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+# Subjective style / structure lints — judgment calls, not correctness.
+too_many_lines = "allow"
+too_long_first_doc_paragraph = "allow"
+doc_overindented_list_items = "allow"
+similar_names = "allow"
+struct_field_names = "allow"
+too_many_arguments = "allow"
+fn_params_excessive_bools = "allow"
+# Numeric casts: reviewed case-by-case at the call site, not blanket-fixed.
+cast_possible_truncation = "allow"
+cast_precision_loss = "allow"
+cast_sign_loss = "allow"
+cast_possible_wrap = "allow"
+# Held intentionally across a scope; tightening risks re-lock races.
+significant_drop_tightening = "allow"
+future_not_send = "allow"
+# Style-preference lints left in their explicit form by choice.
+manual_let_else = "allow"
+option_if_let_else = "allow"
+needless_pass_by_value = "allow"
+unnecessary_wraps = "allow"
+ptr_arg = "allow"
+ref_option = "allow"
+trivially_copy_pass_by_ref = "allow"
+implicit_hasher = "allow"
+return_self_not_must_use = "allow"
+type_complexity = "allow"
+zero_sized_map_values = "allow"
+items_after_statements = "allow"
+case_sensitive_file_extension_comparisons = "allow"

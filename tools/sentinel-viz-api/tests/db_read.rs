@@ -1,4 +1,4 @@
-//! Read the real bridge SQLite store and assert each known event type
+//! Read the real bridge `SQLite` store and assert each known event type
 //! appears at least once. Skipped (with a printed note) if the store
 //! is not present on this machine — keeps the suite green on a fresh
 //! checkout without a live bridge.

@@ -16,7 +16,7 @@ use crate::transcript;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Kpis {
-    /// Sessions whose status is firing / busy / awaiting_user.
+    /// Sessions whose status is firing / busy / `awaiting_user`.
     pub sessions_active: usize,
     /// Total sessions in the current window.
     pub sessions_total: usize,
@@ -45,8 +45,7 @@ pub struct TokenUsage {
 pub fn compute(graph: &GraphResponse) -> Kpis {
     let now_secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
+        .map_or(0, |d| d.as_secs() as i64);
 
     let active_set = ["firing", "busy", "awaiting_user"];
     let mut sessions_active = 0;
@@ -151,7 +150,7 @@ fn collect_tokens(session_ids: &[String], now_secs: i64) -> Option<TokenUsage> {
             let usage = v.get("message").and_then(|m| m.get("usage"));
             let Some(u) = usage else { continue };
             let g = |k: &str| -> u64 {
-                u.get(k).and_then(|x| x.as_u64()).unwrap_or(0)
+                u.get(k).and_then(serde_json::Value::as_u64).unwrap_or(0)
             };
             total.input += g("input_tokens");
             total.cache_creation += g("cache_creation_input_tokens");

@@ -1,7 +1,22 @@
 use std::path::{Path, PathBuf};
 
+/// Resolve the home directory the Claude transcript roots live under.
+/// Honors the `SENTINEL_VIZ_HOME` override first (used by tests and any
+/// non-standard layout), then falls back to the OS home. This avoids
+/// relying on `$HOME`, which `dirs::home_dir()` ignores on Windows (it
+/// reads `USERPROFILE` / the Known Folder API), so a `HOME`-only override
+/// silently does nothing there.
+fn viz_home() -> Option<PathBuf> {
+    if let Some(h) = std::env::var_os("SENTINEL_VIZ_HOME") {
+        if !h.is_empty() {
+            return Some(PathBuf::from(h));
+        }
+    }
+    dirs::home_dir()
+}
+
 /// Locate the conversation transcript JSONL for a session, across
-/// both Claude homes. Mirrors `find_transcript()` in viz_server.py.
+/// both Claude homes. Mirrors `find_transcript()` in `viz_server.py`.
 ///
 /// WORKSTREAM: claude-code — both `~/.claude/projects/` and
 /// `~/.claude-sentinel/projects/` are owned by Claude Code itself
@@ -13,7 +28,7 @@ pub fn find_transcript(session_id: &str) -> Option<PathBuf> {
         return None;
     }
     let name = format!("{session_id}.jsonl");
-    let home = dirs::home_dir()?;
+    let home = viz_home()?;
     let roots = [home.join(".claude/projects"), home.join(".claude-sentinel/projects")];
     for root in roots {
         if !root.exists() {
@@ -21,7 +36,7 @@ pub fn find_transcript(session_id: &str) -> Option<PathBuf> {
         }
         let Ok(rd) = std::fs::read_dir(&root) else { continue };
         for entry in rd.flatten() {
-            if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            if !entry.file_type().is_ok_and(|t| t.is_dir()) {
                 continue;
             }
             let cand = entry.path().join(&name);

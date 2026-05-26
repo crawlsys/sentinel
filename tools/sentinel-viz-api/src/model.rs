@@ -40,7 +40,7 @@ pub mod node_kind {
 
 /// One node in the graph (`object.created` materialisation).
 ///
-/// Wire format matches the Python viz_server.py `load_graph` response,
+/// Wire format matches the Python `viz_server.py` `load_graph` response,
 /// extended with optional per-session liveness fields.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Node {
@@ -60,7 +60,7 @@ pub struct Node {
     pub awaiting_question: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub awaiting_options: Option<serde_json::Value>,
-    /// Coarse categorisation for SentinelToolCall nodes. Lets the UI
+    /// Coarse categorisation for `SentinelToolCall` nodes. Lets the UI
     /// colour by intent (compute vs. planning vs. communication)
     /// without inspecting `data.tool` client-side.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -70,13 +70,13 @@ pub struct Node {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NodeCategory {
-    /// Bash, Read, Write, Edit, Grep, Glob, NotebookEdit
+    /// Bash, Read, Write, Edit, Grep, Glob, `NotebookEdit`
     Tc,
-    /// TaskCreate/Update/List, WebFetch, WebSearch, plan tools
+    /// TaskCreate/Update/List, `WebFetch`, `WebSearch`, plan tools
     Planning,
-    /// Agent, AskUserQuestion, Stop
+    /// Agent, `AskUserQuestion`, Stop
     Communication,
-    /// UserPromptSubmit (no tool — it's a user message)
+    /// `UserPromptSubmit` (no tool — it's a user message)
     Prompt,
     /// Anything else
     Other,

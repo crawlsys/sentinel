@@ -27,10 +27,22 @@ async fn main() -> Result<()> {
         .and_then(|s| s.parse().ok())
         .unwrap_or(100);
 
+    // `/api/config` may bind an OpenAI key and Ollama URL into server
+    // state, so it must not be writable when the server is reachable
+    // off the loopback interface.
+    let allow_config_writes = sentinel_viz_api::server::is_loopback_host(&host);
+    if !allow_config_writes {
+        tracing::warn!(
+            %host,
+            "bound to a non-loopback host; POST /api/config is disabled"
+        );
+    }
+
     let state = Arc::new(AppState {
         db_path: db_path.clone(),
         window_limit,
         started_at: Instant::now(),
+        allow_config_writes,
         cache: std::sync::RwLock::new(Vec::new()),
         activity_cache: std::sync::RwLock::new(Vec::new()),
         naming: sentinel_viz_api::naming::NamingState::from_env(),

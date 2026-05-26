@@ -1,12 +1,17 @@
 //! Build a synthetic Claude transcript JSONL and verify
 //! `session_activity` rolls it up into segments correctly.
 
+// This integration test mutates `SENTINEL_VIZ_HOME` to point the
+// transcript finder at a temp tree; `std::env::set_var` is `unsafe`
+// on current Rust. Scoped to the test target only.
+#![allow(unsafe_code)]
+
 use std::io::Write;
 
 use sentinel_viz_api::activity;
 use tempfile::TempDir;
 
-fn fixture_jsonl() -> &'static str {
+const fn fixture_jsonl() -> &'static str {
     // Minimal Claude transcript: user input → assistant turn with one
     // Bash tool_use → user message containing the matching tool_result.
     r#"{"type":"user","timestamp":"2026-05-25T00:00:00Z","message":{"content":"hello"}}
@@ -34,18 +39,21 @@ fn activity_rolls_user_input_and_assistant_turn() {
     std::fs::create_dir_all(&projects).unwrap();
     write_transcript(&projects, "sess-a");
 
-    // Point dirs::home_dir at the temp tree by overriding HOME.
-    let _orig = std::env::var("HOME").ok();
+    // Point the transcript finder at the temp tree via SENTINEL_VIZ_HOME.
+    // We use this override (not HOME) because dirs::home_dir() ignores
+    // $HOME on Windows, so a HOME-only override is a silent no-op there.
+    let orig_home = std::env::var("SENTINEL_VIZ_HOME").ok();
     // SAFETY: tests run single-threaded by default in cargo test
     // for this binary; not setting RUST_TEST_THREADS=1 is fine here
     // because we have no other tests in this file.
     unsafe {
-        std::env::set_var("HOME", fake_home);
+        std::env::set_var("SENTINEL_VIZ_HOME", fake_home);
     }
 
     let r = activity::session_activity("sess-a", 80, None, 30);
-    if let Some(orig) = _orig {
-        unsafe { std::env::set_var("HOME", orig) };
+    match &orig_home {
+        Some(orig) => unsafe { std::env::set_var("SENTINEL_VIZ_HOME", orig) },
+        None => unsafe { std::env::remove_var("SENTINEL_VIZ_HOME") },
     }
 
     assert_eq!(r.session_id, "sess-a");
@@ -67,12 +75,13 @@ fn activity_rolls_user_input_and_assistant_turn() {
 #[test]
 fn activity_returns_empty_for_missing_session() {
     let tmp = TempDir::new().unwrap();
-    let _orig = std::env::var("HOME").ok();
-    unsafe { std::env::set_var("HOME", tmp.path()) };
+    let orig_home = std::env::var("SENTINEL_VIZ_HOME").ok();
+    unsafe { std::env::set_var("SENTINEL_VIZ_HOME", tmp.path()) };
 
     let r = activity::session_activity("does-not-exist", 80, None, 30);
-    if let Some(orig) = _orig {
-        unsafe { std::env::set_var("HOME", orig) };
+    match &orig_home {
+        Some(orig) => unsafe { std::env::set_var("SENTINEL_VIZ_HOME", orig) },
+        None => unsafe { std::env::remove_var("SENTINEL_VIZ_HOME") },
     }
     assert_eq!(r.session_id, "does-not-exist");
     assert!(r.transcript.is_none());

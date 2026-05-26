@@ -22,16 +22,42 @@ pub async fn stream(
     let st = stream::unfold(
         (state, -1_i64),
         |(state, mut last_seq)| async move {
+            // First poll: seed the opening frame from the shared graph
+            // cache when a snapshot already exists, instead of forcing a
+            // cold ~7s build for every new subscriber. The cache is keyed
+            // identically to the default `/api/graph` request, so a warm
+            // dashboard tab will usually have populated it.
+            if last_seq < 0 {
+                let key = (state.window_limit, Some(6 * 3600_i64), false);
+                let seed = {
+                    let cache = state.cache.read().unwrap_or_else(std::sync::PoisonError::into_inner);
+                    cache
+                        .iter()
+                        .find(|e| e.key == key)
+                        .map(|e| (Arc::clone(&e.body), e.last_seq))
+                };
+                if let Some((body, seq)) = seed {
+                    last_seq = seq;
+                    let payload = String::from_utf8((*body).clone()).unwrap_or_default();
+                    return Some((Ok(Event::default().data(payload)), (state, last_seq)));
+                }
+            }
             loop {
-                let conn = match db::open_ro(&state.db_path) {
-                    Ok(c) => c,
-                    Err(_) => {
-                        time::sleep(Duration::from_millis(500)).await;
-                        continue;
-                    }
+                let conn = if let Ok(c) = db::open_ro(&state.db_path) { c } else {
+                    // Signal degraded state to the client rather than
+                    // silently looping. The UI can surface this the
+                    // same way it treats a degraded /api/graph payload.
+                    time::sleep(Duration::from_millis(500)).await;
+                    return Some((
+                        Ok(Event::default().comment("db-unavailable")),
+                        (state, last_seq),
+                    ));
                 };
                 let cur = db::peek_max_seq(&conn).unwrap_or(0);
-                if cur != last_seq {
+                // `seq` is a monotonically increasing counter; only treat
+                // a strictly higher value as new work. `!=` would also
+                // fire on a transient lower read.
+                if cur > last_seq {
                     last_seq = cur;
                     let opts = GraphOpts {
                         limit: state.window_limit,
@@ -45,7 +71,9 @@ pub async fn stream(
                             let body = serde_json::to_vec(&g).unwrap_or_default();
                             let body_arc = Arc::new(body);
                             let g_arc = Arc::new(g);
-                            if let Ok(mut cache) = state.cache.write() {
+                            {
+                                let mut cache =
+                                    state.cache.write().unwrap_or_else(std::sync::PoisonError::into_inner);
                                 cache.retain(|e| e.key != key);
                                 cache.push(CacheEntry {
                                     key,

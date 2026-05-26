@@ -5,7 +5,7 @@ use serde_json::Value;
 use crate::model::{ActivityEvent, ActivityResponse, Segment, ToolCallSummary};
 use crate::transcript::{self, trim};
 
-/// Port of `session_activity()` in viz_server.py.
+/// Port of `session_activity()` in `viz_server.py`.
 pub fn session_activity(
     session_id: &str,
     limit: usize,
@@ -19,7 +19,7 @@ pub fn session_activity(
             transcript: None,
             events: vec![],
             segments: vec![],
-            at_ts: at_ts.map(|s| s.to_string()),
+            at_ts: at_ts.map(std::string::ToString::to_string),
             ..Default::default()
         };
     };
@@ -30,7 +30,7 @@ pub fn session_activity(
             transcript: Some(path.display().to_string()),
             events: vec![],
             segments: vec![],
-            at_ts: at_ts.map(|s| s.to_string()),
+            at_ts: at_ts.map(std::string::ToString::to_string),
             error: Some("read error".to_string()),
             ..Default::default()
         };
@@ -38,7 +38,6 @@ pub fn session_activity(
 
     let mut out: Vec<ActivityEvent> = Vec::new();
     let mut segments: Vec<Segment> = Vec::new();
-    let mut tool_use_to_seg: HashMap<String, usize> = HashMap::new();
     let mut tool_use_to_tc: HashMap<String, (usize, usize)> = HashMap::new(); // (seg idx, tool_call idx)
 
     for line in file.lines() {
@@ -52,70 +51,23 @@ pub fn session_activity(
         let msg = r.get("message").cloned().unwrap_or(Value::Null);
 
         match typ {
-            "user" => handle_user(&msg, &ts, &mut out, &mut segments, &tool_use_to_seg, &mut tool_use_to_tc),
-            "assistant" => handle_assistant(&msg, &ts, &mut out, &mut segments, &mut tool_use_to_seg, &mut tool_use_to_tc),
+            "user" => handle_user(&msg, &ts, &mut out, &mut segments, &tool_use_to_tc),
+            "assistant" => handle_assistant(&msg, &ts, &mut out, &mut segments, &mut tool_use_to_tc),
             _ => {}
         }
     }
 
+    // Anchored view: when `at_ts` parses, return only the events and
+    // segments inside the ±window around the anchor.
     if let Some(anchor_str) = at_ts {
         if let Some(anchor) = parse_dt(anchor_str) {
-            let filtered_events: Vec<ActivityEvent> = out
-                .iter()
-                .filter(|e| {
-                    if let Some(pt) = parse_dt(&e.ts) {
-                        (pt - anchor).num_seconds().abs() <= window_secs
-                    } else {
-                        false
-                    }
-                })
-                .cloned()
-                .collect();
-            let filtered_segs: Vec<Segment> = segments
-                .iter()
-                .filter(|s| {
-                    let Some(pt) = parse_dt(&s.ts) else { return false };
-                    let pt_end = s
-                        .ts_end
-                        .as_deref()
-                        .and_then(parse_dt)
-                        .unwrap_or(pt);
-                    (pt - anchor).num_seconds() <= window_secs
-                        && (anchor - pt_end).num_seconds() <= window_secs
-                })
-                .cloned()
-                .collect();
-            return ActivityResponse {
-                session_id: session_id.to_string(),
-                transcript: Some(path.display().to_string()),
-                total: Some(out.len()),
-                total_segments: Some(segments.len()),
-                events: filtered_events,
-                segments: filtered_segs,
-                at_ts: Some(anchor_str.to_string()),
-                window_secs: Some(window_secs),
-                ..Default::default()
-            };
+            return windowed_response(
+                session_id, &path, &out, &segments, anchor_str, anchor, window_secs,
+            );
         }
     }
 
-    fn tail<T>(v: Vec<T>, n: usize) -> Vec<T> {
-        let len = v.len();
-        if len > n {
-            v.into_iter().skip(len - n).collect()
-        } else {
-            v
-        }
-    }
-    // Defence-in-depth filter for empty segments that slipped through
-    // the per-handler filters. A segment is empty if it has no text
-    // AND no tool_calls AND no preview content the UI could render.
-    segments.retain(|s| {
-        let has_text = s.text.as_deref().map(|t| !t.trim().is_empty()).unwrap_or(false);
-        let has_calls = !s.tool_calls.is_empty();
-        let has_preview = !s.preview.trim().is_empty() && s.preview.trim() != "(empty)";
-        has_text || has_calls || has_preview
-    });
+    retain_renderable_segments(&mut segments);
     let total = out.len();
     let total_segs = segments.len();
     ActivityResponse {
@@ -125,7 +77,73 @@ pub fn session_activity(
         segments: tail(segments, limit),
         total: Some(total),
         total_segments: Some(total_segs),
-        at_ts: at_ts.map(|s| s.to_string()),
+        at_ts: at_ts.map(std::string::ToString::to_string),
+        ..Default::default()
+    }
+}
+
+fn tail<T>(v: Vec<T>, n: usize) -> Vec<T> {
+    let len = v.len();
+    if len > n {
+        v.into_iter().skip(len - n).collect()
+    } else {
+        v
+    }
+}
+
+/// Defence-in-depth filter for empty segments that slipped through the
+/// per-handler filters. A segment is empty if it has no text AND no
+/// `tool_calls` AND no preview content the UI could render.
+fn retain_renderable_segments(segments: &mut Vec<Segment>) {
+    segments.retain(|s| {
+        let has_text = s.text.as_deref().is_some_and(|t| !t.trim().is_empty());
+        let has_calls = !s.tool_calls.is_empty();
+        let has_preview = !s.preview.trim().is_empty() && s.preview.trim() != "(empty)";
+        has_text || has_calls || has_preview
+    });
+}
+
+/// Build the anchored (`at_ts`) response: events within ±`window_secs`
+/// of the anchor, and segments that overlap the same window.
+fn windowed_response(
+    session_id: &str,
+    path: &std::path::Path,
+    out: &[ActivityEvent],
+    segments: &[Segment],
+    anchor_str: &str,
+    anchor: chrono::DateTime<chrono::FixedOffset>,
+    window_secs: i64,
+) -> ActivityResponse {
+    let filtered_events: Vec<ActivityEvent> = out
+        .iter()
+        .filter(|e| {
+            if let Some(pt) = parse_dt(&e.ts) {
+                (pt - anchor).num_seconds().abs() <= window_secs
+            } else {
+                false
+            }
+        })
+        .cloned()
+        .collect();
+    let filtered_segs: Vec<Segment> = segments
+        .iter()
+        .filter(|s| {
+            let Some(pt) = parse_dt(&s.ts) else { return false };
+            let pt_end = s.ts_end.as_deref().and_then(parse_dt).unwrap_or(pt);
+            (pt - anchor).num_seconds() <= window_secs
+                && (anchor - pt_end).num_seconds() <= window_secs
+        })
+        .cloned()
+        .collect();
+    ActivityResponse {
+        session_id: session_id.to_string(),
+        transcript: Some(path.display().to_string()),
+        total: Some(out.len()),
+        total_segments: Some(segments.len()),
+        events: filtered_events,
+        segments: filtered_segs,
+        at_ts: Some(anchor_str.to_string()),
+        window_secs: Some(window_secs),
         ..Default::default()
     }
 }
@@ -135,8 +153,7 @@ fn handle_user(
     ts: &str,
     out: &mut Vec<ActivityEvent>,
     segments: &mut Vec<Segment>,
-    tool_use_to_seg: &HashMap<String, usize>,
-    tool_use_to_tc: &mut HashMap<String, (usize, usize)>,
+    tool_use_to_tc: &HashMap<String, (usize, usize)>,
 ) {
     let Some(content) = msg.get("content") else { return };
     if let Some(text) = content.as_str() {
@@ -172,7 +189,7 @@ fn handle_user(
         if c.get("type").and_then(|v| v.as_str()) != Some("tool_result") {
             continue;
         }
-        let tu_id = c.get("tool_use_id").and_then(|v| v.as_str()).map(|s| s.to_string());
+        let tu_id = c.get("tool_use_id").and_then(|v| v.as_str()).map(std::string::ToString::to_string);
         let result = c.get("content");
         let mut result_text = String::new();
         if let Some(arr) = result.and_then(|v| v.as_array()) {
@@ -186,7 +203,7 @@ fn handle_user(
         } else if let Some(s) = result.and_then(|v| v.as_str()) {
             result_text = s.to_string();
         }
-        let is_error = c.get("is_error").and_then(|v| v.as_bool()).unwrap_or(false);
+        let is_error = c.get("is_error").and_then(serde_json::Value::as_bool).unwrap_or(false);
         if !result_text.is_empty() {
             out.push(ActivityEvent {
                 ts: ts.to_string(),
@@ -210,7 +227,6 @@ fn handle_user(
                     }
                 }
             }
-            let _ = tool_use_to_seg;
         }
     }
 }
@@ -220,7 +236,6 @@ fn handle_assistant(
     ts: &str,
     out: &mut Vec<ActivityEvent>,
     segments: &mut Vec<Segment>,
-    tool_use_to_seg: &mut HashMap<String, usize>,
     tool_use_to_tc: &mut HashMap<String, (usize, usize)>,
 ) {
     let blocks = msg.get("content").and_then(|c| c.as_array()).cloned().unwrap_or_default();
@@ -231,6 +246,11 @@ fn handle_assistant(
         ..Default::default()
     };
     let mut accumulated_text = String::new();
+    // Defer recording the tool_use→(seg,tc) mapping until the segment's
+    // real index is known. Captured as (tool_use_id, tool_call_idx); the
+    // segment index is filled in once we actually push the segment, so
+    // the map can't point at the wrong (or a never-pushed) segment.
+    let mut pending_tc: Vec<(String, usize)> = Vec::new();
     for c in &blocks {
         let t = c.get("type").and_then(|v| v.as_str());
         if t == Some("text") {
@@ -272,13 +292,14 @@ fn handle_assistant(
             seg.tool_calls.push(tc);
             seg.tool_count += 1;
             if !tu_id.is_empty() {
-                tool_use_to_seg.insert(tu_id.clone(), segments.len());
-                tool_use_to_tc.insert(tu_id, (segments.len(), tc_idx));
+                pending_tc.push((tu_id, tc_idx));
             }
         }
     }
     // Label: chronological dedup, "Nx tool" formatting
-    if !seg.tools.is_empty() {
+    if seg.tools.is_empty() {
+        seg.label = "assistant text".to_string();
+    } else {
         let mut counts: HashMap<String, usize> = HashMap::new();
         for t in &seg.tools {
             *counts.entry(t.clone()).or_insert(0) += 1;
@@ -297,8 +318,6 @@ fn handle_assistant(
             }
         }
         seg.label = parts.join(", ");
-    } else {
-        seg.label = "assistant text".to_string();
     }
     seg.preview = if !accumulated_text.is_empty() {
         trim(&accumulated_text, 220)
@@ -320,21 +339,29 @@ fn handle_assistant(
     if seg.tool_calls.is_empty() && accumulated_text.trim().is_empty() {
         return;
     }
+    // Push first, then record the maps against the segment's real
+    // index. Doing this after the early-return above also guarantees we
+    // never map a tool_use to a segment that was dropped.
+    let seg_idx = segments.len();
     segments.push(seg);
+    for (tu_id, tc_idx) in pending_tc {
+        tool_use_to_tc.insert(tu_id, (seg_idx, tc_idx));
+    }
 }
 
-/// Mirrors `_tool_summary()` in viz_server.py — pure heuristics.
+/// Mirrors `_tool_summary()` in `viz_server.py` — pure heuristics.
 pub fn tool_summary(name: &str, inp: &Value) -> String {
     let dict = inp.as_object();
     let s = |k: &str| -> String {
         dict.and_then(|m| m.get(k))
             .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
+            .map(std::string::ToString::to_string)
             .unwrap_or_default()
     };
     let summary = match name {
         "Bash" => trim(&s("command"), 200),
-        "Read" | "Write" => trim(&s("file_path"), 200),
+        // All file-path-only tools share one summary.
+        "Read" | "Write" | "NotebookEdit" | "MultiEdit" => trim(&s("file_path"), 200),
         "Edit" => format!(
             "{}  →  {}",
             trim(&s("file_path"), 80),
@@ -347,7 +374,7 @@ pub fn tool_summary(name: &str, inp: &Value) -> String {
             "grep '{}' {}",
             trim(&s("pattern"), 60),
             trim(
-                &if !s("path").is_empty() { s("path") } else { s("glob") },
+                &if s("path").is_empty() { s("glob") } else { s("path") },
                 80
             )
         ),
@@ -355,10 +382,10 @@ pub fn tool_summary(name: &str, inp: &Value) -> String {
         "TaskList" => "list current tasks".to_string(),
         "TaskCreate" => {
             let subj = s("subject");
-            if !subj.is_empty() {
-                format!("create: {}", trim(&subj, 180))
-            } else {
+            if subj.is_empty() {
                 "create task".to_string()
+            } else {
+                format!("create: {}", trim(&subj, 180))
             }
         }
         "TaskUpdate" => {
@@ -376,7 +403,7 @@ pub fn tool_summary(name: &str, inp: &Value) -> String {
         "TaskOutput" => format!("read output #{}", s("taskId")),
         "ScheduleWakeup" => {
             let reason = s("reason");
-            let secs = dict.and_then(|m| m.get("delaySeconds")).and_then(|v| v.as_f64());
+            let secs = dict.and_then(|m| m.get("delaySeconds")).and_then(serde_json::Value::as_f64);
             match (reason.as_str(), secs) {
                 ("", Some(s)) => format!("wake in {}s", s as i64),
                 (r, Some(s)) => format!("wake in {}s — {}", s as i64, trim(r, 160)),
@@ -409,10 +436,9 @@ pub fn tool_summary(name: &str, inp: &Value) -> String {
         }
         "ExitPlanMode" | "EnterPlanMode" | "Plan" => name.to_string(),
         "Stop" => "stop".to_string(),
-        "NotebookEdit" | "MultiEdit" => trim(&s("file_path"), 200),
         _ => {
             // Generic fallback. Strip metadata and `{}` noise.
-            if dict.map(|m| m.is_empty()).unwrap_or(true) {
+            if dict.is_none_or(serde_json::Map::is_empty) {
                 format!("({name})")
             } else {
                 let filtered: serde_json::Map<String, Value> = dict

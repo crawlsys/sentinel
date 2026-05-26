@@ -6,11 +6,11 @@ use serde_json::Value;
 use crate::transcript;
 
 /// `(kind, question, options)` where kind is one of:
-///   - `"question"` — last pending tool_use is AskUserQuestion
+///   - `"question"` — last pending `tool_use` is `AskUserQuestion`
 ///   - `"reply"`    — agent's last turn ended on text with no user reply
 ///   - None         — not awaiting
 ///
-/// Mirrors `detect_awaiting_user()` in viz_server.py.
+/// Mirrors `detect_awaiting_user()` in `viz_server.py`.
 pub fn detect(path: &Path) -> (Option<&'static str>, Option<String>, Value) {
     let Ok(file) = std::fs::read_to_string(path) else { return (None, None, Value::Array(vec![])) };
 

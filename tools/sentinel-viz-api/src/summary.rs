@@ -3,16 +3,16 @@
 //! Three kinds of summary the UI can ask for:
 //!
 //!   - `card`     : 2-4 sentence recap of what an agent did in a session
-//!                  window (anchored by at_ts ± 45s if given, else the
+//!                  window (anchored by `at_ts` ± 45s if given, else the
 //!                  most recent activity tail). Shown above the
 //!                  activity-segment list in the inspector.
-//!   - `wait`     : 1-2 sentences explaining what an awaiting_user
+//!   - `wait`     : 1-2 sentences explaining what an `awaiting_user`
 //!                  session is blocked on. Shown in the STUCK panel.
 //!   - `narrative`: 1-line "what's happening right now" across N
 //!                  sessions in the last M seconds. Shown in a future
 //!                  bottom-console live feed (not wired yet).
 //!
-//! Uses the same SENTINEL_VIZ_NAMING_MODEL knob as session naming.
+//! Uses the same `SENTINEL_VIZ_NAMING_MODEL` knob as session naming.
 //! Cached server-side (10-min TTL) keyed by inputs. Rate-limited
 //! globally to 12 LLM calls/min across all summary kinds.
 //!
@@ -52,7 +52,10 @@ pub enum SummaryKind {
 }
 
 impl SummaryKind {
-    pub fn from_str(s: &str) -> Option<Self> {
+    /// Parse the wire string (`card` / `wait` / `narrative`). Named
+    /// `parse` rather than `from_str` to avoid shadowing the standard
+    /// `FromStr` trait method.
+    pub fn parse(s: &str) -> Option<Self> {
         match s {
             "card" => Some(Self::Card),
             "wait" => Some(Self::Wait),
@@ -61,7 +64,7 @@ impl SummaryKind {
         }
     }
 
-    pub fn label(self) -> &'static str {
+    pub const fn label(self) -> &'static str {
         match self {
             Self::Card => "card",
             Self::Wait => "wait",
@@ -69,7 +72,7 @@ impl SummaryKind {
         }
     }
 
-    fn system_prompt(self) -> &'static str {
+    const fn system_prompt(self) -> &'static str {
         match self {
             Self::Card => "You summarize what an autonomous coding agent did in a Sentinel session window. Be terse, concrete, focused on what the agent decided and what state it produced. 2-4 short sentences. No preamble. No markdown headers or bullet lists.",
             Self::Wait => "You explain in 1-2 sentences what an autonomous coding agent is blocked on, based on its last messages and pending tool call. The operator needs to know what to do to unblock it. No preamble.",
@@ -80,9 +83,17 @@ impl SummaryKind {
 
 pub struct SummaryState {
     pub model: RwLock<Option<ModelConfig>>,
-    /// (session_id, kind, at_ts) → cached response.
+    /// (`session_id`, kind, `at_ts`) → cached response.
     cache: RwLock<HashMap<String, CacheEntry>>,
     recent_calls: RwLock<Vec<Instant>>,
+}
+
+/// Result of a cache probe. Distinguishes a miss from a hit that
+/// cached a `None` summary (no usable text) so callers don't re-issue
+/// an LLM call for a known-empty result.
+enum CacheLookup {
+    Hit(Option<String>),
+    Miss,
 }
 
 #[derive(Debug, Clone)]
@@ -101,21 +112,21 @@ impl SummaryState {
     }
 
     pub fn set_model(&self, m: Option<ModelConfig>) {
-        *self.model.write().unwrap() = m;
-        self.cache.write().unwrap().clear();
+        *self.model.write().unwrap_or_else(std::sync::PoisonError::into_inner) = m;
+        self.cache.write().unwrap_or_else(std::sync::PoisonError::into_inner).clear();
     }
 
     fn rate_allowed(&self) -> bool {
         let now = Instant::now();
         let window = Duration::from_secs(RATE_LIMIT_WINDOW_SECS);
-        let calls = self.recent_calls.read().unwrap();
+        let calls = self.recent_calls.read().unwrap_or_else(std::sync::PoisonError::into_inner);
         calls.iter().filter(|t| now.duration_since(**t) < window).count() < RATE_LIMIT_MAX_CALLS
     }
 
     fn record_call(&self) {
         let now = Instant::now();
         let window = Duration::from_secs(RATE_LIMIT_WINDOW_SECS);
-        let mut calls = self.recent_calls.write().unwrap();
+        let mut calls = self.recent_calls.write().unwrap_or_else(std::sync::PoisonError::into_inner);
         calls.retain(|t| now.duration_since(*t) < window);
         calls.push(now);
     }
@@ -124,17 +135,17 @@ impl SummaryState {
         format!("{}|{}|{}", session_id, kind.label(), at_ts.unwrap_or(""))
     }
 
-    fn cached(&self, key: &str) -> Option<Option<String>> {
-        let cache = self.cache.read().unwrap();
-        let e = cache.get(key)?;
+    fn cached(&self, key: &str) -> CacheLookup {
+        let cache = self.cache.read().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(e) = cache.get(key) else { return CacheLookup::Miss };
         if e.built_at.elapsed().as_secs() > CACHE_TTL_SECS {
-            return None;
+            return CacheLookup::Miss;
         }
-        Some(e.text.clone())
+        CacheLookup::Hit(e.text.clone())
     }
 
     fn store(&self, key: &str, text: Option<String>) {
-        let mut cache = self.cache.write().unwrap();
+        let mut cache = self.cache.write().unwrap_or_else(std::sync::PoisonError::into_inner);
         cache.insert(key.to_string(), CacheEntry { text, built_at: Instant::now() });
     }
 }
@@ -148,20 +159,20 @@ pub async fn summarize(
     let disabled = SummaryResponse {
         session_id: session_id.to_string(),
         kind: kind.label().to_string(),
-        at_ts: at_ts.map(|s| s.to_string()),
+        at_ts: at_ts.map(std::string::ToString::to_string),
         text: None,
         source: "disabled".to_string(),
         cached: false,
     };
-    let model_snapshot = state.model.read().unwrap().clone();
+    let model_snapshot = state.model.read().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
     let Some(model) = model_snapshot.as_ref() else { return disabled };
 
     let key = SummaryState::key(session_id, kind, at_ts);
-    if let Some(cached) = state.cached(&key) {
+    if let CacheLookup::Hit(cached) = state.cached(&key) {
         return SummaryResponse {
             session_id: session_id.to_string(),
             kind: kind.label().to_string(),
-            at_ts: at_ts.map(|s| s.to_string()),
+            at_ts: at_ts.map(std::string::ToString::to_string),
             text: cached,
             source: "cache".to_string(),
             cached: true,
@@ -171,7 +182,7 @@ pub async fn summarize(
         return SummaryResponse {
             session_id: session_id.to_string(),
             kind: kind.label().to_string(),
-            at_ts: at_ts.map(|s| s.to_string()),
+            at_ts: at_ts.map(std::string::ToString::to_string),
             text: None,
             source: "rate-limited".to_string(),
             cached: false,
@@ -182,8 +193,7 @@ pub async fn summarize(
     // segments (already JSONL-derived).
     let limit = match kind {
         SummaryKind::Card => 60,
-        SummaryKind::Wait => 30,
-        SummaryKind::Narrative => 30,
+        SummaryKind::Wait | SummaryKind::Narrative => 30,
     };
     let window = match kind {
         SummaryKind::Card => 45,
@@ -196,7 +206,7 @@ pub async fn summarize(
         let resp = SummaryResponse {
             session_id: session_id.to_string(),
             kind: kind.label().to_string(),
-            at_ts: at_ts.map(|s| s.to_string()),
+            at_ts: at_ts.map(std::string::ToString::to_string),
             text: None,
             source: "no-activity".to_string(),
             cached: false,
@@ -233,7 +243,7 @@ pub async fn summarize(
     SummaryResponse {
         session_id: session_id.to_string(),
         kind: kind.label().to_string(),
-        at_ts: at_ts.map(|s| s.to_string()),
+        at_ts: at_ts.map(std::string::ToString::to_string),
         text,
         source: model.label(),
         cached: false,
@@ -241,11 +251,14 @@ pub async fn summarize(
 }
 
 fn build_activity_blob(a: &ActivityResponse, kind: SummaryKind) -> String {
+    use std::fmt::Write as _;
     let mut out = String::new();
+    // Writes to a String are infallible, so the `write!` results are
+    // intentionally discarded.
     if let Some(t) = a.transcript.as_deref() {
-        out.push_str(&format!("Session: {} (transcript {})\n", a.session_id, t));
+        let _ = writeln!(out, "Session: {} (transcript {})", a.session_id, t);
     } else {
-        out.push_str(&format!("Session: {}\n", a.session_id));
+        let _ = writeln!(out, "Session: {}", a.session_id);
     }
     out.push_str("Activity (chronological):\n");
     for ev in &a.events {
@@ -254,25 +267,25 @@ fn build_activity_blob(a: &ActivityResponse, kind: SummaryKind) -> String {
             "tool_use" => {
                 let tool = ev.tool.as_deref().unwrap_or("");
                 let text = ev.text.as_deref().unwrap_or("");
-                out.push_str(&format!("[{ts}] tool {tool}: {text}\n"));
+                let _ = writeln!(out, "[{ts}] tool {tool}: {text}");
             }
             "tool_result" => {
                 let text = ev.text.as_deref().unwrap_or("");
                 let err = ev.is_error.unwrap_or(false);
                 if err {
-                    out.push_str(&format!("[{ts}] ↳ ERROR: {text}\n"));
+                    let _ = writeln!(out, "[{ts}] ↳ ERROR: {text}");
                 } else {
-                    out.push_str(&format!("[{ts}] ↳ {text}\n"));
+                    let _ = writeln!(out, "[{ts}] ↳ {text}");
                 }
             }
             "user" => {
-                out.push_str(&format!("[{ts}] user: {}\n", ev.text.as_deref().unwrap_or("")));
+                let _ = writeln!(out, "[{ts}] user: {}", ev.text.as_deref().unwrap_or(""));
             }
             "assistant" => {
-                out.push_str(&format!("[{ts}] assistant: {}\n", ev.text.as_deref().unwrap_or("")));
+                let _ = writeln!(out, "[{ts}] assistant: {}", ev.text.as_deref().unwrap_or(""));
             }
             other => {
-                out.push_str(&format!("[{ts}] {other}: {}\n", ev.text.as_deref().unwrap_or("")));
+                let _ = writeln!(out, "[{ts}] {other}: {}", ev.text.as_deref().unwrap_or(""));
             }
         }
     }
@@ -297,7 +310,7 @@ fn sanitize(raw: &str) -> Option<String> {
     Some(cleaned.to_string())
 }
 
-/// Build a SummaryState that handles a missing model gracefully —
+/// Build a `SummaryState` that handles a missing model gracefully —
 /// returns "disabled" without ever hitting the network.
 #[cfg(test)]
 pub fn disabled_for_tests() -> SummaryState {
@@ -330,9 +343,9 @@ mod tests {
     #[test]
     fn kind_from_str_round_trips() {
         for k in ["card", "wait", "narrative"] {
-            let kind = SummaryKind::from_str(k).unwrap();
+            let kind = SummaryKind::parse(k).unwrap();
             assert_eq!(kind.label(), k);
         }
-        assert!(SummaryKind::from_str("nope").is_none());
+        assert!(SummaryKind::parse("nope").is_none());
     }
 }

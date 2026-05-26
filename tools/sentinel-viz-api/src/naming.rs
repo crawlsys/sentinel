@@ -2,13 +2,13 @@
 //! label produced by an LLM. Configurable via `SENTINEL_VIZ_NAMING_MODEL`:
 //!
 //!   none                   — no naming, callers fall back to UUID slice
-//!   openai:gpt-4o-mini     — OpenAI Chat Completions API (uses OPENAI_API_KEY)
+//!   openai:gpt-4o-mini     — `OpenAI` Chat Completions API (uses `OPENAI_API_KEY`)
 //!   openai:gpt-4o          — same, larger model
-//!   local:<model>          — Ollama at OLLAMA_URL (default http://127.0.0.1:11434)
+//!   local:<model>          — Ollama at `OLLAMA_URL` (default <http://127.0.0.1:11434>)
 //!
 //! Constraints:
 //!   - Rate-limited: max 10 outbound LLM calls per minute
-//!   - Cached: 24h TTL keyed by session_id + first-prompt-sha
+//!   - Cached: 24h TTL keyed by `session_id` + first-prompt-sha
 //!   - Graceful: any error → return None, caller uses UUID slice
 //!   - Lazy: only called when the frontend asks (no eager fan-out)
 //!
@@ -40,6 +40,14 @@ pub struct NameResponse {
     pub cached: bool,
 }
 
+/// Result of a cache probe. Distinguishes a miss from a hit that
+/// cached a `None` name (the LLM produced nothing usable) so callers
+/// don't re-issue an LLM call for a known-empty result.
+enum CacheLookup {
+    Hit(Option<String>),
+    Miss,
+}
+
 #[derive(Debug, Clone)]
 struct CacheEntry {
     name: Option<String>,
@@ -68,9 +76,9 @@ impl NamingState {
     }
 
     pub fn set_model(&self, m: Option<ModelConfig>) {
-        *self.model.write().unwrap() = m;
+        *self.model.write().unwrap_or_else(std::sync::PoisonError::into_inner) = m;
         // Drop cache so a new model can re-name everything.
-        self.cache.write().unwrap().clear();
+        self.cache.write().unwrap_or_else(std::sync::PoisonError::into_inner).clear();
     }
 
     /// Decide whether the rate limiter would allow another call.
@@ -78,7 +86,7 @@ impl NamingState {
     fn rate_allowed(&self) -> bool {
         let now = Instant::now();
         let window = Duration::from_secs(RATE_LIMIT_WINDOW_SECS);
-        let calls = self.recent_calls.read().unwrap();
+        let calls = self.recent_calls.read().unwrap_or_else(std::sync::PoisonError::into_inner);
         let in_window = calls.iter().filter(|t| now.duration_since(**t) < window).count();
         in_window < RATE_LIMIT_MAX_CALLS
     }
@@ -86,25 +94,25 @@ impl NamingState {
     fn record_call(&self) {
         let now = Instant::now();
         let window = Duration::from_secs(RATE_LIMIT_WINDOW_SECS);
-        let mut calls = self.recent_calls.write().unwrap();
+        let mut calls = self.recent_calls.write().unwrap_or_else(std::sync::PoisonError::into_inner);
         calls.retain(|t| now.duration_since(*t) < window);
         calls.push(now);
     }
 
-    fn cached(&self, session_id: &str, fp: &str) -> Option<Option<String>> {
-        let cache = self.cache.read().unwrap();
-        let entry = cache.get(session_id)?;
+    fn cached(&self, session_id: &str, fp: &str) -> CacheLookup {
+        let cache = self.cache.read().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(entry) = cache.get(session_id) else { return CacheLookup::Miss };
         if entry.prompt_fp != fp {
-            return None;
+            return CacheLookup::Miss;
         }
         if entry.built_at.elapsed().as_secs() > CACHE_TTL_SECS {
-            return None;
+            return CacheLookup::Miss;
         }
-        Some(entry.name.clone())
+        CacheLookup::Hit(entry.name.clone())
     }
 
     fn store(&self, session_id: &str, name: Option<String>, fp: String) {
-        let mut cache = self.cache.write().unwrap();
+        let mut cache = self.cache.write().unwrap_or_else(std::sync::PoisonError::into_inner);
         cache.insert(
             session_id.to_string(),
             CacheEntry {
@@ -125,7 +133,7 @@ pub async fn name_session(state: &NamingState, session_id: &str) -> NameResponse
         source: "disabled".to_string(),
         cached: false,
     };
-    let model_snapshot = state.model.read().unwrap().clone();
+    let model_snapshot = state.model.read().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
     let Some(model) = model_snapshot.as_ref() else { return no_model };
 
     // Build the prompt input — first user message + first 3 tool
@@ -157,7 +165,7 @@ pub async fn name_session(state: &NamingState, session_id: &str) -> NameResponse
     }
     let fp = fingerprint(&first_prompt);
 
-    if let Some(cached) = state.cached(session_id, &fp) {
+    if let CacheLookup::Hit(cached) = state.cached(session_id, &fp) {
         return NameResponse {
             session_id: session_id.to_string(),
             name: cached,
@@ -290,13 +298,14 @@ pub fn sanitize_name(raw: &str) -> Option<String> {
     }
     let out = words.join(" ").to_lowercase();
     // Bail on obvious model fabrications: parens, refusals, etc.
-    if out.contains("i cannot") || out.contains("i'm sorry") || out.contains("[") {
+    if out.contains("i cannot") || out.contains("i'm sorry") || out.contains('[') {
         return None;
     }
     Some(out)
 }
 
 #[cfg(test)]
+#[allow(unsafe_code)] // env mutation in from_env_none_means_no_naming
 mod tests {
     use super::*;
 
@@ -335,6 +344,6 @@ mod tests {
             std::env::remove_var("SENTINEL_VIZ_NAMING_MODEL");
         }
         let s = NamingState::from_env();
-        assert!(s.model.is_none());
+        assert!(s.model.read().unwrap_or_else(std::sync::PoisonError::into_inner).is_none());
     }
 }
