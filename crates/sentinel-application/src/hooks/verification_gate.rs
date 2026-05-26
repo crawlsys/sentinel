@@ -10,6 +10,7 @@
 use regex::Regex;
 use sentinel_domain::constants;
 use sentinel_domain::events::{HookEvent, HookInput, HookOutput};
+use sentinel_domain::state::SessionState;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -281,7 +282,18 @@ pub fn process_stop(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
 // UserPromptSubmit phase: inject verification reminder
 // ---------------------------------------------------------------------------
 
-pub fn process_prompt(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
+pub fn process_prompt(
+    input: &HookInput,
+    ctx: &HookContext<'_>,
+    state: &SessionState,
+) -> HookOutput {
+    // First-class glass break short-circuit: an audited `sentinel break`
+    // (scoped to `verification` or unscoped) suspends the verification
+    // reminder, matching the suppression in `pre_commit_verification`.
+    if super::glass_break_gate::active_glass_break(state, "verification") {
+        return HookOutput::allow();
+    }
+
     let session_id = input.session_id.as_deref().unwrap_or("unknown");
     let path = match state_file(ctx.fs, session_id) {
         Some(p) => p,
@@ -462,7 +474,36 @@ mod tests {
             ..Default::default()
         };
         let ctx = crate::hooks::test_support::stub_ctx();
-        let output = process_prompt(&input, &ctx);
+        let state = SessionState::new("test-vg-inject");
+        let output = process_prompt(&input, &ctx, &state);
+        assert!(output.hook_specific_output.is_none());
+    }
+
+    /// An active first-class glass break suppresses the verification reminder.
+    #[test]
+    fn test_glass_break_suppresses_reminder() {
+        use chrono::{Duration, Utc};
+        use sentinel_domain::state::GlassBreak;
+
+        let input = HookInput {
+            session_id: Some("test-vg-gb".into()),
+            ..Default::default()
+        };
+        let ctx = crate::hooks::test_support::stub_ctx();
+        let mut state = SessionState::new("test-vg-gb");
+        let now = Utc::now();
+        state.glass_break = Some(GlassBreak {
+            reason: "emergency".to_string(),
+            started_at: now,
+            expires_at: now + Duration::minutes(5),
+            duration_minutes: 5,
+            workflow: None,
+            challenge_code: "BREAK-000000".to_string(),
+            tools_used: Vec::new(),
+        });
+        // Short-circuits to allow() before any state-file read.
+        let output = process_prompt(&input, &ctx, &state);
+        assert!(output.blocked.is_none());
         assert!(output.hook_specific_output.is_none());
     }
 

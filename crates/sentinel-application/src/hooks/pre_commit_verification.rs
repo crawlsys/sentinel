@@ -23,6 +23,7 @@
 
 use regex::Regex;
 use sentinel_domain::events::{HookInput, HookOutput};
+use sentinel_domain::state::SessionState;
 use sentinel_domain::test_evidence::evidence_path;
 use std::path::PathBuf;
 
@@ -104,10 +105,17 @@ fn is_docs_only_commit_with(command: &str, git: &dyn super::GitStatusPort, cwd: 
 
 /// Process a pre-commit verification hook event (`PreToolUse`).
 /// Uses session-scoped signed override check.
-pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
+///
+/// An active first-class glass break (scoped to `verification` or unscoped)
+/// suppresses the block — additive to the coarse `verification` override.
+pub fn process(
+    input: &HookInput,
+    ctx: &super::HookContext<'_>,
+    state: &SessionState,
+) -> HookOutput {
     let session_id = input.session_id.as_deref().unwrap_or("unknown");
     let override_path = default_override_path(ctx.fs, session_id);
-    process_with_override(input, &override_path, session_id, ctx.fs, ctx.git)
+    process_with_override(input, &override_path, session_id, ctx.fs, ctx.git, state)
 }
 
 /// Internal: process with explicit override path + git port (for testability).
@@ -118,6 +126,7 @@ fn process_with_override(
     session_id: &str,
     fs: &dyn super::FileSystemPort,
     git: &dyn super::GitStatusPort,
+    state: &SessionState,
 ) -> HookOutput {
     // Only act on Bash tool calls
     let tool = match &input.tool_name {
@@ -163,6 +172,12 @@ fn process_with_override(
     // These files have no tests to run — requiring evidence is nonsensical.
     let cwd = input.cwd.as_deref().unwrap_or(".");
     if is_docs_only_commit_with(command, git, cwd) {
+        return HookOutput::allow();
+    }
+
+    // First-class glass break short-circuit: an audited `sentinel break`
+    // (scoped to `verification` or unscoped) suspends the verification gate.
+    if super::glass_break_gate::active_glass_break(state, "verification") {
         return HookOutput::allow();
     }
 
@@ -221,6 +236,11 @@ mod tests {
     use crate::hooks::hygiene_override;
     use sentinel_domain::test_evidence::TestEvidenceEntry;
     use std::path::Path;
+
+    /// No-break session state for tests not exercising glass-break.
+    fn nb() -> SessionState {
+        SessionState::new("pre-commit-test")
+    }
 
     /// Real-FS adapter scoped to a caller-supplied home directory.
     struct ScopedHomeFs {
@@ -292,7 +312,7 @@ mod tests {
             ..Default::default()
         };
         let ctx = crate::hooks::test_support::stub_ctx();
-        let output = process(&input, &ctx);
+        let output = process(&input, &ctx, &nb());
         assert!(output.blocked.is_none());
     }
 
@@ -304,7 +324,7 @@ mod tests {
             ..Default::default()
         };
         let ctx = crate::hooks::test_support::stub_ctx();
-        let output = process(&input, &ctx);
+        let output = process(&input, &ctx, &nb());
         assert!(output.blocked.is_none());
     }
 
@@ -324,10 +344,66 @@ mod tests {
             "test-sess",
             &crate::hooks::test_support::StubFs,
             &crate::hooks::test_support::StubGit,
+            &nb(),
         );
         assert_eq!(output.blocked, Some(true));
         assert!(output.reason.as_ref().unwrap().contains("BLOCKED"));
         assert!(output.reason.as_ref().unwrap().contains("Committing"));
+    }
+
+    /// An active first-class glass break suppresses the no-evidence block.
+    #[test]
+    fn test_glass_break_suppresses_no_evidence_block() {
+        use chrono::{Duration, Utc};
+        use sentinel_domain::state::GlassBreak;
+
+        let tmpdir = tempfile::tempdir().unwrap();
+        let override_path = tmpdir.path().join("no-override");
+        let input = HookInput {
+            tool_name: Some("Bash".to_string()),
+            tool_input: Some(serde_json::json!({"command": "git commit -m 'test'"})),
+            ..Default::default()
+        };
+
+        // Without a break: blocked (no evidence).
+        assert_eq!(
+            process_with_override(
+                &input,
+                &override_path,
+                "test-sess",
+                &crate::hooks::test_support::StubFs,
+                &crate::hooks::test_support::StubGit,
+                &nb(),
+            )
+            .blocked,
+            Some(true)
+        );
+
+        // With a verification-scoped active break: allowed.
+        let mut state = nb();
+        let now = Utc::now();
+        state.glass_break = Some(GlassBreak {
+            reason: "emergency".to_string(),
+            started_at: now,
+            expires_at: now + Duration::minutes(5),
+            duration_minutes: 5,
+            workflow: Some("verification".to_string()),
+            challenge_code: "BREAK-000000".to_string(),
+            tools_used: Vec::new(),
+        });
+        assert!(
+            process_with_override(
+                &input,
+                &override_path,
+                "test-sess",
+                &crate::hooks::test_support::StubFs,
+                &crate::hooks::test_support::StubGit,
+                &state,
+            )
+            .blocked
+            .is_none(),
+            "active verification-scoped glass break must suppress the no-evidence block"
+        );
     }
 
     #[test]
@@ -386,6 +462,7 @@ mod tests {
             "test-sess",
             &crate::hooks::test_support::StubFs,
             &StubCodeDiff,
+            &nb(),
         );
         assert_eq!(output.blocked, Some(true));
         assert!(output.reason.as_ref().unwrap().contains("Pushing"));
@@ -408,7 +485,7 @@ mod tests {
             tool_input: Some(serde_json::json!({"command": "git commit -m 'tested'"})),
             ..Default::default()
         };
-        let output = process_with_override(&input, &override_path, session_id, &fs, &git);
+        let output = process_with_override(&input, &override_path, session_id, &fs, &git, &nb());
         assert!(output.blocked.is_none());
     }
 
@@ -431,7 +508,7 @@ mod tests {
             tool_input: Some(serde_json::json!({"command": "git commit -m 'no tests'"})),
             ..Default::default()
         };
-        let output = process_with_override(&input, &override_path, session_id, &fs, &git);
+        let output = process_with_override(&input, &override_path, session_id, &fs, &git, &nb());
         assert_eq!(output.blocked, Some(true));
     }
 
@@ -482,6 +559,7 @@ mod tests {
             session_id,
             &real_fs,
             &crate::hooks::test_support::StubGit,
+            &nb(),
         );
         assert!(output.blocked.is_none());
 
@@ -500,7 +578,7 @@ mod tests {
     fn test_allows_no_tool_name() {
         let input = HookInput::default();
         let ctx = crate::hooks::test_support::stub_ctx();
-        let output = process(&input, &ctx);
+        let output = process(&input, &ctx, &nb());
         assert!(output.blocked.is_none());
     }
 
@@ -521,6 +599,7 @@ mod tests {
             "test-sess",
             &crate::hooks::test_support::StubFs,
             &crate::hooks::test_support::StubGit,
+            &nb(),
         );
         assert_eq!(output.blocked, Some(true));
     }

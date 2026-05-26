@@ -29,6 +29,7 @@ pub mod error_reporter;
 pub mod evidence_collector;
 pub mod execution_log;
 pub mod git_hygiene;
+pub mod glass_break_gate;
 pub mod good_citizen_observer;
 pub mod hookdeck_decoders;
 pub mod hygiene_override;

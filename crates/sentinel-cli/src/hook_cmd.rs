@@ -535,7 +535,7 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
             // Verification gate — remind to verify before claiming completion
             let verify_prompt_output =
                 time_and_record(ctx.fs, &mk_ctx("verification_gate"), || {
-                    hooks::verification_gate::process_prompt(&input, &ctx)
+                    hooks::verification_gate::process_prompt(&input, &ctx, &state)
                 });
             output.merge(&verify_prompt_output);
 
@@ -661,7 +661,7 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
             // Git hygiene — block on protected branch without worktree + uncommitted file limit
             if matches!(input.tool_name.as_deref(), Some("Edit" | "Write")) {
                 let hygiene_output = time_and_record(ctx.fs, &mk_ctx("git_hygiene"), || {
-                    hooks::git_hygiene::process(&input, &git, ctx.fs)
+                    hooks::git_hygiene::process(&input, &git, ctx.fs, &state)
                 });
                 output.merge(&hygiene_output);
 
@@ -744,7 +744,7 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
             if matches!(input.tool_name.as_deref(), Some("Bash")) {
                 let commit_output =
                     time_and_record(ctx.fs, &mk_ctx("pre_commit_verification"), || {
-                        hooks::pre_commit_verification::process(&input, &ctx)
+                        hooks::pre_commit_verification::process(&input, &ctx, &state)
                     });
                 output.merge(&commit_output);
 
