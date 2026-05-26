@@ -19,7 +19,7 @@ use chrono::Utc;
 use sentinel_domain::events::{HookEvent, HookInput, HookOutput};
 use tracing::{debug, warn};
 
-use super::{run_async, FileSystemPort, MemoryMcpPort};
+use super::{run_async_timeout, FileSystemPort, MemoryMcpPort};
 
 // ---------------------------------------------------------------------------
 // Injected state — written so memory_feedback can classify outcomes on Stop
@@ -206,19 +206,27 @@ fn search_memory_engine(
     args.insert("project".into(), serde_json::Value::String(project.clone()));
     args.insert("top_k".into(), serde_json::Value::Number(8u32.into()));
 
-    let payload: serde_json::Value = run_async(async {
-        match memory_mcp.call_tool("memory_search", args).await {
-            Ok(p) => Some(p),
-            Err(e) => {
-                warn!(
-                    project = %project,
-                    error = %e,
-                    "memory-mcp search failed — skipping injection this turn"
-                );
-                None
+    // Recall search cold-starts memory-mcp + server-side embed + vector search
+    // + rerank — that routinely exceeds the default 3s hook budget, which would
+    // silently drop recall (and starve the feedback loop). Give it a dedicated
+    // 10s budget: this is the read path, so a slightly slower first prompt of a
+    // session is an acceptable trade for reliable recall.
+    let payload: serde_json::Value = run_async_timeout(
+        async {
+            match memory_mcp.call_tool("memory_search", args).await {
+                Ok(p) => Some(p),
+                Err(e) => {
+                    warn!(
+                        project = %project,
+                        error = %e,
+                        "memory-mcp search failed — skipping injection this turn"
+                    );
+                    None
+                }
             }
-        }
-    })?;
+        },
+        std::time::Duration::from_secs(10),
+    )?;
 
     let hits: Vec<UnifiedHit> = payload
         .get("hits")

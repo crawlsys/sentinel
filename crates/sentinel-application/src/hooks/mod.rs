@@ -342,7 +342,22 @@ const RUN_ASYNC_TIMEOUT: std::time::Duration = sentinel_domain::constants::RUN_A
 ///    if the future doesn't complete in time.
 ///
 /// Used by all memory/Qdrant hooks that need to make async HTTP calls.
+/// Most hook work must be quick (the default 3s budget). For the few paths
+/// where a slightly-slower-but-must-complete call is acceptable (e.g. recall
+/// search, which cold-starts memory-mcp + embeds + vector-searches and can
+/// exceed 3s), use [`run_async_timeout`] with an explicit budget.
 pub fn run_async<F, T>(future: F) -> T
+where
+    F: std::future::Future<Output = T> + Send,
+    T: Send + Default,
+{
+    run_async_timeout(future, RUN_ASYNC_TIMEOUT)
+}
+
+/// Like [`run_async`] but with an explicit wall-clock timeout. Use for hook
+/// work that legitimately needs more than the default 3s (recall search, etc.)
+/// — never for the hot blocking path of a gate.
+pub fn run_async_timeout<F, T>(future: F, timeout: std::time::Duration) -> T
 where
     F: std::future::Future<Output = T> + Send,
     T: Send + Default,
@@ -358,7 +373,7 @@ where
             {
                 Ok(rt) => rt.block_on(async {
                     // Apply tokio timeout on top of reqwest timeouts
-                    if let Ok(result) = tokio::time::timeout(RUN_ASYNC_TIMEOUT, future).await { result } else {
+                    if let Ok(result) = tokio::time::timeout(timeout, future).await { result } else {
                         tracing::debug!("run_async: wall-clock timeout exceeded");
                         T::default()
                     }
