@@ -58,7 +58,7 @@ describe("StatusBar", () => {
       expect(btn.textContent).toMatch(/auto\s+on/i);
       // Visual cue must come from the on-state class set — verifies
       // the conditional renders the right palette.
-      expect(btn.className).toContain("#3fb950");
+      expect(btn.className).toContain("#4A9E5C");
     });
 
     it("invokes onToggleAuto when clicked", () => {

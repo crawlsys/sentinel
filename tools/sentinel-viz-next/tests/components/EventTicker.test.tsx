@@ -71,7 +71,7 @@ describe("EventTicker — sub-line operator phrasing (P3-20)", () => {
     const subLines = Array.from(
       screen.getByTestId("ticker-rows").querySelectorAll("li"),
     )
-      .map((li) => li.querySelector("div.text-\\[10px\\].text-\\[\\#6e7681\\].truncate.pl-4"))
+      .map((li) => li.querySelector("div.text-\\[10px\\].text-\\[\\#999\\].truncate.pl-4"))
       .filter(Boolean) as HTMLElement[];
     expect(subLines.length).toBeGreaterThan(0);
     for (const sub of subLines) {

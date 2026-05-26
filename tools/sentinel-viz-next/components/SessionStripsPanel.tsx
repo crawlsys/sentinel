@@ -126,11 +126,11 @@ export function SessionStripsPanel({
   return (
     <section
       data-testid="session-strips-panel"
-      className="flex flex-col h-full min-h-0 bg-[#0d1117] text-[#c9d1d9] font-mono"
+      className="flex flex-col h-full min-h-0 bg-[#000] text-[#E8E8E8] font-mono"
     >
-      <header className="flex items-baseline gap-3 px-3 py-2 border-b border-[#30363d] text-[10px] uppercase tracking-wider text-[#6e7681]">
+      <header className="flex items-baseline gap-3 px-3 py-2 border-b border-[#222] text-[10px] uppercase tracking-wider text-[#999]">
         <span>sessions</span>
-        <span className="text-[#484f58]">· last {labelForWindow(windowMinutes)}</span>
+        <span className="text-[#666]">· last {labelForWindow(windowMinutes)}</span>
         <span className="ml-auto flex gap-1" data-testid="strips-window-selector">
           {WINDOW_OPTIONS.map((opt) => (
             <button
@@ -140,8 +140,8 @@ export function SessionStripsPanel({
               onClick={() => setWindowMinutes(opt.minutes)}
               className={`px-1.5 py-0.5 rounded border text-[9px] tracking-normal ${
                 windowMinutes === opt.minutes
-                  ? "border-[#58a6ff] text-[#58a6ff] bg-[#0d1f3a]"
-                  : "border-[#30363d] text-[#6e7681] hover:text-[#c9d1d9]"
+                  ? "border-[#5B9BF6] text-[#5B9BF6] bg-[#0A1525]"
+                  : "border-[#222] text-[#999] hover:text-[#E8E8E8]"
               }`}
             >
               {opt.label}
@@ -152,7 +152,7 @@ export function SessionStripsPanel({
       {strips.length === 0 ? (
         <div
           data-testid="session-strips-empty"
-          className="flex-1 flex items-center justify-center text-[#6e7681] text-xs px-3"
+          className="flex-1 flex items-center justify-center text-[#999] text-xs px-3"
         >
           no sessions with activity in the last {labelForWindow(windowMinutes)}
         </div>

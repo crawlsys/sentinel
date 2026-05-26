@@ -165,24 +165,24 @@ export function SessionConsole({
       // redundant on small screens AND eats prime vertical real
       // estate the strips need. Operator can still inspect any
       // individual event via the modal that opens on tap.
-      className="hidden md:block border-t border-[#30363d] bg-[#0d1117] font-mono text-xs"
+      className="hidden md:block border-t border-[#222] bg-[#000] font-mono text-xs"
       onMouseEnter={() => setPaused(true)}
       onMouseLeave={() => setPaused(false)}
     >
       <div
-        className="flex items-center gap-2 px-3 py-1.5 cursor-pointer hover:bg-[#161b22]"
+        className="flex items-center gap-2 px-3 py-1.5 cursor-pointer hover:bg-[#111]"
         onClick={() => setOpen((o) => !o)}
       >
-        <span className="text-[#6e7681]">{open ? "▼" : "▶"}</span>
+        <span className="text-[#999]">{open ? "▼" : "▶"}</span>
         <span
           className={`inline-block w-2 h-2 rounded-full ${
-            paused ? "bg-[#6e7681]" : loading ? "bg-[#d29922]" : "bg-[#3fb950]"
+            paused ? "bg-[#999]" : loading ? "bg-[#D4A843]" : "bg-[#4A9E5C]"
           }`}
           style={{
             animation: paused || loading ? "none" : "pulse-dot 1.4s ease-in-out infinite",
           }}
         />
-        <span className="text-[10px] uppercase tracking-wider text-[#58a6ff]">
+        <span className="text-[10px] uppercase tracking-wider text-[#5B9BF6]">
           live log
         </span>
         {focused ? (
@@ -200,13 +200,13 @@ export function SessionConsole({
           </span>
         ) : (
           <span
-            className="text-[10px] uppercase tracking-wider text-[#6e7681]"
+            className="text-[10px] uppercase tracking-wider text-[#999]"
             data-testid="session-console-scope"
           >
             all sessions
           </span>
         )}
-        <span className="text-[10px] text-[#6e7681] ml-2">
+        <span className="text-[10px] text-[#999] ml-2">
           {entries.length} of last {focused ? MAX_ENTRIES_FOCUSED : MAX_ENTRIES_MERGED} ·{" "}
           {paused ? "paused (hover)" : "auto 8s"}
         </span>
@@ -214,7 +214,7 @@ export function SessionConsole({
       {open ? (
         <ul className="overflow-y-auto px-3 py-2 space-y-1.5" style={{ maxHeight: "26vh" }}>
           {entries.length === 0 ? (
-            <li className="text-[10px] text-[#6e7681] italic">
+            <li className="text-[10px] text-[#999] italic">
               {loading ? "fetching segments…" : "no recent segments"}
             </li>
           ) : (
@@ -234,13 +234,13 @@ export function SessionConsole({
                       <span className="font-bold truncate" style={{ color }}>
                         {e.label}
                       </span>
-                      <span className="text-[#6e7681] whitespace-nowrap">
+                      <span className="text-[#999] whitespace-nowrap">
                         {timeShort(e.ts)} · s:{e.sessionId.slice(0, 8)}
                       </span>
                     </div>
                     <div
                       className={`text-[11px] whitespace-pre-wrap break-words leading-snug ${
-                        e.hadError ? "text-[#f85149]" : "text-[#c9d1d9]"
+                        e.hadError ? "text-[#D71921]" : "text-[#E8E8E8]"
                       }`}
                     >
                       {e.preview || "(no preview)"}

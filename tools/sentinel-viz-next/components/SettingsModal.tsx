@@ -96,56 +96,56 @@ export function SettingsModal({ open, onClose }: Props) {
         if (e.target === e.currentTarget) onClose();
       }}
     >
-      <div className="bg-[#161b22] border border-[#30363d] rounded-lg w-[480px] max-w-[95vw] p-4 font-mono text-xs">
+      <div className="bg-[#111] border border-[#222] rounded-lg w-[480px] max-w-[95vw] p-4 font-mono text-xs">
         <div className="flex items-baseline justify-between mb-3">
-          <h3 className="text-[#58a6ff] text-sm font-bold">settings</h3>
+          <h3 className="text-[#5B9BF6] text-sm font-bold">settings</h3>
           <button
             type="button"
             aria-label="close settings"
             onClick={onClose}
-            className="text-[#6e7681] hover:text-[#c9d1d9]"
+            className="text-[#999] hover:text-[#E8E8E8]"
           >
             ✕
           </button>
         </div>
 
         <div className="mb-3">
-          <div className="text-[10px] uppercase tracking-wider text-[#6e7681] mb-1">
+          <div className="text-[10px] uppercase tracking-wider text-[#999] mb-1">
             current
           </div>
           <div className="flex justify-between">
             <span>model</span>
-            <span className="text-[#58a6ff]">{currentModel}</span>
+            <span className="text-[#5B9BF6]">{currentModel}</span>
           </div>
           <div className="flex justify-between">
             <span>openai key bound</span>
-            <span className={currentHasKey ? "text-[#3fb950]" : "text-[#6e7681]"}>
+            <span className={currentHasKey ? "text-[#4A9E5C]" : "text-[#999]"}>
               {currentHasKey ? "yes" : "no"}
             </span>
           </div>
         </div>
 
-        <div className="mb-3 border-t border-[#30363d] pt-3">
-          <label className="block text-[10px] uppercase tracking-wider text-[#6e7681] mb-1">
+        <div className="mb-3 border-t border-[#222] pt-3">
+          <label className="block text-[10px] uppercase tracking-wider text-[#999] mb-1">
             naming + summary model
           </label>
           <select
             value={pendingModel}
             onChange={(e) => setPendingModel(e.target.value)}
-            className="w-full bg-[#0d1117] border border-[#30363d] rounded px-2 py-1 text-[#c9d1d9]"
+            className="w-full bg-[#000] border border-[#222] rounded px-2 py-1 text-[#E8E8E8]"
           >
             {MODEL_PRESETS.map((p) => (
               <option key={p.value} value={p.value}>{p.label}</option>
             ))}
           </select>
-          <div className="text-[10px] text-[#6e7681] mt-1">
+          <div className="text-[10px] text-[#999] mt-1">
             Used for session names, card summaries, and "what it's waiting on" text.
           </div>
         </div>
 
         {isOpenAi ? (
           <div className="mb-3">
-            <label className="block text-[10px] uppercase tracking-wider text-[#6e7681] mb-1">
+            <label className="block text-[10px] uppercase tracking-wider text-[#999] mb-1">
               openai api key {currentHasKey ? "(leave blank to keep current)" : ""}
             </label>
             <input
@@ -153,16 +153,16 @@ export function SettingsModal({ open, onClose }: Props) {
               value={pendingKey}
               onChange={(e) => setPendingKey(e.target.value)}
               placeholder="sk-..."
-              className="w-full bg-[#0d1117] border border-[#30363d] rounded px-2 py-1 text-[#c9d1d9] font-mono"
+              className="w-full bg-[#000] border border-[#222] rounded px-2 py-1 text-[#E8E8E8] font-mono"
             />
-            <div className="text-[10px] text-[#6e7681] mt-1">
+            <div className="text-[10px] text-[#999] mt-1">
               Stays in-memory on the API server. Never persisted to disk.
             </div>
           </div>
         ) : null}
         {isOpenRouter ? (
           <div className="mb-3">
-            <label className="block text-[10px] uppercase tracking-wider text-[#6e7681] mb-1">
+            <label className="block text-[10px] uppercase tracking-wider text-[#999] mb-1">
               openrouter api key (optional — server will fall back to env / on-disk)
             </label>
             <input
@@ -170,9 +170,9 @@ export function SettingsModal({ open, onClose }: Props) {
               value={pendingKey}
               onChange={(e) => setPendingKey(e.target.value)}
               placeholder="sk-or-v1-... (leave blank to use ~/.config/openrouter/api_key)"
-              className="w-full bg-[#0d1117] border border-[#30363d] rounded px-2 py-1 text-[#c9d1d9] font-mono"
+              className="w-full bg-[#000] border border-[#222] rounded px-2 py-1 text-[#E8E8E8] font-mono"
             />
-            <div className="text-[10px] text-[#6e7681] mt-1">
+            <div className="text-[10px] text-[#999] mt-1">
               Pre-filled from the operator-convention path on the API host; leave blank to use it.
             </div>
           </div>
@@ -180,7 +180,7 @@ export function SettingsModal({ open, onClose }: Props) {
 
         {pendingModel.startsWith("local:") ? (
           <div className="mb-3">
-            <label className="block text-[10px] uppercase tracking-wider text-[#6e7681] mb-1">
+            <label className="block text-[10px] uppercase tracking-wider text-[#999] mb-1">
               ollama url (optional)
             </label>
             <input
@@ -188,21 +188,21 @@ export function SettingsModal({ open, onClose }: Props) {
               value={pendingOllama}
               onChange={(e) => setPendingOllama(e.target.value)}
               placeholder="http://127.0.0.1:11434"
-              className="w-full bg-[#0d1117] border border-[#30363d] rounded px-2 py-1 text-[#c9d1d9] font-mono"
+              className="w-full bg-[#000] border border-[#222] rounded px-2 py-1 text-[#E8E8E8] font-mono"
             />
           </div>
         ) : null}
 
-        {err ? <div className="text-[#f85149] mb-2">error: {err}</div> : null}
+        {err ? <div className="text-[#D71921] mb-2">error: {err}</div> : null}
         {savedAt ? (
-          <div className="text-[#3fb950] mb-2">saved · cache cleared</div>
+          <div className="text-[#4A9E5C] mb-2">saved · cache cleared</div>
         ) : null}
 
         <div className="flex justify-end gap-2 mt-3">
           <button
             type="button"
             onClick={onClose}
-            className="px-3 py-1 rounded border border-[#30363d] text-[#c9d1d9] hover:bg-[#21262d]"
+            className="px-3 py-1 rounded border border-[#222] text-[#E8E8E8] hover:bg-[#222]"
           >
             close
           </button>
@@ -210,7 +210,7 @@ export function SettingsModal({ open, onClose }: Props) {
             type="button"
             onClick={onSave}
             disabled={!canSave}
-            className="px-3 py-1 rounded bg-[#1f6feb] text-white disabled:bg-[#21262d] disabled:text-[#6e7681]"
+            className="px-3 py-1 rounded bg-[#5B9BF6] text-white disabled:bg-[#222] disabled:text-[#999]"
           >
             {saving ? "saving…" : "save"}
           </button>

@@ -59,8 +59,8 @@ export function SessionStrip({ data, selected, onSelect }: Props) {
       data-stuck={isStuck ? "true" : undefined}
       data-selected={selected ? "true" : undefined}
       onClick={onSelect}
-      className={`px-3 py-2 border-b border-[#21262d] cursor-pointer flex gap-3 ${
-        selected ? "bg-[#1f6feb22]" : "hover:bg-[#1f6feb14]"
+      className={`px-3 py-2 border-b border-[#222] cursor-pointer flex gap-3 ${
+        selected ? "bg-[#5B9BF622]" : "hover:bg-[#5B9BF614]"
       }`}
     >
       {/* Session-color tab — 4px wide, full row height, matches
@@ -89,8 +89,8 @@ export function SessionStrip({ data, selected, onSelect }: Props) {
           >
             {data.displayName}
           </span>
-          <span className="text-[#6e7681] text-[10px]">{statusText}</span>
-          <span className="ml-auto text-[#6e7681] text-[10px] whitespace-nowrap">
+          <span className="text-[#999] text-[10px]">{statusText}</span>
+          <span className="ml-auto text-[#999] text-[10px] whitespace-nowrap">
             {formatAge(data.lastActivityAgeS)} · {data.totalEvents} ev
           </span>
         </div>
@@ -116,13 +116,13 @@ export function SessionStrip({ data, selected, onSelect }: Props) {
                 {categoryLabel(row.category)}
               </span>
               <span
-                className="flex-1 truncate text-[#c9d1d9]"
+                className="flex-1 truncate text-[#E8E8E8]"
                 title={`${row.total} ${categoryLabel(row.category)} events, peak ${row.peak}/min`}
                 style={{ letterSpacing: "-0.04em" }}
               >
                 {bucketsToSparkline(row.counts, data.peakPerMin || row.peak)}
               </span>
-              <span className="shrink-0 text-[9px] text-[#6e7681] tabular-nums">
+              <span className="shrink-0 text-[9px] text-[#999] tabular-nums">
                 {row.total}
               </span>
             </li>
@@ -136,10 +136,10 @@ export function SessionStrip({ data, selected, onSelect }: Props) {
         {summaryAvailable && !isStuck ? (
           <div
             data-testid="session-strip-ai-summary"
-            className="mt-1 text-[10px] text-[#8b949e] leading-tight line-clamp-2"
+            className="mt-1 text-[10px] text-[#999] leading-tight line-clamp-2"
             title={summaryText}
           >
-            <span className="text-[#58a6ff] mr-1 uppercase tracking-wider text-[9px]">
+            <span className="text-[#5B9BF6] mr-1 uppercase tracking-wider text-[9px]">
               ai
             </span>
             {summaryText}
@@ -149,7 +149,7 @@ export function SessionStrip({ data, selected, onSelect }: Props) {
             keep the layout calm — show a tiny ghost placeholder so
             the strip doesn't jump when the text arrives. */}
         {!summaryAvailable && !summaryDisabled && !isStuck && summaryQ.isPending ? (
-          <div className="mt-1 text-[10px] text-[#484f58] italic leading-tight">
+          <div className="mt-1 text-[10px] text-[#666] italic leading-tight">
             ai · generating summary…
           </div>
         ) : null}
@@ -160,12 +160,12 @@ export function SessionStrip({ data, selected, onSelect }: Props) {
         {summaryFailedSilently && !isStuck ? (
           <div
             data-testid="session-strip-ai-unavailable"
-            className="mt-1 text-[10px] text-[#484f58] italic leading-tight"
+            className="mt-1 text-[10px] text-[#666] italic leading-tight"
             title={`Source: ${summaryQ.data?.source ?? "unknown"}`}
           >
             ai · no rollup available
             {summaryQ.data?.source ? (
-              <span className="text-[#30363d] ml-1">({summaryQ.data.source})</span>
+              <span className="text-[#222] ml-1">({summaryQ.data.source})</span>
             ) : null}
           </div>
         ) : null}
@@ -186,13 +186,13 @@ export function SessionStrip({ data, selected, onSelect }: Props) {
         {data.stuck ? (
           <div
             data-testid="session-strip-stuck"
-            className="mt-1.5 rounded border border-[#f85149] bg-[#3a0f0f33] p-2 space-y-1"
+            className="mt-1.5 rounded border border-[#D71921] bg-[#1a060633] p-2 space-y-1"
           >
-            <div className="text-[10px] font-bold text-[#f85149] flex items-baseline gap-1.5 flex-wrap">
+            <div className="text-[10px] font-bold text-[#D71921] flex items-baseline gap-1.5 flex-wrap">
               <span>⚠ STUCK</span>
-              <span className="text-[#ffa198]">{formatStuckAge(data.stuck.ageSecs)}</span>
-              <span className="text-[#ffa198]">·</span>
-              <span className="text-[#ffa198]">{data.stuck.kind ?? "awaiting"}</span>
+              <span className="text-[#FFA198]">{formatStuckAge(data.stuck.ageSecs)}</span>
+              <span className="text-[#FFA198]">·</span>
+              <span className="text-[#FFA198]">{data.stuck.kind ?? "awaiting"}</span>
             </div>
             {/* AI "what needs to happen" rollup. Only renders
                 when we have actual text — falls back to a hint
@@ -201,16 +201,16 @@ export function SessionStrip({ data, selected, onSelect }: Props) {
             {summaryAvailable ? (
               <div
                 data-testid="session-strip-stuck-ai"
-                className="text-[10px] text-[#ffa198] leading-snug"
+                className="text-[10px] text-[#FFA198] leading-snug"
                 title={summaryText}
               >
-                <span className="uppercase tracking-wider text-[9px] text-[#f85149] mr-1">
+                <span className="uppercase tracking-wider text-[9px] text-[#D71921] mr-1">
                   ai
                 </span>
                 {summaryText}
               </div>
             ) : summaryQ.isPending ? (
-              <div className="text-[10px] text-[#7d3434] italic leading-snug">
+              <div className="text-[10px] text-[#5a1010] italic leading-snug">
                 <span className="uppercase tracking-wider text-[9px] mr-1">ai</span>
                 generating "what's needed"…
               </div>
@@ -220,8 +220,8 @@ export function SessionStrip({ data, selected, onSelect }: Props) {
                 agent asked, not just the LLM rollup. Multi-line so
                 long questions don't get truncated. */}
             {data.stuck.question ? (
-              <div className="text-[10px] text-[#c9d1d9] leading-snug">
-                <span className="uppercase tracking-wider text-[9px] text-[#8b949e] mr-1">
+              <div className="text-[10px] text-[#E8E8E8] leading-snug">
+                <span className="uppercase tracking-wider text-[9px] text-[#999] mr-1">
                   raw
                 </span>
                 {data.stuck.question}

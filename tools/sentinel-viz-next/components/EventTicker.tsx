@@ -326,18 +326,18 @@ export function EventTicker({ events, onSelectNode, sessionColors, stuckMeta, do
   return (
     <aside
       data-testid="event-ticker"
-      className="flex flex-col h-full w-full md:w-[360px] border-t md:border-t-0 md:border-l border-[#30363d] bg-[#0d1117] text-[#c9d1d9] text-xs font-mono"
+      className="flex flex-col h-full w-full md:w-[360px] border-t md:border-t-0 md:border-l border-[#222] bg-[#000] text-[#E8E8E8] text-xs font-mono"
     >
-      <header className="px-3 py-2 border-b border-[#30363d] uppercase tracking-wider text-[10px] text-[#6e7681] flex justify-between items-baseline gap-2">
+      <header className="px-3 py-2 border-b border-[#222] uppercase tracking-wider text-[10px] text-[#999] flex justify-between items-baseline gap-2">
         <span>events</span>
         <span
           className="text-[9px] tracking-normal normal-case flex gap-2"
           data-testid="actor-legend"
           title="event origin: agent (Claude) / control plane (Sentinel) / operator (you)"
         >
-          <span style={{ color: "#6e7681" }}>◇ agent</span>
-          <span style={{ color: "#d29922" }}>⚙ sentinel</span>
-          <span style={{ color: "#58a6ff" }}>↩ user</span>
+          <span style={{ color: "#999" }}>◇ agent</span>
+          <span style={{ color: "#D4A843" }}>⚙ sentinel</span>
+          <span style={{ color: "#5B9BF6" }}>↩ user</span>
         </span>
         <span>{rows.length} rows</span>
       </header>
@@ -353,18 +353,18 @@ export function EventTicker({ events, onSelectNode, sessionColors, stuckMeta, do
               <li
                 key={`skel-${i}`}
                 data-testid="ticker-skeleton"
-                className="pl-0 pr-3 py-1 border-b border-[#21262d] flex animate-pulse"
+                className="pl-0 pr-3 py-1 border-b border-[#222] flex animate-pulse"
                 style={{ opacity: Math.max(0.15, 1 - i * 0.1) }}
               >
                 <span
                   className="shrink-0 self-stretch"
-                  style={{ width: "4px", backgroundColor: "#21262d", marginRight: "8px" }}
+                  style={{ width: "4px", backgroundColor: "#222", marginRight: "8px" }}
                 />
                 <div className="flex-1 min-w-0 flex items-baseline gap-2 py-0.5">
-                  <span className="w-3 h-3 rounded-sm bg-[#21262d]" />
-                  <span className="w-2 h-2 rounded-full bg-[#21262d]" />
-                  <span className="w-8 h-2 rounded bg-[#21262d]" />
-                  <span className="flex-1 h-2 rounded bg-[#21262d]" />
+                  <span className="w-3 h-3 rounded-sm bg-[#222]" />
+                  <span className="w-2 h-2 rounded-full bg-[#222]" />
+                  <span className="w-8 h-2 rounded bg-[#222]" />
+                  <span className="flex-1 h-2 rounded bg-[#222]" />
                 </div>
               </li>
             ))
@@ -403,7 +403,7 @@ export function EventTicker({ events, onSelectNode, sessionColors, stuckMeta, do
               data-session-id={row.sessionId ?? undefined}
               data-intervention={row.isIntervention ? "true" : undefined}
               data-stuck={pinnedKeys.has(row.key) ? "true" : undefined}
-              className={`pl-0 pr-3 py-0.5 border-b border-[#21262d] hover:bg-[#1f6feb22] flex ${
+              className={`pl-0 pr-3 py-0.5 border-b border-[#222] hover:bg-[#5B9BF622] flex ${
                 pinnedKeys.has(row.key)
                   ? "stuck-row"
                   : interventionKeys.has(row.key)
@@ -417,7 +417,7 @@ export function EventTicker({ events, onSelectNode, sessionColors, stuckMeta, do
                 className="shrink-0 self-stretch"
                 style={{
                   width: "4px",
-                  backgroundColor: sessionColor ?? "#21262d",
+                  backgroundColor: sessionColor ?? "#222",
                   marginRight: "8px",
                   borderLeft: row.outcome === "deny" || row.outcome === "denied" ? "2px solid #f85149" : undefined,
                 }}
@@ -444,10 +444,10 @@ export function EventTicker({ events, onSelectNode, sessionColors, stuckMeta, do
                   style={{
                     color:
                       row.actor === "sentinel"
-                        ? "#d29922"
+                        ? "#D4A843"
                         : row.actor === "user"
-                          ? "#58a6ff"
-                          : "#6e7681",
+                          ? "#5B9BF6"
+                          : "#999",
                   }}
                   title={ACTOR_LABEL[row.actor]}
                 >
@@ -458,12 +458,12 @@ export function EventTicker({ events, onSelectNode, sessionColors, stuckMeta, do
                   style={{ backgroundColor: categoryColor(row.category) }}
                   title={categoryLabel(row.category)}
                 />
-                <TimeAgo ts={row.ts} className="text-[#6e7681] text-[10px] whitespace-nowrap" />
+                <TimeAgo ts={row.ts} className="text-[#999] text-[10px] whitespace-nowrap" />
                 {row.members.length > 1 ? (
                   <button
                     type="button"
                     onClick={(e) => { e.stopPropagation(); toggle(row.key); }}
-                    className="px-1 rounded bg-[#21262d] text-[#58a6ff] text-[10px] hover:bg-[#30363d]"
+                    className="px-1 rounded bg-[#222] text-[#5B9BF6] text-[10px] hover:bg-[#222]"
                     title="show grouped members"
                   >
                     ×{row.members.length} {isOpen ? "▾" : "▸"}
@@ -485,7 +485,7 @@ export function EventTicker({ events, onSelectNode, sessionColors, stuckMeta, do
               {row.augment && row.tools.length <= 1 && row.members.length === 1 ? (
                 <div
                   data-testid="singleton-augment"
-                  className="pl-3 text-[10px] text-[#8b949e] break-words leading-tight line-clamp-2"
+                  className="pl-3 text-[10px] text-[#999] break-words leading-tight line-clamp-2"
                   title={row.augment}
                 >
                   {row.augment}
@@ -501,7 +501,7 @@ export function EventTicker({ events, onSelectNode, sessionColors, stuckMeta, do
                   shouldShowSubLine() helper is exported so the
                   rule is testable. */}
               {shouldShowSubLine(row) ? (
-                <div className="text-[10px] text-[#6e7681] truncate pl-4">
+                <div className="text-[10px] text-[#999] truncate pl-4">
                   {subLineText(row)}
                 </div>
               ) : null}
@@ -522,7 +522,7 @@ export function EventTicker({ events, onSelectNode, sessionColors, stuckMeta, do
               </div>{/* /click-target */}
               {isOpen ? (
                 <ul
-                  className="mt-1 pl-4 border-l border-dashed border-[#30363d]"
+                  className="mt-1 pl-4 border-l border-dashed border-[#222]"
                   data-testid="ticker-flyout"
                 >
                   {row.members.map((m, i) => (
@@ -616,12 +616,12 @@ function RolledPreview({ row }: { row: TickerRow }) {
           key={`prev-${i}`}
           className="flex gap-1.5 items-baseline truncate"
         >
-          <span className="text-[#484f58] shrink-0 w-10 truncate">{l.tool}</span>
+          <span className="text-[#666] shrink-0 w-10 truncate">{l.tool}</span>
           <span
-            className={`truncate ${l.isError ? "text-[#f85149]" : "text-[#8b949e]"}`}
+            className={`truncate ${l.isError ? "text-[#D71921]" : "text-[#999]"}`}
             title={l.summary || l.tool}
           >
-            {l.summary || <span className="text-[#484f58] italic">(loading…)</span>}
+            {l.summary || <span className="text-[#666] italic">(loading…)</span>}
           </span>
         </li>
       ))}
@@ -650,18 +650,18 @@ function FlyoutMember({
   return (
     <li
       onClick={() => member.toolCallId && onSelect(member.toolCallId, member.ts)}
-      className="py-0.5 text-[10px] text-[#c9d1d9] hover:text-[#58a6ff] cursor-pointer flex gap-2 items-baseline"
+      className="py-0.5 text-[10px] text-[#E8E8E8] hover:text-[#5B9BF6] cursor-pointer flex gap-2 items-baseline"
     >
-      <TimeAgo ts={member.ts} className="text-[#6e7681] shrink-0" />
+      <TimeAgo ts={member.ts} className="text-[#999] shrink-0" />
       {member.tool ? (
-        <span className="text-[#c9d1d9] shrink-0 w-12 truncate">{member.tool}</span>
+        <span className="text-[#E8E8E8] shrink-0 w-12 truncate">{member.tool}</span>
       ) : null}
       <span
-        className={`text-[9px] truncate flex-1 ${err ? "text-[#f85149]" : "text-[#8b949e]"}`}
+        className={`text-[9px] truncate flex-1 ${err ? "text-[#D71921]" : "text-[#999]"}`}
         title={tc?.summary ?? undefined}
       >
         {summary ?? (
-          <span className="text-[#484f58]">
+          <span className="text-[#666]">
             {member.toolCallId ? member.toolCallId.replace("SentinelToolCall#", "TC#") : ""}
           </span>
         )}
@@ -669,12 +669,12 @@ function FlyoutMember({
       {diffStats ? (
         <span
           data-testid="flyout-diff-stats"
-          className="text-[9px] shrink-0 px-1 rounded bg-[#21262d] border border-[#30363d]"
+          className="text-[9px] shrink-0 px-1 rounded bg-[#222] border border-[#222]"
           title={`${diffStats.insertions} insertions, ${diffStats.deletions} deletions, ${diffStats.files} files`}
         >
-          <span className="text-[#3fb950]">+{diffStats.insertions}</span>
-          <span className="text-[#6e7681]">/</span>
-          <span className="text-[#f85149]">-{diffStats.deletions}</span>
+          <span className="text-[#4A9E5C]">+{diffStats.insertions}</span>
+          <span className="text-[#999]">/</span>
+          <span className="text-[#D71921]">-{diffStats.deletions}</span>
         </span>
       ) : null}
     </li>
@@ -757,11 +757,11 @@ function StuckReasonLine({ meta }: { meta: StuckMeta }) {
   return (
     <div
       data-testid="stuck-reason-line"
-      className="pl-4 mt-0.5 text-[10px] font-bold text-[#f85149] truncate"
+      className="pl-4 mt-0.5 text-[10px] font-bold text-[#D71921] truncate"
       title={meta.question ?? kindLabel}
     >
       ⚠ STUCK {ageLabel} · {kindLabel}
-      {question ? <span className="font-normal text-[#ffa198] ml-1">— {question}</span> : null}
+      {question ? <span className="font-normal text-[#FFA198] ml-1">— {question}</span> : null}
     </div>
   );
 }

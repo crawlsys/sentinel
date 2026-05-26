@@ -65,29 +65,29 @@ export function KpiBar() {
       <Card
         label="active"
         value={`${kpis.sessions_active} / ${kpis.sessions_total}`}
-        accent="#3fb950"
+        accent="#4A9E5C"
       />
       <Card
         label="evt/min"
         value={isIdle ? "idle" : kpis.events_per_min.toFixed(0)}
-        accent={isIdle ? "#484f58" : "#58a6ff"}
+        accent={isIdle ? "#666" : "#5B9BF6"}
         title={isIdle ? "no events in the last 5 minutes" : undefined}
       />
       <Card
         label="5m"
         value={isIdle ? "—" : String(kpis.events_5m)}
-        accent={isIdle ? "#484f58" : "#bc8cff"}
+        accent={isIdle ? "#666" : "#bc8cff"}
         title={isIdle ? "no events in the last 5 minutes" : undefined}
       />
       {kpis.tokens_5m ? (
         <Card
           label="out/5m"
           value={formatTokens(kpis.tokens_5m.output)}
-          accent="#d29922"
+          accent="#D4A843"
           title={`input ${formatTokens(kpis.tokens_5m.input)} · cache ${formatTokens(kpis.tokens_5m.cache_read)} read · ${formatTokens(kpis.tokens_5m.cache_creation)} write · output ${formatTokens(kpis.tokens_5m.output)}`}
         />
       ) : (
-        <Card label="out/5m" value="—" accent="#484f58" title="no transcript tokens parsed in window" />
+        <Card label="out/5m" value="—" accent="#666" title="no transcript tokens parsed in window" />
       )}
       {/* STUCK count surfaced via the dedicated red-pulsing badge in
           StatusBar — don't double it up here. */}
@@ -108,10 +108,10 @@ function Card({
 }) {
   return (
     <div
-      className="flex items-baseline gap-1 px-2 py-0.5 rounded bg-[#161b22] border border-[#30363d]"
+      className="flex items-baseline gap-1 px-2 py-0.5 rounded bg-[#111] border border-[#222]"
       title={title}
     >
-      <span className="text-[#6e7681] uppercase tracking-wider">{label}</span>
+      <span className="text-[#999] uppercase tracking-wider">{label}</span>
       <span className="font-bold" style={{ color: accent }}>
         {value}
       </span>

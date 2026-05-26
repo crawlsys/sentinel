@@ -242,9 +242,9 @@ export default function Page() {
           {!graph ? (
             <div
               data-testid="loading-overlay"
-              className="absolute bottom-3 right-3 flex items-center gap-2 text-[#6e7681] font-mono text-[10px] uppercase tracking-wider pointer-events-none"
+              className="absolute bottom-3 right-3 flex items-center gap-2 text-[#999] font-mono text-[10px] uppercase tracking-wider pointer-events-none"
             >
-              <div className="w-3 h-3 border-2 border-[#30363d] border-t-[#58a6ff] rounded-full animate-spin" />
+              <div className="w-3 h-3 border-2 border-[#222] border-t-[#5B9BF6] rounded-full animate-spin" />
               <span>{error ?? "loading sentinel snapshot…"}</span>
             </div>
           ) : null}

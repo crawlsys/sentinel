@@ -1,159 +1,118 @@
 @import "tailwindcss";
 
+/* ──────────────────────────────────────────────────────────────
+   Nothing Design System Tokens — Dark mode
+   Per references/tokens.md. OLED background, white data glowing.
+   Session-color tabs in lib/session-colors.ts stay (data-status
+   exemption per skill section 2.5).
+   ──────────────────────────────────────────────────────────── */
 :root {
-  --background: #0d1117;
-  --foreground: #c9d1d9;
-  --accent: #58a6ff;
-  --ok: #3fb950;
-  --ask: #d29922;
-  --deny: #f85149;
-  --session: #bc8cff;
-  --muted: #6e7681;
+  /* Surface scale */
+  --black: #000000;
+  --surface: #111111;
+  --surface-raised: #1A1A1A;
+  --border: #222222;
+  --border-visible: #333333;
+
+  /* Text hierarchy — four levels max */
+  --text-disabled: #666666;
+  --text-secondary: #999999;
+  --text-primary: #E8E8E8;
+  --text-display: #FFFFFF;
+
+  /* Accent & status — color is an event */
+  --accent: #D71921;
+  --accent-subtle: rgba(215, 25, 33, 0.15);
+  --success: #4A9E5C;
+  --warning: #D4A843;
+  --info: #5B9BF6;
 }
 
 @theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-mono: var(--font-geist-mono);
+  /* Tailwind theme bridge — exposes the tokens as bg-/text utilities. */
+  --color-background: var(--black);
+  --color-foreground: var(--text-primary);
+  --color-surface: var(--surface);
+  --color-surface-raised: var(--surface-raised);
+  --color-border: var(--border);
+  --color-border-visible: var(--border-visible);
+  --color-text-disabled: var(--text-disabled);
+  --color-text-secondary: var(--text-secondary);
+  --color-text-primary: var(--text-primary);
+  --color-text-display: var(--text-display);
+  --color-accent: var(--accent);
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+  --color-info: var(--info);
+
+  /* Font families — three discrete roles. */
+  --font-sans: var(--font-grotesk), "DM Sans", system-ui, sans-serif;
+  --font-mono: var(--font-space-mono), "JetBrains Mono", "SF Mono", monospace;
+  --font-doto: var(--font-doto), var(--font-space-mono), monospace;
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  background: var(--black);
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  font-feature-settings: "tnum" 1, "ss01" 1;
 }
 
-/* ---------- accessible focus rings (keyboard nav) ----------
-   Default browser outlines render at ~rgb(16,16,16) which is
-   essentially invisible against the #0d1117 / #161b22 panel
-   backgrounds. Use the existing accent palette and keep the
-   outline OUTSIDE the element so it doesn't shift layout. */
+/* Instrument-panel label utility class for ALL CAPS Space Mono labels
+   per Section 2.2. Used by category labels, kpibar labels, status
+   bar metadata, inspector field names. */
+.nd-label {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.2;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+}
+
+.nd-caption {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.4;
+  letter-spacing: 0.04em;
+  color: var(--text-secondary);
+}
+
+/* Hero number treatment — Doto, large, tight tracking. Reserved
+   for the ONE moment of expression per screen (per section 2.6). */
+.nd-display {
+  font-family: var(--font-doto);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1.0;
+  color: var(--text-display);
+}
+
+/* ──────────────────────────────────────────────────────────────
+   Focus rings — Nothing-style high-contrast accent border
+   ──────────────────────────────────────────────────────────── */
 button:focus-visible,
 a:focus-visible,
 [role="button"]:focus-visible,
 [tabindex]:focus-visible {
-  outline: 2px solid var(--accent);
+  outline: 1px solid var(--text-display);
   outline-offset: 2px;
-  /* On dark panels a faint glow makes the ring pop without the
-     2px outline needing to be thick. */
-  box-shadow: 0 0 0 4px rgba(88, 166, 255, 0.18);
+  box-shadow: none;
 }
 
-/* ---------- graph node pulses (port of viz_server.py liveness ring) ---------- */
-
-/* Continuous per-status pulse on the node's primary circle. */
-@keyframes node-pulse-firing {
-  0%, 100% { stroke: var(--accent); stroke-width: 2px; filter: drop-shadow(0 0 3px var(--accent)); }
-  50%      { stroke: var(--accent); stroke-width: 3px; filter: drop-shadow(0 0 12px var(--accent)) drop-shadow(0 0 22px var(--accent)); }
-}
-@keyframes node-pulse-busy {
-  0%, 100% { stroke: var(--session); stroke-width: 1.5px; filter: drop-shadow(0 0 2px var(--session)); }
-  50%      { stroke: var(--session); stroke-width: 2px;   filter: drop-shadow(0 0 8px var(--session)); }
-}
-@keyframes node-pulse-awaiting {
-  0%, 100% { stroke: var(--ask); stroke-width: 2px; filter: drop-shadow(0 0 4px var(--ask)); }
-  50%      { stroke: var(--ask); stroke-width: 3px; filter: drop-shadow(0 0 14px var(--ask)) drop-shadow(0 0 24px var(--ask)); }
-}
-
-g.node[data-status="firing"] > circle:first-of-type {
-  animation: node-pulse-firing 1.4s ease-in-out infinite;
-}
-g.node[data-status="busy"] > circle:first-of-type {
-  animation: node-pulse-busy 2.6s ease-in-out infinite;
-}
-g.node[data-status="awaiting_user"] > circle:first-of-type {
-  animation: node-pulse-awaiting 1.6s ease-in-out infinite;
-}
-g.node[data-status="dormant"] { opacity: 0.55; }
-g.node[data-status="dead"]    { opacity: 0.30; filter: grayscale(0.6); }
-
-/* Concentric ring radiating outward from active session nodes. */
-@keyframes ring-expand-firing {
-  0%   { r: 12; opacity: 0.7; }
-  100% { r: 28; opacity: 0; }
-}
-@keyframes ring-expand-busy {
-  0%   { r: 12; opacity: 0.45; }
-  100% { r: 22; opacity: 0; }
-}
-@keyframes ring-expand-await {
-  0%   { r: 12; opacity: 0.85; }
-  100% { r: 32; opacity: 0; }
-}
-
-g.node circle.pulse-ring {
-  fill: none;
-  pointer-events: none;
-}
-g.node[data-status="firing"] circle.pulse-ring {
-  stroke: var(--accent); stroke-width: 1.5px;
-  animation: ring-expand-firing 1.4s ease-out infinite;
-}
-g.node[data-status="busy"] circle.pulse-ring {
-  stroke: var(--session); stroke-width: 1px;
-  animation: ring-expand-busy 2.6s ease-out infinite;
-}
-g.node[data-status="awaiting_user"] circle.pulse-ring {
-  stroke: var(--ask); stroke-width: 2px;
-  animation: ring-expand-await 1.6s ease-out infinite;
-}
-g.node:not([data-status="firing"]):not([data-status="busy"]):not([data-status="awaiting_user"]) circle.pulse-ring {
-  display: none;
-}
-
-/* ---------- click-burst pulse (one-shot when user selects a node) ---------- */
-
-@keyframes click-burst {
-  0%   { r: 6;  opacity: 0.9; stroke-width: 3px; }
-  100% { r: 48; opacity: 0;   stroke-width: 0.5px; }
-}
-g.click-burst circle {
-  fill: none;
-  stroke: var(--accent);
-  pointer-events: none;
-  animation: click-burst 0.7s ease-out forwards;
-}
-
-/* ---------- persistent selection halo (always on for selected node) ---------- */
-
-@keyframes selected-halo {
-  0%, 100% { stroke-opacity: 0.95; stroke-width: 2.5px; r: 16; }
-  50%      { stroke-opacity: 0.55; stroke-width: 4px;   r: 20; }
-}
-g.selected-marker {
-  pointer-events: none;
-}
-g.selected-marker > circle.halo-outer {
-  fill: none;
-  stroke: var(--accent);
-  stroke-dasharray: 4 3;
-  animation: selected-halo 1.8s ease-in-out infinite;
-}
-g.selected-marker > circle.halo-inner {
-  fill: none;
-  stroke: var(--accent);
-  stroke-width: 2px;
-  opacity: 0.6;
-}
-
-/* ---------- live-log header pulse dot ---------- */
-
-@keyframes pulse-dot {
-  0%, 100% { opacity: 1.0; transform: scale(1.0); }
-  50%      { opacity: 0.55; transform: scale(0.75); }
-}
-
-/* ---------- sticky stuck rows in the event ticker ---------- */
-
+/* ──────────────────────────────────────────────────────────────
+   Stuck callout — the SOLE accent moment per screen
+   ──────────────────────────────────────────────────────────── */
 @keyframes stuck-row-pulse {
   0%, 100% {
-    background-color: rgba(248, 81, 73, 0.10);
-    box-shadow: inset 3px 0 0 rgba(248, 81, 73, 0.85);
+    background-color: rgba(215, 25, 33, 0.10);
+    box-shadow: inset 3px 0 0 var(--accent);
   }
   50% {
-    background-color: rgba(248, 81, 73, 0.28);
-    box-shadow: inset 3px 0 0 rgba(248, 81, 73, 1.0),
-                inset 0 0 18px rgba(248, 81, 73, 0.35);
+    background-color: rgba(215, 25, 33, 0.22);
+    box-shadow:
+      inset 3px 0 0 var(--accent),
+      inset 0 0 14px rgba(215, 25, 33, 0.30);
   }
 }
 li.stuck-row {
@@ -163,24 +122,35 @@ li.stuck-row {
   z-index: 2;
 }
 
-/* ---------- intervention rows (Sentinel actively denied / injected / blocked) ---------- */
-
-@keyframes intervention-row-pulse {
-  0%, 100% {
-    background-color: rgba(210, 153, 34, 0.08);
-    box-shadow: inset 3px 0 0 rgba(210, 153, 34, 0.80);
-  }
-  50% {
-    background-color: rgba(210, 153, 34, 0.22);
-    box-shadow: inset 3px 0 0 rgba(210, 153, 34, 1.0),
-                inset 0 0 14px rgba(210, 153, 34, 0.30);
-  }
-}
+/* ──────────────────────────────────────────────────────────────
+   Intervention rows — demoted from pulse to static border per
+   Section 2.6 (one accent break per screen). Stuck = red.
+   Interventions = data-status amber on the border only.
+   ──────────────────────────────────────────────────────────── */
 li.intervention-row {
-  animation: intervention-row-pulse 2.0s ease-in-out infinite;
+  background-color: rgba(212, 168, 67, 0.05);
+  box-shadow: inset 3px 0 0 var(--warning);
   position: sticky;
-  /* Stack below stuck rows (z=2) so a stuck overlay never gets
-     buried under an intervention's pulse. */
   top: 0;
   z-index: 1;
+}
+
+/* ──────────────────────────────────────────────────────────────
+   Dot-matrix motif background — used sparingly on hero areas
+   ──────────────────────────────────────────────────────────── */
+.nd-dot-grid {
+  background-image: radial-gradient(circle, var(--border-visible) 1px, transparent 1px);
+  background-size: 16px 16px;
+}
+.nd-dot-grid-subtle {
+  background-image: radial-gradient(circle, var(--border) 0.5px, transparent 0.5px);
+  background-size: 12px 12px;
+}
+
+/* ──────────────────────────────────────────────────────────────
+   Live-log header pulse dot (retained for desktop)
+   ──────────────────────────────────────────────────────────── */
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1.0; transform: scale(1.0); }
+  50%      { opacity: 0.55; transform: scale(0.75); }
 }

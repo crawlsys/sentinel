@@ -31,26 +31,26 @@ describe("livenessLabel — three-state stream freshness signal", () => {
   it("live → green ● with pulse hint", () => {
     const l = livenessLabel("live", true, fakeGraph);
     expect(l.text).toBe("live");
-    expect(l.color).toBe("#3fb950");
+    expect(l.color).toBe("#4A9E5C");
     expect(l.glyph).toBe("●");
   });
 
   it("stale → amber ●; this is the post-P3-21 win — operator sees a 5-30s SSE pause", () => {
     const l = livenessLabel("stale", true, fakeGraph);
     expect(l.text).toBe("stale");
-    expect(l.color).toBe("#d29922");
+    expect(l.color).toBe("#D4A843");
   });
 
   it("down with graph data → blue ● 'ready' (cached snapshot still trustworthy enough to view)", () => {
     const l = livenessLabel("down", false, fakeGraph);
     expect(l.text).toBe("ready");
-    expect(l.color).toBe("#58a6ff");
+    expect(l.color).toBe("#5B9BF6");
   });
 
   it("down with NO graph data → red ○ 'down' (full failure mode)", () => {
     const l = livenessLabel("down", false, null);
     expect(l.text).toBe("down");
-    expect(l.color).toBe("#f85149");
+    expect(l.color).toBe("#D71921");
     expect(l.glyph).toBe("○");
   });
 
@@ -61,7 +61,7 @@ describe("livenessLabel — three-state stream freshness signal", () => {
     // a fully populated dashboard, which is wrong.
     const l = livenessLabel("init", false, fakeGraph);
     expect(l.text).toBe("ready");
-    expect(l.color).toBe("#58a6ff");
+    expect(l.color).toBe("#5B9BF6");
   });
 
   it("init with NO graph yet → connecting (cold start)", () => {

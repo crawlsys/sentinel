@@ -51,17 +51,17 @@ function segmentStyle(
   hadError: boolean,
   tools: string[],
 ): { border: string; label: string; bg: string } {
-  if (hadError) return { border: "#f85149", label: "#f85149", bg: "#3a0f0f" };
-  if (kind === "user_input") return { border: "#58a6ff", label: "#58a6ff", bg: "#0d1f3a" };
+  if (hadError) return { border: "#D71921", label: "#D71921", bg: "#1a0606" };
+  if (kind === "user_input") return { border: "#5B9BF6", label: "#5B9BF6", bg: "#0A1525" };
   // Assistant turn — color by the dominant tool category within the turn.
   if (tools.length > 0) {
     const t = tools[0];
-    if (TC_TOOLS.has(t)) return { border: "#3fb950", label: "#3fb950", bg: "#0d1f0d" };
-    if (PLANNING_TOOLS.has(t)) return { border: "#d29922", label: "#d29922", bg: "#1f1a08" };
-    if (COMMUNICATION_TOOLS.has(t)) return { border: "#bc8cff", label: "#bc8cff", bg: "#1a0f24" };
+    if (TC_TOOLS.has(t)) return { border: "#4A9E5C", label: "#4A9E5C", bg: "#0A1A0A" };
+    if (PLANNING_TOOLS.has(t)) return { border: "#D4A843", label: "#D4A843", bg: "#1A1408" };
+    if (COMMUNICATION_TOOLS.has(t)) return { border: "#bc8cff", label: "#bc8cff", bg: "#0F0818" };
   }
   // Text-only assistant turn (no tool use).
-  return { border: "#bc8cff", label: "#bc8cff", bg: "#1a0f24" };
+  return { border: "#bc8cff", label: "#bc8cff", bg: "#0F0818" };
 }
 
 interface Props {
@@ -108,9 +108,9 @@ export function PanelInspector({ node, anchorTs, onClose }: Props) {
     return (
       <section
         data-testid="panel-inspector"
-        className="w-full md:w-[360px] flex-1 md:flex-none min-h-0 max-h-screen md:max-h-none border-t md:border-t-0 md:border-l border-[#30363d] bg-[#161b22] text-[#c9d1d9] p-4 text-xs font-mono"
+        className="w-full md:w-[360px] flex-1 md:flex-none min-h-0 max-h-screen md:max-h-none border-t md:border-t-0 md:border-l border-[#222] bg-[#111] text-[#E8E8E8] p-4 text-xs font-mono"
       >
-        <p className="text-[#6e7681]">click a node or ticker row to inspect</p>
+        <p className="text-[#999]">click a node or ticker row to inspect</p>
       </section>
     );
   }
@@ -118,11 +118,11 @@ export function PanelInspector({ node, anchorTs, onClose }: Props) {
   return (
     <section
       data-testid="panel-inspector"
-      className="w-full md:w-[360px] border-t md:border-t-0 md:border-l border-[#30363d] bg-[#161b22] text-[#c9d1d9] p-4 text-xs font-mono overflow-y-auto"
+      className="w-full md:w-[360px] border-t md:border-t-0 md:border-l border-[#222] bg-[#111] text-[#E8E8E8] p-4 text-xs font-mono overflow-y-auto"
     >
       <header className="flex items-baseline justify-between mb-3">
-        <h3 className="text-[#c9d1d9] text-sm">
-          <span className="text-[#58a6ff]">{friendlyTitle(node)}</span>
+        <h3 className="text-[#E8E8E8] text-sm">
+          <span className="text-[#5B9BF6]">{friendlyTitle(node)}</span>
         </h3>
         <button
           aria-label="close inspector"
@@ -130,7 +130,7 @@ export function PanelInspector({ node, anchorTs, onClose }: Props) {
           // Touch target sized for thumbs on mobile (≥44×44). On
           // desktop the tighter padding still leaves a clear hit
           // area but doesn't dominate the header.
-          className="text-[#6e7681] hover:text-[#c9d1d9] -mr-2 -my-2 px-3 py-2 text-base md:text-sm rounded hover:bg-[#21262d]"
+          className="text-[#999] hover:text-[#E8E8E8] -mr-2 -my-2 px-3 py-2 text-base md:text-sm rounded hover:bg-[#222]"
         >
           ✕
         </button>
@@ -168,7 +168,7 @@ export function PanelInspector({ node, anchorTs, onClose }: Props) {
       {node.awaiting_question && shouldShowRawAwaiting(summaryKind, summaryQ.data?.text ?? null) ? (
         <div
           data-testid="raw-awaiting-block"
-          className="mt-4 p-2 bg-[#0d1117] border border-[#30363d] rounded"
+          className="mt-4 p-2 bg-[#000] border border-[#222] rounded"
         >
           <div className="text-[10px] uppercase text-[#bc8cff] mb-1">awaiting user · {node.awaiting_kind}</div>
           <div className="text-[11px] whitespace-pre-wrap">{node.awaiting_question}</div>
@@ -176,14 +176,14 @@ export function PanelInspector({ node, anchorTs, onClose }: Props) {
       ) : null}
 
       <details className="mt-4">
-        <summary className="cursor-pointer text-[#6e7681] text-[10px] uppercase tracking-wider">data</summary>
-        <pre className="mt-2 text-[10px] bg-[#0d1117] p-2 rounded border border-[#30363d] overflow-x-auto">
+        <summary className="cursor-pointer text-[#999] text-[10px] uppercase tracking-wider">data</summary>
+        <pre className="mt-2 text-[10px] bg-[#000] p-2 rounded border border-[#222] overflow-x-auto">
           {JSON.stringify(node.data, null, 2)}
         </pre>
       </details>
 
       {sessionId ? (
-        <div className="mt-4 border-t border-[#30363d] pt-3">
+        <div className="mt-4 border-t border-[#222] pt-3">
           <SummaryCard
             kind={summaryKind}
             text={summaryQ.data?.text ?? null}
@@ -191,14 +191,14 @@ export function PanelInspector({ node, anchorTs, onClose }: Props) {
             loading={summaryQ.isPending}
             error={summaryQ.error ? "summary unavailable" : null}
           />
-          <h4 className="text-[10px] uppercase tracking-wider text-[#6e7681] mb-2 flex justify-between mt-4">
+          <h4 className="text-[10px] uppercase tracking-wider text-[#999] mb-2 flex justify-between mt-4">
             <span>{anchorTs ? "activity ± 60s" : "recent activity"}</span>
-            {anchorTs ? <span className="text-[#58a6ff]">@ {anchorTs.slice(11, 19)}</span> : null}
+            {anchorTs ? <span className="text-[#5B9BF6]">@ {anchorTs.slice(11, 19)}</span> : null}
           </h4>
           {activityQ.isPending ? (
-            <p className="text-[#6e7681]">loading…</p>
+            <p className="text-[#999]">loading…</p>
           ) : activityQ.error ? (
-            <p className="text-[#f85149]">activity error</p>
+            <p className="text-[#D71921]">activity error</p>
           ) : activityQ.data?.segments.length ? (
             <ul className="space-y-2" data-testid="activity-segments">
               {activityQ.data.segments.slice(-12).reverse().map((s, i) => {
@@ -219,10 +219,10 @@ export function PanelInspector({ node, anchorTs, onClose }: Props) {
                       <span className="font-bold truncate" style={{ color: sty.label }}>
                         {s.kind === "user_input" ? "user input" : s.label}
                       </span>
-                      <span className="text-[#6e7681] whitespace-nowrap">{relTime(s.ts)}</span>
+                      <span className="text-[#999] whitespace-nowrap">{relTime(s.ts)}</span>
                     </div>
                     {hasBody ? (
-                      <div className="text-[10px] text-[#c9d1d9] opacity-90 whitespace-pre-wrap break-words mb-1">
+                      <div className="text-[10px] text-[#E8E8E8] opacity-90 whitespace-pre-wrap break-words mb-1">
                         {bodyText}
                       </div>
                     ) : null}
@@ -231,19 +231,19 @@ export function PanelInspector({ node, anchorTs, onClose }: Props) {
                         {calls.map((tc, j) => (
                           <li
                             key={`${tc.id || j}`}
-                            className="text-[10px] pl-2 border-l border-[#30363d]"
+                            className="text-[10px] pl-2 border-l border-[#222]"
                           >
                             <div className="flex justify-between gap-2">
-                              <span className="font-mono text-[#3fb950]">{tc.tool}</span>
+                              <span className="font-mono text-[#4A9E5C]">{tc.tool}</span>
                               {tc.error ? (
-                                <span className="text-[#f85149]">error</span>
+                                <span className="text-[#D71921]">error</span>
                               ) : tc.result_preview ? (
-                                <span className="text-[#6e7681]">ok</span>
+                                <span className="text-[#999]">ok</span>
                               ) : (
-                                <span className="text-[#6e7681]">pending</span>
+                                <span className="text-[#999]">pending</span>
                               )}
                             </div>
-                            <div className="text-[10px] text-[#c9d1d9] opacity-90 whitespace-pre-wrap break-words">
+                            <div className="text-[10px] text-[#E8E8E8] opacity-90 whitespace-pre-wrap break-words">
                               {tc.summary && tc.summary !== `(${tc.tool})` ? tc.summary : (
                                 <span className="opacity-50">(no args)</span>
                               )}
@@ -251,7 +251,7 @@ export function PanelInspector({ node, anchorTs, onClose }: Props) {
                             {tc.result_preview ? (
                               <div
                                 className="text-[10px] mt-0.5 opacity-70 italic"
-                                style={{ color: tc.error ? "#f85149" : "#6e7681" }}
+                                style={{ color: tc.error ? "#D71921" : "#999" }}
                               >
                                 → {tc.result_preview}
                               </div>
@@ -260,7 +260,7 @@ export function PanelInspector({ node, anchorTs, onClose }: Props) {
                         ))}
                       </ul>
                     ) : !hasBody ? (
-                      <div className="text-[10px] text-[#6e7681] italic">
+                      <div className="text-[10px] text-[#999] italic">
                         (empty event — likely Stop or hook artefact)
                       </div>
                     ) : null}
@@ -269,7 +269,7 @@ export function PanelInspector({ node, anchorTs, onClose }: Props) {
               })}
             </ul>
           ) : (
-            <p className="text-[#6e7681]">no segments in window</p>
+            <p className="text-[#999]">no segments in window</p>
           )}
         </div>
       ) : null}
@@ -293,8 +293,8 @@ export function shouldShowRawAwaiting(
 function Row({ k, v }: { k: string; v: string }) {
   return (
     <div className="flex justify-between gap-2">
-      <span className="text-[#6e7681]">{k}</span>
-      <span className="text-[#58a6ff] truncate">{v}</span>
+      <span className="text-[#999]">{k}</span>
+      <span className="text-[#5B9BF6] truncate">{v}</span>
     </div>
   );
 }
@@ -309,7 +309,7 @@ interface SummaryCardProps {
 
 function SummaryCard({ kind, text, source, loading, error }: SummaryCardProps) {
   const label = kind === "wait" ? "what it's waiting on" : "ai summary";
-  const accent = kind === "wait" ? "#d29922" : "#58a6ff";
+  const accent = kind === "wait" ? "#D4A843" : "#5B9BF6";
   // Hide the card entirely when naming is disabled — no value in
   // showing an empty stub. Show it as soon as we have ANY signal.
   if (!loading && !error && !text && source === "disabled") return null;
@@ -317,20 +317,20 @@ function SummaryCard({ kind, text, source, loading, error }: SummaryCardProps) {
     <div
       data-testid="ai-summary"
       className="p-2 rounded mb-3 border-l-2"
-      style={{ borderLeftColor: accent, backgroundColor: "#0d1117" }}
+      style={{ borderLeftColor: accent, backgroundColor: "#000" }}
     >
       <div className="flex justify-between items-baseline text-[10px] uppercase tracking-wider mb-1">
         <span style={{ color: accent }}>{label}</span>
-        {source ? <span className="text-[#484f58]">{source}</span> : null}
+        {source ? <span className="text-[#666]">{source}</span> : null}
       </div>
       {loading ? (
-        <div className="text-[10px] text-[#6e7681] italic">generating…</div>
+        <div className="text-[10px] text-[#999] italic">generating…</div>
       ) : error ? (
-        <div className="text-[10px] text-[#f85149]">{error}</div>
+        <div className="text-[10px] text-[#D71921]">{error}</div>
       ) : text ? (
-        <div className="text-[11px] text-[#c9d1d9] whitespace-pre-wrap leading-relaxed">{text}</div>
+        <div className="text-[11px] text-[#E8E8E8] whitespace-pre-wrap leading-relaxed">{text}</div>
       ) : (
-        <div className="text-[10px] text-[#6e7681] italic">
+        <div className="text-[10px] text-[#999] italic">
           (no summary — naming model disabled or activity empty)
         </div>
       )}
