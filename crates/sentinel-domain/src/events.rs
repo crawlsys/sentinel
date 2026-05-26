@@ -878,7 +878,7 @@ mod tests {
     #[test]
     fn test_inject_envelope_round_trips_through_inject_context() {
         let env = HookEnvelope::block("Phase Gate", "load phase file before tools");
-        let out = HookOutput::inject_envelope(HookEvent::PreToolUse, env);
+        let out = HookOutput::inject_envelope(HookEvent::PreToolUse, &env);
         let ctx = out
             .hook_specific_output
             .and_then(|h| h.additional_context)
