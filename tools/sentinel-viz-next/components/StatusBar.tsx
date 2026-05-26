@@ -1,5 +1,8 @@
 "use client";
 
+import { Box, Chip, IconButton, Stack, Tooltip, Typography } from "@mui/material";
+import SettingsIcon from "@mui/icons-material/SettingsOutlined";
+
 import type { GraphResponse } from "../types/api";
 import { AUTO_WATCH_IGNORE_ATTR } from "../lib/auto-watch";
 import type { StreamLiveness } from "../lib/sse";
@@ -34,35 +37,32 @@ export function livenessLabel(
   connected: boolean,
   graph: GraphResponse | null,
 ): LivenessLabel {
-  // Prefer the explicit three-state signal. Fall back to the
-  // boolean if the caller hasn't wired it up yet.
   const effective: StreamLiveness =
     liveness ?? (connected ? "live" : graph ? "down" : "init");
   switch (effective) {
     case "live":
       return { text: "live", color: "#4A9E5C", glyph: "●", pulse: true };
     case "stale":
-      // Real signal: data is here but the stream stopped within
-      // the last 30s. Operators looking at the dashboard for a
-      // decision need to know they're seeing data that may be a
-      // few seconds out of date.
       return { text: "stale", color: "#D4A843", glyph: "●", pulse: false };
     case "down":
-      // We have a graph but the stream is gone. "ready" is the
-      // legacy label; keep it for muscle-memory.
       return graph
         ? { text: "ready", color: "#5B9BF6", glyph: "●", pulse: false }
         : { text: "down", color: "#D71921", glyph: "○", pulse: false };
     case "init":
     default:
-      // Graph snapshot fetched but no SSE message yet → "ready"
-      // (we have data, just not a live stream). Pre-snapshot we're
-      // genuinely connecting.
       return graph
         ? { text: "ready", color: "#5B9BF6", glyph: "●", pulse: false }
         : { text: "connecting", color: "#D4A843", glyph: "○", pulse: false };
   }
 }
+
+const STAT_LABEL_SX = {
+  fontFamily: "var(--font-space-mono), monospace",
+  fontSize: 10,
+  letterSpacing: "0.08em",
+  textTransform: "uppercase",
+  color: "var(--text-secondary)",
+};
 
 export function StatusBar({
   graph,
@@ -77,17 +77,30 @@ export function StatusBar({
   onToggleAuto,
 }: Props) {
   const live = livenessLabel(liveness, connected, graph);
+  const livenessAttr = liveness ?? (connected ? "live" : graph ? "down" : "init");
   return (
-    <div
+    <Box
       data-testid="status-bar"
-      className="flex flex-wrap items-center gap-x-4 gap-y-1 px-3 py-1.5 border-b border-[#222] bg-[#111] text-[10px] uppercase tracking-wider text-[#999] font-mono"
+      sx={{
+        display: "flex",
+        flexWrap: "wrap",
+        alignItems: "center",
+        columnGap: 3,
+        rowGap: 0.5,
+        px: 2,
+        py: 0.75,
+        borderBottom: "1px solid var(--border)",
+        bgcolor: "var(--surface)",
+      }}
     >
-      <span className="text-[#5B9BF6] font-bold">sentinel-viz-next</span>
-      <span
-        data-testid="liveness-indicator"
-        data-liveness={liveness ?? (connected ? "live" : graph ? "down" : "init")}
-        style={{ color: live.color }}
-        className={live.pulse ? "" : ""}
+      <Typography
+        component="span"
+        sx={{ ...STAT_LABEL_SX, color: "var(--info)", fontWeight: 700 }}
+      >
+        sentinel-viz
+      </Typography>
+
+      <Tooltip
         title={
           live.text === "stale"
             ? "SSE stream paused — data may be a few seconds out of date"
@@ -98,69 +111,96 @@ export function StatusBar({
                 : "connecting to sentinel API…"
         }
       >
-        {live.glyph} {live.text}
-      </span>
+        <Typography
+          component="span"
+          data-testid="liveness-indicator"
+          data-liveness={livenessAttr}
+          sx={{ ...STAT_LABEL_SX, color: live.color }}
+        >
+          {live.glyph} {live.text}
+        </Typography>
+      </Tooltip>
+
       {graph ? (
         <>
-          {/* Operator-relevant counts at full contrast. */}
-          <span>nodes: {graph.stats.nodes_total}</span>
-          <span>edges: {graph.stats.edges_total}</span>
-          <span>events: {graph.stats.events_total}</span>
-          {/* Dev telemetry — bridge sequence and corpus totals.
-              Useful for debugging the bridge / db growth but
-              actively noisy in the operator's primary view.
-              Visually de-emphasised. Could move behind a debug
-              toggle later. */}
-          <span className="text-[#666]" data-testid="dev-telemetry">
+          <Typography component="span" sx={STAT_LABEL_SX}>nodes: {graph.stats.nodes_total}</Typography>
+          <Typography component="span" sx={STAT_LABEL_SX}>edges: {graph.stats.edges_total}</Typography>
+          <Typography component="span" sx={STAT_LABEL_SX}>events: {graph.stats.events_total}</Typography>
+          <Typography
+            component="span"
+            data-testid="dev-telemetry"
+            sx={{ ...STAT_LABEL_SX, color: "var(--text-disabled)" }}
+          >
             seq: {graph.max_seq} · corpus: {graph.stats.corpus_nodes} / {graph.stats.corpus_edges}
-          </span>
+          </Typography>
         </>
       ) : (
-        <span>waiting on first snapshot…</span>
+        <Typography component="span" sx={STAT_LABEL_SX}>
+          waiting on first snapshot…
+        </Typography>
       )}
-      <div className="ml-auto flex items-center gap-2">
+
+      <Stack direction="row" spacing={1} sx={{ ml: "auto", alignItems: "center" }}>
         <KpiBar />
-        <button
-          type="button"
-          onClick={onToggleAuto}
+        <Chip
           data-testid="auto-watch-toggle"
-          {...{ [AUTO_WATCH_IGNORE_ATTR]: "" }}
-          className={`px-2 py-0.5 rounded border font-bold tracking-wider ${
-            autoOn
-              ? "bg-[#0A1A10] border-[#4A9E5C] text-[#4A9E5C]"
-              : "bg-[#111] border-[#222] text-[#999] hover:text-[#E8E8E8]"
-          }`}
+          data-auto-on={autoOn ? "true" : "false"}
+          data-auto-reason={autoReason}
+          label={`AUTO ${autoOn ? "ON" : "OFF"}`}
+          onClick={onToggleAuto}
+          clickable
           title={
             autoOn
               ? `auto-watch ON (${autoReason}) — click to disable; auto re-enables on blur or 10m idle`
               : `auto-watch OFF (${autoReason}) — click to enable, or it re-enables on blur / 10m idle`
           }
-        >
-          AUTO {autoOn ? "ON" : "OFF"}
-        </button>
+          sx={{
+            borderColor: autoOn ? "var(--success)" : "var(--border)",
+            color: autoOn ? "var(--success)" : "var(--text-secondary)",
+            fontWeight: 700,
+          }}
+          {...{ [AUTO_WATCH_IGNORE_ATTR]: "" }}
+        />
+
         {stuckCount > 0 ? (
-          <button
-            type="button"
-            onClick={onStuckClick}
-            data-testid="stuck-badge"
-            className="px-2 py-0.5 rounded bg-[#1a0606] border border-[#D71921] text-[#D71921] font-bold animate-pulse hover:bg-[#3a1010]"
-            title="Sessions awaiting you for >15min — click to focus"
-          >
-            STUCK: {stuckCount}
-          </button>
+          <Tooltip title="Sessions awaiting you for >15min — click to focus">
+            <Chip
+              data-testid="stuck-badge"
+              label={`STUCK: ${stuckCount}`}
+              onClick={onStuckClick}
+              clickable
+              sx={{
+                borderColor: "var(--accent)",
+                color: "var(--accent)",
+                bgcolor: "rgba(215,25,33,0.10)",
+                fontWeight: 700,
+                animation: "pulse 1.6s ease-in-out infinite",
+                "@keyframes pulse": {
+                  "0%, 100%": { opacity: 1 },
+                  "50%": { opacity: 0.6 },
+                },
+              }}
+            />
+          </Tooltip>
         ) : null}
-        {error ? <span className="text-[#D71921]">{error}</span> : null}
-        <button
-          type="button"
-          onClick={onOpenSettings}
-          data-testid="open-settings"
-          aria-label="open settings"
-          title="settings"
-          className="text-[#999] hover:text-[#E8E8E8] text-[14px] leading-none"
-        >
-          ⚙
-        </button>
-      </div>
-    </div>
+
+        {error ? (
+          <Typography component="span" sx={{ ...STAT_LABEL_SX, color: "var(--accent)" }}>
+            {error}
+          </Typography>
+        ) : null}
+
+        <Tooltip title="settings">
+          <IconButton
+            data-testid="open-settings"
+            aria-label="open settings"
+            onClick={onOpenSettings}
+            size="small"
+          >
+            <SettingsIcon fontSize="small" />
+          </IconButton>
+        </Tooltip>
+      </Stack>
+    </Box>
   );
 }

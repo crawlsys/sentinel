@@ -1,6 +1,9 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { Chip } from "@mui/material";
+import ExpandMoreIcon from "@mui/icons-material/ExpandMoreRounded";
+import ChevronRightIcon from "@mui/icons-material/ChevronRightRounded";
 
 import { fetchActivity } from "../lib/api";
 import { indexActivity } from "../lib/activity-cache";
@@ -173,7 +176,11 @@ export function SessionConsole({
         className="flex items-center gap-2 px-3 py-1.5 cursor-pointer hover:bg-[#111]"
         onClick={() => setOpen((o) => !o)}
       >
-        <span className="text-[#999]">{open ? "▼" : "▶"}</span>
+        {open ? (
+          <ExpandMoreIcon sx={{ fontSize: 16, color: "var(--text-secondary)" }} />
+        ) : (
+          <ChevronRightIcon sx={{ fontSize: 16, color: "var(--text-secondary)" }} />
+        )}
         <span
           className={`inline-block w-2 h-2 rounded-full ${
             paused ? "bg-[#999]" : loading ? "bg-[#D4A843]" : "bg-[#4A9E5C]"
@@ -186,18 +193,18 @@ export function SessionConsole({
           live log
         </span>
         {focused ? (
-          <span
-            className="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded"
-            style={{
-              backgroundColor: colorForSession(sessionColors, focused) + "22",
+          <Chip
+            data-testid="session-console-scope"
+            label={`scoped · s:${focused.slice(0, 8)}`}
+            size="small"
+            sx={{
+              bgcolor: colorForSession(sessionColors, focused) + "22",
               color: colorForSession(sessionColors, focused),
               borderColor: colorForSession(sessionColors, focused),
-              borderWidth: "1px",
+              height: 20,
+              fontSize: 10,
             }}
-            data-testid="session-console-scope"
-          >
-            scoped · s:{focused.slice(0, 8)}
-          </span>
+          />
         ) : (
           <span
             className="text-[10px] uppercase tracking-wider text-[#999]"

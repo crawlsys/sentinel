@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { ToggleButton, ToggleButtonGroup } from "@mui/material";
 
 import type { GraphResponse, Node } from "../types/api";
 import { buildSessionStrips } from "../lib/session-strips";
@@ -131,23 +132,43 @@ export function SessionStripsPanel({
       <header className="flex items-baseline gap-3 px-3 py-2 border-b border-[#222] text-[10px] uppercase tracking-wider text-[#999]">
         <span>sessions</span>
         <span className="text-[#666]">· last {labelForWindow(windowMinutes)}</span>
-        <span className="ml-auto flex gap-1" data-testid="strips-window-selector">
+        <ToggleButtonGroup
+          data-testid="strips-window-selector"
+          value={windowMinutes}
+          exclusive
+          size="small"
+          onChange={(_, v) => {
+            if (typeof v === "number") setWindowMinutes(v);
+          }}
+          sx={{ ml: "auto" }}
+        >
           {WINDOW_OPTIONS.map((opt) => (
-            <button
+            <ToggleButton
               key={opt.minutes}
-              type="button"
+              value={opt.minutes}
               data-testid={`window-${opt.minutes}m`}
-              onClick={() => setWindowMinutes(opt.minutes)}
-              className={`px-1.5 py-0.5 rounded border text-[9px] tracking-normal ${
-                windowMinutes === opt.minutes
-                  ? "border-[#5B9BF6] text-[#5B9BF6] bg-[#0A1525]"
-                  : "border-[#222] text-[#999] hover:text-[#E8E8E8]"
-              }`}
+              sx={{
+                fontFamily: "var(--font-space-mono), monospace",
+                fontSize: 9,
+                letterSpacing: 0,
+                textTransform: "lowercase",
+                px: 1,
+                py: 0.25,
+                color: "var(--text-secondary)",
+                borderColor: "var(--border)",
+                "&.Mui-selected": {
+                  color: "var(--info)",
+                  borderColor: "var(--info)",
+                  bgcolor: "rgba(91,155,246,0.12)",
+                  "&:hover": { bgcolor: "rgba(91,155,246,0.18)" },
+                },
+                "&:hover": { color: "var(--text-primary)" },
+              }}
             >
               {opt.label}
-            </button>
+            </ToggleButton>
           ))}
-        </span>
+        </ToggleButtonGroup>
       </header>
       {strips.length === 0 ? (
         <div

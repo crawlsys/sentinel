@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { Box, Stack, Tooltip, Typography } from "@mui/material";
 
 import { apiBase } from "../lib/api";
 
@@ -19,11 +20,6 @@ interface Kpis {
   stuck_count: number;
 }
 
-/// Compact metrics strip — sits in the StatusBar at the right edge,
-/// auto-refreshes every 5s. Cards roll up the data the operator
-/// asked for: token throughput, recent activity, active sessions,
-/// cost (when wired). Designed to fit on one row so it doesn't
-/// crowd the status counters.
 export function KpiBar() {
   const [kpis, setKpis] = useState<Kpis | null>(null);
 
@@ -49,53 +45,50 @@ export function KpiBar() {
 
   if (!kpis) return null;
 
-  // P3-33: when there are no events in the last 5min, the cards
-  // visually read as "0" which looks broken. Mute them and show
-  // "idle" so the operator can tell "no events flowing through
-  // sentinel right now" from "kpi computation is wrong".
   const isIdle = kpis.events_5m === 0;
 
   return (
-    <div
-      data-testid="kpi-bar"
-      data-idle={isIdle ? "true" : undefined}
-      className="flex items-center gap-3 text-[10px] font-mono"
-      title="auto-refreshes every 5s — derived from the cached graph snapshot + transcript JSONLs"
-    >
-      <Card
-        label="active"
-        value={`${kpis.sessions_active} / ${kpis.sessions_total}`}
-        accent="#4A9E5C"
-      />
-      <Card
-        label="evt/min"
-        value={isIdle ? "idle" : kpis.events_per_min.toFixed(0)}
-        accent={isIdle ? "#666" : "#5B9BF6"}
-        title={isIdle ? "no events in the last 5 minutes" : undefined}
-      />
-      <Card
-        label="5m"
-        value={isIdle ? "—" : String(kpis.events_5m)}
-        accent={isIdle ? "#666" : "#bc8cff"}
-        title={isIdle ? "no events in the last 5 minutes" : undefined}
-      />
-      {kpis.tokens_5m ? (
-        <Card
-          label="out/5m"
-          value={formatTokens(kpis.tokens_5m.output)}
-          accent="#D4A843"
-          title={`input ${formatTokens(kpis.tokens_5m.input)} · cache ${formatTokens(kpis.tokens_5m.cache_read)} read · ${formatTokens(kpis.tokens_5m.cache_creation)} write · output ${formatTokens(kpis.tokens_5m.output)}`}
+    <Tooltip title="auto-refreshes every 5s — derived from the cached graph snapshot + transcript JSONLs">
+      <Stack
+        data-testid="kpi-bar"
+        data-idle={isIdle ? "true" : undefined}
+        direction="row"
+        spacing={1.5}
+        sx={{ alignItems: "center" }}
+      >
+        <KpiCard
+          label="active"
+          value={`${kpis.sessions_active} / ${kpis.sessions_total}`}
+          accent="var(--success)"
         />
-      ) : (
-        <Card label="out/5m" value="—" accent="#666" title="no transcript tokens parsed in window" />
-      )}
-      {/* STUCK count surfaced via the dedicated red-pulsing badge in
-          StatusBar — don't double it up here. */}
-    </div>
+        <KpiCard
+          label="evt/min"
+          value={isIdle ? "idle" : kpis.events_per_min.toFixed(0)}
+          accent={isIdle ? "var(--text-disabled)" : "var(--info)"}
+          title={isIdle ? "no events in the last 5 minutes" : undefined}
+        />
+        <KpiCard
+          label="5m"
+          value={isIdle ? "—" : String(kpis.events_5m)}
+          accent={isIdle ? "var(--text-disabled)" : "#bc8cff"}
+          title={isIdle ? "no events in the last 5 minutes" : undefined}
+        />
+        {kpis.tokens_5m ? (
+          <KpiCard
+            label="out/5m"
+            value={formatTokens(kpis.tokens_5m.output)}
+            accent="var(--warning)"
+            title={`input ${formatTokens(kpis.tokens_5m.input)} · cache ${formatTokens(kpis.tokens_5m.cache_read)} read · ${formatTokens(kpis.tokens_5m.cache_creation)} write · output ${formatTokens(kpis.tokens_5m.output)}`}
+          />
+        ) : (
+          <KpiCard label="out/5m" value="—" accent="var(--text-disabled)" title="no transcript tokens parsed in window" />
+        )}
+      </Stack>
+    </Tooltip>
   );
 }
 
-function Card({
+function KpiCard({
   label,
   value,
   accent,
@@ -106,17 +99,45 @@ function Card({
   accent: string;
   title?: string;
 }) {
-  return (
-    <div
-      className="flex items-baseline gap-1 px-2 py-0.5 rounded bg-[#111] border border-[#222]"
-      title={title}
+  const body = (
+    <Box
+      sx={{
+        display: "flex",
+        alignItems: "baseline",
+        gap: 0.75,
+        px: 1,
+        py: 0.25,
+        borderRadius: 1,
+        border: "1px solid var(--border)",
+        bgcolor: "var(--surface)",
+      }}
     >
-      <span className="text-[#999] uppercase tracking-wider">{label}</span>
-      <span className="font-bold" style={{ color: accent }}>
+      <Typography
+        component="span"
+        sx={{
+          fontFamily: "var(--font-space-mono), monospace",
+          fontSize: 10,
+          letterSpacing: "0.08em",
+          textTransform: "uppercase",
+          color: "var(--text-secondary)",
+        }}
+      >
+        {label}
+      </Typography>
+      <Typography
+        component="span"
+        sx={{
+          fontFamily: "var(--font-space-mono), monospace",
+          fontSize: 11,
+          fontWeight: 700,
+          color: accent,
+        }}
+      >
         {value}
-      </span>
-    </div>
+      </Typography>
+    </Box>
   );
+  return title ? <Tooltip title={title}>{body}</Tooltip> : body;
 }
 
 function formatTokens(n: number): string {

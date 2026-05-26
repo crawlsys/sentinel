@@ -1,6 +1,21 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import {
+  Box,
+  Button,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  Divider,
+  IconButton,
+  MenuItem,
+  Select,
+  Stack,
+  TextField,
+  Typography,
+} from "@mui/material";
+import CloseIcon from "@mui/icons-material/CloseRounded";
 
 import { fetchConfig, setConfig } from "../lib/api";
 
@@ -11,21 +26,30 @@ interface Props {
 
 const MODEL_PRESETS = [
   { value: "none", label: "Disabled (UUID fallback)" },
-  // OpenRouter group — instance-wide default per P3-32. Cheap +
-  // good options first, then a few stronger picks for when the
-  // operator wants longer / more accurate summaries.
   { value: "openrouter:openai/gpt-4o-mini", label: "OpenRouter · gpt-4o-mini (cheap+good, default)" },
   { value: "openrouter:google/gemini-2.0-flash-001", label: "OpenRouter · gemini-2.0-flash (very cheap)" },
   { value: "openrouter:anthropic/claude-3.5-haiku", label: "OpenRouter · claude-3.5-haiku" },
   { value: "openrouter:openai/gpt-4o", label: "OpenRouter · gpt-4o (stronger, costlier)" },
-  // Direct OpenAI — only relevant if operator wants to bypass
-  // OpenRouter and pay OpenAI directly.
   { value: "openai:gpt-4o-mini", label: "OpenAI direct · gpt-4o-mini" },
   { value: "openai:gpt-4o", label: "OpenAI direct · gpt-4o" },
-  // Local Ollama for fully-private workflows.
   { value: "local:qwen2.5:1.5b", label: "Local · qwen2.5:1.5b (fast, private)" },
   { value: "local:qwen2.5-coder:7b", label: "Local · qwen2.5-coder:7b" },
 ];
+
+const LABEL_SX = {
+  fontFamily: "var(--font-space-mono), monospace",
+  fontSize: 10,
+  letterSpacing: "0.08em",
+  textTransform: "uppercase",
+  color: "var(--text-secondary)",
+};
+
+const HINT_SX = {
+  fontFamily: "var(--font-space-mono), monospace",
+  fontSize: 10,
+  color: "var(--text-secondary)",
+  mt: 0.5,
+};
 
 export function SettingsModal({ open, onClose }: Props) {
   const [currentModel, setCurrentModel] = useState<string>("none");
@@ -49,12 +73,8 @@ export function SettingsModal({ open, onClose }: Props) {
       .catch((e) => setErr(String(e)));
   }, [open]);
 
-  if (!open) return null;
-
   const isOpenAi = pendingModel.startsWith("openai:");
   const isOpenRouter = pendingModel.startsWith("openrouter:");
-  // openrouter has a server-side fallback (env or on-disk file),
-  // so the key field is OPTIONAL for openrouter even on first save.
   const requiresKeyInput = isOpenAi && !currentHasKey;
   const canSave =
     !saving &&
@@ -87,135 +107,158 @@ export function SettingsModal({ open, onClose }: Props) {
   }
 
   return (
-    <div
-      role="dialog"
+    <Dialog
+      open={open}
+      onClose={onClose}
       aria-label="settings"
-      data-testid="settings-modal"
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60"
-      onClick={(e) => {
-        if (e.target === e.currentTarget) onClose();
+      maxWidth="xs"
+      fullWidth
+      slotProps={{
+        paper: {
+          "data-testid": "settings-modal",
+          sx: { fontFamily: "var(--font-space-mono), monospace" },
+        } as never,
       }}
     >
-      <div className="bg-[#111] border border-[#222] rounded-lg w-[480px] max-w-[95vw] p-4 font-mono text-xs">
-        <div className="flex items-baseline justify-between mb-3">
-          <h3 className="text-[#5B9BF6] text-sm font-bold">settings</h3>
-          <button
-            type="button"
-            aria-label="close settings"
-            onClick={onClose}
-            className="text-[#999] hover:text-[#E8E8E8]"
-          >
-            ✕
-          </button>
-        </div>
+      <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", px: 3, pt: 2.5, pb: 1 }}>
+        <Typography
+          component="h3"
+          sx={{ ...LABEL_SX, color: "var(--info)", fontWeight: 700, fontSize: 13 }}
+        >
+          settings
+        </Typography>
+        <IconButton aria-label="close settings" onClick={onClose} size="small">
+          <CloseIcon fontSize="small" />
+        </IconButton>
+      </Box>
 
-        <div className="mb-3">
-          <div className="text-[10px] uppercase tracking-wider text-[#999] mb-1">
-            current
-          </div>
-          <div className="flex justify-between">
-            <span>model</span>
-            <span className="text-[#5B9BF6]">{currentModel}</span>
-          </div>
-          <div className="flex justify-between">
-            <span>openai key bound</span>
-            <span className={currentHasKey ? "text-[#4A9E5C]" : "text-[#999]"}>
-              {currentHasKey ? "yes" : "no"}
-            </span>
-          </div>
-        </div>
+      <DialogContent sx={{ pt: 1 }}>
+        <Stack spacing={2}>
+          <Box>
+            <Typography sx={LABEL_SX}>current</Typography>
+            <Box sx={{ display: "flex", justifyContent: "space-between", mt: 0.5 }}>
+              <Typography sx={{ fontFamily: "var(--font-space-mono), monospace", fontSize: 12 }}>
+                model
+              </Typography>
+              <Typography sx={{ fontFamily: "var(--font-space-mono), monospace", fontSize: 12, color: "var(--info)" }}>
+                {currentModel}
+              </Typography>
+            </Box>
+            <Box sx={{ display: "flex", justifyContent: "space-between" }}>
+              <Typography sx={{ fontFamily: "var(--font-space-mono), monospace", fontSize: 12 }}>
+                openai key bound
+              </Typography>
+              <Typography
+                sx={{
+                  fontFamily: "var(--font-space-mono), monospace",
+                  fontSize: 12,
+                  color: currentHasKey ? "var(--success)" : "var(--text-secondary)",
+                }}
+              >
+                {currentHasKey ? "yes" : "no"}
+              </Typography>
+            </Box>
+          </Box>
 
-        <div className="mb-3 border-t border-[#222] pt-3">
-          <label className="block text-[10px] uppercase tracking-wider text-[#999] mb-1">
-            naming + summary model
-          </label>
-          <select
-            value={pendingModel}
-            onChange={(e) => setPendingModel(e.target.value)}
-            className="w-full bg-[#000] border border-[#222] rounded px-2 py-1 text-[#E8E8E8]"
-          >
-            {MODEL_PRESETS.map((p) => (
-              <option key={p.value} value={p.value}>{p.label}</option>
-            ))}
-          </select>
-          <div className="text-[10px] text-[#999] mt-1">
-            Used for session names, card summaries, and "what it's waiting on" text.
-          </div>
-        </div>
+          <Divider />
 
-        {isOpenAi ? (
-          <div className="mb-3">
-            <label className="block text-[10px] uppercase tracking-wider text-[#999] mb-1">
-              openai api key {currentHasKey ? "(leave blank to keep current)" : ""}
-            </label>
-            <input
-              type="password"
-              value={pendingKey}
-              onChange={(e) => setPendingKey(e.target.value)}
-              placeholder="sk-..."
-              className="w-full bg-[#000] border border-[#222] rounded px-2 py-1 text-[#E8E8E8] font-mono"
-            />
-            <div className="text-[10px] text-[#999] mt-1">
-              Stays in-memory on the API server. Never persisted to disk.
-            </div>
-          </div>
-        ) : null}
-        {isOpenRouter ? (
-          <div className="mb-3">
-            <label className="block text-[10px] uppercase tracking-wider text-[#999] mb-1">
-              openrouter api key (optional — server will fall back to env / on-disk)
-            </label>
-            <input
-              type="password"
-              value={pendingKey}
-              onChange={(e) => setPendingKey(e.target.value)}
-              placeholder="sk-or-v1-... (leave blank to use ~/.config/openrouter/api_key)"
-              className="w-full bg-[#000] border border-[#222] rounded px-2 py-1 text-[#E8E8E8] font-mono"
-            />
-            <div className="text-[10px] text-[#999] mt-1">
-              Pre-filled from the operator-convention path on the API host; leave blank to use it.
-            </div>
-          </div>
-        ) : null}
+          <Box>
+            <Typography sx={LABEL_SX}>naming + summary model</Typography>
+            <Select
+              fullWidth
+              size="small"
+              value={pendingModel}
+              onChange={(e) => setPendingModel(e.target.value as string)}
+              sx={{ mt: 0.5 }}
+            >
+              {MODEL_PRESETS.map((p) => (
+                <MenuItem key={p.value} value={p.value} sx={{ fontFamily: "var(--font-space-mono), monospace", fontSize: 12 }}>
+                  {p.label}
+                </MenuItem>
+              ))}
+            </Select>
+            <Typography sx={HINT_SX}>
+              Used for session names, card summaries, and "what it's waiting on" text.
+            </Typography>
+          </Box>
 
-        {pendingModel.startsWith("local:") ? (
-          <div className="mb-3">
-            <label className="block text-[10px] uppercase tracking-wider text-[#999] mb-1">
-              ollama url (optional)
-            </label>
-            <input
-              type="text"
-              value={pendingOllama}
-              onChange={(e) => setPendingOllama(e.target.value)}
-              placeholder="http://127.0.0.1:11434"
-              className="w-full bg-[#000] border border-[#222] rounded px-2 py-1 text-[#E8E8E8] font-mono"
-            />
-          </div>
-        ) : null}
+          {isOpenAi ? (
+            <Box>
+              <Typography sx={LABEL_SX}>
+                openai api key {currentHasKey ? "(leave blank to keep current)" : ""}
+              </Typography>
+              <TextField
+                fullWidth
+                size="small"
+                type="password"
+                value={pendingKey}
+                onChange={(e) => setPendingKey(e.target.value)}
+                placeholder="sk-..."
+                sx={{ mt: 0.5 }}
+                slotProps={{ htmlInput: { style: { fontFamily: "var(--font-space-mono), monospace", fontSize: 12 } } }}
+              />
+              <Typography sx={HINT_SX}>
+                Stays in-memory on the API server. Never persisted to disk.
+              </Typography>
+            </Box>
+          ) : null}
 
-        {err ? <div className="text-[#D71921] mb-2">error: {err}</div> : null}
-        {savedAt ? (
-          <div className="text-[#4A9E5C] mb-2">saved · cache cleared</div>
-        ) : null}
+          {isOpenRouter ? (
+            <Box>
+              <Typography sx={LABEL_SX}>
+                openrouter api key (optional — server will fall back to env / on-disk)
+              </Typography>
+              <TextField
+                fullWidth
+                size="small"
+                type="password"
+                value={pendingKey}
+                onChange={(e) => setPendingKey(e.target.value)}
+                placeholder="sk-or-v1-... (leave blank to use ~/.config/openrouter/api_key)"
+                sx={{ mt: 0.5 }}
+                slotProps={{ htmlInput: { style: { fontFamily: "var(--font-space-mono), monospace", fontSize: 12 } } }}
+              />
+              <Typography sx={HINT_SX}>
+                Pre-filled from the operator-convention path on the API host; leave blank to use it.
+              </Typography>
+            </Box>
+          ) : null}
 
-        <div className="flex justify-end gap-2 mt-3">
-          <button
-            type="button"
-            onClick={onClose}
-            className="px-3 py-1 rounded border border-[#222] text-[#E8E8E8] hover:bg-[#222]"
-          >
-            close
-          </button>
-          <button
-            type="button"
-            onClick={onSave}
-            disabled={!canSave}
-            className="px-3 py-1 rounded bg-[#5B9BF6] text-white disabled:bg-[#222] disabled:text-[#999]"
-          >
-            {saving ? "saving…" : "save"}
-          </button>
-        </div>
-      </div>
-    </div>
+          {pendingModel.startsWith("local:") ? (
+            <Box>
+              <Typography sx={LABEL_SX}>ollama url (optional)</Typography>
+              <TextField
+                fullWidth
+                size="small"
+                type="text"
+                value={pendingOllama}
+                onChange={(e) => setPendingOllama(e.target.value)}
+                placeholder="http://127.0.0.1:11434"
+                sx={{ mt: 0.5 }}
+                slotProps={{ htmlInput: { style: { fontFamily: "var(--font-space-mono), monospace", fontSize: 12 } } }}
+              />
+            </Box>
+          ) : null}
+
+          {err ? (
+            <Typography sx={{ ...HINT_SX, color: "var(--accent)" }}>error: {err}</Typography>
+          ) : null}
+          {savedAt ? (
+            <Typography sx={{ ...HINT_SX, color: "var(--success)" }}>
+              saved · cache cleared
+            </Typography>
+          ) : null}
+        </Stack>
+      </DialogContent>
+
+      <DialogActions sx={{ px: 3, pb: 2.5 }}>
+        <Button variant="outlined" onClick={onClose}>
+          close
+        </Button>
+        <Button variant="contained" onClick={onSave} disabled={!canSave}>
+          {saving ? "saving…" : "save"}
+        </Button>
+      </DialogActions>
+    </Dialog>
   );
 }

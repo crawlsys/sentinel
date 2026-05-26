@@ -2,6 +2,8 @@
 
 import { useEffect } from "react";
 import { useQuery } from "@tanstack/react-query";
+import { IconButton, Tooltip } from "@mui/material";
+import CloseIcon from "@mui/icons-material/CloseRounded";
 
 import type { Node } from "../types/api";
 import { fetchActivity, fetchSummary } from "../lib/api";
@@ -124,16 +126,16 @@ export function PanelInspector({ node, anchorTs, onClose }: Props) {
         <h3 className="text-[#E8E8E8] text-sm">
           <span className="text-[#5B9BF6]">{friendlyTitle(node)}</span>
         </h3>
-        <button
-          aria-label="close inspector"
-          onClick={onClose}
-          // Touch target sized for thumbs on mobile (≥44×44). On
-          // desktop the tighter padding still leaves a clear hit
-          // area but doesn't dominate the header.
-          className="text-[#999] hover:text-[#E8E8E8] -mr-2 -my-2 px-3 py-2 text-base md:text-sm rounded hover:bg-[#222]"
-        >
-          ✕
-        </button>
+        <Tooltip title="close inspector">
+          <IconButton
+            aria-label="close inspector"
+            onClick={onClose}
+            size="small"
+            sx={{ mr: -1, my: -0.5 }}
+          >
+            <CloseIcon fontSize="small" />
+          </IconButton>
+        </Tooltip>
       </header>
       <div className="space-y-1 text-[11px]">
         {node.category ? (

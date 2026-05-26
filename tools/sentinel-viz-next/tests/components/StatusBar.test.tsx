@@ -52,13 +52,13 @@ describe("StatusBar", () => {
       expect(btn.textContent).toMatch(/auto\s+off/i);
     });
 
-    it("renders ON state and applies the green border styling", () => {
+    it("renders ON state and exposes the active flag via data-auto-on", () => {
       render(<StatusBar graph={fakeGraph} connected={true} error={null} autoOn={true} />);
       const btn = screen.getByTestId("auto-watch-toggle");
       expect(btn.textContent).toMatch(/auto\s+on/i);
-      // Visual cue must come from the on-state class set — verifies
-      // the conditional renders the right palette.
-      expect(btn.className).toContain("#4A9E5C");
+      // Visual cue comes from the MUI sx-based theme; we assert the
+      // state contract via data attr rather than a class string.
+      expect(btn.getAttribute("data-auto-on")).toBe("true");
     });
 
     it("invokes onToggleAuto when clicked", () => {
