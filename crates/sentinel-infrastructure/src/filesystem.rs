@@ -17,6 +17,17 @@ impl FileSystemPort for RealFileSystem {
         dirs::home_dir()
     }
 
+    fn claude_dir(&self) -> PathBuf {
+        if let Ok(dir) = std::env::var("SENTINEL_CLAUDE_DIR") {
+            if !dir.is_empty() {
+                return PathBuf::from(dir);
+            }
+        }
+        self.home_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(".claude")
+    }
+
     fn read_to_string(&self, path: &Path) -> Result<String> {
         std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))
     }

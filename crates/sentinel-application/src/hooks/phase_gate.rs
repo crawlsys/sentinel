@@ -1922,16 +1922,15 @@ mod tests {
         let mut workflows = HashMap::new();
         workflows.insert("linear".to_string(), test_workflow());
 
-        // Construct a path that definitely doesn't exist (random
-        // suffix) so we exercise the untrusted branch regardless
-        // of which dev machine runs the test.
-        let fake_path = dirs::home_dir().unwrap().join(format!(
-            ".claude/skills/linear/phases/nonexistent-{}.md",
-            uuid::Uuid::new_v4(),
-        ));
+        // Construct a path that definitely doesn't exist so the test is
+        // independent of whether the developer has real marketplace skills
+        // installed under ~/.claude, while still using a real workflow phase.
+        let temp = tempfile::tempdir().unwrap();
+        let fake_path = temp.path().join(".claude/skills/linear/phases/claim.md");
+        std::fs::create_dir_all(fake_path.parent().unwrap()).unwrap();
         assert!(
             !fake_path.exists(),
-            "test setup: random path should not exist"
+            "test setup: claim.md should not exist in temporary skills tree"
         );
 
         let input = HookInput {
@@ -1943,10 +1942,9 @@ mod tests {
         };
         let output = process(&input, &mut state, &workflows, &test_fs());
         assert!(output.blocked.is_none());
-        // Untrusted → not recorded.
-        let file_name = fake_path.file_name().and_then(|s| s.to_str()).unwrap();
-        assert!(!state.has_phase_been_read("linear", file_name));
-        // Untrusted → no workflow advance.
+
+        // Untrusted -> not recorded and no workflow advance.
+        assert!(!state.has_phase_been_read("linear", "claim.md"));
         assert!(
             state.workflows.get("linear").is_none()
                 || !state

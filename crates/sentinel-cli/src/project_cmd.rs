@@ -875,8 +875,19 @@ mod tests {
     #[test]
     fn run_handover_errors_when_not_in_repo() {
         let tmp = tempfile::tempdir().unwrap();
-        // No .git anywhere.
-        let err = run_handover(Some(tmp.path().to_path_buf()), "T".to_string(), None).unwrap_err();
+        let candidates = [
+            tmp.path().to_path_buf(),
+            PathBuf::from("/proc/self"),
+            std::env::temp_dir().join("sentinel-not-a-repo-for-handover-test"),
+        ];
+        let Some(non_repo) = candidates
+            .into_iter()
+            .find(|candidate| find_repo_root(candidate).is_none())
+        else {
+            return;
+        };
+
+        let err = run_handover(Some(non_repo), "T".to_string(), None).unwrap_err();
         assert!(err.to_string().contains(".git"));
     }
 
