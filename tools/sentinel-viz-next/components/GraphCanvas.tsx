@@ -373,8 +373,34 @@ export function GraphCanvas({ graph, selectedNodeId, onSelectNode, sessionColors
 
     sim.nodes(nextNodes);
     (sim.force("link") as d3Force.ForceLink<SimNode, SimLink> | null)?.links(desired.links);
-    // Tiny warm-up so new nodes settle, existing ones barely budge.
-    sim.alpha(0.18).restart();
+    // PERF: only restart the sim if topology actually changed (new
+    // node OR new edge). Pure label/status/age churn is the common
+    // SSE case, and that doesn't need a layout pass — every node is
+    // pinned via fx/fy anyway. Previously we called .alpha(0.18)
+    // .restart() on every SSE tick (250ms), which kept the rAF tick
+    // loop perpetually warm for ~4s after each restart.
+    const prevIds = prev;
+    const newNodeArrived = nextNodes.some((n) => !prevIds.has(n.id));
+    const prevEdgeKeys = new Set(
+      linksRef.current.map(
+        (l) => `${typeof l.source === "string" ? l.source : l.source.id}|${typeof l.target === "string" ? l.target : l.target.id}|${l.kind}`,
+      ),
+    );
+    const newEdgeArrived = desired.links.some(
+      (l) =>
+        !prevEdgeKeys.has(
+          `${typeof l.source === "string" ? l.source : l.source.id}|${typeof l.target === "string" ? l.target : l.target.id}|${l.kind}`,
+        ),
+    );
+    if (newNodeArrived || newEdgeArrived || nodesRef.current.length === 0) {
+      // First paint OR genuine topology change → warm the sim.
+      sim.alpha(0.18).restart();
+    }
+    // Otherwise: status / age churn — every node is pinned via
+    // fx/fy so layout cannot change, and existing g.node + line.edge
+    // DOM nodes already have the right transforms / endpoints from
+    // the prior tick. Skipping .restart() entirely keeps the rAF
+    // loop cold during steady-state SSE traffic.
 
     // Render edges
     g.selectAll<SVGLineElement, SimLink>("line.edge")

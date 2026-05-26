@@ -11,6 +11,7 @@ import { StatusBar } from "../components/StatusBar";
 import { sessionColorMap } from "../lib/session-colors";
 import { useGraphStream } from "../lib/sse";
 import { maybeFireStuckAlert, stuckSessions } from "../lib/stuck";
+import { useAutoWatch } from "../lib/auto-watch";
 
 export default function Page() {
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
@@ -45,10 +46,46 @@ export default function Page() {
 
   const stuck = useMemo(() => stuckSessions(graph), [graph]);
   const sessionColors = useMemo(() => sessionColorMap(graph), [graph]);
+  const stuckMeta = useMemo(() => {
+    const m = new Map<string, import("../components/EventTicker").StuckMeta>();
+    for (const n of stuck) {
+      const sid = n.data?.session_id;
+      if (typeof sid !== "string") continue;
+      m.set(sid, {
+        ageSecs: n.last_activity_age_s ?? 0,
+        kind: n.awaiting_kind ?? null,
+        question: n.awaiting_question ?? null,
+      });
+    }
+    return m;
+  }, [stuck]);
+
+  const auto = useAutoWatch(false);
 
   useEffect(() => {
     maybeFireStuckAlert(stuck.length, stuck);
   }, [stuck]);
+
+  // Auto-watch: when on and the graph snapshot ticks, jump selection
+  // to the freshest event (latest of graph.events). Operator
+  // interaction immediately disables auto via the auto-watch hook,
+  // so this only fires while the user is genuinely hands-off.
+  useEffect(() => {
+    if (!auto.on || !graph || graph.events.length === 0) return;
+    const latest = graph.events[graph.events.length - 1];
+    const tcid = typeof latest.payload.tool_call_id === "string"
+      ? (latest.payload.tool_call_id as string)
+      : null;
+    const sid = typeof latest.payload.session_id === "string"
+      ? (latest.payload.session_id as string)
+      : null;
+    const ts = typeof latest.payload.ts_sec === "string"
+      ? (latest.payload.ts_sec as string)
+      : (typeof latest.payload.ts === "string" ? (latest.payload.ts as string) : latest.ts);
+    if (tcid) selectNode(tcid, ts);
+    else if (sid) selectNode(`SentinelSession#${sid}`, ts);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [auto.on, graph?.max_seq]);
 
   function selectNode(nodeId: string | null, ts?: string) {
     setSelectedNodeId(nodeId);
@@ -71,6 +108,9 @@ export default function Page() {
         stuckCount={stuck.length}
         onStuckClick={focusFirstStuck}
         onOpenSettings={() => setSettingsOpen(true)}
+        autoOn={auto.on}
+        autoReason={auto.reason}
+        onToggleAuto={() => auto.set(!auto.on)}
       />
       <div className="flex flex-1 min-h-0">
         <div className="flex-1 min-w-0 min-h-0 relative">
@@ -101,9 +141,14 @@ export default function Page() {
           events={graph?.events ?? []}
           onSelectNode={(id, ts) => selectNode(id, ts)}
           sessionColors={sessionColors}
+          stuckMeta={stuckMeta}
         />
       </div>
-      <SessionConsole graph={graph} sessionColors={sessionColors} />
+      <SessionConsole
+        graph={graph}
+        sessionColors={sessionColors}
+        selectedSessionId={selectedSessionId}
+      />
       <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} />
     </main>
   );

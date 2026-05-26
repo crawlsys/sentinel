@@ -1,6 +1,7 @@
 "use client";
 
 import type { GraphResponse } from "../types/api";
+import { AUTO_WATCH_IGNORE_ATTR } from "../lib/auto-watch";
 import { KpiBar } from "./KpiBar";
 
 interface Props {
@@ -10,9 +11,22 @@ interface Props {
   stuckCount?: number;
   onStuckClick?: () => void;
   onOpenSettings?: () => void;
+  autoOn?: boolean;
+  autoReason?: "operator" | "interaction" | "blur" | "idle";
+  onToggleAuto?: () => void;
 }
 
-export function StatusBar({ graph, connected, error, stuckCount = 0, onStuckClick, onOpenSettings }: Props) {
+export function StatusBar({
+  graph,
+  connected,
+  error,
+  stuckCount = 0,
+  onStuckClick,
+  onOpenSettings,
+  autoOn = false,
+  autoReason = "operator",
+  onToggleAuto,
+}: Props) {
   return (
     <div
       data-testid="status-bar"
@@ -37,6 +51,24 @@ export function StatusBar({ graph, connected, error, stuckCount = 0, onStuckClic
       )}
       <div className="ml-auto flex items-center gap-2">
         <KpiBar />
+        <button
+          type="button"
+          onClick={onToggleAuto}
+          data-testid="auto-watch-toggle"
+          {...{ [AUTO_WATCH_IGNORE_ATTR]: "" }}
+          className={`px-2 py-0.5 rounded border font-bold tracking-wider ${
+            autoOn
+              ? "bg-[#0d2a1a] border-[#3fb950] text-[#3fb950]"
+              : "bg-[#161b22] border-[#30363d] text-[#6e7681] hover:text-[#c9d1d9]"
+          }`}
+          title={
+            autoOn
+              ? `auto-watch ON (${autoReason}) — click to disable; auto re-enables on blur or 10m idle`
+              : `auto-watch OFF (${autoReason}) — click to enable, or it re-enables on blur / 10m idle`
+          }
+        >
+          AUTO {autoOn ? "ON" : "OFF"}
+        </button>
         {stuckCount > 0 ? (
           <button
             type="button"

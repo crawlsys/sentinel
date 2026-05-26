@@ -105,4 +105,76 @@ describe("EventTicker", () => {
     // After expanding, the row should reveal both grouped members.
     expect(screen.getAllByText("TC#tc1")).toHaveLength(2);
   });
+
+  describe("sticky stuck rows", () => {
+    it("does not pin or highlight anything when stuckMeta is empty", () => {
+      render(<EventTicker events={sampleEvents} onSelectNode={() => {}} stuckMeta={new Map()} />);
+      expect(screen.queryByTestId("stuck-reason-line")).toBeNull();
+      const rows = screen.getByTestId("ticker-rows").querySelectorAll("li.stuck-row");
+      expect(rows.length).toBe(0);
+    });
+
+    it("pins the freshest row of a stuck session to the top with the stuck-row class", () => {
+      // sess-b is the freshest event (UserPromptSubmit, last in sampleEvents),
+      // sess-a has older events. If we mark sess-a stuck, its newest event
+      // should jump to the top of the rendered list.
+      const stuckMeta = new Map([
+        ["sess-a", { ageSecs: 1800, kind: "AskUserQuestion", question: "still here?" }],
+      ]);
+      render(<EventTicker events={sampleEvents} onSelectNode={() => {}} stuckMeta={stuckMeta} />);
+      const rows = screen.getByTestId("ticker-rows").querySelectorAll("li");
+      // First row must belong to the stuck session and carry the
+      // stuck-row class.
+      expect(rows[0].className).toContain("stuck-row");
+      expect(rows[0].textContent).toMatch(/sess-a/);
+      expect(rows[0].getAttribute("data-stuck")).toBe("true");
+    });
+
+    it("renders the stuck-reason sub-line with age, kind, and question", () => {
+      const stuckMeta = new Map([
+        [
+          "sess-a",
+          { ageSecs: 18 * 60, kind: "AskUserQuestion", question: "Should we proceed with the migration?" },
+        ],
+      ]);
+      render(<EventTicker events={sampleEvents} onSelectNode={() => {}} stuckMeta={stuckMeta} />);
+      const reason = screen.getByTestId("stuck-reason-line");
+      expect(reason.textContent).toMatch(/STUCK/);
+      expect(reason.textContent).toMatch(/18m/);
+      expect(reason.textContent).toMatch(/AskUserQuestion/);
+      expect(reason.textContent).toMatch(/Should we proceed/);
+    });
+
+    it("truncates long questions to ~88 chars with an ellipsis", () => {
+      const longQ = "a".repeat(200);
+      const stuckMeta = new Map([
+        ["sess-a", { ageSecs: 900, kind: null, question: longQ }],
+      ]);
+      render(<EventTicker events={sampleEvents} onSelectNode={() => {}} stuckMeta={stuckMeta} />);
+      const reason = screen.getByTestId("stuck-reason-line");
+      expect(reason.textContent).toMatch(/…/);
+      // Should not contain the full 200 a's.
+      expect(reason.textContent?.includes("a".repeat(200))).toBe(false);
+    });
+
+    it("falls back to 'awaiting' label when awaiting_kind is null", () => {
+      const stuckMeta = new Map([
+        ["sess-a", { ageSecs: 900, kind: null, question: null }],
+      ]);
+      render(<EventTicker events={sampleEvents} onSelectNode={() => {}} stuckMeta={stuckMeta} />);
+      const reason = screen.getByTestId("stuck-reason-line");
+      expect(reason.textContent).toMatch(/awaiting/);
+    });
+
+    it("only the FIRST event per stuck session is pinned (not every row from that session)", () => {
+      // sess-a has 3 events (2 grouped Bash + 1 hook). If pinned, only
+      // the freshest row from sess-a should carry the stuck class.
+      const stuckMeta = new Map([
+        ["sess-a", { ageSecs: 900, kind: "PreToolUse", question: null }],
+      ]);
+      render(<EventTicker events={sampleEvents} onSelectNode={() => {}} stuckMeta={stuckMeta} />);
+      const pinnedRows = screen.getByTestId("ticker-rows").querySelectorAll("li.stuck-row");
+      expect(pinnedRows.length).toBe(1);
+    });
+  });
 });

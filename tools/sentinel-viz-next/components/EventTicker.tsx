@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { memo, useEffect, useMemo, useState } from "react";
 
 import type { NodeCategory, RecentEvent } from "../types/api";
 import { lookup as lookupActivityCache, subscribe as subscribeActivityCache } from "../lib/activity-cache";
@@ -11,6 +11,25 @@ interface Props {
   onSelectNode: (nodeId: string, eventTs?: string) => void;
   /** sid → color. From session-colors.sessionColorMap(graph). */
   sessionColors?: Map<string, string>;
+  /** session_id → why-stuck context. Sessions present here get
+   *  their freshest event pinned to the top of the ticker with a
+   *  pulsing-red highlight AND an inline "⚠ STUCK Xm — <question>"
+   *  sub-line so the operator can see what's being asked without
+   *  having to click anything. */
+  stuckMeta?: Map<string, StuckMeta>;
+}
+
+export interface StuckMeta {
+  /** Seconds since the session's last activity (i.e. how long the
+   *  ask has been parked). */
+  ageSecs: number;
+  /** awaiting_kind from the bridge (e.g. "AskUserQuestion",
+   *  "PreToolUse", "Stop"), null when unknown. */
+  kind: string | null;
+  /** awaiting_question text from the bridge, truncated for display.
+   *  Null when no question text is available (e.g. tool-permission
+   *  stalls), in which case the kind is shown alone. */
+  question: string | null;
 }
 
 interface TickerMember {
@@ -37,14 +56,14 @@ interface TickerRow {
   members: TickerMember[];
 }
 
-export function EventTicker({ events, onSelectNode, sessionColors }: Props) {
+export function EventTicker({ events, onSelectNode, sessionColors, stuckMeta }: Props) {
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
-  // Force a 5s re-render so "30s ago" rolls forward in quiet periods.
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    const id = window.setInterval(() => setNow(Date.now()), 5_000);
-    return () => window.clearInterval(id);
-  }, []);
+  // PERF: `now` used to live here and trigger a full list re-render
+  // every 5 seconds purely to roll relative timestamps forward. The
+  // re-render was visible during quiet periods (single-frame jank
+  // every 5s, plus full reconciliation across hundreds of rows).
+  // Each timestamp is now isolated in <TimeAgo> below — it owns its
+  // own 5s ticker and only re-renders that one <span>.
 
   // Subscribe to the activity-cache so richer labels appear as the
   // inspector pulls JSONL detail. Bumping `cacheTick` triggers a
@@ -70,6 +89,30 @@ export function EventTicker({ events, onSelectNode, sessionColors }: Props) {
     [rows, cacheTick],
   );
 
+  // Sticky-stuck: float the freshest event per stuck session to the
+  // top of the list, then the rest in normal newest-first order.
+  // The pinned rows render with a pulsing red border to make them
+  // unmissable.
+  const { orderedRows, pinnedKeys } = useMemo(() => {
+    if (!stuckMeta || stuckMeta.size === 0) {
+      return { orderedRows: augmentedRows, pinnedKeys: new Set<string>() };
+    }
+    const seenStuckSid = new Set<string>();
+    const pinned: typeof augmentedRows = [];
+    const rest: typeof augmentedRows = [];
+    const pinnedKeys = new Set<string>();
+    for (const r of augmentedRows) {
+      if (r.sessionId && stuckMeta.has(r.sessionId) && !seenStuckSid.has(r.sessionId)) {
+        seenStuckSid.add(r.sessionId);
+        pinnedKeys.add(r.key);
+        pinned.push(r);
+      } else {
+        rest.push(r);
+      }
+    }
+    return { orderedRows: [...pinned, ...rest], pinnedKeys };
+  }, [augmentedRows, stuckMeta]);
+
   function toggle(key: string) {
     setExpanded((prev) => {
       const next = new Set(prev);
@@ -89,7 +132,7 @@ export function EventTicker({ events, onSelectNode, sessionColors }: Props) {
         <span>{rows.length} rows · {events.length} raw</span>
       </header>
       <ul className="overflow-y-auto flex-1" data-testid="ticker-rows">
-        {augmentedRows.map((row) => {
+        {orderedRows.map((row) => {
           const isOpen = expanded.has(row.key);
           const focus = () => {
             if (row.toolCallId) onSelectNode(row.toolCallId, row.ts);
@@ -101,7 +144,10 @@ export function EventTicker({ events, onSelectNode, sessionColors }: Props) {
           return (
             <li
               key={row.key}
-              className="pl-0 pr-3 py-1 border-b border-[#21262d] hover:bg-[#1f6feb22] flex"
+              data-stuck={pinnedKeys.has(row.key) ? "true" : undefined}
+              className={`pl-0 pr-3 py-1 border-b border-[#21262d] hover:bg-[#1f6feb22] flex ${
+                pinnedKeys.has(row.key) ? "stuck-row" : ""
+              }`}
             >
               {/* Session-color tab — 4px wide, full row height, matches
                   the same color as that session's node in the graph. */}
@@ -122,9 +168,7 @@ export function EventTicker({ events, onSelectNode, sessionColors }: Props) {
                   style={{ backgroundColor: categoryColor(row.category) }}
                   title={categoryLabel(row.category)}
                 />
-                <span className="text-[#6e7681] text-[10px] whitespace-nowrap">
-                  {tickerTime(row.ts, now)}
-                </span>
+                <TimeAgo ts={row.ts} className="text-[#6e7681] text-[10px] whitespace-nowrap" />
                 {row.members.length > 1 ? (
                   <button
                     type="button"
@@ -146,6 +190,9 @@ export function EventTicker({ events, onSelectNode, sessionColors }: Props) {
                 {row.sessionId ? `s:${row.sessionId.slice(0, 8)}…` : ""} {row.sentinelEvent}
                 {row.outcome ? ` · ${row.outcome}` : ""}
               </div>
+              {pinnedKeys.has(row.key) && row.sessionId && stuckMeta?.get(row.sessionId) ? (
+                <StuckReasonLine meta={stuckMeta.get(row.sessionId)!} />
+              ) : null}
               {isOpen ? (
                 <ul className="mt-1 pl-4 border-l border-dashed border-[#30363d]">
                   {row.members.map((m, i) => (
@@ -154,7 +201,7 @@ export function EventTicker({ events, onSelectNode, sessionColors }: Props) {
                       onClick={() => m.toolCallId && onSelectNode(m.toolCallId, m.ts)}
                       className="py-0.5 text-[10px] text-[#c9d1d9] hover:text-[#58a6ff] cursor-pointer"
                     >
-                      <span className="text-[#6e7681] mr-2">{tickerTime(m.ts, now)}</span>
+                      <TimeAgo ts={m.ts} className="text-[#6e7681] mr-2" />
                       {m.toolCallId ? m.toolCallId.replace("SentinelToolCall#", "TC#") : "(no tc id)"}
                     </li>
                   ))}
@@ -167,6 +214,46 @@ export function EventTicker({ events, onSelectNode, sessionColors }: Props) {
       </ul>
     </aside>
   );
+}
+
+/// Leaf timestamp — owns its own 5s ticker so refreshing the visible
+/// "5m ago" doesn't re-render any ancestor. ONLY this <span>
+/// reconciles. The chosen 5s cadence is a compromise: fast enough to
+/// keep "30s ago" feeling live, slow enough to be free.
+const TimeAgo = memo(function TimeAgo({ ts, className }: { ts: string; className?: string }) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const id = window.setInterval(() => setNow(Date.now()), 5_000);
+    return () => window.clearInterval(id);
+  }, []);
+  return <span className={className}>{tickerTime(ts, now)}</span>;
+});
+
+function StuckReasonLine({ meta }: { meta: StuckMeta }) {
+  const ageLabel = formatAge(meta.ageSecs);
+  const kindLabel = meta.kind ?? "awaiting";
+  const question = meta.question
+    ? meta.question.length > 90
+      ? `${meta.question.slice(0, 88)}…`
+      : meta.question
+    : null;
+  return (
+    <div
+      data-testid="stuck-reason-line"
+      className="pl-4 mt-0.5 text-[10px] font-bold text-[#f85149] truncate"
+      title={meta.question ?? kindLabel}
+    >
+      ⚠ STUCK {ageLabel} · {kindLabel}
+      {question ? <span className="font-normal text-[#ffa198] ml-1">— {question}</span> : null}
+    </div>
+  );
+}
+
+function formatAge(secs: number): string {
+  if (secs < 60) return `${Math.round(secs)}s`;
+  if (secs < 3600) return `${Math.round(secs / 60)}m`;
+  if (secs < 86400) return `${Math.round(secs / 3600)}h`;
+  return `${Math.round(secs / 86400)}d`;
 }
 
 /// Group consecutive events sharing

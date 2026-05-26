@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import { fetchActivity } from "../lib/api";
 import { colorForSession } from "../lib/session-colors";
@@ -11,6 +11,10 @@ interface Props {
   graph: GraphResponse | null;
   /** sid → color, same mapping the ticker + galaxies use. */
   sessionColors: Map<string, string>;
+  /** When set, the live log scopes to just this session and shows
+   *  ~10 segments instead of merging across all sessions. Null/undef
+   *  falls back to the cross-session merged view. */
+  selectedSessionId?: string | null;
   defaultOpen?: boolean;
 }
 
@@ -33,44 +37,64 @@ interface MergedEntry {
 /// rollups the activity panel already produces. Refreshes every
 /// 8s and on every graph change.
 const REFRESH_INTERVAL_MS = 8_000;
-const MAX_ENTRIES = 5;
+const MAX_ENTRIES_MERGED = 5;
+const MAX_ENTRIES_FOCUSED = 10;
 
-export function SessionConsole({ graph, sessionColors, defaultOpen = true }: Props) {
+export function SessionConsole({
+  graph,
+  sessionColors,
+  selectedSessionId,
+  defaultOpen = true,
+}: Props) {
   const [entries, setEntries] = useState<MergedEntry[]>([]);
   const [open, setOpen] = useState<boolean>(defaultOpen);
   const [loading, setLoading] = useState<boolean>(false);
   const [paused, setPaused] = useState<boolean>(false);
 
-  useEffect(() => {
-    if (!graph || paused) return;
-    let cancelled = false;
-    const sessionIds: string[] = [];
+  // Effect depends on the *string* selected sid (and a join of visible
+  // sids), not on the whole graph object — otherwise every SSE tick
+  // would tear down the interval. The refresh inside the effect can
+  // still read the latest graph via the closure on each interval fire.
+  const visibleSessionIds = useMemo(() => {
+    if (!graph) return [] as string[];
+    const out: string[] = [];
     for (const n of graph.nodes) {
       if (n.type !== "SentinelSession") continue;
       const sid = typeof n.data?.session_id === "string" ? (n.data.session_id as string) : null;
-      if (sid && !sessionIds.includes(sid)) sessionIds.push(sid);
+      if (sid && !out.includes(sid)) out.push(sid);
     }
+    return out;
+  }, [graph]);
+
+  const focused = selectedSessionId ?? null;
+  const sessionIdsKey = focused ? `focus:${focused}` : visibleSessionIds.join(",");
+
+  useEffect(() => {
+    if (paused) return;
+    let cancelled = false;
+    const sessionIds = focused ? [focused] : visibleSessionIds;
+    if (sessionIds.length === 0) {
+      setEntries([]);
+      return;
+    }
+    const perSessionLimit = focused ? MAX_ENTRIES_FOCUSED : 6;
+    const maxEntries = focused ? MAX_ENTRIES_FOCUSED : MAX_ENTRIES_MERGED;
 
     async function refresh() {
-      if (sessionIds.length === 0) return;
       setLoading(true);
       try {
-        // Fetch the last few segments per visible session in parallel.
         const responses = await Promise.allSettled(
-          sessionIds.map((sid) => fetchActivity(sid, { limit: 6 }).then((r) => ({ sid, r }))),
+          sessionIds.map((sid) =>
+            fetchActivity(sid, { limit: perSessionLimit }).then((r) => ({ sid, r })),
+          ),
         );
         if (cancelled) return;
         const merged: MergedEntry[] = [];
         for (const res of responses) {
           if (res.status !== "fulfilled") continue;
           const { sid, r } = res.value;
-          for (const s of r.segments) {
-            merged.push(segmentToEntry(sid, s));
-          }
+          for (const s of r.segments) merged.push(segmentToEntry(sid, s));
         }
-        // Sort newest-first, dedupe by (sessionId, ts, label) so the
-        // same row doesn't appear twice if multiple sessions returned
-        // overlapping cached segments.
         const seen = new Set<string>();
         const sorted = merged
           .sort((a, b) => (a.ts < b.ts ? 1 : -1))
@@ -80,7 +104,7 @@ export function SessionConsole({ graph, sessionColors, defaultOpen = true }: Pro
             seen.add(k);
             return true;
           })
-          .slice(0, MAX_ENTRIES);
+          .slice(0, maxEntries);
         setEntries(sorted);
       } catch {
         /* silent */
@@ -94,7 +118,8 @@ export function SessionConsole({ graph, sessionColors, defaultOpen = true }: Pro
       cancelled = true;
       window.clearInterval(id);
     };
-  }, [graph, paused]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionIdsKey, paused]);
 
   return (
     <div
@@ -119,8 +144,30 @@ export function SessionConsole({ graph, sessionColors, defaultOpen = true }: Pro
         <span className="text-[10px] uppercase tracking-wider text-[#58a6ff]">
           live log
         </span>
+        {focused ? (
+          <span
+            className="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded"
+            style={{
+              backgroundColor: colorForSession(sessionColors, focused) + "22",
+              color: colorForSession(sessionColors, focused),
+              borderColor: colorForSession(sessionColors, focused),
+              borderWidth: "1px",
+            }}
+            data-testid="session-console-scope"
+          >
+            scoped · s:{focused.slice(0, 8)}
+          </span>
+        ) : (
+          <span
+            className="text-[10px] uppercase tracking-wider text-[#6e7681]"
+            data-testid="session-console-scope"
+          >
+            all sessions
+          </span>
+        )}
         <span className="text-[10px] text-[#6e7681] ml-2">
-          {entries.length} of last 5 · {paused ? "paused (hover)" : "auto 8s"}
+          {entries.length} of last {focused ? MAX_ENTRIES_FOCUSED : MAX_ENTRIES_MERGED} ·{" "}
+          {paused ? "paused (hover)" : "auto 8s"}
         </span>
       </div>
       {open ? (

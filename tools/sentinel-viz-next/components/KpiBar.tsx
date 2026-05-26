@@ -76,14 +76,8 @@ export function KpiBar() {
       ) : (
         <Card label="out/5m" value="—" accent="#484f58" title="no transcript tokens parsed in window" />
       )}
-      {kpis.stuck_count > 0 ? (
-        <Card
-          label="stuck"
-          value={String(kpis.stuck_count)}
-          accent="#f85149"
-          title="sessions in awaiting_user > 15min"
-        />
-      ) : null}
+      {/* STUCK count surfaced via the dedicated red-pulsing badge in
+          StatusBar — don't double it up here. */}
     </div>
   );
 }
