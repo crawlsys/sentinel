@@ -706,7 +706,7 @@ mod tests {
 
     #[test]
     fn test_max_duration_validation() {
-        assert!(MAX_DURATION_MINUTES == 30);
-        assert!(DEFAULT_DURATION_MINUTES == 5);
+        assert_eq!(MAX_DURATION_MINUTES, 30);
+        assert_eq!(DEFAULT_DURATION_MINUTES, 5);
     }
 }

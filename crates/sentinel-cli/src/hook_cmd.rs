@@ -2511,14 +2511,14 @@ mod tests {
         let result: Result<Option<()>, tokio::time::error::Elapsed> =
             tokio::time::timeout(short_timeout, async {
                 // Mimic RigClassifier::from_env taking 30 s (e.g. Windows TLS cert load).
-                let _classifier: Option<()> = tokio::task::spawn_blocking(|| {
+                let classifier: Option<()> = tokio::task::spawn_blocking(|| {
                     std::thread::sleep(std::time::Duration::from_secs(30));
                     None::<()>
                 })
                 .await
                 .ok()
                 .flatten();
-                _classifier
+                classifier
             })
             .await;
 

@@ -1881,6 +1881,12 @@ mod tests {
     }
 
     #[tokio::test]
+    // ENV_LOCK is held across awaits deliberately: it serialises HOME/USERPROFILE
+    // mutation between concurrent #[tokio::test]s, and the awaited transactions
+    // run against that redirected env. Releasing the guard before the awaits
+    // would let a sibling test race the env. Single-purpose test mutex, not a
+    // runtime lock — the await-holding-lock concern doesn't apply.
+    #[allow(clippy::await_holding_lock)]
     async fn with_session_state_loads_and_saves_through_lock() {
         // End-to-end: inside the lock, the handler sees state loaded for
         // the session; mutations are persisted and visible on a follow-up
