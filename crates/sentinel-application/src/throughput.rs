@@ -219,7 +219,7 @@ pub fn read_token_costs(path: &Path) -> Result<HashMap<String, f64>> {
                 out.insert(r.ticket, r.cost_usd);
             }
             Err(e) => {
-                tracing::warn!(error = %e, "tokens-per-ticket.jsonl: skipping malformed line")
+                tracing::warn!(error = %e, "tokens-per-ticket.jsonl: skipping malformed line");
             }
         }
     }

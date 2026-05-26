@@ -1,11 +1,11 @@
-//! CwdChanged hook — detect working directory changes
+//! `CwdChanged` hook — detect working directory changes
 //!
 //! When the working directory changes, re-detects project context
 //! for skill routing and project config.
 
 use sentinel_domain::events::{HookInput, HookOutput};
 
-/// Process CwdChanged event
+/// Process `CwdChanged` event
 ///
 /// Logs directory change for state tracking.
 pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {

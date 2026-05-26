@@ -25,8 +25,8 @@ use super::{FileSystemPort, HookContext, MemoryMcpPort};
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct InjectedMemory {
     id: String,
-    /// Retrieval-event id captured by memory_inject from memory_search. This —
-    /// not `id` (the atom id) — is what memory_record_outcome expects, since
+    /// Retrieval-event id captured by `memory_inject` from `memory_search`. This —
+    /// not `id` (the atom id) — is what `memory_record_outcome` expects, since
     /// the retrieval log is keyed by event id.
     #[serde(default)]
     event_id: Option<String>,
@@ -220,12 +220,9 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
         Err(_) => return HookOutput::allow(),
     };
 
-    let state: InjectedState = match serde_json::from_str(&state_content) {
-        Ok(s) => s,
-        Err(_) => {
-            debug!("Invalid injected-memories state file — skipping");
-            return HookOutput::allow();
-        }
+    let state: InjectedState = if let Ok(s) = serde_json::from_str(&state_content) { s } else {
+        debug!("Invalid injected-memories state file — skipping");
+        return HookOutput::allow();
     };
 
     if state.memories.is_empty() {

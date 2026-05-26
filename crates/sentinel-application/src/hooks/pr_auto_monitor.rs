@@ -1,7 +1,7 @@
 //! PR Auto-Monitor
 //!
-//! PostToolUse hook that detects PR-related git operations and injects
-//! CronCreate instructions for automated monitoring.
+//! `PostToolUse` hook that detects PR-related git operations and injects
+//! `CronCreate` instructions for automated monitoring.
 //!
 //! Detects:
 //! - `gh pr create` → monitor CI, reviews, conflicts every 5 min
@@ -59,7 +59,7 @@ fn git_config_path(cwd: &Path) -> Option<PathBuf> {
     None
 }
 
-/// Process a PostToolUse Bash event for PR-related commands.
+/// Process a `PostToolUse` Bash event for PR-related commands.
 pub fn process(input: &HookInput) -> HookOutput {
     let cmd = match extract_bash_command(input) {
         Some(c) => c,
@@ -152,7 +152,7 @@ fn extract_pr_from_result(input: &HookInput) -> Option<String> {
     // Look for PR URL pattern
     if let Some(pos) = text.find("/pull/") {
         let after = &text[pos + 6..];
-        let num: String = after.chars().take_while(|c| c.is_ascii_digit()).collect();
+        let num: String = after.chars().take_while(char::is_ascii_digit).collect();
         if !num.is_empty() {
             return Some(format!("#{num}"));
         }
@@ -161,7 +161,7 @@ fn extract_pr_from_result(input: &HookInput) -> Option<String> {
     // Look for "Created pull request #N"
     if let Some(pos) = text.find('#') {
         let after = &text[pos + 1..];
-        let num: String = after.chars().take_while(|c| c.is_ascii_digit()).collect();
+        let num: String = after.chars().take_while(char::is_ascii_digit).collect();
         if !num.is_empty() {
             return Some(format!("#{num}"));
         }

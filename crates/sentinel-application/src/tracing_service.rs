@@ -14,19 +14,19 @@
 //!
 //! # Span lifecycle
 //!
-//! 1. **`start_span`** at PreToolUse — returns a [`SpanHandle`] that the
+//! 1. **`start_span`** at `PreToolUse` — returns a [`SpanHandle`] that the
 //!    caller threads through the step. Sets the active span so child
 //!    spans correlate.
 //! 2. **`record_event`** any time during the span — bag of structured
 //!    attributes (e.g. `verdict.sufficient = true`, `evidence.token_count = 42`).
-//! 3. **`end_span`** at PostToolUse — closes the span with optional
+//! 3. **`end_span`** at `PostToolUse` — closes the span with optional
 //!    status. Idempotent.
 //!
 //! # Correlation with proof chain
 //!
 //! [`SpanHandle::trace_context`] returns the W3C [`TraceContext`] for
-//! the active span. The hook stamps that context onto the StepProof it
-//! emits — making the proof chain queryable by trace_id, and giving
+//! the active span. The hook stamps that context onto the `StepProof` it
+//! emits — making the proof chain queryable by `trace_id`, and giving
 //! Tempo / Honeycomb dashboards a back-link via `step_id` / `phase_id`
 //! attributes.
 
@@ -119,7 +119,7 @@ impl From<bool> for AttributeValue {
 pub struct SpanHandle {
     /// Stable identifier for this span within the process. The exporter
     /// uses this to correlate the start / record / end events; it's
-    /// distinct from the W3C span_id (which is part of `trace_context`)
+    /// distinct from the W3C `span_id` (which is part of `trace_context`)
     /// because exporters may choose their own internal IDs for
     /// efficiency.
     pub local_id: u64,

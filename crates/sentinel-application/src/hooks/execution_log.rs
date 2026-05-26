@@ -59,16 +59,12 @@ fn extract_context(line: &str) -> Option<String> {
 }
 
 /// Read the current skill from the telemetry state file written by skill-router.
-/// Uses sentinel's protected telemetry dir instead of world-writable temp_dir(). (Attack #51)
+/// Uses sentinel's protected telemetry dir instead of world-writable `temp_dir()`. (Attack #51)
 fn current_skill(fs: &dyn FileSystemPort) -> String {
     let dir = fs
-        .home_dir()
-        .map(|h| h.join(".claude").join("sentinel").join("telemetry"))
-        .unwrap_or_else(|| std::env::temp_dir());
+        .home_dir().map_or_else(std::env::temp_dir, |h| h.join(".claude").join("sentinel").join("telemetry"));
     let path = dir.join("claude-current-skill");
-    fs.read_to_string(&path)
-        .map(|s| s.trim().to_string())
-        .unwrap_or_else(|_| "none".to_string())
+    fs.read_to_string(&path).map_or_else(|_| "none".to_string(), |s| s.trim().to_string())
 }
 
 /// Process the execution-log hook event (Stop).
@@ -245,7 +241,7 @@ fn enrich_summary_with_tool_calls(base: Option<&str>, tool_calls: &[String]) -> 
     let mut seen: Vec<&str> = Vec::new();
     for name in tool_calls {
         let s = name.as_str();
-        if !seen.iter().any(|existing| *existing == s) {
+        if !seen.contains(&s) {
             seen.push(s);
         }
     }

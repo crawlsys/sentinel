@@ -1,4 +1,4 @@
-//! Test Evidence Recorder (PostToolUse)
+//! Test Evidence Recorder (`PostToolUse`)
 //!
 //! When a Bash tool call matches a test/build pattern, append a line to
 //! `~/.claude/sentinel/state/test-evidence/{session_id}.jsonl`. The
@@ -46,7 +46,7 @@ pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
         .tool_result
         .as_ref()
         .and_then(|tr| tr.get("success"))
-        .and_then(|v| v.as_bool())
+        .and_then(serde_json::Value::as_bool)
         .unwrap_or(true);
 
     let Some(home) = ctx.fs.home_dir() else {
@@ -61,8 +61,7 @@ pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
     let entry = TestEvidenceEntry {
         ts_ms: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis())
-            .unwrap_or(0),
+            .map_or(0, |d| d.as_millis()),
         session_id: session_id.to_string(),
         cwd: input.cwd.clone().unwrap_or_default(),
         command: command.to_string(),

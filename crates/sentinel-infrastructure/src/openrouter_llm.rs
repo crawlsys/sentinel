@@ -48,8 +48,7 @@ impl OpenRouterLlm {
     const fn model_id(model: LlmModel) -> &'static str {
         match model {
             LlmModel::Haiku => "openai/gpt-5.5-pro", // Codex tier
-            LlmModel::Sonnet => "anthropic/claude-opus-4.7", // no Sonnet in policy → Opus
-            LlmModel::Opus => "anthropic/claude-opus-4.7",
+            LlmModel::Sonnet | LlmModel::Opus => "anthropic/claude-opus-4.7", // no Sonnet in policy → Opus
         }
     }
 }

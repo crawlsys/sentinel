@@ -64,13 +64,13 @@ impl Clock for MockClock {
     }
 }
 
-/// Dedup key — (source, resource_id, event_type).
+/// Dedup key — (source, `resource_id`, `event_type`).
 ///
 /// - `source`: "linear", "github", "vercel", etc. Drawn from the webhook source.
 /// - `resource_id`: the specific entity being affected (issue identifier, PR
 ///    number, etc). `None` when the event doesn't target a single resource, in
-///    which case coalescing falls back to (source, event_type).
-/// - `event_type`: "Issue.update", "check_run.completed", etc.
+///    which case coalescing falls back to (source, `event_type`).
+/// - `event_type`: "Issue.update", "`check_run.completed`", etc.
 #[derive(Debug, Clone, Eq, PartialEq, Hash)]
 pub struct DedupKey {
     pub source: String,
@@ -93,7 +93,7 @@ impl DedupKey {
 
     /// Attempt to derive a dedup key from a [`ChannelEvent`]'s meta map.
     ///
-    /// Looks for `meta.source` + `meta.resource_id` + (meta.event_type || top-level event).
+    /// Looks for `meta.source` + `meta.resource_id` + (`meta.event_type` || top-level event).
     /// Returns `None` if the event has no `source` — such events bypass dedup.
     pub fn from_event(event: &ChannelEvent) -> Option<Self> {
         let source = event
@@ -109,9 +109,7 @@ impl DedupKey {
         let event_type = event
             .meta
             .get("event_type")
-            .and_then(|v| v.as_str())
-            .map(String::from)
-            .unwrap_or_else(|| event.event.clone());
+            .and_then(|v| v.as_str()).map_or_else(|| event.event.clone(), String::from);
         Some(Self::new(source, resource_id, event_type))
     }
 }
@@ -199,31 +197,28 @@ impl<C: Clock> Coalescer<C> {
         };
         let now = self.clock.now();
 
-        match self.pending.get_mut(&key) {
-            Some(existing) => {
-                let superseded = std::mem::take(&mut existing.latest_path);
-                if let Some(ref p) = superseded {
-                    existing.superseded_paths.push(p.clone());
-                }
-                existing.event = event;
-                existing.latest_path = event_path;
-                existing.count += 1;
-                existing.last_seen = now;
-                IngestOutcome::Coalesced { superseded }
+        if let Some(existing) = self.pending.get_mut(&key) {
+            let superseded = std::mem::take(&mut existing.latest_path);
+            if let Some(ref p) = superseded {
+                existing.superseded_paths.push(p.clone());
             }
-            None => {
-                self.pending.insert(
-                    key,
-                    Pending {
-                        event,
-                        latest_path: event_path,
-                        superseded_paths: Vec::new(),
-                        count: 1,
-                        last_seen: now,
-                    },
-                );
-                IngestOutcome::Buffered
-            }
+            existing.event = event;
+            existing.latest_path = event_path;
+            existing.count += 1;
+            existing.last_seen = now;
+            IngestOutcome::Coalesced { superseded }
+        } else {
+            self.pending.insert(
+                key,
+                Pending {
+                    event,
+                    latest_path: event_path,
+                    superseded_paths: Vec::new(),
+                    count: 1,
+                    last_seen: now,
+                },
+            );
+            IngestOutcome::Buffered
         }
     }
 

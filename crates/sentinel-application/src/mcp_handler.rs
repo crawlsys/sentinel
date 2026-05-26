@@ -16,7 +16,7 @@ use crate::proof_engine::ProofEngine;
 /// MCP tool call request
 #[derive(Debug, Clone, Deserialize)]
 pub struct McpToolCall {
-    /// Tool name (e.g., "sentinel__submit_evidence")
+    /// Tool name (e.g., "`sentinel__submit_evidence`")
     pub name: String,
 
     /// Tool arguments as JSON
@@ -38,7 +38,7 @@ pub struct McpToolResult {
 }
 
 impl McpToolResult {
-    pub fn ok(content: serde_json::Value) -> Self {
+    pub const fn ok(content: serde_json::Value) -> Self {
         Self {
             success: true,
             content,
@@ -73,7 +73,7 @@ pub struct McpHandler {
     /// registry wired is a fail-fast error, not a silent skip).
     evidence_adapters: Option<Arc<crate::evidence_adapters::EvidenceAdapterRegistry>>,
     /// Step-level verifier requirements (sentinel #71). Each entry
-    /// says "the step at (skill, phase_id, step_id) cannot seal
+    /// says "the step at (skill, `phase_id`, `step_id`) cannot seal
     /// unless its evidence carries a receipt from the named
     /// adapter." Checked AFTER the BIBLE wireup folds any
     /// `evidence_claim` receipt into `Evidence.custom`, so verifiers
@@ -94,7 +94,7 @@ pub struct ProofArchiveBacking {
 }
 
 impl McpHandler {
-    pub fn new(state: Arc<RwLock<SessionState>>, proof_engine: Arc<ProofEngine>) -> Self {
+    pub const fn new(state: Arc<RwLock<SessionState>>, proof_engine: Arc<ProofEngine>) -> Self {
         Self {
             state,
             proof_engine,
@@ -224,7 +224,7 @@ impl McpHandler {
 
     /// Return a single [`StepProof`](sentinel_domain::step_proof::StepProof)
     /// matching `(skill, step_id [, phase_id])`. Phase id disambiguates
-    /// when the same step_id repeats across phases (e.g. "1" in both
+    /// when the same `step_id` repeats across phases (e.g. "1" in both
     /// "claim" and "review" phases).
     async fn get_step_proof(&self, args: serde_json::Value) -> McpToolResult {
         let skill = match args.get("skill").and_then(|v| v.as_str()) {
@@ -388,7 +388,7 @@ impl McpHandler {
     /// - `phase_id` (string)
     /// - `step_id` (string)
     /// - `step_description` (string) — what "sufficient" means for this step
-    /// - `verdict` (object) — JudgeVerdict { sufficient, confidence, reasoning, requested_evidence? }
+    /// - `verdict` (object) — `JudgeVerdict` { sufficient, confidence, reasoning, `requested_evidence`? }
     ///
     /// Optional arguments (sensible defaults applied when omitted):
     /// - `evidence` (object) — defaults to empty Evidence
@@ -397,7 +397,7 @@ impl McpHandler {
     /// - `account_context` (string|null) — defaults to null
     /// - `started_at` (RFC3339 string) — defaults to now-1ms
     ///
-    /// Returns the sealed StepProof on success, or an error on
+    /// Returns the sealed `StepProof` on success, or an error on
     /// insufficient verdict / chain-link mismatch / serialization
     /// failure. Refusing to seal an insufficient verdict is the
     /// engine's job — surface the error here for caller telemetry.
@@ -445,7 +445,7 @@ impl McpHandler {
             let st = self.state.read().await;
             match st.independent_verdict(skill, phase_id, step_id) {
                 Some(indep) => (indep.sufficient, indep.confidence, true),
-                None => (verdict.sufficient, f64::from(verdict.confidence), false),
+                None => (verdict.sufficient, verdict.confidence, false),
             }
         };
         let (eff_sufficient, eff_confidence, from_independent) = effective_verdict;
@@ -576,7 +576,7 @@ impl McpHandler {
                 })
             }
             Some(v) if v.is_null() => None, // Explicit clear.
-            Some(v) => v.as_str().map(|s| s.to_string()),
+            Some(v) => v.as_str().map(std::string::ToString::to_string),
         };
 
         // started_at — accept RFC3339 string, fall back to now-1ms so
@@ -678,18 +678,18 @@ impl McpHandler {
     ///
     /// The `step_sequence` field is the key signal: it lets the M7 router
     /// query "for prompts like X, what step-sequence patterns have worked
-    /// before?" without dragging the full StepProof payloads across the
+    /// before?" without dragging the full `StepProof` payloads across the
     /// MCP boundary.
     async fn query_proof_corpus(&self, args: serde_json::Value) -> McpToolResult {
         let skill_filter = args.get("skill_filter").and_then(|v| v.as_str());
-        let min_steps = args.get("min_steps").and_then(|v| v.as_u64()).unwrap_or(0);
+        let min_steps = args.get("min_steps").and_then(serde_json::Value::as_u64).unwrap_or(0);
         let successful_only = args
             .get("successful_only")
-            .and_then(|v| v.as_bool())
+            .and_then(serde_json::Value::as_bool)
             .unwrap_or(true);
         let max_results = args
             .get("max_results")
-            .and_then(|v| v.as_u64())
+            .and_then(serde_json::Value::as_u64)
             .unwrap_or(50)
             .min(500) as usize;
 
@@ -701,7 +701,7 @@ impl McpHandler {
         let mut summaries: Vec<serde_json::Value> = Vec::new();
         let mut total_matched: u64 = 0;
 
-        for (skill, chain) in state.proof_chains.iter() {
+        for (skill, chain) in &state.proof_chains {
             if let Some(want) = skill_filter {
                 if skill != want {
                     continue;

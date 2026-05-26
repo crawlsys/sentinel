@@ -5,11 +5,11 @@
 //! by SEN-1. This module is the single read path for both, plus the two
 //! aggregation surfaces:
 //!
-//! * [`compute_stage_thresholds`] — for each (team, from_stage) pair,
+//! * [`compute_stage_thresholds`] — for each (team, `from_stage`) pair,
 //!   emit p50/p75/p90 of the elapsed hours into the next stage. The
 //!   stale-ticket hook reads these to replace its hardcoded thresholds.
 //! * [`compute_per_stage_breakdown`] — for each (team, stage) pair, emit
-//!   mean / p50 / p75 / sample_count over the 30-day window. The
+//!   mean / p50 / p75 / `sample_count` over the 30-day window. The
 //!   dashboard's `CycleTimeBreakdown` organism + master enterprise
 //!   dashboard (SEN-19) read this.
 //!
@@ -44,7 +44,7 @@ use crate::cycle_time::CycleTimeEvent;
 /// so percentile bases stay aligned across the two surfaces.
 pub const DEFAULT_WINDOW_DAYS: i64 = 30;
 
-/// One (team, from_stage) entry in the stale-threshold table (SEN-2).
+/// One (team, `from_stage`) entry in the stale-threshold table (SEN-2).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StageThreshold {
     /// Team identifier (e.g. `FPCRM`). May be `null` when the upstream
@@ -143,12 +143,9 @@ fn pair_transitions(events: &[CycleTimeEvent]) -> Vec<(Option<String>, String, f
         events_of_issue.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
         let mut prev: Option<(&CycleTimeEvent, DateTime<Utc>)> = None;
         for ev in events_of_issue.iter() {
-            let ts = match DateTime::parse_from_rfc3339(&ev.timestamp) {
-                Ok(t) => t.with_timezone(&Utc),
-                Err(_) => {
-                    prev = None;
-                    continue;
-                }
+            let ts = if let Ok(t) = DateTime::parse_from_rfc3339(&ev.timestamp) { t.with_timezone(&Utc) } else {
+                prev = None;
+                continue;
             };
             if let Some((p, p_ts)) = prev {
                 let diff_secs = (ts - p_ts).num_seconds().max(0);
@@ -169,7 +166,7 @@ fn pair_transitions(events: &[CycleTimeEvent]) -> Vec<(Option<String>, String, f
     out
 }
 
-/// SEN-2: per-(team, from_stage) p50/p75/p90 of dwell time, computed over
+/// SEN-2: per-(team, `from_stage`) p50/p75/p90 of dwell time, computed over
 /// the last `window_days` days of `cycle-time.jsonl`. `now` is injected
 /// for test determinism.
 ///

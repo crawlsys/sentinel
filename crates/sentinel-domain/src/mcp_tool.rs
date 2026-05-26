@@ -59,8 +59,9 @@ pub const SAFE_METHOD_PREFIXES: &[&str] = &[
     "get_", "list_", "search_", "read_", "check_", "resolve_", "verify_",
 ];
 
-/// MCP servers that are trusted operator-registered infrastructure — their
-/// tools are NOT gated as dangerous regardless of method verb. These are
+/// MCP servers that are trusted operator-registered infrastructure.
+///
+/// Their tools are NOT gated as dangerous regardless of method verb. These are
 /// servers the operator controls (browser automation, reasoning, memory,
 /// sentinel's own surface, issue tracking) where the per-tool verb gate adds
 /// friction without security value. Per Gary: "MCPs are safe."

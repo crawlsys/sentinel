@@ -76,8 +76,8 @@ pub fn report_result_fire_and_forget(
 /// one id per line.
 ///
 /// File ops are deliberately simple: append-on-drain, read-and-
-/// remove on Stop. Race window between consul_inbox appending
-/// and execution_log clearing is small (hooks for the same
+/// remove on Stop. Race window between `consul_inbox` appending
+/// and `execution_log` clearing is small (hooks for the same
 /// session don't usually overlap) and the failure mode is
 /// "operator misses one Result ping" — non-fatal.
 fn pending_file_path(session_id: &str) -> Option<PathBuf> {
@@ -97,6 +97,7 @@ fn pending_file_path(session_id: &str) -> Option<PathBuf> {
 }
 
 /// Append `instruction_id` to the per-session pending file.
+///
 /// Creates the parent dir + file if needed. Errors logged at
 /// debug; never propagated (the operator still got an Ack via
 /// the WS; only the Stop hook's per-instruction Result depends
@@ -338,7 +339,7 @@ pub fn take_turn_signals(session_id: &str) -> Vec<TurnSignal> {
 ///
 /// Rules (MVP — coarse classification, the ~90-95% reliability target
 /// per the project's reliability philosophy):
-/// 1. If the caller supplies an `api_error` (StopFailure path), all
+/// 1. If the caller supplies an `api_error` (`StopFailure` path), all
 ///    pending instructions are `Failure { error }`.
 /// 2. Otherwise, if any [`TurnSignal::PermissionDenied`] was observed
 ///    this turn, all pending instructions are `Declined { reason }`
@@ -442,7 +443,7 @@ pub fn escalate_fire_and_forget(event: EscalationKind) {
 /// Returns `false` when no approval is present, the daemon is
 /// unreachable, or the HTTP call fails.
 ///
-/// Called from the `catastrophic_escalation` PreToolUse hook
+/// Called from the `catastrophic_escalation` `PreToolUse` hook
 /// before classifying the tool call. The cache lookup is the
 /// retry-allow path: an approval recorded by the legatus's
 /// inbound `CatastrophicAck` handler authorizes exactly one
@@ -513,7 +514,7 @@ enum LegatusClientError {
     Serialize(serde_json::Error),
 }
 
-/// Synchronously drain the daemon's inbox by repeatedly GETting
+/// Synchronously drain the daemon's inbox by repeatedly `GETting`
 /// `/legatus/inbox/next` until the daemon returns 204 No Content
 /// (queue empty). Returns whatever instructions were buffered
 /// (possibly empty). Used by the `UserPromptSubmit` hook to pull

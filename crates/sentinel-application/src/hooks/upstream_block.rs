@@ -3,7 +3,7 @@
 //!
 //! # Why
 //!
-//! Several PreToolUse hooks block a tool call when their gate
+//! Several `PreToolUse` hooks block a tool call when their gate
 //! conditions aren't met (`phase_gate` requires plan-mode for
 //! risky ops, `pre_commit_verification` requires a verification
 //! token before commits, `git_hygiene` blocks Edit/Write past the
@@ -52,7 +52,7 @@ pub fn deny_with_upstream(hook_name: &str, reason: String) -> HookOutput {
 /// Convenience wrapper around `HookOutput::block`: same shape as
 /// `deny_with_upstream` but routes through the `block` variant
 /// (used by hooks like `pre_commit_verification` that emit a
-/// generic block rather than a PreToolUse deny).
+/// generic block rather than a `PreToolUse` deny).
 #[must_use]
 pub fn block_with_upstream(hook_name: &str, reason: String) -> HookOutput {
     signal_upstream(hook_name, &reason);

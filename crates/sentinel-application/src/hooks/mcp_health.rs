@@ -3,7 +3,7 @@
 //! Detects MCP server failures after tool calls and logs them to
 //! ~/.claude/metrics/errors.jsonl for auto-filing to Linear.
 //!
-//! Runs on PostToolUse — only checks tools with the `mcp__` prefix.
+//! Runs on `PostToolUse` — only checks tools with the `mcp__` prefix.
 //! Never blocks, only logs.
 
 use chrono::Utc;
@@ -57,7 +57,7 @@ fn detect_error(input: &HookInput) -> Option<String> {
     let is_error = input
         .extra
         .get("is_error")
-        .and_then(|v| v.as_bool())
+        .and_then(serde_json::Value::as_bool)
         .unwrap_or(false);
 
     // Check tool_result for error patterns
@@ -135,7 +135,7 @@ fn log_mcp_error(
     let _ = fs.append(&errors_path, line.as_bytes());
 }
 
-/// Process an MCP health check (PostToolUse)
+/// Process an MCP health check (`PostToolUse`)
 pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     let tool_name = match &input.tool_name {
         Some(name) if name.starts_with("mcp__") => name.as_str(),

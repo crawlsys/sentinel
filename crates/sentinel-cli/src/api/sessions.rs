@@ -60,9 +60,8 @@ fn load_sessions() -> Vec<SessionSummary> {
     // fs::read_to_string(). Raw reads bypass HMAC verification, allowing an attacker
     // with filesystem access to inject forged session state into the dashboard.
     let dir = state_dir();
-    let entries = match fs::read_dir(&dir) {
-        Ok(e) => e,
-        Err(_) => return Vec::new(),
+    let Ok(entries) = fs::read_dir(&dir) else {
+        return Vec::new();
     };
 
     let mut sessions = Vec::new();
@@ -78,9 +77,8 @@ fn load_sessions() -> Vec<SessionSummary> {
             let session_id = file_name.trim_end_matches(".json");
 
             // Use HMAC-verified load
-            let state = match sentinel_infrastructure::state_store::load(session_id) {
-                Ok(Some(s)) => s,
-                _ => continue, // Skip invalid, tampered, or unsigned state files
+            let Ok(Some(state)) = sentinel_infrastructure::state_store::load(session_id) else {
+                continue; // Skip invalid, tampered, or unsigned state files
             };
 
             // Convert phases_read HashMap<String, Vec<String>> to flat list
@@ -297,7 +295,7 @@ async fn get_stats() -> Json<serde_json::Value> {
     let hook_avg_ms: HashMap<String, u64> = hook_timings
         .into_iter()
         .map(|(hook, (total_ms, count))| {
-            let avg = if count > 0 { total_ms / count } else { 0 };
+            let avg = total_ms.checked_div(count).unwrap_or(0);
             (hook, avg)
         })
         .collect();

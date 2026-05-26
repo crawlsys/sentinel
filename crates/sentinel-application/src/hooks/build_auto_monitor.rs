@@ -1,6 +1,6 @@
 //! Build Auto-Monitor
 //!
-//! PostToolUse hook that detects background builds and injects
+//! `PostToolUse` hook that detects background builds and injects
 //! monitoring suggestions.
 //!
 //! Detects:
@@ -10,7 +10,7 @@
 
 use sentinel_domain::events::{HookEvent, HookInput, HookOutput};
 
-/// Process a PostToolUse Bash event for build-related commands.
+/// Process a `PostToolUse` Bash event for build-related commands.
 pub fn process(input: &HookInput) -> HookOutput {
     let cmd = match extract_bash_command(input) {
         Some(c) => c,
@@ -22,7 +22,7 @@ pub fn process(input: &HookInput) -> HookOutput {
         .tool_input
         .as_ref()
         .and_then(|v| v.get("run_in_background"))
-        .and_then(|v| v.as_bool())
+        .and_then(serde_json::Value::as_bool)
         .unwrap_or(false)
         || cmd.trim_end().ends_with('&');
 

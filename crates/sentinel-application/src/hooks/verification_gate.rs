@@ -4,7 +4,7 @@
 //! (e.g. "all tests pass" without running tests). Writes findings to
 //! `~/.claude/metrics/unverified-claims.json`.
 //!
-//! **UserPromptSubmit phase:** Reads findings, checks cooldown (5 min),
+//! **`UserPromptSubmit` phase:** Reads findings, checks cooldown (5 min),
 //! injects reminder to run verification before claiming completion.
 
 use regex::Regex;
@@ -28,8 +28,7 @@ struct ClaimState {
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
+        .map_or(0, |d| d.as_millis() as u64)
 }
 
 fn state_file(fs: &dyn FileSystemPort, session_id: &str) -> Option<PathBuf> {
@@ -180,11 +179,10 @@ fn parse_transcript(
                                 data.assistant_text.push('\n');
                             }
                         }
-                        "tool_use" => {
-                            if block.get("name").and_then(|v| v.as_str()) == Some("Bash") {
+                        "tool_use"
+                            if block.get("name").and_then(|v| v.as_str()) == Some("Bash") => {
                                 data.has_bash_calls = true;
                             }
-                        }
                         _ => {}
                     }
                 }

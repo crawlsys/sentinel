@@ -2,8 +2,8 @@
 //!
 //! Blocks Edit/Write tools when uncommitted changes exceed thresholds.
 //! Hard-blocks editing on main/master without a worktree.
-//! All git operations go through the injected GitStatusPort — no direct
-//! std::process::Command calls.
+//! All git operations go through the injected `GitStatusPort` — no direct
+//! `std::process::Command` calls.
 
 use sentinel_domain::constants;
 use sentinel_domain::events::{HookInput, HookOutput};
@@ -15,7 +15,7 @@ const MAX_UNCOMMITTED_FILES: usize = constants::MAX_UNCOMMITTED_FILES;
 /// Protected branch names that should not receive direct edits.
 const PROTECTED_BRANCHES: &[&str] = &["main", "master"];
 
-/// Extract the target file path from a HookInput.
+/// Extract the target file path from a `HookInput`.
 ///
 /// Checks `input.file_path` (Claude Code 2.1.89+), then falls back to
 /// `tool_input.file_path` for older runtimes.
@@ -115,7 +115,7 @@ fn is_path_inside_repo(
     canon_target.starts_with(&canon_root)
 }
 
-/// Process a git-hygiene hook event (PreToolUse for Edit/Write).
+/// Process a git-hygiene hook event (`PreToolUse` for Edit/Write).
 ///
 /// Checks:
 /// 1. Warn if editing directly on main/master (not in a worktree)

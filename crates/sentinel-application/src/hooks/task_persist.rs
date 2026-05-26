@@ -1,6 +1,6 @@
 //! Task Persist Hook — snapshot task list to project-level tasks.md + global JSON
 //!
-//! Fires on TaskCreated, TaskCompleted, and Stop events.
+//! Fires on `TaskCreated`, `TaskCompleted`, and Stop events.
 //!
 //! Two outputs per fire:
 //!
@@ -11,7 +11,7 @@
 //!    a fresh marker block is prepended (and the existing content stays below it).
 //!
 //! 2. **`~/.claude/sentinel/persistent-tasks/{project_hash}/tasks.json`** (rehydration)
-//!    Machine-readable snapshot consumed by `task_rehydrate` on SessionStart.
+//!    Machine-readable snapshot consumed by `task_rehydrate` on `SessionStart`.
 //!    `meta.json` next to it tracks last update + content hash for skip-if-unchanged.
 //!    Previously lived at `~/.claude/persistent-tasks/` — moved under `sentinel/`
 //!    to colocate with the rest of sentinel-owned state. Old data is migrated
@@ -31,7 +31,7 @@ use std::path::{Path, PathBuf};
 
 use super::{FileSystemPort, GitStatusPort, HookContext};
 
-/// Public so tasks_md_guard / linear_sync can detect the auto block.
+/// Public so `tasks_md_guard` / `linear_sync` can detect the auto block.
 pub const MARKER_START: &str = "<!-- SENTINEL:TASKS:START -->";
 pub const MARKER_END: &str = "<!-- SENTINEL:TASKS:END -->";
 
@@ -148,7 +148,7 @@ fn find_active_task_dir(fs: &dyn FileSystemPort, session_id: &str) -> Option<Pat
 /// Check if a directory contains at least one .json task file (not .lock, not .highwatermark)
 fn has_task_files(fs: &dyn FileSystemPort, dir: &PathBuf) -> bool {
     fs.read_dir(dir)
-        .map(|entries| {
+        .is_ok_and(|entries| {
             entries.iter().any(|p| {
                 let name = p
                     .file_name()
@@ -157,7 +157,6 @@ fn has_task_files(fs: &dyn FileSystemPort, dir: &PathBuf) -> bool {
                 name.ends_with(".json") && !name.starts_with('.')
             })
         })
-        .unwrap_or(false)
 }
 
 /// Read all tasks from a task list directory
@@ -205,7 +204,7 @@ fn read_linear_issues(fs: &dyn FileSystemPort, project_name: &str) -> Vec<Linear
 }
 
 /// Render Linear-issue rows. Active states only (no completed/canceled);
-/// sorted by status_type rank then identifier.
+/// sorted by `status_type` rank then identifier.
 fn render_linear_section(issues: &[LinearIssue]) -> String {
     if issues.is_empty() {
         return String::new();
@@ -310,7 +309,7 @@ fn render_auto_block_body(
         .count();
 
     let mut md = String::new();
-    md.push_str("\n");
+    md.push('\n');
     md.push_str(&format!(
         "<!-- This block is auto-managed by sentinel `task_persist` hook. Edit via TaskCreate / Linear, not by hand. Updated: {now} -->\n\n"
     ));
@@ -461,9 +460,7 @@ fn encode_project_key(path: &str) -> String {
 /// Pull the project name (last segment of repo root path) for the rendered header.
 fn project_name(repo_root: &Path) -> String {
     repo_root
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| "project".to_string())
+        .file_name().map_or_else(|| "project".to_string(), |n| n.to_string_lossy().to_string())
 }
 
 /// Atomic file write: write to `<path>.tmp` then rename. Falls back to direct
@@ -556,8 +553,7 @@ fn write_project_tasks_md(
             let existing_count = count_block_tasks(existing_block);
             let new_count = count_block_tasks(body);
             let force = std::env::var(SHRINK_GUARD_FORCE_ENV)
-                .map(|v| !v.is_empty())
-                .unwrap_or(false);
+                .is_ok_and(|v| !v.is_empty());
             #[allow(
                 clippy::cast_precision_loss,
                 clippy::cast_possible_truncation,
@@ -706,7 +702,7 @@ fn write_memory_summary(
             }
             out
         }
-        None => new_index_line.clone(),
+        None => new_index_line,
     };
     fs.write(&index_path, updated_index.as_bytes())?;
 
@@ -819,7 +815,7 @@ fn write_persistent_tasks(
     Ok(())
 }
 
-/// Process task persistence on TaskCreated, TaskCompleted, or Stop events.
+/// Process task persistence on `TaskCreated`, `TaskCompleted`, or Stop events.
 ///
 /// Reads the active session's task files, then writes:
 /// - `<repo_root>/tasks.md` (project-scoped, with marker block)
@@ -857,12 +853,9 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     let session_id: &str = &session_id;
     let cwd = input.cwd.as_deref().unwrap_or(".");
 
-    let task_dir = match find_active_task_dir(ctx.fs, session_id) {
-        Some(dir) => dir,
-        None => {
-            tracing::debug!("No active task directory found — skipping persist");
-            return HookOutput::allow();
-        }
+    let task_dir = if let Some(dir) = find_active_task_dir(ctx.fs, session_id) { dir } else {
+        tracing::debug!("No active task directory found — skipping persist");
+        return HookOutput::allow();
     };
 
     let tasks = read_tasks(ctx.fs, &task_dir);

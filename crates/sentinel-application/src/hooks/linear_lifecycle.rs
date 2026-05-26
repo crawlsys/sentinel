@@ -1,7 +1,7 @@
 //! Linear Issue Lifecycle Monitor
 //!
-//! PostToolUse hook that detects Linear issue state changes and injects
-//! CronCreate instructions for lifecycle monitoring.
+//! `PostToolUse` hook that detects Linear issue state changes and injects
+//! `CronCreate` instructions for lifecycle monitoring.
 //!
 //! Detects:
 //! - `mcp__linear__update_issue` with state change → lifecycle monitoring
@@ -10,7 +10,7 @@
 
 use sentinel_domain::events::{HookEvent, HookInput, HookOutput};
 
-/// Process a PostToolUse event for Linear tool calls.
+/// Process a `PostToolUse` event for Linear tool calls.
 pub fn process(input: &HookInput) -> HookOutput {
     let tool = match &input.tool_name {
         Some(t) => t.as_str(),
@@ -57,7 +57,7 @@ pub fn process(input: &HookInput) -> HookOutput {
     HookOutput::allow()
 }
 
-/// Extract state_id from update_issue tool input if present.
+/// Extract `state_id` from `update_issue` tool input if present.
 fn extract_state_change(input: &HookInput) -> Option<String> {
     let tool_input = input.tool_input.as_ref()?;
     tool_input

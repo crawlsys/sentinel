@@ -1,6 +1,6 @@
 //! Step Gate Hook
 //!
-//! PreToolUse hook that blocks fine-grained step tool calls when their
+//! `PreToolUse` hook that blocks fine-grained step tool calls when their
 //! prerequisite step has not been completed (i.e. no [`StepProof`] exists in
 //! the active [`ProofChain`] for the prior step).
 //!
@@ -11,11 +11,11 @@
 //! finer granularity: within a phase, did the prior step in the configured
 //! sequence produce a proof before the next step's tool is called?
 //!
-//! Both hooks fire on PreToolUse. They are **complementary**, not redundant:
+//! Both hooks fire on `PreToolUse`. They are **complementary**, not redundant:
 //! - Skills with no step config fall through `step_gate` (no-op) and rely on
 //!   `phase_gate` alone — backwards compatible with the existing 76 skills.
-//! - Skills *with* step configs get both layers — phase_gate prevents whole
-//!   phases from being skipped; step_gate prevents steps within a phase
+//! - Skills *with* step configs get both layers — `phase_gate` prevents whole
+//!   phases from being skipped; `step_gate` prevents steps within a phase
 //!   from being skipped.
 //!
 //! # Tool naming convention
@@ -125,14 +125,14 @@ fn deny_with_context(input: &HookInput, reason: impl Into<String>) -> HookOutput
     HookOutput::deny(super::block_context::append_block_context(reason, input))
 }
 
-/// Process a step-gate hook event (PreToolUse).
+/// Process a step-gate hook event (`PreToolUse`).
 ///
 /// Returns:
 /// - [`HookOutput::allow`] for tool calls that aren't step tools, for skills
 ///   without step configs (backwards compat), for the first step in a phase
 ///   (no prereq), and for steps whose prereq proof exists.
 /// - [`HookOutput::deny`] with a `[Sentinel-Authority]` message when the
-///   prereq StepProof is missing.
+///   prereq `StepProof` is missing.
 pub fn process(
     input: &HookInput,
     state: &SessionState,

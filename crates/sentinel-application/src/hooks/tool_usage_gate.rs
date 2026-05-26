@@ -1,20 +1,20 @@
 //! Tool Usage Gate
 //!
-//! PreToolUse hook that blocks Edit/Write if required preconditions aren't met:
+//! `PreToolUse` hook that blocks Edit/Write if required preconditions aren't met:
 //! 1. Sequential thinking must have been used this session
 //! 2. At least one task must have been created this session
 //! 3. A plan must have been approved this session (ExitPlanMode/EnterPlanMode
 //!    called, OR a recent `plans/*.md` exists)
-//! 4. A task must be actively in_progress
+//! 4. A task must be actively `in_progress`
 //!
 //! State is tracked via marker files in the temp directory, keyed by session ID.
-//! Marker files are written by the PostToolUse dispatcher when it detects
+//! Marker files are written by the `PostToolUse` dispatcher when it detects
 //! the relevant tool calls.
 //!
 //! Plan-mode detection (primary): read the session transcript at
 //! `input.transcript_path` and walk it to find the last `EnterPlanMode` or
 //! `ExitPlanMode` `tool_use` entry. If `EnterPlanMode` appears after the
-//! last `ExitPlanMode` (or there is no ExitPlanMode), the session is
+//! last `ExitPlanMode` (or there is no `ExitPlanMode`), the session is
 //! currently in plan mode and check #3 is satisfied directly by the real
 //! Claude Code 2.1.114 signal. This replaces the old `SENTINEL_AUTOPILOT`
 //! env-var bypass — see `detect_plan_mode_from_transcript`.
@@ -26,7 +26,7 @@
 //!
 //! Plan-file fallback: when a session is resumed, `ExitPlanMode` may have
 //! been called in a prior session and the transcript may not be available,
-//! so no PLAN_MARKER exists. Detect this by scanning for recently-written
+//! so no `PLAN_MARKER` exists. Detect this by scanning for recently-written
 //! `*.md` files in any `plans/` directory between `{cwd}` and the
 //! containing repo root. We walk upward from cwd until we find a `.git`
 //! entry (file or directory — worktrees use a file) and check every
@@ -54,8 +54,7 @@ use super::{EnvPort, FileSystemPort};
 /// authoritative signal and this env var is ignored.
 fn is_autopilot(env: &dyn EnvPort) -> bool {
     env.var("SENTINEL_AUTOPILOT")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
+        .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
 }
 
 /// Walk the transcript newest-to-oldest looking for the most recent
@@ -63,9 +62,9 @@ fn is_autopilot(env: &dyn EnvPort) -> bool {
 /// the last one is `EnterPlanMode` — meaning the session is currently in
 /// plan mode.
 ///
-/// Claude Code 2.1.114 records plan-mode entry as an assistant tool_use
+/// Claude Code 2.1.114 records plan-mode entry as an assistant `tool_use`
 /// block with `name: "EnterPlanMode"` (real tool — binary handler `r7H` —
-/// though omitted from `sdk-tools.d.ts`). Exit is a tool_use with
+/// though omitted from `sdk-tools.d.ts`). Exit is a `tool_use` with
 /// `name: "ExitPlanMode"`. Between those two calls the permission context
 /// carries `mode: "plan"`.
 ///
@@ -123,10 +122,10 @@ const SEQUENTIAL_MARKER_PREFIX: &str = "claude-sequential-used-";
 /// Marker file prefix for task creation.
 const TASK_MARKER_PREFIX: &str = "claude-task-created-";
 
-/// Marker file prefix for plan approval (ExitPlanMode was called).
+/// Marker file prefix for plan approval (`ExitPlanMode` was called).
 const PLAN_MARKER_PREFIX: &str = "claude-plan-approved-";
 
-/// Marker file prefix for active task (TaskUpdate set a task to in_progress).
+/// Marker file prefix for active task (`TaskUpdate` set a task to `in_progress`).
 const TASK_ACTIVE_PREFIX: &str = "claude-task-active-";
 
 /// Check if a marker file exists for this session.
@@ -158,8 +157,7 @@ fn plans_dir_has_recent_md(fs: &dyn FileSystemPort, dir: &Path, now: SystemTime)
         {
             Ok(modified) => now
                 .duration_since(modified)
-                .map(|age| age <= PLAN_FILE_FRESH_WINDOW)
-                .unwrap_or(false),
+                .is_ok_and(|age| age <= PLAN_FILE_FRESH_WINDOW),
             Err(_) => false,
         }
     })
@@ -210,12 +208,12 @@ pub fn mark_task_created(fs: &dyn FileSystemPort, session_id: &str) {
     write_marker(fs, TASK_MARKER_PREFIX, session_id);
 }
 
-/// Write the plan-approved marker for this session (ExitPlanMode was called).
+/// Write the plan-approved marker for this session (`ExitPlanMode` was called).
 pub fn mark_plan_approved(fs: &dyn FileSystemPort, session_id: &str) {
     write_marker(fs, PLAN_MARKER_PREFIX, session_id);
 }
 
-/// Write the task-active marker for this session (a task is in_progress).
+/// Write the task-active marker for this session (a task is `in_progress`).
 pub fn mark_task_active(fs: &dyn FileSystemPort, session_id: &str) {
     write_marker(fs, TASK_ACTIVE_PREFIX, session_id);
 }
@@ -329,7 +327,7 @@ fn recent_pending_task_hint(fs: &dyn FileSystemPort, _session_id: &str) -> Optio
             let id = task
                 .get("id")
                 .and_then(|v| v.as_str())
-                .or_else(|| task.get("id").and_then(|v| v.as_i64()).map(|_| "?"))
+                .or_else(|| task.get("id").and_then(serde_json::Value::as_i64).map(|_| "?"))
                 .unwrap_or("?");
             let subject = task
                 .get("subject")
@@ -341,13 +339,13 @@ fn recent_pending_task_hint(fs: &dyn FileSystemPort, _session_id: &str) -> Optio
     None
 }
 
-/// Process a PreToolUse event. Routes by reversibility class (A6, per
+/// Process a `PreToolUse` event. Routes by reversibility class (A6, per
 /// `docs/a6-reversibility-graded-tripwires.md`):
 ///
 /// - `TriviallyReversible` → allow silently (memory writes, plan files,
 ///   read-only ops, list/get MCP tools per the shipped TOML).
 /// - `ReversibleWithEffort` → run the four-check stack (sequential-thinking
-///   marker + task created + plan mode + active task in_progress).
+///   marker + task created + plan mode + active task `in_progress`).
 /// - `Irreversible` / `Catastrophic` → when `a3_enabled` is `true`,
 ///   short-circuit to `allow()` so the A3 `dry_run_then_commit` hook
 ///   handles the gating via its separate-model-family auditor. When

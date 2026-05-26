@@ -1,7 +1,7 @@
 //! Judge enforcement mode — the shadow → warn → enforce rollout switch.
 //!
 //! Read from `SENTINEL_JUDGE_ENFORCEMENT` (default [`Mode::Shadow`]). Governs
-//! what happens with the verdict the `step_judge` PostToolUse hook produces:
+//! what happens with the verdict the `step_judge` `PostToolUse` hook produces:
 //!
 //! - [`Mode::Shadow`] (default): the judge runs and its verdict is recorded,
 //!   but nothing blocks. Safe to ship — observe the pass/over-block mix on real

@@ -29,14 +29,14 @@ pub struct ProofEngine {
     judge: Arc<dyn JudgeService>,
 
     /// Praefectus client for populating ProofBundle.actor per Fabrica
-    /// ADR-001 §IX. Defaults to an InMemoryPraefectusClient (returns
+    /// ADR-001 §IX. Defaults to an `InMemoryPraefectusClient` (returns
     /// None for every lookup → existing behavior preserved). Production
     /// deployments call [`Self::with_praefectus`] to wire a real
     /// HTTP/IPC adapter against consul-app's Praefectus.
     praefectus: Arc<dyn PraefectusClient>,
 
     /// Optional Ed25519 signing key (#4 — proof attestation). When present,
-    /// every sealed StepProof is signed over its `combined_hash`, so verifiers
+    /// every sealed `StepProof` is signed over its `combined_hash`, so verifiers
     /// can confirm "the holder of this key authored this chain entry" — beyond
     /// the SHA-256 hash chain. Loaded from `SENTINEL_SIGNING_KEY` by the CLI
     /// layer (sentinel-domain stays pure / key-agnostic). `None` = unsigned
@@ -73,7 +73,7 @@ impl ProofEngine {
     }
 
     /// Wire an Ed25519 signing key + the mandatory-signing posture (#4).
-    /// When `key` is `Some`, every sealed StepProof is signed. When
+    /// When `key` is `Some`, every sealed `StepProof` is signed. When
     /// `required` is true, sealing without a key is refused (error) — the
     /// audit-grade attestation guarantee. Builder shape; existing callers
     /// keep the unsigned default.
@@ -130,10 +130,7 @@ impl ProofEngine {
             ) {
                 let count = state.submission_attempts(&phase_key).map_or(0, |a| a.count);
                 bail!(
-                    "Phase '{}' resubmission blocked — wait {}s (failed {} time(s))",
-                    phase_id,
-                    remaining,
-                    count
+                    "Phase '{phase_id}' resubmission blocked — wait {remaining}s (failed {count} time(s))"
                 );
             }
         }
@@ -230,9 +227,8 @@ impl ProofEngine {
                         );
                     } else {
                         bail!(
-                            "Phase '{}' cannot be advanced — prior required phases are incomplete. \
-                             Phases must be completed in order.",
-                            phase_id
+                            "Phase '{phase_id}' cannot be advanced — prior required phases are incomplete. \
+                             Phases must be completed in order."
                         );
                     }
                 } else {
@@ -241,9 +237,8 @@ impl ProofEngine {
                     // enforcement. Now refuse to advance without a workflow definition.
                     // ProofEngine callers MUST provide a workflow parameter.
                     bail!(
-                        "Phase '{}' for skill '{}' cannot be advanced — no workflow definition provided. \
-                         ProofEngine requires workflow context for sequential enforcement.",
-                        phase_id, skill
+                        "Phase '{phase_id}' for skill '{skill}' cannot be advanced — no workflow definition provided. \
+                         ProofEngine requires workflow context for sequential enforcement."
                     );
                 }
             }
@@ -281,7 +276,7 @@ impl ProofEngine {
     /// 3. **Insufficient verdicts hard-fail with no chain mutation.** If
     ///    `verdict.sufficient == false`, we return an error without
     ///    appending — the chain only carries verdicts that passed. Failed
-    ///    verdicts are still observable via the JudgeError surface in
+    ///    verdicts are still observable via the `JudgeError` surface in
     ///    `step_judge` and via tracing logs.
     ///
     /// On success, returns the sealed `StepProof` so callers can hash its
@@ -411,7 +406,7 @@ impl ProofEngine {
         let chain = state
             .proof_chains
             .get(skill)
-            .ok_or_else(|| anyhow::anyhow!("No proof chain for skill '{}'", skill))?;
+            .ok_or_else(|| anyhow::anyhow!("No proof chain for skill '{skill}'"))?;
         Ok(chain.verify())
     }
 }

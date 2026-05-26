@@ -78,9 +78,7 @@ fn content_to_uuid(session_id: &str, chunk_index: usize) -> String {
 /// Derive project name from cwd (last path component).
 fn project_name(cwd: &str) -> String {
     std::path::Path::new(cwd)
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| "unknown".to_string())
+        .file_name().map_or_else(|| "unknown".to_string(), |n| n.to_string_lossy().to_string())
 }
 
 /// Compute project hash from cwd. Delegates to the shared canonical

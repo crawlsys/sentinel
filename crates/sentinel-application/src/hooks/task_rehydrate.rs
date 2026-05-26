@@ -1,6 +1,6 @@
-//! Task Rehydrate Hook — inject persistent tasks on SessionStart
+//! Task Rehydrate Hook — inject persistent tasks on `SessionStart`
 //!
-//! Fires on SessionStart. Reads `~/.claude/sentinel/persistent-tasks/{project_hash}/tasks.json`
+//! Fires on `SessionStart`. Reads `~/.claude/sentinel/persistent-tasks/{project_hash}/tasks.json`
 //! and injects incomplete tasks into context as a system reminder so Claude
 //! sees prior work and can continue where the previous session left off.
 //! (Legacy `~/.claude/persistent-tasks/` data is migrated automatically on
@@ -56,7 +56,7 @@ struct PersistMeta {
     session_id: String,
 }
 
-/// Compute project hash (must match task_persist.rs). Delegates to the shared
+/// Compute project hash (must match `task_persist.rs`). Delegates to the shared
 /// canonical implementation in `super::project_hash`.
 fn project_hash(cwd: &str) -> String {
     super::project_hash(cwd)
@@ -81,7 +81,7 @@ fn persistent_tasks_dir(fs: &dyn FileSystemPort, project_hash: &str) -> Option<P
 /// external editor, disk error), the rehydrator would treat it as "no tasks"
 /// and inject nothing — silent data loss with zero warning to the user.
 ///
-/// The companion fix in task_persist.rs makes the write atomic, but we still
+/// The companion fix in `task_persist.rs` makes the write atomic, but we still
 /// want defense in depth: if a parse fails for any reason (concurrent writer,
 /// disk issue, manual edit gone wrong), log a loud warning so the user knows
 /// their persistent task store is corrupt. They can then recover from the
@@ -157,7 +157,7 @@ fn relative_time(updated_at: &str) -> String {
 /// mode-aware branching can be unit-tested without a real `HookContext`.
 ///
 /// In Autopilot the agent is meant to drain the queue, not interrupt Gary
-/// every session — instruction directs immediate recreation via TaskCreate.
+/// every session — instruction directs immediate recreation via `TaskCreate`.
 /// In Planned mode, Gary may have moved on from stale work, so instruction
 /// directs the agent to ask first.
 fn format_rehydrate_instruction(
@@ -198,7 +198,7 @@ fn format_rehydrate_instruction(
     }
 }
 
-/// Process SessionStart — inject persistent tasks into context
+/// Process `SessionStart` — inject persistent tasks into context
 pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     let session_id = input.session_id.as_deref().unwrap_or("unknown");
     let cwd = input.cwd.as_deref().unwrap_or(".");
@@ -227,9 +227,7 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     }
 
     // Read meta for timestamp
-    let time_str = read_meta(ctx.fs, &proj_hash)
-        .map(|m| relative_time(&m.updated_at))
-        .unwrap_or_else(|| "unknown".to_string());
+    let time_str = read_meta(ctx.fs, &proj_hash).map_or_else(|| "unknown".to_string(), |m| relative_time(&m.updated_at));
 
     // Detect whether any task has blocking relationships
     let has_blocking = incomplete

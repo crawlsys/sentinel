@@ -323,7 +323,7 @@ const GIT_BLOCKED_RULES: &[GitRule] = &[
 fn strip_message_args(args: &[String]) -> String {
     const VALUE_FLAGS: &[&str] = &["-m", "--message", "-F", "--file"];
     let mut out: Vec<&str> = Vec::with_capacity(args.len());
-    let mut iter = args.iter().peekable();
+    let mut iter = args.iter();
     while let Some(arg) = iter.next() {
         // `--flag=value` form: strip the whole token.
         if let Some(eq_pos) = arg.find('=') {
@@ -342,9 +342,10 @@ fn strip_message_args(args: &[String]) -> String {
     out.join(" ")
 }
 
-/// Evaluate a git invocation given its raw arg vector. Strips commit-message
-/// content before applying substring-match policy rules so a commit body
-/// containing "--force" or "reset --hard" doesn't false-positive.
+/// Evaluate a git invocation given its raw arg vector.
+///
+/// Strips commit-message content before applying substring-match policy rules
+/// so a commit body containing `--force` or `reset --hard` doesn't false-positive.
 pub fn evaluate_git_args(args: &[String]) -> InterceptorPolicy {
     let stripped = strip_message_args(args);
     evaluate_git_command(&stripped)
@@ -428,7 +429,10 @@ pub fn classify_risk(args_joined: &str) -> (RiskLevel, &'static str) {
 // ============================================================================
 
 /// Resolve an npx package name to a local Rust CLI binary.
-pub fn resolve_npx_redirect(package: &str, redirects: &HashMap<String, String>) -> Option<String> {
+pub fn resolve_npx_redirect<S: std::hash::BuildHasher>(
+    package: &str,
+    redirects: &HashMap<String, String, S>,
+) -> Option<String> {
     redirects.get(package).cloned()
 }
 

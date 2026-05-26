@@ -62,7 +62,7 @@ pub fn extract_metadata(repo: &Path) -> ProjectMetadata {
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_default();
         if !dir_name.is_empty() {
-            meta.repository = Some(format!("https://github.com/garysomerhalder/{}", dir_name));
+            meta.repository = Some(format!("https://github.com/garysomerhalder/{dir_name}"));
         }
     }
 
@@ -369,8 +369,8 @@ pub fn discover_repos(github_dir: &Path) -> Vec<PathBuf> {
         Err(_) => return Vec::new(),
     };
 
-    for entry in entries.filter_map(|e| e.ok()) {
-        if !entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
+    for entry in entries.filter_map(std::result::Result::ok) {
+        if !entry.file_type().is_ok_and(|ft| ft.is_dir()) {
             continue;
         }
 
@@ -400,7 +400,7 @@ pub fn discover_repos(github_dir: &Path) -> Vec<PathBuf> {
 fn gen_readme(meta: &ProjectMetadata) -> String {
     let title = &meta.name;
     let desc = if meta.description.is_empty() {
-        format!("A Rust project.")
+        "A Rust project.".to_string()
     } else {
         meta.description.clone()
     };
@@ -409,13 +409,12 @@ fn gen_readme(meta: &ProjectMetadata) -> String {
         Some(RustFlavor::McpServer) => {
             let product = title.trim_end_matches("-mcp");
             format!(
-                "\nMCP server for {} — built with [Vulcan SDK](https://github.com/garysomerhalder/vulcan-mcp-sdk-rust), wrapped by `mcp-router` for hot-reload.\n",
-                product
+                "\nMCP server for {product} — built with [Vulcan SDK](https://github.com/garysomerhalder/vulcan-mcp-sdk-rust), wrapped by `mcp-router` for hot-reload.\n"
             )
         }
         Some(RustFlavor::Cli) => {
             let product = title.trim_end_matches("-cli-rs").trim_end_matches("-cli");
-            format!("\nCommand-line tool for {}.\n", product)
+            format!("\nCommand-line tool for {product}.\n")
         }
         _ => String::new(),
     };
@@ -424,7 +423,7 @@ fn gen_readme(meta: &ProjectMetadata) -> String {
         let members: Vec<String> = meta
             .workspace_members
             .iter()
-            .map(|m| format!("- `{}`", m))
+            .map(|m| format!("- `{m}`"))
             .collect();
         format!("\n## Workspace Members\n\n{}\n", members.join("\n"))
     } else {
@@ -433,7 +432,7 @@ fn gen_readme(meta: &ProjectMetadata) -> String {
 
     let install_section = match &meta.rust_flavor {
         Some(RustFlavor::McpServer) => format!(
-            r#"## Installation
+            r"## Installation
 
 ```bash
 cargo install --path .
@@ -444,30 +443,26 @@ cargo install --path .
 ```bash
 claude mcp add {} -- mcp-router --single {}
 ```
-"#,
+",
             title.trim_end_matches("-mcp"),
             title,
         ),
-        Some(RustFlavor::Cli) => format!(
-            r#"## Installation
+        Some(RustFlavor::Cli) => r"## Installation
 
 ```bash
 cargo install --path .
 ```
-"#
-        ),
-        _ => format!(
-            r#"## Installation
+".to_string(),
+        _ => r"## Installation
 
 ```bash
 cargo build --release
 ```
-"#
-        ),
+".to_string(),
     };
 
     format!(
-        r#"# {title}
+        r"# {title}
 
 > {desc}
 {flavor_line}
@@ -490,7 +485,7 @@ cargo fmt --check        # Check formatting
 ## License
 
 {license}
-"#,
+",
         title = title,
         desc = desc,
         flavor_line = flavor_line,
@@ -504,24 +499,19 @@ cargo fmt --check        # Check formatting
 fn gen_claude_md(meta: &ProjectMetadata) -> String {
     let mut sections = Vec::new();
 
-    sections.push(format!(
-        "# CLAUDE.md\n\nThis file provides guidance to Claude Code (claude.ai/code) when working with code in this repository."
-    ));
+    sections.push("# CLAUDE.md\n\nThis file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.".to_string());
 
     // Build commands
     let build_cmds = match &meta.rust_flavor {
-        Some(RustFlavor::McpServer) => format!(
-            r#"## Build Commands
+        Some(RustFlavor::McpServer) => r"## Build Commands
 
 ```bash
 cargo build --release    # Build optimized binary
 cargo test               # Run all tests
 cargo clippy             # Lint
 cargo fmt --check        # Check formatting
-```"#
-        ),
-        Some(RustFlavor::Cli) => format!(
-            r#"## Build Commands
+```".to_string(),
+        Some(RustFlavor::Cli) => r"## Build Commands
 
 ```bash
 cargo build --release    # Build optimized binary
@@ -529,18 +519,15 @@ cargo test               # Run all tests
 cargo clippy             # Lint
 cargo fmt --check        # Check formatting
 cargo install --path .   # Install to ~/.cargo/bin/
-```"#
-        ),
-        _ => format!(
-            r#"## Build Commands
+```".to_string(),
+        _ => r"## Build Commands
 
 ```bash
 cargo build --release    # Build optimized binary
 cargo test               # Run all tests
 cargo clippy             # Lint
 cargo fmt --check        # Check formatting
-```"#
-        ),
+```".to_string(),
     };
     sections.push(build_cmds);
 
@@ -549,7 +536,7 @@ cargo fmt --check        # Check formatting
         let members: Vec<String> = meta
             .workspace_members
             .iter()
-            .map(|m| format!("- `{}`", m))
+            .map(|m| format!("- `{m}`"))
             .collect();
         sections.push(format!(
             "## Architecture\n\nRust workspace with {} crates:\n\n{}",
@@ -563,7 +550,7 @@ cargo fmt --check        # Check formatting
         let deps: Vec<String> = meta
             .path_dependencies
             .iter()
-            .map(|d| format!("- `{}` (local path dependency)", d))
+            .map(|d| format!("- `{d}` (local path dependency)"))
             .collect();
         sections.push(format!(
             "## Key Dependencies\n\n{}\n\nThese are local path dependencies — the repos must be cloned as siblings.",
@@ -574,13 +561,13 @@ cargo fmt --check        # Check formatting
     // MCP-specific notes
     if meta.rust_flavor == Some(RustFlavor::McpServer) {
         sections.push(format!(
-            r#"## MCP Server
+            r"## MCP Server
 
 This is a Vulcan SDK MCP server. Key patterns:
 - Tools are defined with `#[tool]` proc macro
 - Tool handlers use `#[tool_handler]`
 - Router uses `#[tool_router]`
-- Binary is wrapped by `mcp-router --single {}` for hot-reload"#,
+- Binary is wrapped by `mcp-router --single {}` for hot-reload",
             meta.binary_name.as_deref().unwrap_or(&meta.name)
         ));
     }
@@ -590,7 +577,7 @@ This is a Vulcan SDK MCP server. Key patterns:
 
 fn gen_changelog(meta: &ProjectMetadata) -> String {
     format!(
-        r#"# Changelog
+        r"# Changelog
 
 All notable changes to this project will be documented in this file.
 
@@ -604,7 +591,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - Initial release
 
 <!-- generated by sentinel init -->
-"#,
+",
         version = meta.version,
         date = chrono::Utc::now().format("%Y-%m-%d"),
     )
@@ -615,8 +602,7 @@ fn gen_license(meta: &ProjectMetadata) -> String {
     let author = meta
         .authors
         .first()
-        .map(|a| a.as_str())
-        .unwrap_or("Gary Somerhalder");
+        .map_or("Gary Somerhalder", std::string::String::as_str);
 
     format!(
         r#"MIT License
@@ -641,8 +627,6 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 "#,
-        year = year,
-        author = author,
     )
 }
 
@@ -655,7 +639,7 @@ fn gen_building_md(meta: &ProjectMetadata) -> String {
         let deps: Vec<String> = meta
             .path_dependencies
             .iter()
-            .map(|d| format!("- `{}`", d))
+            .map(|d| format!("- `{d}`"))
             .collect();
         format!(
             "\n### Local Dependencies\n\nThis project has path dependencies that must be cloned as sibling directories:\n\n{}\n",
@@ -664,7 +648,7 @@ fn gen_building_md(meta: &ProjectMetadata) -> String {
     };
 
     format!(
-        r#"# Building
+        r"# Building
 
 ## Prerequisites
 
@@ -689,7 +673,7 @@ cargo test
 ```bash
 cargo install --path .
 ```
-"#,
+",
         rust_version = rust_version,
         binary = meta.binary_name.as_deref().unwrap_or(&meta.name),
         path_deps_note = path_deps_note,
@@ -703,7 +687,7 @@ fn gen_security_md(meta: &ProjectMetadata) -> String {
         .unwrap_or("https://github.com/garysomerhalder");
 
     format!(
-        r#"# Security Policy
+        r"# Security Policy
 
 ## Reporting a Vulnerability
 
@@ -718,13 +702,12 @@ If you discover a security vulnerability, please report it responsibly:
 - **Acknowledgment**: Within 48 hours
 - **Assessment**: Within 1 week
 - **Fix**: Depends on severity, typically within 2 weeks for critical issues
-"#,
-        repo_url = repo_url,
+",
     )
 }
 
 fn gen_editorconfig() -> String {
-    r#"root = true
+    r"root = true
 
 [*]
 charset = utf-8
@@ -736,12 +719,12 @@ indent_size = 4
 
 [*.{md,yml,yaml,toml,json}]
 indent_size = 2
-"#
+"
     .to_string()
 }
 
 fn gen_gitattributes() -> String {
-    r#"* text=auto eol=lf
+    r"* text=auto eol=lf
 *.rs text diff=rust
 *.toml text diff=toml
 *.md text diff=markdown
@@ -750,7 +733,7 @@ fn gen_gitattributes() -> String {
 *.dll binary
 *.so binary
 *.dylib binary
-"#
+"
     .to_string()
 }
 

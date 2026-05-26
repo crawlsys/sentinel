@@ -1,7 +1,7 @@
 //! AI Judge Service
 //!
 //! Orchestrates AI evaluation of phase evidence.
-//! Routes to Cerebras (fast), OpenAI (normal), or Anthropic (critical)
+//! Routes to Cerebras (fast), `OpenAI` (normal), or Anthropic (critical)
 //! via the `MultiModelJudge` in infrastructure.
 
 use anyhow::{bail, Result};

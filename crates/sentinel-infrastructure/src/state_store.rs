@@ -33,7 +33,7 @@ use chacha20poly1305::aead::Aead;
 use chacha20poly1305::{AeadCore, ChaCha20Poly1305, KeyInit};
 use fs2::FileExt;
 use hmac::{Hmac, Mac};
-use sha2::Sha256;
+use sha2::{Digest as _, Sha256};
 
 use sentinel_domain::state::SessionState;
 
@@ -77,7 +77,11 @@ pub fn state_dir() -> PathBuf {
 
 /// Encode bytes as hexadecimal string (avoids `hex` crate dependency)
 fn to_hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+    use std::fmt::Write as _;
+    bytes.iter().fold(String::with_capacity(bytes.len() * 2), |mut s, b| {
+        let _ = write!(s, "{b:02x}");
+        s
+    })
 }
 
 /// Decode hexadecimal string to bytes (avoids `hex` crate dependency)
@@ -276,7 +280,7 @@ fn restrict_secret_permissions(path: &std::path::Path) {
 #[cfg(windows)]
 fn verify_acl_owner_only(path: &std::path::Path, username: &str, log_warning: bool) -> bool {
     use std::os::windows::process::CommandExt;
-    const CREATE_NO_WINDOW: u32 = 0x08000000;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     let path_str = path.to_string_lossy().to_string();
 
     let verify = std::process::Command::new("icacls")
@@ -326,16 +330,17 @@ fn verify_acl_owner_only(path: &std::path::Path, username: &str, log_warning: bo
 fn apply_windows_owner_only_acl(path: &str, username: &str) -> Result<()> {
     use std::os::windows::process::CommandExt;
 
-    const CREATE_NO_WINDOW: u32 = 0x08000000;
-    let principal = if let Ok(domain) = std::env::var("USERDOMAIN") {
-        if domain.is_empty() {
-            username.to_string()
-        } else {
-            format!(r"{domain}\{username}")
-        }
-    } else {
-        username.to_string()
-    };
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let principal = std::env::var("USERDOMAIN").map_or_else(
+        |_| username.to_string(),
+        |domain| {
+            if domain.is_empty() {
+                username.to_string()
+            } else {
+                format!(r"{domain}\{username}")
+            }
+        },
+    );
 
     let escaped_path = path.replace('\'', "''");
     let escaped_principal = principal.replace('\'', "''");
@@ -430,7 +435,6 @@ fn derive_hmac_key() -> Vec<u8> {
     // Add the random secret
     key_material.push_str(&to_hex(&secret));
     // SHA-256 the key material to get a fixed-size key
-    use sha2::Digest;
     let mut hasher = Sha256::new();
     hasher.update(key_material.as_bytes());
     hasher.finalize().to_vec()
@@ -556,7 +560,6 @@ fn derive_hmac_key_for_version(version: u32) -> Option<Vec<u8>> {
     let salt = "sentinel-state-integrity-v2";
     let key_material = format!("{hostname}:{username}:{salt}:{}", to_hex(&secret));
 
-    use sha2::Digest;
     let mut hasher = Sha256::new();
     hasher.update(key_material.as_bytes());
     Some(hasher.finalize().to_vec())
@@ -568,24 +571,22 @@ fn derive_hmac_key_for_version(version: u32) -> Option<Vec<u8>> {
 /// For legacy sigs, tries the current key (backward compat).
 fn verify_hmac(data: &[u8], sig_str: &str) -> bool {
     // Parse versioned signature: "v{N}:{hex}"
-    let (version, hex) = if let Some(rest) = sig_str.strip_prefix('v') {
-        if let Some((v_str, hex_part)) = rest.split_once(':') {
-            if let Ok(v) = v_str.parse::<u32>() {
-                (Some(v), hex_part)
-            } else {
-                (None, sig_str) // Malformed version, treat as legacy
-            }
-        } else {
-            (None, sig_str) // No colon, treat as legacy
-        }
-    } else {
-        (None, sig_str) // No 'v' prefix, legacy format
-    };
+    let (version, hex) = sig_str.strip_prefix('v').map_or(
+        (None, sig_str), // No 'v' prefix, legacy format
+        |rest| {
+            rest.split_once(':').map_or(
+                (None, sig_str), // No colon, treat as legacy
+                |(v_str, hex_part)| {
+                    v_str.parse::<u32>().map_or(
+                        (None, sig_str), // Malformed version, treat as legacy
+                        |v| (Some(v), hex_part),
+                    )
+                },
+            )
+        },
+    );
 
-    let expected = match from_hex(hex) {
-        Some(v) => v,
-        None => return false,
-    };
+    let Some(expected) = from_hex(hex) else { return false };
 
     // Derive the correct key based on version
     let key = if let Some(v) = version {

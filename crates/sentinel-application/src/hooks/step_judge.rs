@@ -1,6 +1,6 @@
 //! Step Judge Hook
 //!
-//! PostToolUse hook that runs the AI judge against a completed step's
+//! `PostToolUse` hook that runs the AI judge against a completed step's
 //! evidence and prepares the verdict for `submit_step_complete` (M1.5) to
 //! seal into the proof chain.
 //!
@@ -27,7 +27,7 @@
 //!
 //! # What this hook does today (M1.4 stub scope)
 //!
-//! 1. Detects PostToolUse for a step tool (same `mcp__skills__<skill>__step_<id>`
+//! 1. Detects `PostToolUse` for a step tool (same `mcp__skills__<skill>__step_<id>`
 //!    naming as `step_gate`).
 //! 2. Resolves the step's description from the loaded step config (so the
 //!    judge prompt knows what "sufficient" looks like for this specific step).
@@ -38,7 +38,7 @@
 //! 5. Returns the [`JudgeVerdict`] inside a [`StepJudgeOutcome`] struct that
 //!    M1.5's `submit_step_complete` will consume.
 //!
-//! Persistence (writing the StepProof to disk, advancing the chain head)
+//! Persistence (writing the `StepProof` to disk, advancing the chain head)
 //! lives in M1.5 — this hook is the *verdict* layer; the *write* layer
 //! comes next.
 //!
@@ -56,7 +56,7 @@
 //! and emits `Outcome::Skipped` so the chain doesn't get a fake verdict
 //! during emergency bypass. The hook never blocks via `HookOutput::deny`
 //! — failed verdicts surface as a non-sufficient `JudgeVerdict` that
-//! `submit_step_complete` will refuse to seal. PostToolUse blocking is
+//! `submit_step_complete` will refuse to seal. `PostToolUse` blocking is
 //! the wrong layer for "this step didn't pass"; the chain itself is the
 //! enforcement substrate, not this hook's allow/deny return.
 
@@ -101,13 +101,13 @@ pub enum StepJudgeOutcome {
     NotAStepTool,
     /// Skill has no step config registered — backwards-compat, no verdict.
     NoStepConfig,
-    /// Skill has a step config but the specific step_id wasn't found in any
+    /// Skill has a step config but the specific `step_id` wasn't found in any
     /// phase. Possible misconfig or stale tool name.
     UnknownStep { skill: String, step_id: String },
     /// Glass break was active — judge skipped, no verdict.
     Skipped,
     /// Judge ran, here's the verdict + the resolved coordinates so M1.5 can
-    /// build the StepProof without reparsing the tool name.
+    /// build the `StepProof` without reparsing the tool name.
     Judged {
         skill: String,
         phase_id: String,
@@ -119,7 +119,7 @@ pub enum StepJudgeOutcome {
     },
     /// **Cold-start baseline (M1.8)**: judge ran but the step is still in
     /// its warmup window. Verdict is observational — `submit_step_complete`
-    /// must NOT seal a StepProof for this outcome (the chain only carries
+    /// must NOT seal a `StepProof` for this outcome (the chain only carries
     /// enforced verdicts). The verdict is still surfaced for telemetry so
     /// operators can watch warmup-time false-positive rates and decide
     /// when to lower the threshold.
@@ -184,7 +184,7 @@ fn truncate_json_summary(v: &serde_json::Value, max: usize) -> String {
     }
 }
 
-/// Build a step-shaped Evidence blob from PostToolUse `HookInput`.
+/// Build a step-shaped Evidence blob from `PostToolUse` `HookInput`.
 ///
 /// The judge will see:
 /// - one `ToolCallEvidence` entry summarising the step tool's input
@@ -208,7 +208,7 @@ fn gather_evidence(input: &HookInput) -> Evidence {
         evidence.tool_calls.push(ToolCallEvidence {
             tool: tool_name.clone(),
             args_summary: truncate_json_summary(tool_input, 500),
-            timestamp: timestamp.clone(),
+            timestamp,
         });
     }
 
@@ -218,7 +218,7 @@ fn gather_evidence(input: &HookInput) -> Evidence {
         // Real M1.5 evidence work will replace this with structured exit
         // codes from sentinel's tool-result capture path.
         let success =
-            !tool_result.get("error").is_some() && tool_result.as_bool().map_or(true, |b| b);
+            tool_result.get("error").is_none() && tool_result.as_bool().is_none_or(|b| b);
         evidence.tool_results.push(ToolResultEvidence {
             tool: tool_name.clone(),
             result_summary: truncate_json_summary(tool_result, 500),
@@ -245,10 +245,10 @@ fn gather_evidence(input: &HookInput) -> Evidence {
     evidence
 }
 
-/// Process a step-judge hook event (PostToolUse).
+/// Process a step-judge hook event (`PostToolUse`).
 ///
 /// Returns `(HookOutput, StepJudgeOutcome)`. The `HookOutput` is always
-/// `allow` for this hook — we don't block tool calls in PostToolUse, we
+/// `allow` for this hook — we don't block tool calls in `PostToolUse`, we
 /// just produce verdicts. The `StepJudgeOutcome` carries the verdict (or
 /// the reason no verdict was produced) up to the caller; M1.5's wiring
 /// in `hook_cmd.rs` will consume it to call `submit_step_complete` when

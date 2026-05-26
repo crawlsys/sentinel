@@ -151,31 +151,29 @@ pub struct MarketplaceSnapshot {
 /// Count subdirectories in a path.
 pub fn count_subdirs(dir: &Path) -> usize {
     fs::read_dir(dir)
-        .map(|entries| {
+        .map_or(0, |entries| {
             entries
-                .filter_map(|e| e.ok())
+                .filter_map(std::result::Result::ok)
                 .filter(|e| {
-                    e.file_type().map(|ft| ft.is_dir()).unwrap_or(false)
+                    e.file_type().is_ok_and(|ft| ft.is_dir())
                         && !e.file_name().to_string_lossy().starts_with('_')
                 })
                 .count()
         })
-        .unwrap_or(0)
 }
 
 /// Count files with a given extension in a directory (non-recursive).
 pub fn count_files_with_ext(dir: &Path, ext: &str) -> usize {
     fs::read_dir(dir)
-        .map(|entries| {
+        .map_or(0, |entries| {
             entries
-                .filter_map(|e| e.ok())
+                .filter_map(std::result::Result::ok)
                 .filter(|e| {
-                    e.file_type().map(|ft| ft.is_file()).unwrap_or(false)
+                    e.file_type().is_ok_and(|ft| ft.is_file())
                         && e.file_name().to_string_lossy().ends_with(ext)
                 })
                 .count()
         })
-        .unwrap_or(0)
 }
 
 /// Count MCP servers from `~/.claude.json`.
@@ -190,7 +188,7 @@ pub fn count_mcp_servers(home_dir: &Path) -> usize {
         .and_then(|json| {
             json.get("mcpServers")
                 .and_then(|v| v.as_object())
-                .map(|obj| obj.len())
+                .map(serde_json::Map::len)
         })
         .unwrap_or(0)
 }
@@ -202,16 +200,15 @@ pub fn count_repos_with_suffix(home_dir: &Path, suffix: &str) -> usize {
     let gh_dir = home_dir.join("Documents").join("GitHub");
 
     fs::read_dir(gh_dir)
-        .map(|entries| {
+        .map_or(0, |entries| {
             entries
-                .filter_map(|e| e.ok())
+                .filter_map(std::result::Result::ok)
                 .filter(|e| {
-                    e.file_type().map(|ft| ft.is_dir()).unwrap_or(false)
+                    e.file_type().is_ok_and(|ft| ft.is_dir())
                         && e.file_name().to_string_lossy().ends_with(suffix)
                 })
                 .count()
         })
-        .unwrap_or(0)
 }
 
 /// Count all marketplace components in `~/.claude/`.
@@ -628,9 +625,9 @@ fn scan_skills(root_dir: &Path, mp_data: &serde_json::Value) -> Vec<Skill> {
     };
 
     let mut skill_dirs: Vec<String> = entries
-        .filter_map(|e| e.ok())
+        .filter_map(std::result::Result::ok)
         .filter(|e| {
-            e.file_type().map(|ft| ft.is_dir()).unwrap_or(false)
+            e.file_type().is_ok_and(|ft| ft.is_dir())
                 && !e.file_name().to_string_lossy().starts_with('_')
         })
         .map(|e| e.file_name().to_string_lossy().to_string())
@@ -689,7 +686,7 @@ fn scan_skills(root_dir: &Path, mp_data: &serde_json::Value) -> Vec<Skill> {
 
         let priority = mp_skill
             .and_then(|s| s.get("priority"))
-            .and_then(|v| v.as_u64())
+            .and_then(serde_json::Value::as_u64)
             .map(|v| v as u32);
 
         let allowed_tools: Vec<String> = fm
@@ -762,7 +759,9 @@ fn scan_agents(root_dir: &Path, mp_data: &serde_json::Value) -> Vec<Agent> {
                 .unwrap_or("")
                 .to_string();
 
-            let description = if !file.is_empty() {
+            let description = if file.is_empty() {
+                String::new()
+            } else {
                 let agent_path = agents_dir.join(&file);
                 fs::read_to_string(&agent_path)
                     .ok()
@@ -771,8 +770,6 @@ fn scan_agents(root_dir: &Path, mp_data: &serde_json::Value) -> Vec<Agent> {
                         fm.get("description").cloned().unwrap_or_default()
                     })
                     .unwrap_or_default()
-            } else {
-                String::new()
             };
 
             Agent {
@@ -793,9 +790,9 @@ fn scan_commands(root_dir: &Path) -> Vec<CommandDef> {
     };
 
     let mut command_files: Vec<String> = entries
-        .filter_map(|e| e.ok())
+        .filter_map(std::result::Result::ok)
         .filter(|e| {
-            e.file_type().map(|ft| ft.is_file()).unwrap_or(false)
+            e.file_type().is_ok_and(|ft| ft.is_file())
                 && e.file_name().to_string_lossy().ends_with(".md")
         })
         .map(|e| e.file_name().to_string_lossy().to_string())
@@ -851,7 +848,7 @@ fn scan_mcp_servers(mp_data: &serde_json::Value) -> Vec<McpServer> {
                         .and_then(|v| v.as_str())
                         .unwrap_or("stdio")
                         .to_string(),
-                    optional: m.get("optional").and_then(|v| v.as_bool()).unwrap_or(false),
+                    optional: m.get("optional").and_then(serde_json::Value::as_bool).unwrap_or(false),
                 })
                 .collect()
         })
@@ -1261,13 +1258,12 @@ pub fn count_extended(root_dir: &Path) -> ExtendedCounts {
 /// Count all non-hidden entries in a directory.
 fn count_all_non_hidden(dir: &Path) -> usize {
     fs::read_dir(dir)
-        .map(|entries| {
+        .map_or(0, |entries| {
             entries
-                .filter_map(|e| e.ok())
+                .filter_map(std::result::Result::ok)
                 .filter(|e| !e.file_name().to_string_lossy().starts_with('.'))
                 .count()
         })
-        .unwrap_or(0)
 }
 
 /// Parse Browserbase tool count from marketplace.json MCP description.
@@ -1286,7 +1282,7 @@ fn parse_browserbase_tools(root_dir: &Path) -> usize {
             arr.iter().find(|m| {
                 matches!(
                     m.get("name").and_then(|n| n.as_str()),
-                    Some("browserbase") | Some("steel")
+                    Some("browserbase" | "steel")
                 )
             })
         })
@@ -1412,7 +1408,7 @@ pub fn sync_counts(root_dir: &Path, dry_run: bool) -> SyncCountsReport {
         &mut changed_files,
         &[(
             r#""description":\s*"[^"]*""#,
-            &format!(r#""description": "{}""#, desc_line),
+            &format!(r#""description": "{desc_line}""#),
         )],
     );
 
@@ -1424,7 +1420,7 @@ pub fn sync_counts(root_dir: &Path, dry_run: bool) -> SyncCountsReport {
         &mut changed_files,
         &[(
             r#""description":\s*"[^"]*""#,
-            &format!(r#""description": "{}""#, desc_line),
+            &format!(r#""description": "{desc_line}""#),
         )],
     );
 
@@ -1451,7 +1447,7 @@ pub fn sync_counts(root_dir: &Path, dry_run: bool) -> SyncCountsReport {
         &mut changed_files,
         &[
             (
-                r#"> \*\*\d+ skills \+ \d+ agents \+ 1 sentinel engine \(\d+ hooks\) \+ \d+ MCP servers\*\*"#,
+                r"> \*\*\d+ skills \+ \d+ agents \+ 1 sentinel engine \(\d+ hooks\) \+ \d+ MCP servers\*\*",
                 &format!(
                     "> **{} skills + {} agents + 1 sentinel engine ({} hooks) + {} MCP servers**",
                     c.skills, c.agents, c.hooks, c.mcp_servers
@@ -1527,7 +1523,7 @@ pub fn sync_counts(root_dir: &Path, dry_run: bool) -> SyncCountsReport {
         &mut changed_files,
         &[
             (
-                r#"> \*\*\d+ skills \+ \d+ agents \+ 1 sentinel engine \(\d+ hooks\) \+ \d+ MCP servers\*\*"#,
+                r"> \*\*\d+ skills \+ \d+ agents \+ 1 sentinel engine \(\d+ hooks\) \+ \d+ MCP servers\*\*",
                 &format!(
                     "> **{} skills + {} agents + 1 sentinel engine ({} hooks) + {} MCP servers**",
                     c.skills, c.agents, c.hooks, c.mcp_servers
@@ -1645,15 +1641,15 @@ fn walk_text_files(
         return;
     };
 
-    for entry in entries.filter_map(|e| e.ok()) {
+    for entry in entries.filter_map(std::result::Result::ok) {
         let name = entry.file_name();
         let name_str = name.to_string_lossy();
 
-        if entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
+        if entry.file_type().is_ok_and(|ft| ft.is_dir()) {
             if !skip_dirs.contains(name_str.as_ref()) {
                 walk_text_files(&entry.path(), skip_dirs, text_exts, callback);
             }
-        } else if entry.file_type().map(|ft| ft.is_file()).unwrap_or(false) {
+        } else if entry.file_type().is_ok_and(|ft| ft.is_file()) {
             if let Some(ext) = entry.path().extension().and_then(|e| e.to_str()) {
                 if text_exts.contains(ext) {
                     callback(&entry.path());
@@ -1749,11 +1745,11 @@ fn walk_manifest_files(
         return;
     };
 
-    for entry in entries.filter_map(|e| e.ok()) {
+    for entry in entries.filter_map(std::result::Result::ok) {
         let full_path = entry.path();
         let name = entry.file_name();
         let name_str = name.to_string_lossy();
-        let rel_path = format!("{}/{}", base_path, name_str);
+        let rel_path = format!("{base_path}/{name_str}");
 
         // Check exclusions
         if exclude_patterns
@@ -1763,9 +1759,9 @@ fn walk_manifest_files(
             continue;
         }
 
-        if entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
+        if entry.file_type().is_ok_and(|ft| ft.is_dir()) {
             walk_manifest_files(&full_path, &rel_path, extensions, exclude_patterns, files);
-        } else if entry.file_type().map(|ft| ft.is_file()).unwrap_or(false) {
+        } else if entry.file_type().is_ok_and(|ft| ft.is_file()) {
             // Check extension filter
             if let Some(exts) = extensions {
                 let has_ext = exts.iter().any(|ext| name_str.ends_with(ext));

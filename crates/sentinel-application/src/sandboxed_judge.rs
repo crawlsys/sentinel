@@ -27,7 +27,7 @@
 //! - **Panic isolation** — the inner judge is invoked via
 //!   `tokio::spawn`, so a panic in the judge becomes a `JoinError`
 //!   at this layer rather than unwinding the calling task. The
-//!   sandbox converts the JoinError to a `sufficient=false` verdict
+//!   sandbox converts the `JoinError` to a `sufficient=false` verdict
 //!   tagged `PANIC:` so callers see something happened.
 //!
 //! - **Predictable error shape** — every sandboxed failure produces
@@ -90,7 +90,7 @@ impl SandboxedJudge {
     }
 
     /// Synthetic verdict for "the sandbox killed the call." Tagged so
-    /// callers that scan for SANDBOX:/PANIC: prefixes can filter.
+    /// callers that scan for <SANDBOX:/PANIC>: prefixes can filter.
     fn sandbox_timeout_verdict(timeout: Duration) -> JudgeVerdict {
         JudgeVerdict::fail(
             0.0,
@@ -196,7 +196,7 @@ impl JudgeService for SandboxedJudge {
     /// judge's `evaluate_multi` (which may have an overridden parallel
     /// implementation worth preserving). Same wrap-with-timeout-and-
     /// panic-isolation pattern. Per-judge errors INSIDE the inner
-    /// multi-call already become ERROR JudgeRuns by the trait's
+    /// multi-call already become ERROR `JudgeRuns` by the trait's
     /// default contract; the sandbox layers on top of that.
     async fn evaluate_multi(
         &self,

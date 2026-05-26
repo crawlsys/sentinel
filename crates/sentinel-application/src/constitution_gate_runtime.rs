@@ -97,7 +97,7 @@ impl ConstitutionGateConfig {
                 anyhow::bail!("constitution-gate: rule with empty name is not allowed");
             }
             if r.path_prefix.trim().is_empty() {
-                anyhow::bail!("constitution-gate: rule {:?} has empty path_prefix", r.name,);
+                anyhow::bail!("constitution-gate: rule {:?} has empty path_prefix", r.name);
             }
             if r.banned_patterns.is_empty() {
                 anyhow::bail!(

@@ -1,6 +1,6 @@
 //! Orchestration Nudge Hook
 //!
-//! UserPromptSubmit hook that nudges three orchestration patterns based on
+//! `UserPromptSubmit` hook that nudges three orchestration patterns based on
 //! heuristics about the prompt text:
 //!
 //! 1. **Agent teams** — when the prompt describes 3+ independent parallel
@@ -10,8 +10,8 @@
 //!    already in a subagent, suggest `Agent(subagent_type: "Explore")` to
 //!    protect the main context.
 //! 3. **Skills** — when the prompt looks like it matches a skill activation
-//!    trigger but skill_router already fired, we don't re-nudge. When
-//!    skill_router reported "No skill matched" but the prompt looks like
+//!    trigger but `skill_router` already fired, we don't re-nudge. When
+//!    `skill_router` reported "No skill matched" but the prompt looks like
 //!    skill work (multi-step implementation, structured process), we
 //!    suggest invoking the relevant skill via `Skill(skill: "<name>")`.
 //!
@@ -21,7 +21,7 @@ use regex::Regex;
 use sentinel_domain::events::{HookEvent, HookInput, HookOutput};
 
 /// Regex compiled lazily — sentinel is single-threaded per invocation so
-/// OnceLock isn't needed; a fresh compile per call is cheap for these.
+/// `OnceLock` isn't needed; a fresh compile per call is cheap for these.
 fn parallel_signal(prompt: &str) -> bool {
     let patterns = [
         r"\bin parallel\b",
@@ -34,7 +34,7 @@ fn parallel_signal(prompt: &str) -> bool {
     let lower = prompt.to_lowercase();
     patterns
         .iter()
-        .any(|p| Regex::new(p).map(|re| re.is_match(&lower)).unwrap_or(false))
+        .any(|p| Regex::new(p).is_ok_and(|re| re.is_match(&lower)))
 }
 
 fn broad_exploration_signal(prompt: &str) -> bool {
@@ -50,7 +50,7 @@ fn broad_exploration_signal(prompt: &str) -> bool {
     let lower = prompt.to_lowercase();
     patterns
         .iter()
-        .any(|p| Regex::new(p).map(|re| re.is_match(&lower)).unwrap_or(false))
+        .any(|p| Regex::new(p).is_ok_and(|re| re.is_match(&lower)))
 }
 
 fn multi_step_implementation_signal(prompt: &str) -> bool {
@@ -64,7 +64,7 @@ fn multi_step_implementation_signal(prompt: &str) -> bool {
     let lower = prompt.to_lowercase();
     patterns
         .iter()
-        .any(|p| Regex::new(p).map(|re| re.is_match(&lower)).unwrap_or(false))
+        .any(|p| Regex::new(p).is_ok_and(|re| re.is_match(&lower)))
 }
 
 /// True if we're executing inside a subagent — we don't want to nudge

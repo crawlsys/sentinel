@@ -63,13 +63,13 @@ pub struct ArchivedChainRecord {
     pub schema_version: u32,
     /// When the archive was written (RFC3339 UTC).
     pub archived_at: DateTime<Utc>,
-    /// The chain as it stood at archive time. Carries skill, session_id,
-    /// entries, head_hash — everything `query_proof_corpus` needs.
+    /// The chain as it stood at archive time. Carries skill, `session_id`,
+    /// entries, `head_hash` — everything `query_proof_corpus` needs.
     pub chain: ProofChain,
 }
 
 /// One line in `index.jsonl`. Compact summary used by router queries
-/// without dragging full StepProof payloads across the MCP boundary.
+/// without dragging full `StepProof` payloads across the MCP boundary.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArchivedChainSummary {
     /// Schema version of this index entry. See [`SCHEMA_VERSION`].
@@ -225,9 +225,7 @@ fn archive_one_chain(
     // a crashed Stop can't leave half-written JSON in the bucket.
     let tmp_path = path.with_file_name(format!(
         ".{}.tmp",
-        path.file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "chain".to_string())
+        path.file_name().map_or_else(|| "chain".to_string(), |n| n.to_string_lossy().into_owned())
     ));
     fs.write(&tmp_path, &json_bytes)
         .context("write archived chain tmp file")?;

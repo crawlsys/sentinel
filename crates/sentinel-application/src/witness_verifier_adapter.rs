@@ -1,12 +1,12 @@
 //! Production `WitnessVerifierPort` adapter that delegates to the
 //! `PraefectusClient`.
 //!
-//! sentinel-legatus owns the WitnessVerifierPort trait but cannot
+//! sentinel-legatus owns the `WitnessVerifierPort` trait but cannot
 //! depend on sentinel-application (sentinel-application depends on
 //! sentinel-legatus). This crate (sentinel-application) is the
 //! right home for the bridge adapter: it has both `PraefectusClient`
 //! (the IPC surface to the per-machine Praefectus) and the
-//! WitnessVerifierPort trait (re-exported from sentinel-legatus).
+//! `WitnessVerifierPort` trait (re-exported from sentinel-legatus).
 //!
 //! The daemon (sentinel-cli) constructs this adapter at startup
 //! when a Praefectus client is configured and installs it on the

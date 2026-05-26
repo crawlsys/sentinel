@@ -72,8 +72,7 @@ fn parse_candidates(raw: &str) -> Vec<CandidateAtom> {
     let body = trimmed
         .strip_prefix("```json")
         .or_else(|| trimmed.strip_prefix("```"))
-        .map(|s| s.trim_end_matches("```").trim())
-        .unwrap_or(trimmed);
+        .map_or(trimmed, |s| s.trim_end_matches("```").trim());
 
     // Find the first '[' ... matching ']' span to be robust to leading prose.
     let start = match body.find('[') {

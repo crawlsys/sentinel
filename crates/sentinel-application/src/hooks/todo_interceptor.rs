@@ -3,7 +3,7 @@
 //! Intercepts TaskCreate/TaskUpdate tool calls, parses encoded metadata
 //! (priority, tags, task IDs), and persists to a rich JSONL format.
 //!
-//! Runs on PostToolUse — only intercepts TaskCreate and TaskUpdate calls.
+//! Runs on `PostToolUse` — only intercepts `TaskCreate` and `TaskUpdate` calls.
 //! Never blocks, only persists.
 //!
 //! Storage:
@@ -155,8 +155,7 @@ fn update_stats(
     let active = read_existing_todos(fs, active_path);
     let completed_count = fs
         .read_to_string(completed_path)
-        .map(|c| c.lines().filter(|l| !l.is_empty()).count())
-        .unwrap_or(0);
+        .map_or(0, |c| c.lines().filter(|l| !l.is_empty()).count());
 
     let stats = QuickStats {
         active_todos: active.len(),
@@ -175,7 +174,7 @@ fn update_stats(
     );
 }
 
-/// Handle a TaskCreate call — add a new task to active.jsonl
+/// Handle a `TaskCreate` call — add a new task to active.jsonl
 fn handle_task_create(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     let tool_input = match &input.tool_input {
         Some(ti) => ti,
@@ -244,7 +243,7 @@ fn handle_task_create(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     HookOutput::allow()
 }
 
-/// Handle a TaskUpdate call — update status, move to completed if done
+/// Handle a `TaskUpdate` call — update status, move to completed if done
 fn handle_task_update(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     let tool_input = match &input.tool_input {
         Some(ti) => ti,
@@ -318,7 +317,7 @@ fn handle_task_update(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     HookOutput::allow()
 }
 
-/// Process a todo interceptor hook event (PostToolUse)
+/// Process a todo interceptor hook event (`PostToolUse`)
 pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     match input.tool_name.as_deref() {
         Some(TASK_CREATE) => handle_task_create(input, ctx),

@@ -1,4 +1,4 @@
-//! Session Init — SessionStart hook
+//! Session Init — `SessionStart` hook
 //!
 //! Handles session initialization:
 //! - Logs session start to sentinel/metrics/sessions.jsonl
@@ -117,7 +117,7 @@ const SYNC_DIRS_RECURSIVE: &[&str] = &[];
 /// Minimum number of skill directories for a valid sync.
 const MIN_SKILL_DIRS: usize = sentinel_domain::constants::MIN_SKILL_DIRS;
 
-/// Process SessionStart event
+/// Process `SessionStart` event
 pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
     let session_id = input.session_id.as_deref().unwrap_or("unknown");
     let cwd = input.cwd.as_deref().unwrap_or(".");
@@ -193,9 +193,9 @@ pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
         // Detect project from cwd path
         let project = detect_project_from_cwd(cwd);
         if let Some(ref proj) = project {
-            lines.push(format!("CLAUDE_PROJECT={}", proj));
+            lines.push(format!("CLAUDE_PROJECT={proj}"));
         }
-        lines.push(format!("SENTINEL_SESSION_ID={}", session_id));
+        lines.push(format!("SENTINEL_SESSION_ID={session_id}"));
 
         if !lines.is_empty() {
             if let Err(e) = std::fs::write(&env_file, lines.join("\n") + "\n") {
@@ -297,7 +297,7 @@ fn log_session_start(
 
 /// One-time migration: move `~/.claude/metrics/*` → `~/.claude/sentinel/metrics/`.
 ///
-/// Runs on every SessionStart but only does work when the old directory exists
+/// Runs on every `SessionStart` but only does work when the old directory exists
 /// and contains files. After moving, the old directory is removed.
 fn migrate_metrics_dir(claude_dir: &Path) {
     let old_dir = claude_dir.join("metrics");
@@ -319,13 +319,7 @@ fn migrate_metrics_dir(claude_dir: &Path) {
         let src = entry.path();
         if src.is_file() {
             let dst = new_dir.join(entry.file_name());
-            if !dst.exists() {
-                // Move file (copy + remove for cross-device safety)
-                if fs::copy(&src, &dst).is_ok() {
-                    let _ = fs::remove_file(&src);
-                    moved += 1;
-                }
-            } else {
+            if dst.exists() {
                 // Destination already exists — append JSONL files, skip others
                 let name = entry.file_name();
                 let name_str = name.to_string_lossy();
@@ -341,14 +335,19 @@ fn migrate_metrics_dir(claude_dir: &Path) {
                     moved += 1;
                 }
                 // Non-JSONL duplicates: leave the old copy for safety
+            } else {
+                // Move file (copy + remove for cross-device safety)
+                if fs::copy(&src, &dst).is_ok() {
+                    let _ = fs::remove_file(&src);
+                    moved += 1;
+                }
             }
         }
     }
 
     // Remove old directory if empty
     if fs::read_dir(&old_dir)
-        .map(|mut d| d.next().is_none())
-        .unwrap_or(false)
+        .is_ok_and(|mut d| d.next().is_none())
     {
         let _ = fs::remove_dir(&old_dir);
     }
@@ -363,7 +362,7 @@ fn migrate_metrics_dir(claude_dir: &Path) {
 
 /// One-time migration: move `~/.claude/.last-sync-commit` → `~/.claude/sentinel/state/last-sync-commit`.
 ///
-/// Runs on every SessionStart but only does work when the old file exists.
+/// Runs on every `SessionStart` but only does work when the old file exists.
 fn migrate_last_sync_commit(claude_dir: &Path) {
     let old_file = claude_dir.join(".last-sync-commit");
     if !old_file.exists() {
@@ -551,8 +550,7 @@ fn validate_sync(claude_dir: &Path) -> ValidationResult {
         let skill_count = count_subdirs(&skills_dir);
         if skill_count < MIN_SKILL_DIRS {
             reasons.push(format!(
-                "Only {} skill directories found (minimum: {})",
-                skill_count, MIN_SKILL_DIRS
+                "Only {skill_count} skill directories found (minimum: {MIN_SKILL_DIRS})"
             ));
         }
     } else {
@@ -562,14 +560,13 @@ fn validate_sync(claude_dir: &Path) -> ValidationResult {
     // 3. sentinel engine should be available
     let cargo_bin = dirs::home_dir().map(|h| h.join(".cargo").join("bin"));
     let sentinel_available = cargo_bin
-        .map(|d| {
+        .is_some_and(|d| {
             if cfg!(windows) {
                 d.join("sentinel.exe").exists() || d.join("sentinel-engine.exe").exists()
             } else {
                 d.join("sentinel").exists() || d.join("sentinel-engine").exists()
             }
-        })
-        .unwrap_or(false);
+        });
     if !sentinel_available {
         reasons.push("sentinel binary not found in ~/.cargo/bin/".to_string());
     }
@@ -614,7 +611,7 @@ fn list_project_configs(claude_dir: &Path) -> Vec<String> {
     }
     let mut names = Vec::new();
     if let Ok(entries) = fs::read_dir(&projects_dir) {
-        for entry in entries.filter_map(|e| e.ok()) {
+        for entry in entries.filter_map(std::result::Result::ok) {
             let name = entry.file_name().to_string_lossy().to_string();
             if name.ends_with(".md") && !name.starts_with('_') {
                 names.push(name.trim_end_matches(".md").to_string());
@@ -655,7 +652,7 @@ fn list_linear_accounts(claude_dir: &Path) -> Vec<String> {
     let projects_dir = claude_dir.join("sentinel").join("projects");
     if projects_dir.exists() {
         if let Ok(entries) = fs::read_dir(&projects_dir) {
-            for entry in entries.filter_map(|e| e.ok()) {
+            for entry in entries.filter_map(std::result::Result::ok) {
                 let path = entry.path();
                 let name = entry.file_name().to_string_lossy().to_string();
                 if !name.ends_with(".md") || name.starts_with('_') {
@@ -847,7 +844,7 @@ fn generate_claude_md(
     } else {
         let list = project_names
             .iter()
-            .map(|n| format!("  - `{}`", n))
+            .map(|n| format!("  - `{n}`"))
             .collect::<Vec<_>>()
             .join("\n");
         format!(
@@ -862,11 +859,11 @@ fn generate_claude_md(
     } else {
         let list = linear_accounts
             .iter()
-            .map(|a| format!("  - `{}`", a))
+            .map(|a| format!("  - `{a}`"))
             .collect::<Vec<_>>()
             .join("\n");
         format!(
-            "\n### Linear Multi-Account\n\nSwitch between Linear workspaces using `mcp__linear__switch_account(account_name: \"<name>\")`.\n\n**Available accounts:**\n{}\n\nEach project config specifies its `linear_account` — the skill router auto-switches when detecting issue prefixes.
+            "\n### Linear Multi-Account\n\nSwitch between Linear workspaces using `mcp__linear__switch_account(account_name: \"<name>\")`.\n\n**Available accounts:**\n{list}\n\nEach project config specifies its `linear_account` — the skill router auto-switches when detecting issue prefixes.
 
 ### Linear Workflow Automation
 
@@ -877,8 +874,7 @@ Firefly Pro repos (and any project adopting the convention) use a fixed Linear p
 3. **QA pass** — tester moves to **Completed**.
 4. **QA fail** — tester moves to **QA Failed** and reassigns to whoever owns the next attempt.
 
-The workflow needs a `LINEAR_API_KEY` repo secret (workspace-scoped). Assignee and target-state UUIDs are hardcoded per repo for stability — new repos copy `.github/workflows/linear-on-merge.yml` from the reference implementation in `firefly-pro-crm` and adjust those two constants for their Linear workspace + QA tester.\n",
-            list
+The workflow needs a `LINEAR_API_KEY` repo secret (workspace-scoped). Assignee and target-state UUIDs are hardcoded per repo for stability — new repos copy `.github/workflows/linear-on-merge.yml` from the reference implementation in `firefly-pro-crm` and adjust those two constants for their Linear workspace + QA tester.\n"
         )
     };
 
@@ -1650,11 +1646,11 @@ CIRCUMSTANCE**
 ///
 /// This is the public entry point for the sentinel MCP tool and the
 /// `sentinel regenerate-claude-md` CLI subcommand. It re-runs the same
-/// logic as the SessionStart hook: counts components, lists projects and
+/// logic as the `SessionStart` hook: counts components, lists projects and
 /// Linear accounts, renders the live task snapshot for the current cwd,
 /// then writes a fresh CLAUDE.md.
 ///
-/// Used by the TaskCreated / TaskCompleted hook handlers to keep the
+/// Used by the `TaskCreated` / `TaskCompleted` hook handlers to keep the
 /// Active Tasks section in sync after any task-state mutation.
 ///
 /// Returns the path that was written.
@@ -1728,8 +1724,7 @@ fn build_startup_context(
             let pull_tag = if *pulled { " (pulled)" } else { "" };
             if *files > 0 {
                 parts.push(format!(
-                    "[Marketplace Sync] {} files synced{}",
-                    files, pull_tag
+                    "[Marketplace Sync] {files} files synced{pull_tag}"
                 ));
             } else {
                 parts.push("[Marketplace Sync] No changes".to_string());
@@ -1760,7 +1755,7 @@ fn build_startup_context(
     // Auto-init results
     if let Some(result) = init_result {
         if !result.created.is_empty() {
-            let file_names: Vec<&str> = result.created.iter().map(|f| f.path()).collect();
+            let file_names: Vec<&str> = result.created.iter().map(sentinel_domain::project::StandardFile::path).collect();
             parts.push(format!(
                 "[Project Init] Auto-generated {} standard file(s): {}",
                 result.created.len(),
@@ -1784,7 +1779,7 @@ fn build_startup_context(
 // Linear team key caching (marketplace → sentinel)
 // ---------------------------------------------------------------------------
 
-/// Read all ~/.claude/sentinel/projects/*.md files, extract linear_teams keys from
+/// Read all ~/.claude/sentinel/projects/*.md files, extract `linear_teams` keys from
 /// YAML frontmatter, and write them to ~/.claude/sentinel/linear-teams.json
 /// so the skill router can consume them without hardcoding.
 fn cache_linear_team_keys(claude_dir: &Path) {
@@ -1801,7 +1796,7 @@ fn cache_linear_team_keys(claude_dir: &Path) {
         Err(_) => return,
     };
 
-    for entry in entries.filter_map(|e| e.ok()) {
+    for entry in entries.filter_map(std::result::Result::ok) {
         let path = entry.path();
         let file_name = entry.file_name().to_string_lossy().to_string();
         if !file_name.ends_with(".md") || file_name.starts_with('_') {
@@ -1877,7 +1872,7 @@ fn cache_linear_team_keys(claude_dir: &Path) {
 /// Auto-generate missing standard project files in the cwd.
 /// Only runs if the directory looks like a git repo.
 /// Never overwrites existing files (force=false).
-/// Detect project name from cwd for CLAUDE_ENV_FILE injection.
+/// Detect project name from cwd for `CLAUDE_ENV_FILE` injection.
 fn detect_project_from_cwd(cwd: &str) -> Option<String> {
     let dir_name = Path::new(cwd).file_name()?.to_str()?;
     let project = match dir_name {

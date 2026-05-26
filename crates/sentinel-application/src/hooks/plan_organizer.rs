@@ -1,6 +1,6 @@
 //! Plan Organizer Hook
 //!
-//! Fires on PostToolUse when tool_name == "ExitPlanMode".
+//! Fires on `PostToolUse` when `tool_name` == "`ExitPlanMode`".
 //! Claude Code saves plans to `{project}/plans/{slug}.md` by default with
 //! a random slug (e.g. "bright-EAGLE-river.md"). This hook archives plans
 //! to TWO destinations:
@@ -44,7 +44,7 @@ fn detect_project(cwd: &str) -> String {
 }
 
 /// Extract the plan file path from the tool result JSON.
-/// ExitPlanMode returns `{ "data": { "filePath": "...", ... } }` on success.
+/// `ExitPlanMode` returns `{ "data": { "filePath": "...", ... } }` on success.
 fn extract_plan_path(tool_result: Option<&serde_json::Value>) -> Option<PathBuf> {
     let resp = tool_result?;
     // Try direct `filePath` first
@@ -97,7 +97,7 @@ fn next_versioned_path(fs: &dyn FileSystemPort, target_dir: &Path, slug: &str) -
     target_dir.join(format!("{slug}-v999.md"))
 }
 
-/// Process an ExitPlanMode PostToolUse event.
+/// Process an `ExitPlanMode` `PostToolUse` event.
 /// Copies the plan file into `~/.claude/plans/{project}/{slug}-v{N}.md`.
 pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     // Only fire on ExitPlanMode
@@ -109,12 +109,9 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     let project = detect_project(cwd);
 
     // Extract the plan file path from the tool response
-    let plan_path = match extract_plan_path(input.tool_result.as_ref()) {
-        Some(p) => p,
-        None => {
-            tracing::debug!("No plan file path in ExitPlanMode response; skipping");
-            return HookOutput::allow();
-        }
+    let plan_path = if let Some(p) = extract_plan_path(input.tool_result.as_ref()) { p } else {
+        tracing::debug!("No plan file path in ExitPlanMode response; skipping");
+        return HookOutput::allow();
     };
 
     // Derive slug from filename (strip .md extension)
@@ -175,7 +172,7 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
         "project".to_string(),
         serde_json::Value::String(project.clone()),
     );
-    meta.insert("slug".to_string(), serde_json::Value::String(slug.clone()));
+    meta.insert("slug".to_string(), serde_json::Value::String(slug));
     meta.insert(
         "archived_path".to_string(),
         serde_json::Value::String(target_path.display().to_string()),

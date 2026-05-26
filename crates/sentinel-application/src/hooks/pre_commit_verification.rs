@@ -9,7 +9,7 @@
 //! [`super::test_evidence_recorder`]). Every Bash invocation that matches a
 //! test/build pattern is appended to
 //! `~/.claude/sentinel/state/test-evidence/{session_id}.jsonl`. This hook
-//! checks that file — keyed by the **same** session_id Claude Code passes in
+//! checks that file — keyed by the **same** `session_id` Claude Code passes in
 //! — and allows the commit/push if it contains at least one entry.
 //!
 //! Why not parse Claude Code's transcript? The hook input `session_id`
@@ -102,7 +102,7 @@ fn is_docs_only_commit_with(command: &str, git: &dyn super::GitStatusPort, cwd: 
     files.iter().all(|f| is_docs_only_path(f))
 }
 
-/// Process a pre-commit verification hook event (PreToolUse).
+/// Process a pre-commit verification hook event (`PreToolUse`).
 /// Uses session-scoped signed override check.
 pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
     let session_id = input.session_id.as_deref().unwrap_or("unknown");

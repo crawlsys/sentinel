@@ -1,11 +1,11 @@
 //! Todo Loader Hook
 //!
-//! Runs on UserPromptSubmit. Reads persistent todos from
+//! Runs on `UserPromptSubmit`. Reads persistent todos from
 //! `~/.claude/todos/active.jsonl`, filters by current project,
 //! groups by status/priority, and injects a summary into context.
 //! Only loads once per session (uses a temp marker file).
 //!
-//! All IO goes through `ctx.fs` (FileSystemPort).
+//! All IO goes through `ctx.fs` (`FileSystemPort`).
 
 use std::path::{Path, PathBuf};
 
@@ -138,8 +138,7 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
         .unwrap_or("unknown");
 
     let mut context = format!(
-        "[Todos] Project: {} | Pending: {} | In Progress: {} | P0: {} | P1: {}",
-        project_name, pending_count, in_progress_count, p0_count, p1_count
+        "[Todos] Project: {project_name} | Pending: {pending_count} | In Progress: {in_progress_count} | P0: {p0_count} | P1: {p1_count}"
     );
 
     if !top_todos.is_empty() {

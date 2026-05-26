@@ -5,7 +5,7 @@
 //!
 //! ## How it works
 //!
-//! - **PostToolUse (Bash)**: scan tool output for compile warnings, dead-code
+//! - **`PostToolUse` (Bash)**: scan tool output for compile warnings, dead-code
 //!   diagnostics, lint findings, test failures, and inline TODO/FIXME/HACK
 //!   markers near edited lines. Append a one-line summary to a per-session
 //!   state file at
@@ -82,7 +82,7 @@ fn observation_path(home: &Path, session_id: &str) -> PathBuf {
         .join(format!("{session_id}.jsonl"))
 }
 
-/// PostToolUse: scan Bash tool result for known issue patterns and
+/// `PostToolUse`: scan Bash tool result for known issue patterns and
 /// append any matches to the session log. Best-effort: any IO failure
 /// is silently swallowed.
 pub fn process_post_tool(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
@@ -218,7 +218,7 @@ pub fn process_stop(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutp
     }
 
     let envelope = HookEnvelope::new("Good Citizen", HookTier::Warn, lines.join("\n"));
-    HookOutput::inject_envelope(HookEvent::Stop, envelope)
+    HookOutput::inject_envelope(HookEvent::Stop, &envelope)
 }
 
 // ---------------------------------------------------------------------------
@@ -235,8 +235,7 @@ fn compile_observation_patterns() -> Vec<(regex::Regex, &'static str)> {
 fn now_ms() -> u128 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0)
+        .map_or(0, |d| d.as_millis())
 }
 
 /// Pull plain text out of the Claude Code `tool_result` value. The shape

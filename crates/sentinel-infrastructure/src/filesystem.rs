@@ -3,9 +3,11 @@
 //! Thin delegation to `std::fs` + dirs. Exists so hooks can be tested
 //! with a mock filesystem that doesn't touch real disk.
 
+use std::io::Write as _;
+use std::path::{Path, PathBuf};
+
 use anyhow::{Context, Result};
 use sentinel_domain::ports::FileSystemPort;
-use std::path::{Path, PathBuf};
 
 /// Infrastructure adapter implementing `FileSystemPort` via real `std::fs`.
 pub struct RealFileSystem;
@@ -82,7 +84,6 @@ impl FileSystemPort for RealFileSystem {
         } else {
             content
         };
-        use std::io::Write;
         let mut file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -211,10 +212,7 @@ fn stamp_trace_id_if_missing_with<F: Fn() -> String>(content: &[u8], gen_id: F) 
     for raw in text.split_inclusive('\n') {
         // split_inclusive keeps the trailing '\n'; strip it before parse,
         // then put it back exactly as it was.
-        let (body, nl) = match raw.strip_suffix('\n') {
-            Some(b) => (b, "\n"),
-            None => (raw, ""),
-        };
+        let (body, nl) = raw.strip_suffix('\n').map_or((raw, ""), |b| (b, "\n"));
         if body.is_empty() {
             out.push_str(raw);
             continue;
@@ -249,14 +247,16 @@ fn stamp_trace_id_if_missing_with<F: Fn() -> String>(content: &[u8], gen_id: F) 
     }
 }
 
-/// Best-effort: if `path` is a metrics JSONL larger than
-/// `METRICS_LOG_MAX_BYTES`, rename it to `<file>.archive.<ts_ms>` so the
-/// next append starts a fresh file. Errors are swallowed — observability
-/// plumbing must not break the caller's critical path.
+/// Best-effort metrics log rotation.
 ///
-/// Public so the unit tests can exercise the path-classifier + size
-/// threshold logic in isolation. Not part of `FileSystemPort`; consumed
-/// only by `RealFileSystem::append`.
+/// If `path` is a metrics JSONL larger than `METRICS_LOG_MAX_BYTES`, renames it
+/// to `<file>.archive.<ts_ms>` so the next append starts a fresh file. Errors
+/// are swallowed — observability plumbing must not break the caller's critical
+/// path.
+///
+/// Public so the unit tests can exercise the path-classifier + size threshold
+/// logic in isolation. Not part of `FileSystemPort`; consumed only by
+/// `RealFileSystem::append`.
 pub fn rotate_metrics_log_if_oversized(path: &Path) {
     if !is_metrics_jsonl(path) {
         return;
@@ -267,9 +267,15 @@ pub fn rotate_metrics_log_if_oversized(path: &Path) {
     if meta.len() <= METRICS_LOG_MAX_BYTES {
         return;
     }
-    let ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_millis() as u64);
+    let ts = {
+        let millis = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis());
+        // u128→u64: millis since epoch won't overflow u64 for ~584 million years
+        #[allow(clippy::cast_possible_truncation)]
+        let ts_u64 = millis as u64;
+        ts_u64
+    };
     let archive_name = format!(
         "{}.archive.{ts}",
         path.file_name()

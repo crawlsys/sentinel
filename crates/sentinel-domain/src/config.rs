@@ -76,10 +76,11 @@ impl SentinelConfig {
     }
 }
 
-/// Judge-tier configuration. Today carries the default tier (used
-/// when a step config omits the `judge` field) and a flag controlling
-/// whether software-only signing is acceptable for this deployment
-/// (false ⇒ hardware signing required, ties into M1.10 follow-up).
+/// Judge-tier configuration.
+///
+/// Carries the default tier (used when a step config omits the `judge` field)
+/// and a flag controlling whether software-only signing is acceptable for this
+/// deployment (false ⇒ hardware signing required, ties into M1.10 follow-up).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JudgeConfig {
     /// Default `JudgeModel` for steps that don't declare a tier.
@@ -110,10 +111,11 @@ pub struct ProofArchiveConfig {
     pub aging_days: Option<u32>,
 }
 
-/// Signing-key configuration. Today the env-var name + a flag
-/// requiring hardware backing (M1.10 follow-up). When
-/// `hardware_required` is `true`, the signing backend trait must
-/// produce a non-software variant or chain submission fails.
+/// Signing-key configuration.
+///
+/// Carries the env-var name and a flag requiring hardware backing (M1.10
+/// follow-up). When `hardware_required` is `true`, the signing backend trait
+/// must produce a non-software variant or chain submission fails.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SigningConfig {
     /// Env-var name carrying the Ed25519 signing key. `None` ⇒
@@ -137,9 +139,10 @@ impl Default for SigningConfig {
     }
 }
 
-/// One validation failure. Each variant carries the offending value
-/// + the rule that was broken so a deny-banner can render an
-/// actionable line per error without parsing the enum.
+/// One validation failure.
+///
+/// Each variant carries the offending value and the rule that was broken,
+/// so a deny-banner can render an actionable line per error without parsing the enum.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConfigError {
     /// `RequestLimits.max_evidence_bytes` exceeded the safety ceiling.

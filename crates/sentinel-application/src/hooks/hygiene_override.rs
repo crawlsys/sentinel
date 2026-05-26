@@ -1,6 +1,6 @@
 //! Hygiene Override Hook
 //!
-//! Runs on UserPromptSubmit. Checks user prompt for override patterns
+//! Runs on `UserPromptSubmit`. Checks user prompt for override patterns
 //! (e.g., "override hygiene", "skip tests"). If matched, writes temporary
 //! override files with 60-second expiry so that git-hygiene-gate and
 //! verification-gate will allow tool calls through.
@@ -32,7 +32,7 @@ fn override_dir(fs: &dyn FileSystemPort) -> PathBuf {
 
 /// Override file paths — session-scoped with SHA-256 hash of session ID.
 ///
-/// **Attack #46**: Uses SHA-256 (128-bit truncation) instead of DefaultHasher
+/// **Attack #46**: Uses SHA-256 (128-bit truncation) instead of `DefaultHasher`
 /// (48-bit truncation). Stored under ~/.claude/sentinel/ instead of temp dir.
 /// **Attack #56**: No longer in world-readable /tmp.
 pub fn hygiene_override_path(fs: &dyn FileSystemPort, session_id: &str) -> PathBuf {
@@ -69,7 +69,7 @@ fn sha256_hash(input: &str) -> String {
 }
 
 /// Compute HMAC-like signature for override content.
-/// Uses SHA-256(salt + type + session_id + timestamp) as a simple MAC.
+/// Uses SHA-256(salt + type + `session_id` + timestamp) as a simple MAC.
 /// Not a true HMAC (no hmac crate in this crate) but sufficient since
 /// the salt is embedded in the binary and not observable.
 fn compute_override_sig(override_type: &str, session_id: &str, timestamp: u64) -> String {
@@ -103,8 +103,7 @@ fn verify_override_content(content: &str, override_type: &str, session_id: &str)
 fn now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+        .map_or(0, |d| d.as_secs())
 }
 
 /// Override expiry reduced from 5 minutes to 60 seconds (Attack #31).
@@ -112,9 +111,10 @@ fn now_secs() -> u64 {
 const OVERRIDE_TTL_SECS: u64 = sentinel_domain::constants::OVERRIDE_TTL_SECS;
 
 /// Phase-gate override TTL — 1 hour (3600s).
+///
 /// Phase-gate overrides are explicitly invoked for marketplace-wide skill
 /// refactors which involve many sequential file edits AND spawned subagents
-/// that don't naturally share the parent's session_id. The original 600s
+/// that don't naturally share the parent's `session_id`. The original 600s
 /// ceiling was too tight: a single skill standardization sweep (Sprint 2–7
 /// of the 75-skill marketplace audit) runs 30–60 min continuous. Multiple
 /// re-triggers per sweep created a poor operator experience and lost work
@@ -168,7 +168,7 @@ pub fn is_signed_override_active(
 }
 
 /// Like `is_signed_override_active` but with a caller-specified TTL.
-/// Used by phase_gate (which needs 600s instead of 60s) — see the
+/// Used by `phase_gate` (which needs 600s instead of 60s) — see the
 /// `PHASE_GATE_OVERRIDE_TTL_SECS` rationale.
 pub fn is_signed_override_active_with_ttl(
     fs: &dyn FileSystemPort,
@@ -181,31 +181,28 @@ pub fn is_signed_override_active_with_ttl(
         Ok(c) => c,
         Err(_) => return false,
     };
-    match verify_override_content(&content, override_type, session_id) {
-        Some(timestamp) => {
-            let now = now_secs();
-            if now.saturating_sub(timestamp) < ttl_secs {
-                true
-            } else {
-                // Expired — clean up (write empty)
-                let _ = fs.write(path, b"");
-                false
-            }
-        }
-        None => {
-            // Invalid content (unsigned/tampered) — clean up
-            eprintln!(
-                "[sentinel] SECURITY: Override file at '{}' has invalid signature. Removing.",
-                path.display()
-            );
+    if let Some(timestamp) = verify_override_content(&content, override_type, session_id) {
+        let now = now_secs();
+        if now.saturating_sub(timestamp) < ttl_secs {
+            true
+        } else {
+            // Expired — clean up (write empty)
             let _ = fs.write(path, b"");
             false
         }
+    } else {
+        // Invalid content (unsigned/tampered) — clean up
+        eprintln!(
+            "[sentinel] SECURITY: Override file at '{}' has invalid signature. Removing.",
+            path.display()
+        );
+        let _ = fs.write(path, b"");
+        false
     }
 }
 
 /// Process the hygiene-override hook event.
-/// Accepts session_id for session-scoped override files.
+/// Accepts `session_id` for session-scoped override files.
 pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     let prompt = match &input.prompt {
         Some(p) => p.to_lowercase(),

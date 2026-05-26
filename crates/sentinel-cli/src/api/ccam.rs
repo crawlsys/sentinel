@@ -40,10 +40,13 @@ fn sentinel_dir() -> PathBuf {
 }
 
 fn now_ms() -> u64 {
-    SystemTime::now()
+    // as_millis() returns u128; values until year 585 million fit in u64.
+    #[allow(clippy::cast_possible_truncation)]
+    let ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
-        .as_millis() as u64
+        .as_millis() as u64;
+    ms
 }
 
 // ── Accounts ────────────────────────────────────────────────────────────────
@@ -58,20 +61,19 @@ fn load_accounts() -> serde_json::Value {
     let rotation: serde_json::Value = fs::read_to_string(&rotation_path)
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or(serde_json::json!({}));
+        .unwrap_or_else(|| serde_json::json!({}));
 
     let cooldowns = rotation
         .get("cooldowns")
         .cloned()
-        .unwrap_or(serde_json::json!({}));
+        .unwrap_or_else(|| serde_json::json!({}));
     let last_assigned = rotation
         .get("lastAssigned")
         .and_then(|v| v.as_str())
         .unwrap_or("");
 
-    let entries = match fs::read_dir(&accounts_root) {
-        Ok(e) => e,
-        Err(_) => return serde_json::json!({ "accounts": [] }),
+    let Ok(entries) = fs::read_dir(&accounts_root) else {
+        return serde_json::json!({ "accounts": [] });
     };
 
     let now = now_ms();
@@ -96,12 +98,12 @@ fn load_accounts() -> serde_json::Value {
         let creds: serde_json::Value = fs::read_to_string(&creds_path)
             .ok()
             .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or(serde_json::json!({}));
+            .unwrap_or_else(|| serde_json::json!({}));
 
         let oauth = creds
             .get("claudeAiOauth")
             .cloned()
-            .unwrap_or(serde_json::json!({}));
+            .unwrap_or_else(|| serde_json::json!({}));
         let expires_at = oauth.get("expiresAt").and_then(serde_json::Value::as_u64).unwrap_or(0);
         let subscription_type = oauth
             .get("subscriptionType")
@@ -122,6 +124,9 @@ fn load_accounts() -> serde_json::Value {
             "live"
         };
 
+        // Both values are ms-since-epoch; the difference fits in i64 for any
+        // realistic timestamp (year 292 million). #[allow] is narrowly scoped.
+        #[allow(clippy::cast_possible_wrap)]
         let expires_in_minutes: i64 = if expires_at == 0 {
             0
         } else {
@@ -166,14 +171,16 @@ fn load_accounts() -> serde_json::Value {
 }
 
 async fn get_accounts() -> Json<serde_json::Value> {
-    let mut cache = ACCOUNTS_CACHE.lock().unwrap();
-    if let Some((ts, ref data)) = *cache {
-        if ts.elapsed() < CACHE_TTL {
-            return Json(data.clone());
+    {
+        let cache = ACCOUNTS_CACHE.lock().unwrap();
+        if let Some((ts, ref data)) = *cache {
+            if ts.elapsed() < CACHE_TTL {
+                return Json(data.clone());
+            }
         }
     }
     let data = load_accounts();
-    *cache = Some((Instant::now(), data.clone()));
+    *ACCOUNTS_CACHE.lock().unwrap() = Some((Instant::now(), data.clone()));
     Json(data)
 }
 
@@ -211,9 +218,8 @@ fn pid_alive(pid: u64) -> bool {
 
 fn load_sessions() -> serde_json::Value {
     let env_root = session_env_dir();
-    let entries = match fs::read_dir(&env_root) {
-        Ok(e) => e,
-        Err(_) => return serde_json::json!({ "sessions": [] }),
+    let Ok(entries) = fs::read_dir(&env_root) else {
+        return serde_json::json!({ "sessions": [] });
     };
 
     let now = now_ms();
@@ -244,7 +250,7 @@ fn load_sessions() -> serde_json::Value {
         let manifest: serde_json::Value = fs::read_to_string(&manifest_path)
             .ok()
             .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or(serde_json::json!({}));
+            .unwrap_or_else(|| serde_json::json!({}));
 
         let account_profile = manifest
             .get("account_profile")
@@ -293,14 +299,16 @@ fn load_sessions() -> serde_json::Value {
 }
 
 async fn get_sessions() -> Json<serde_json::Value> {
-    let mut cache = SESSIONS_CACHE.lock().unwrap();
-    if let Some((ts, ref data)) = *cache {
-        if ts.elapsed() < CACHE_TTL {
-            return Json(data.clone());
+    {
+        let cache = SESSIONS_CACHE.lock().unwrap();
+        if let Some((ts, ref data)) = *cache {
+            if ts.elapsed() < CACHE_TTL {
+                return Json(data.clone());
+            }
         }
     }
     let data = load_sessions();
-    *cache = Some((Instant::now(), data.clone()));
+    *SESSIONS_CACHE.lock().unwrap() = Some((Instant::now(), data.clone()));
     Json(data)
 }
 
@@ -311,7 +319,7 @@ async fn get_rotation() -> Json<serde_json::Value> {
     let raw: serde_json::Value = fs::read_to_string(&path)
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or(serde_json::json!({}));
+        .unwrap_or_else(|| serde_json::json!({}));
 
     let now = now_ms();
 
@@ -320,7 +328,10 @@ async fn get_rotation() -> Json<serde_json::Value> {
     if let Some(cd_map) = raw.get("cooldowns").and_then(|v| v.as_object()) {
         for (profile, entry) in cd_map {
             let until = entry.get("until").and_then(serde_json::Value::as_u64).unwrap_or(0);
-            let hours_remaining = if until > now {
+            // Both until and now are ms-since-epoch; difference is bounded by ~year 292M.
+            // The f64 cast may lose ~1ms precision on large values; acceptable for display.
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss, clippy::cast_precision_loss)]
+            let hours_remaining: u64 = if until > now {
                 ((until - now) as f64 / 1000.0 / 3600.0).ceil() as u64
             } else {
                 0
@@ -339,7 +350,7 @@ async fn get_rotation() -> Json<serde_json::Value> {
         "rotation_count": raw.get("rotationCount"),
         "last_rotation": raw.get("lastRotation"),
         "cooldowns": cooldowns,
-        "paused": raw.get("paused").cloned().unwrap_or(serde_json::json!([])),
+        "paused": raw.get("paused").cloned().unwrap_or_else(|| serde_json::json!([])),
     }))
 }
 
@@ -350,7 +361,7 @@ async fn get_utilization() -> Json<serde_json::Value> {
     let data: serde_json::Value = fs::read_to_string(&path)
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or(serde_json::json!({ "profiles": {}, "updated_at": null }));
+        .unwrap_or_else(|| serde_json::json!({ "profiles": {}, "updated_at": null }));
     Json(data)
 }
 
@@ -361,7 +372,7 @@ async fn get_linear() -> Json<serde_json::Value> {
     let data: serde_json::Value = fs::read_to_string(&path)
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or(serde_json::json!({ "updated_at": null, "issues": [] }));
+        .unwrap_or_else(|| serde_json::json!({ "updated_at": null, "issues": [] }));
     Json(data)
 }
 

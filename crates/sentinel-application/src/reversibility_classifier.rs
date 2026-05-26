@@ -42,7 +42,7 @@ impl StaticReversibilityClassifier {
     /// back to [`ReversibilityClass::Irreversible`] (the conservative
     /// default the port trait specifies).
     #[must_use]
-    pub fn new(table: HashMap<String, ReversibilityClass>) -> Self {
+    pub const fn new(table: HashMap<String, ReversibilityClass>) -> Self {
         Self {
             table,
             default: ReversibilityClass::Irreversible,
@@ -63,7 +63,7 @@ impl StaticReversibilityClassifier {
     /// (e.g., to focus on a single Catastrophic case) can set the
     /// fallback explicitly.
     #[must_use]
-    pub fn with_default(mut self, default: ReversibilityClass) -> Self {
+    pub const fn with_default(mut self, default: ReversibilityClass) -> Self {
         self.default = default;
         self
     }

@@ -4,8 +4,8 @@
 //! current session AND the push includes frontend file changes. Ensures
 //! UI changes are browser-verified before code reaches the remote.
 //!
-//! "Browser test" here means either a local CDP test (mcp__cdp__*, edge-cdp
-//! skill) for localhost OR a remote Browserbase test (mcp__browserbase__*)
+//! "Browser test" here means either a local CDP test (`mcp__cdp`__*, edge-cdp
+//! skill) for localhost OR a remote Browserbase test (`mcp__browserbase`__*)
 //! for preview/staging URLs. Either one counts as proof that someone drove
 //! the UI in a real browser since the last frontend change.
 //!
@@ -39,8 +39,8 @@ const TEST_VALIDITY: Duration = constants::BROWSER_TEST_VALIDITY;
 const FRONTEND_EXTENSIONS: &[&str] = &[".tsx", ".jsx", ".css", ".scss", ".styled"];
 
 /// Path to the browser test state file for a given session.
-/// **Attack #61 fix**: Moved from world-writable temp_dir() to sentinel's
-/// protected directory. Also sanitizes session_id to prevent path traversal.
+/// **Attack #61 fix**: Moved from world-writable `temp_dir()` to sentinel's
+/// protected directory. Also sanitizes `session_id` to prevent path traversal.
 fn state_file_path(fs: &dyn super::FileSystemPort, session_id: &str) -> PathBuf {
     // Sanitize session_id — only allow alphanumeric, hyphen, underscore
     let safe_id: String = session_id
@@ -84,7 +84,7 @@ fn has_recent_browser_test(fs: &dyn super::FileSystemPort, session_id: &str) -> 
     // Verify passed flag and session match
     let passed = state
         .get("passed")
-        .and_then(|v| v.as_bool())
+        .and_then(serde_json::Value::as_bool)
         .unwrap_or(false);
     let state_session = state
         .get("sessionId")
@@ -104,7 +104,7 @@ fn has_recent_browser_test(fs: &dyn super::FileSystemPort, session_id: &str) -> 
     match chrono::DateTime::parse_from_rfc3339(timestamp) {
         Ok(test_time) => {
             let elapsed = Utc::now().signed_duration_since(test_time);
-            elapsed.num_seconds() >= 0 && elapsed.to_std().map_or(false, |d| d < TEST_VALIDITY)
+            elapsed.num_seconds() >= 0 && elapsed.to_std().is_ok_and(|d| d < TEST_VALIDITY)
         }
         Err(_) => false,
     }
@@ -161,12 +161,12 @@ fn repo_has_browser_test_config_in(
     };
 
     for path in entries {
-        if path.extension().map_or(true, |e| e != "md") {
+        if path.extension().is_none_or(|e| e != "md") {
             continue;
         }
         if path
             .file_name()
-            .map_or(false, |n| n.to_string_lossy().starts_with('_'))
+            .is_some_and(|n| n.to_string_lossy().starts_with('_'))
         {
             continue;
         }
@@ -290,7 +290,7 @@ fn diff_has_frontend_files(git: &dyn super::GitStatusPort, cwd: Option<&str>) ->
 }
 
 /// Write the browser test state file after a successful browser test session.
-/// Called from the PostToolUse handler when:
+/// Called from the `PostToolUse` handler when:
 ///   - `mcp__browserbase__release_session` succeeds (Browserbase remote test), OR
 ///   - `mcp__cdp__close_instance` succeeds (CDP local test), OR
 ///   - `mcp__steel__release_session` succeeds (legacy Steel, kept for compat).
@@ -315,7 +315,7 @@ pub fn record_browser_test_passed(fs: &dyn super::FileSystemPort, session_id: &s
     }
 }
 
-/// PostToolUse handler — detect successful browser tests and record test state.
+/// `PostToolUse` handler — detect successful browser tests and record test state.
 /// Triggers on:
 /// 1. `mcp__browserbase__release_session` — Browserbase remote test completed
 /// 2. `mcp__cdp__close_instance`         — CDP local test completed
@@ -323,7 +323,7 @@ pub fn record_browser_test_passed(fs: &dyn super::FileSystemPort, session_id: &s
 /// 4. Bash tool result containing `BROWSER_TEST_PASS` or legacy `STEEL_TEST_PASS`
 ///    — CDP/Puppeteer/Playwright script test completed
 ///
-/// Should be called from the PostToolUse event dispatch in hook_cmd.rs.
+/// Should be called from the `PostToolUse` event dispatch in `hook_cmd.rs`.
 pub fn process_post_tool(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
     let tool = match &input.tool_name {
         Some(name) => name.as_str(),
@@ -351,7 +351,7 @@ pub fn process_post_tool(input: &HookInput, ctx: &super::HookContext<'_>) -> Hoo
             .tool_result
             .as_ref()
             .and_then(|r| r.as_str())
-            .map_or(false, |s| {
+            .is_some_and(|s| {
                 s.contains("BROWSER_TEST_PASS") || s.contains("STEEL_TEST_PASS")
             });
         if has_marker {
@@ -362,7 +362,7 @@ pub fn process_post_tool(input: &HookInput, ctx: &super::HookContext<'_>) -> Hoo
     HookOutput::allow()
 }
 
-/// Process a pre-push browser test hook event (PreToolUse).
+/// Process a pre-push browser test hook event (`PreToolUse`).
 pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
     // Only act on Bash tool calls
     let tool = match &input.tool_name {

@@ -86,7 +86,7 @@ impl<'a> GitInterceptorService<'a> {
         };
 
         // Check for --bypass flag
-        if args.first().map(|s| s.as_str()) == Some("--bypass") {
+        if args.first().map(std::string::String::as_str) == Some("--bypass") {
             let rest: Vec<String> = args.iter().skip(1).cloned().collect();
             return self.handle_bypass(&rest, &real_git, cwd);
         }
@@ -193,7 +193,7 @@ impl<'a> GitInterceptorService<'a> {
 /// `git` itself unregisters the worktree from its admin state but on Windows
 /// it routinely fails to delete the on-disk directory shell because some
 /// process (file watcher, mcp-router, IDE) holds a handle. Git returns 0
-/// regardless, leaving an orphaned dir that hygiene_reminders later flags.
+/// regardless, leaving an orphaned dir that `hygiene_reminders` later flags.
 ///
 /// This helper detects `worktree remove [--force] <path>`, and if the dir
 /// still exists after git's exit, retries `std::fs::remove_dir_all` with

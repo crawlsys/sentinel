@@ -119,7 +119,7 @@ pub struct CodexFindings {
     pub total: u64,
 }
 
-/// CodeRabbit severity-block counts within a single PR.
+/// `CodeRabbit` severity-block counts within a single PR.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct CodeRabbitFindings {
     pub critical: u64,
@@ -353,14 +353,14 @@ fn build_row(repo: &str, summary: &PrSummaryRaw, detail: &PrDetailRaw) -> PrRow 
 }
 
 impl CodexFindings {
-    fn total_set(self) -> Self {
+    const fn total_set(self) -> Self {
         let total = self.critical + self.high + self.medium + self.low;
         Self { total, ..self }
     }
 }
 
 impl CodeRabbitFindings {
-    fn total_set(self) -> Self {
+    const fn total_set(self) -> Self {
         let total = self.critical + self.potential_issue + self.suggestion + self.nitpick;
         Self { total, ..self }
     }
@@ -394,7 +394,7 @@ pub fn count_codex_findings(body: &str) -> CodexFindings {
     f
 }
 
-/// Count CodeRabbit severity blocks. CodeRabbit reviews use shapes like:
+/// Count `CodeRabbit` severity blocks. `CodeRabbit` reviews use shapes like:
 ///   `_⚠️ Potential issue_ | _🔴 Critical_`
 ///   `_🛠️ Refactor suggestion_`
 ///   `_🧹 Nitpick (assertive)_`
@@ -468,12 +468,12 @@ pub fn percentile(values: &[f64], q: f64) -> f64 {
         return sorted[lo];
     }
     let frac = pos - (lo as f64);
-    sorted[lo] + (sorted[hi] - sorted[lo]) * frac
+    (sorted[hi] - sorted[lo]).mul_add(frac, sorted[lo])
 }
 
-/// Heuristic remediation rate for CodeRabbit: # of CodeRabbit-authored
-/// review threads that have a follow-up commit after their submitted_at.
-/// Returns `None` if there are no CodeRabbit reviews to score against.
+/// Heuristic remediation rate for `CodeRabbit`: # of CodeRabbit-authored
+/// review threads that have a follow-up commit after their `submitted_at`.
+/// Returns `None` if there are no `CodeRabbit` reviews to score against.
 fn compute_coderabbit_remediation(detail: &PrDetailRaw) -> Option<f64> {
     let cr_reviews: Vec<&ReviewRaw> = detail
         .reviews

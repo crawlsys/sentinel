@@ -1,4 +1,4 @@
-//! Dependency Freshness Check — SessionStart hook
+//! Dependency Freshness Check — `SessionStart` hook
 //!
 //! Detects the project type from files in the working directory and runs
 //! the appropriate outdated-dependency check. Results are injected into
@@ -30,7 +30,7 @@ enum ProjectType {
 }
 
 impl ProjectType {
-    fn name(&self) -> &'static str {
+    const fn name(&self) -> &'static str {
         match self {
             Self::Rust => "rust",
             Self::Node => "node",
@@ -184,7 +184,7 @@ fn check_outdated(
     }
 }
 
-/// Process SessionStart — check for outdated dependencies.
+/// Process `SessionStart` — check for outdated dependencies.
 pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     let cwd_str = input.cwd.as_deref().unwrap_or(".");
     let cwd = Path::new(cwd_str);
@@ -214,7 +214,7 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     }
 
     tracing::debug!(
-        project_types = ?project_types.iter().map(|t| t.name()).collect::<Vec<_>>(),
+        project_types = ?project_types.iter().map(ProjectType::name).collect::<Vec<_>>(),
         "Checking for outdated dependencies"
     );
 

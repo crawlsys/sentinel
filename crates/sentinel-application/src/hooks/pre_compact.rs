@@ -1,4 +1,4 @@
-//! Pre-Compact Snapshot — PreCompact hook
+//! Pre-Compact Snapshot — `PreCompact` hook
 //!
 //! Fires right before Claude Code auto-compacts the context window.
 //! Writes a survival snapshot to `~/.claude/metrics/compact-snapshot.json`
@@ -49,7 +49,7 @@ fn snapshot_file(fs: &dyn FileSystemPort) -> Option<PathBuf> {
     Some(metrics_dir(fs)?.join("compact-snapshot.json"))
 }
 
-/// Read the activity summary written by activity_tracker::process_stop
+/// Read the activity summary written by `activity_tracker::process_stop`
 fn read_activity_summary(
     fs: &dyn FileSystemPort,
     session_id: &str,
@@ -122,7 +122,7 @@ fn read_context_percent(fs: &dyn FileSystemPort, session_id: &str) -> Option<f64
         return None;
     }
 
-    val.get("percent_used").and_then(|v| v.as_f64())
+    val.get("percent_used").and_then(serde_json::Value::as_f64)
 }
 
 /// Detect current git branch from cwd
@@ -178,7 +178,7 @@ fn read_session_state(
         })
         .unwrap_or_default();
 
-    let tool_calls = val.get("tool_calls").and_then(|v| v.as_u64()).unwrap_or(0);
+    let tool_calls = val.get("tool_calls").and_then(serde_json::Value::as_u64).unwrap_or(0);
 
     (active_skill, phases_read, tool_calls)
 }

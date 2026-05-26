@@ -3,6 +3,7 @@
 //! Collects errors with resolution tracking.
 //! Mirrors the Node.js error-log.js pattern.
 
+use std::io::Write as _;
 use std::path::PathBuf;
 
 use anyhow::Result;
@@ -58,7 +59,6 @@ pub fn log_error(session_id: &str, hook: &str, error: &str) -> Result<()> {
     };
 
     let line = serde_json::to_string(&entry)? + "\n";
-    use std::io::Write;
     let mut file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)

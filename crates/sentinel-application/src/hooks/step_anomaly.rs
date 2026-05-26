@@ -19,9 +19,9 @@
 //!
 //! 1. **Tool novelty** — agent invoked a tool it has never used before
 //! 2. **Frequency spike** — step ran more than N times in a window
-//! 3. **Argument shape drift** — tool_input JSON shape differs from prior runs
-//! 4. **Payload size outliers** — tool_input/result bytes >> typical
-//! 5. **Duration outliers** — step duration_ms >> typical
+//! 3. **Argument shape drift** — `tool_input` JSON shape differs from prior runs
+//! 4. **Payload size outliers** — `tool_input/result` bytes >> typical
+//! 5. **Duration outliers** — step `duration_ms` >> typical
 //! 6. **Sequence anomaly** — step ran out of expected order
 //! 7. **Cost spike** — token spend / API cost >> typical
 //! 8. **Risk escalation** — step elevated trust tier mid-chain
@@ -99,7 +99,7 @@ pub enum AnomalyDimension {
 /// `anomalies` means "no anomalies detected" — the canonical clean
 /// case. The report is a side-channel artifact, not part of the
 /// proof chain itself; future M1.9+ work can fold a hash of this
-/// into the StepProof's `evidence.custom` if customers want
+/// into the `StepProof`'s `evidence.custom` if customers want
 /// anomaly-aware audit trails.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct StepAnomalyReport {
@@ -169,7 +169,7 @@ pub trait AnomalyDetector: Send + Sync {
 fn shape_descriptor(value: &serde_json::Value) -> String {
     match value {
         serde_json::Value::Object(map) => {
-            let mut keys: Vec<&str> = map.keys().map(|s| s.as_str()).collect();
+            let mut keys: Vec<&str> = map.keys().map(std::string::String::as_str).collect();
             keys.sort_unstable();
             let inner = keys
                 .iter()
@@ -306,8 +306,7 @@ impl AnomalyDetector for PayloadSizeDetector {
         history: &ProofChain,
     ) -> Option<Anomaly> {
         let current_size = serde_json::to_string(&current_evidence.custom)
-            .map(|s| s.len())
-            .unwrap_or(0);
+            .map_or(0, |s| s.len());
         if current_size == 0 {
             return None;
         }
@@ -453,7 +452,7 @@ pub fn default_detectors() -> Vec<Box<dyn AnomalyDetector>> {
 ///
 /// Observation-only — never blocks. Caller (typically M1.5's
 /// `submit_step_evidence`) decides what to do with the report:
-/// attach to the StepProof's `evidence.custom`, surface in dashboard
+/// attach to the `StepProof`'s `evidence.custom`, surface in dashboard
 /// telemetry, or refuse to seal when severity exceeds a threshold.
 #[must_use]
 pub fn run_detectors(
@@ -482,7 +481,7 @@ pub fn run_detectors(
 }
 
 #[allow(unused_imports)]
-fn _stub_unused_step_proof(_p: &StepProof) {}
+const fn _stub_unused_step_proof(_p: &StepProof) {}
 
 #[cfg(test)]
 mod tests {

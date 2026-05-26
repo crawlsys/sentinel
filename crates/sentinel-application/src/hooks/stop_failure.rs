@@ -1,4 +1,4 @@
-//! StopFailure hook — detect API errors and rate limits.
+//! `StopFailure` hook — detect API errors and rate limits.
 //!
 //! Called when a turn ends due to an API error rather than normal completion.
 //! For rate limits, this hook now rotates the active Claude account
@@ -13,14 +13,14 @@
 //! - `"You've used 87% of your session limit · resets 4pm (CDT)"`
 //! - `"You're now using extra usage · Your session limit resets 4pm (CDT)"`
 //!
-//! The `error` field is `"rate_limit"` and the content/error_details contains
+//! The `error` field is `"rate_limit"` and the `content/error_details` contains
 //! the human-readable message above.
 
 use sentinel_domain::events::{HookInput, HookOutput};
 
 const DEFAULT_RATE_LIMIT_COOLDOWN_MINUTES: u64 = 300;
 
-/// Parse error_details to extract a cooldown duration in minutes.
+/// Parse `error_details` to extract a cooldown duration in minutes.
 ///
 /// Handles patterns from Anthropic rate limit errors:
 /// - "resets 4pm (CDT)" / "resets 4:30pm (CDT)" — Claude Code's actual format
@@ -28,7 +28,7 @@ const DEFAULT_RATE_LIMIT_COOLDOWN_MINUTES: u64 = 300;
 /// - "resets at 4:00 PM" / "resets at 16:00" — absolute time
 /// - "retry after 3600" / "retry-after: 3600" — seconds
 /// - "resets in 4h 30m" / "resets in 270 minutes" — relative duration
-/// - "rate_limit_error" with no parseable time — returns None (caller defaults to 5hr)
+/// - "`rate_limit_error`" with no parseable time — returns None (caller defaults to 5hr)
 fn parse_reset_minutes(error_details: &str) -> Option<u64> {
     let lower = error_details.to_lowercase();
 
@@ -39,7 +39,7 @@ fn parse_reset_minutes(error_details: &str) -> Option<u64> {
     {
         let after = &lower[idx..];
         if let Some(secs) = extract_first_number(after) {
-            let minutes = (secs + 59) / 60; // round up
+            let minutes = secs.div_ceil(60); // round up
             if minutes > 0 && minutes <= 600 {
                 return Some(minutes);
             }
@@ -123,7 +123,7 @@ fn parse_relative_duration(s: &str) -> Option<u64> {
     }
 }
 
-/// Parse flexible absolute time formats from Claude Code's NP6() formatter:
+/// Parse flexible absolute time formats from Claude Code's `NP6()` formatter:
 /// - "4pm (CDT)" → extract hour
 /// - "4:30pm (CDT)" → extract hour:minute
 /// - "Apr 3, 4pm (CDT)" → skip date part, extract time
@@ -243,7 +243,7 @@ fn summarize_process_failure(output: &super::ProcessOutput) -> String {
     "accounts rotate exited unsuccessfully".to_string()
 }
 
-/// Process StopFailure event
+/// Process `StopFailure` event
 ///
 /// Logs the error, rotates accounts on rate limits, and requests a clean
 /// relaunch so the handler can resume on the next account automatically.
@@ -307,7 +307,7 @@ pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
             "ts": chrono::Utc::now().to_rfc3339(),
         });
 
-        let line = format!("{}\n", entry);
+        let line = format!("{entry}\n");
         let _ = ctx
             .fs
             .append(&metrics_dir.join("errors.jsonl"), line.as_bytes());

@@ -1,7 +1,7 @@
 //! Evidence Collector
 //!
 //! Captures tool call results as evidence for the proof chain.
-//! Runs on every PostToolUse event.
+//! Runs on every `PostToolUse` event.
 
 use sentinel_domain::events::{HookInput, HookOutput};
 use sentinel_domain::state::PhaseCollectionState;

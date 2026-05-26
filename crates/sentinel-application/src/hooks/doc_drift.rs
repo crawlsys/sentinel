@@ -6,7 +6,7 @@
 //! stale relative to recent code changes. Writes drift findings to
 //! `~/.claude/metrics/doc-drift.jsonl`.
 //!
-//! **UserPromptSubmit phase:** Reads drift findings, checks cooldown (30 min),
+//! **`UserPromptSubmit` phase:** Reads drift findings, checks cooldown (30 min),
 //! and injects explicit update instructions into Claude's context.
 
 use sentinel_domain::constants;
@@ -46,8 +46,7 @@ struct DriftEntry {
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
+        .map_or(0, |d| d.as_millis() as u64)
 }
 
 fn metrics_dir(fs: &dyn FileSystemPort) -> Option<PathBuf> {
@@ -151,7 +150,7 @@ fn recent_source_changes(cwd: &Path) -> Vec<String> {
     // Also check root-level source files
     if let Ok(entries) = fs::read_dir(cwd) {
         for entry in entries.flatten() {
-            if entry.file_type().map(|ft| ft.is_file()).unwrap_or(false) {
+            if entry.file_type().is_ok_and(|ft| ft.is_file()) {
                 let name = entry.file_name().to_string_lossy().to_string();
                 if source_exts
                     .iter()
@@ -364,8 +363,8 @@ fn check_changelog_drift(
     let content = fs::read_to_string(path).ok()?;
 
     // Check if changelog has an [Unreleased] section
-    if !content.contains("[Unreleased]") && !content.contains("Unreleased") {
-        if recent_changes.len() >= 3 {
+    if !content.contains("[Unreleased]") && !content.contains("Unreleased")
+        && recent_changes.len() >= 3 {
             return Some(DriftEntry {
                 doc: "CHANGELOG.md".into(),
                 reason:
@@ -376,7 +375,6 @@ fn check_changelog_drift(
                 resolved: false,
             });
         }
-    }
 
     // Check if CHANGELOG is older than recently modified source files.
     // This catches committed changes where CHANGELOG wasn't updated.
@@ -602,22 +600,22 @@ pub fn process_stop(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
         }
     }
 
-    if !drift_entries.is_empty() {
+    if drift_entries.is_empty() {
+        // No drift detected — resolve any previous findings for this cwd
+        resolve_drift_for_cwd(ctx.fs, cwd_str);
+    } else {
         tracing::info!(
             count = drift_entries.len(),
             "Doc drift detected: {:?}",
             drift_entries.iter().map(|e| &e.doc).collect::<Vec<_>>()
         );
         write_drift_entries(ctx.fs, &drift_entries);
-    } else {
-        // No drift detected — resolve any previous findings for this cwd
-        resolve_drift_for_cwd(ctx.fs, cwd_str);
     }
 
     HookOutput::allow()
 }
 
-/// Process on UserPromptSubmit — inject update instructions if drift exists.
+/// Process on `UserPromptSubmit` — inject update instructions if drift exists.
 pub fn process_prompt(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     let cwd_str = input.cwd.as_deref().unwrap_or(".");
 
@@ -640,14 +638,12 @@ pub fn process_prompt(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
                 "README.md" => {
                     !doc_path.exists()
                         || fs::read_to_string(&doc_path)
-                            .map(|c| c.split_whitespace().count() < 30)
-                            .unwrap_or(true)
+                            .map_or(true, |c| c.split_whitespace().count() < 30)
                 }
                 "CLAUDE.md" => {
                     !doc_path.exists()
                         || fs::metadata(&doc_path)
-                            .map(|m| m.len() < 200)
-                            .unwrap_or(true)
+                            .map_or(true, |m| m.len() < 200)
                 }
                 "CHANGELOG.md" | "BUILDING.md" | "LICENSE" | "SECURITY.md" => !doc_path.exists(),
                 _ => false,

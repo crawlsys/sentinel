@@ -1,8 +1,8 @@
-//! TaskCompleted hook — verification gate for task completion
+//! `TaskCompleted` hook — verification gate for task completion
 //!
 //! When a task is being marked complete, reminds the teammate to verify
 //! their work before marking it done. This is the team-level equivalent
-//! of the verification_gate hook.
+//! of the `verification_gate` hook.
 
 use sentinel_domain::events::{HookEvent, HookInput, HookOutput};
 
@@ -33,7 +33,7 @@ fn extract_linear_id(subject: &str) -> Option<&str> {
     None
 }
 
-/// Process TaskCompleted event
+/// Process `TaskCompleted` event
 ///
 /// Injects context reminding the teammate to verify before marking complete.
 /// If the task subject contains `@linear:{ID}`, also injects Linear sync instructions.
@@ -66,15 +66,14 @@ pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
 
     // Base verification reminder
     let mut context = format!(
-        "[Task Completion Gate] Teammate '{}' (team: {}) is completing task #{}: '{}'\n\
+        "[Task Completion Gate] Teammate '{teammate_name}' (team: {team_name}) is completing task #{task_id}: '{task_subject}'\n\
          \n\
          BEFORE marking this task complete, verify:\n\
          1. All acceptance criteria from the task description are met\n\
          2. Tests pass (run them, don't assume)\n\
          3. No TODO/FIXME/HACK markers left in changed code\n\
          4. Changes are committed (or staged for the lead to review)\n\
-         5. Report what was done via SendMessage to the team lead",
-        teammate_name, team_name, task_id, task_subject
+         5. Report what was done via SendMessage to the team lead"
     );
 
     // Check for incomplete checklist items
@@ -85,7 +84,7 @@ pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
                 .filter(|item| {
                     !item
                         .get("completed")
-                        .and_then(|v| v.as_bool())
+                        .and_then(serde_json::Value::as_bool)
                         .unwrap_or(false)
                 })
                 .filter_map(|item| item.get("text").and_then(|v| v.as_str()))
@@ -109,13 +108,12 @@ pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
     if let Some(linear_id) = extract_linear_id(task_subject) {
         context.push_str(&format!(
             "\n\n\
-             [Linear Sync] Task is bound to Linear issue {}.\n\
+             [Linear Sync] Task is bound to Linear issue {linear_id}.\n\
              After verifying the task is complete:\n\
-             1. Post a progress comment on {} via mcp__linear__create_comment\n\
-             2. Check if ALL tasks with @linear:{} are now completed (use TaskList)\n\
+             1. Post a progress comment on {linear_id} via mcp__linear__create_comment\n\
+             2. Check if ALL tasks with @linear:{linear_id} are now completed (use TaskList)\n\
              3. If all tasks done → transition the Linear issue to the next workflow state\n\
-             4. If tasks remain → note progress in the comment (e.g., \"3/5 tasks complete\")",
-            linear_id, linear_id, linear_id
+             4. If tasks remain → note progress in the comment (e.g., \"3/5 tasks complete\")"
         ));
     }
 

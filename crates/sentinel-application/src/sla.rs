@@ -161,6 +161,7 @@ pub fn load_config(path: &Path) -> Result<SlaConfig> {
 }
 
 /// Check a single [`SlaRule`] against a single [`Subject`] at time `now`.
+///
 /// Returns `Some(BreachRecord)` when the subject matches every filter AND
 /// has aged past the rule's target. Returns `None` otherwise — including
 /// for unparseable `created_at` timestamps (logged via `tracing::warn`).

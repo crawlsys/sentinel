@@ -8,7 +8,7 @@
 //! Per the A3 design (`docs/a3-dry-run-then-commit.md` §4):
 //!
 //! 1. Reversibility check via [`ReversibilityClassifierPort`]. Trivially
-//!    and ReversibleWithEffort are out of scope (the `tool_usage_gate`
+//!    and `ReversibleWithEffort` are out of scope (the `tool_usage_gate`
 //!    four-check stack already handles RWE; Trivially short-circuits at
 //!    the gate). Only Irreversible / Catastrophic enter A3.
 //! 2. Approval-marker short-circuit: if this exact action (keyed on a
@@ -190,7 +190,7 @@ pub fn process(
     decide(fs, session_id, &action_hash, class, &verdict)
 }
 
-/// Construct the dry-run request, pulling prose fields out of tool_input
+/// Construct the dry-run request, pulling prose fields out of `tool_input`
 /// when the agent supplied them inline (`_intent`, `_reasoning`,
 /// `_expected_effect`). Absent fields stay empty; `DryRunRequest::is_complete`
 /// is what the caller checks.

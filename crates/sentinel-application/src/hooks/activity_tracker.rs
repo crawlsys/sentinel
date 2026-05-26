@@ -1,9 +1,9 @@
 //! Activity Tracker — Two-phase hook
 //!
-//! **PostToolUse phase:** Logs every tool call to
+//! **`PostToolUse` phase:** Logs every tool call to
 //! `~/.claude/metrics/activity-log.jsonl` with structured metadata.
 //!
-//! **UserPromptSubmit phase:** When context is elevated (Yellow+ zone),
+//! **`UserPromptSubmit` phase:** When context is elevated (Yellow+ zone),
 //! injects a compact session activity summary to help Claude stay oriented.
 
 use sentinel_domain::constants;
@@ -37,7 +37,7 @@ struct ActivityEntry {
     /// used most" impossible to answer without inferring from MCP traffic
     /// (linear -> linear skill, doppler -> doppler skill, etc — only
     /// works when a skill maps cleanly to one MCP server, which most
-    /// don't). Now captured directly from tool_input.skill.
+    /// don't). Now captured directly from `tool_input.skill`.
     #[serde(skip_serializing_if = "Option::is_none")]
     skill: Option<String>,
     session_id: String,
@@ -58,8 +58,7 @@ struct ActivitySummary {
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
+        .map_or(0, |d| d.as_millis() as u64)
 }
 
 fn metrics_dir(fs: &dyn FileSystemPort) -> Option<PathBuf> {
@@ -107,15 +106,15 @@ fn extract_file_path(tool: &str, input: &serde_json::Value) -> Option<String> {
         "Edit" | "Write" | "Read" => input
             .get("file_path")
             .and_then(|v| v.as_str())
-            .map(|s| s.to_string()),
+            .map(std::string::ToString::to_string),
         "Glob" => input
             .get("pattern")
             .and_then(|v| v.as_str())
-            .map(|s| s.to_string()),
+            .map(std::string::ToString::to_string),
         "Grep" => input
             .get("path")
             .and_then(|v| v.as_str())
-            .map(|s| s.to_string()),
+            .map(std::string::ToString::to_string),
         _ => None,
     }
 }
@@ -148,9 +147,9 @@ fn extract_command(input: &serde_json::Value) -> Option<String> {
     })
 }
 
-/// Extract the skill name from a `Skill` tool call's tool_input.
+/// Extract the skill name from a `Skill` tool call's `tool_input`.
 ///
-/// Claude Code sends `{"skill": "<name>", "args": "..."}` as the tool_input
+/// Claude Code sends `{"skill": "<name>", "args": "..."}` as the `tool_input`
 /// for the Skill tool. Returns None for non-Skill tools or when `skill`
 /// is missing/non-string (defensive — malformed input shouldn't crash
 /// the activity tracker).
@@ -161,7 +160,7 @@ fn extract_skill_name(tool: &str, input: &serde_json::Value) -> Option<String> {
     input
         .get("skill")
         .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
+        .map(std::string::ToString::to_string)
 }
 
 /// Extract MCP server and action from tool name like `mcp__linear__create_issue`.
@@ -188,7 +187,7 @@ pub fn process_post_tool(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput
     };
 
     let session_id = input.session_id.as_deref().unwrap_or("unknown").to_string();
-    let tool_input = input.tool_input.as_ref().cloned().unwrap_or_default();
+    let tool_input = input.tool_input.clone().unwrap_or_default();
 
     let file_path = extract_file_path(&tool, &tool_input);
     let command = if tool == "Bash" {
@@ -197,8 +196,7 @@ pub fn process_post_tool(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput
         None
     };
     let (mcp_server, mcp_action) = extract_mcp_info(&tool)
-        .map(|(s, a)| (Some(s), Some(a)))
-        .unwrap_or((None, None));
+        .map_or((None, None), |(s, a)| (Some(s), Some(a)));
     let skill = extract_skill_name(&tool, &tool_input);
 
     let entry = ActivityEntry {
@@ -388,7 +386,7 @@ fn check_elevated_context(fs: &dyn FileSystemPort, session_id: &str) -> bool {
 
     let pct = val
         .get("percent_used")
-        .and_then(|v| v.as_f64())
+        .and_then(serde_json::Value::as_f64)
         .unwrap_or(0.0);
     pct >= 50.0
 }

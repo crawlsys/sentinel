@@ -3,7 +3,7 @@
 //! Aggregates `ArchivedChainSummary` entries (from
 //! [`crate::proof_archive::read_index`]) into a 0–1000 trust score with
 //! five behavioral tiers, scoped per-skill and per-session (the
-//! session_id is the agent identifier today). The output is the
+//! `session_id` is the agent identifier today). The output is the
 //! cross-session corpus equivalent of "is this skill / agent
 //! reliable enough to auto-approve at the `critical` trust tier?"
 //! and feeds:
@@ -24,8 +24,8 @@
 //!
 //! # Inputs available *today*
 //!
-//! `ArchivedChainSummary` provides: skill, session_id, step_count,
-//! phase_count, all_sufficient, head_hash, step_sequence, archived_at.
+//! `ArchivedChainSummary` provides: skill, `session_id`, `step_count`,
+//! `phase_count`, `all_sufficient`, `head_hash`, `step_sequence`, `archived_at`.
 //! NOT yet on the summary: anomaly count (task #17 ships the hook,
 //! the corpus rollup is follow-on), per-step cost (task #82 Stage B).
 //! Once those land, fold them into [`score_for_skill`] /
@@ -73,7 +73,7 @@ impl TrustTier {
     }
 }
 
-/// One trust-score result for a (skill | session_id) bucket.
+/// One trust-score result for a (skill | `session_id`) bucket.
 ///
 /// Carries the score + tier plus the inputs that produced it so the
 /// dashboard / MCP responses can show the work, not just the verdict.
@@ -89,7 +89,7 @@ pub struct TrustScore {
     /// same as 100% on 200 chains.
     pub sample_size: usize,
     /// Fraction of contributing chains where every judge verdict was
-    /// `sufficient`. Range [0.0, 1.0]. Cleanly 0.0 when sample_size = 0.
+    /// `sufficient`. Range [0.0, 1.0]. Cleanly 0.0 when `sample_size` = 0.
     pub pass_rate: f64,
     /// Average step count across contributing chains. Longer chains are
     /// not weighted higher in the *score* today, but the field is
@@ -108,7 +108,7 @@ pub struct TrustScore {
 /// 3. **Sample-size cap**: a tiny corpus cannot clear higher tiers
 ///    regardless of pass rate — this is the load-bearing
 ///    "no-confidence-on-tiny-sample" invariant.
-///    - sample_size == 0 → score 0 (Probationary).
+///    - `sample_size` == 0 → score 0 (Probationary).
 ///    - 1..=4 → cap at 200 (Probationary).
 ///    - 5..=20 → cap at 500 (Developing).
 ///    - 21..=100 → cap at 800 (Established).

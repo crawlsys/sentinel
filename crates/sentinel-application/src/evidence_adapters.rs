@@ -21,7 +21,7 @@
 //! Multiple adapters may support the same claim type — the registry
 //! returns the first match by registration order. Cross-vendor
 //! verification (M3.3 multi-lens reviewer pattern) layers atop this
-//! by registering N adapters for the same claim_type and asking the
+//! by registering N adapters for the same `claim_type` and asking the
 //! registry for ALL receipts (not just the first); see
 //! [`EvidenceAdapterRegistry::fetch_all`].
 //!
@@ -143,7 +143,7 @@ impl EvidenceAdapterRegistry {
     /// and get both receipts. Caller decides what "verified" means
     /// when multiple receipts disagree (M3.3 multi-lens pattern).
     ///
-    /// Returns a vec of (adapter_name, Result<receipt, error>) so
+    /// Returns a vec of (`adapter_name`, Result<receipt, error>) so
     /// per-adapter failures don't mask other adapters' successes.
     /// Empty vec when no adapters support the claim type.
     pub async fn fetch_all(

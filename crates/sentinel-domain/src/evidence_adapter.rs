@@ -134,12 +134,12 @@ pub struct EvidenceReceipt {
     pub provenance_hash: String,
 }
 
-/// Errors the adapter framework can surface. Adapter-specific errors
-/// (HTTP failures, auth refusals) get wrapped in `Fetch` with a
-/// human-readable message — typed errors for those would force
-/// every adapter into the same error vocabulary, which doesn't match
-/// the heterogeneous reality (GitHub's 403 isn't Browserbase's 403
-/// isn't Doppler's 403).
+/// Errors the adapter framework can surface.
+///
+/// Adapter-specific errors (HTTP failures, auth refusals) get wrapped in `Fetch`
+/// with a human-readable message — typed errors for those would force every adapter
+/// into the same error vocabulary, which doesn't match the heterogeneous reality
+/// (GitHub's 403 isn't Browserbase's 403 isn't Doppler's 403).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AdapterError {
     /// No adapter in the registry supports this claim type.

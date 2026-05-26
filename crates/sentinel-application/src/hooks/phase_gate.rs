@@ -4,7 +4,7 @@
 //! Uses the workflow state machine to determine if a tool should be blocked.
 //!
 //! Enhanced features (ported from Node.js phase-gate.js):
-//! - Tracks Read() calls on phase files via SessionState
+//! - Tracks `Read()` calls on phase files via `SessionState`
 //! - Formatted block messages with visual boxes
 //! - Post-merge skip detection (review done but qa-handoff not loaded)
 //! - Allows tools within 1 phase gap (mid-phase), blocks at 2+ gap
@@ -32,7 +32,7 @@ fn deny_with_context(input: &HookInput, reason: impl Into<String>) -> HookOutput
     HookOutput::deny(full)
 }
 
-/// Extracted phase file info from a Read() tool_input path.
+/// Extracted phase file info from a `Read()` `tool_input` path.
 #[derive(Debug, Clone)]
 struct PhaseFileInfo {
     /// The phase filename (e.g., "claim.md")
@@ -44,22 +44,22 @@ struct PhaseFileInfo {
     /// recorded for tracking but do NOT advance workflow state.
     trusted: bool,
     /// **Attack #141 fix**: The canonicalized absolute path to the phase file.
-    /// Used for content hashing instead of the user-supplied tool_input path
-    /// to close a TOCTOU gap where a symlink swap between canonicalize() and
-    /// read_to_string() could feed different content than what we validated.
+    /// Used for content hashing instead of the user-supplied `tool_input` path
+    /// to close a TOCTOU gap where a symlink swap between `canonicalize()` and
+    /// `read_to_string()` could feed different content than what we validated.
     canonical_path: Option<std::path::PathBuf>,
 }
 
-/// Extract the phase file name AND skill name from a Read() tool_input path.
+/// Extract the phase file name AND skill name from a `Read()` `tool_input` path.
 /// Matches paths like `~/.claude/skills/linear/phases/claim.md`
 /// or `C:\Users\...\.claude\skills\linear\phases\claim.md`.
 ///
 /// Returns `Some(PhaseFileInfo)` if the path is a valid phase file.
 /// Validates:
 /// - Path components match `skills/{name}/phases/{file}.md` pattern
-/// - No `ParentDir` (`..`) components (checked via Path::components())
+/// - No `ParentDir` (`..`) components (checked via `Path::components()`)
 /// - Skill name and file name contain only safe ASCII characters
-/// - Symlinks resolve to a path still under `~/.claude/skills/` (PathBuf API)
+/// - Symlinks resolve to a path still under `~/.claude/skills/` (`PathBuf` API)
 /// - `trusted` flag indicates whether canonical validation passed
 fn extract_phase_file(
     fs: &dyn super::FileSystemPort,
@@ -181,10 +181,10 @@ fn extract_phase_file(
 // across hooks. Re-export so call sites here don't need to qualify.
 use sentinel_domain::path_safety::is_safe_name;
 
-/// Process a phase-gate hook event (PreToolUse)
+/// Process a phase-gate hook event (`PreToolUse`)
 ///
 /// This function handles two responsibilities:
-/// 1. Track Read() calls on phase files (recording them in state)
+/// 1. Track `Read()` calls on phase files (recording them in state)
 /// 2. Gate non-safe tool calls based on workflow phase progress
 pub fn process(
     input: &HookInput,
@@ -227,9 +227,8 @@ pub fn process(
         let first = tool_name.chars().next().unwrap_or('_');
         if !first.is_ascii_uppercase() {
             eprintln!(
-                "[sentinel] WARNING: Unexpected tool name casing '{}'. \
-                 Expected PascalCase or mcp__prefix. Treating as non-safe.",
-                tool_name
+                "[sentinel] WARNING: Unexpected tool name casing '{tool_name}'. \
+                 Expected PascalCase or mcp__prefix. Treating as non-safe."
             );
         }
     }
@@ -246,8 +245,7 @@ pub fn process(
         if is_dangerous_mcp_tool(tool_name) {
             // Fall through to gate enforcement below (same as Bash/Edit/Write)
             eprintln!(
-                "[sentinel] MCP tool '{}' classified as dangerous — applying gate enforcement",
-                tool_name
+                "[sentinel] MCP tool '{tool_name}' classified as dangerous — applying gate enforcement"
             );
         } else {
             // Safe/read-only MCP tool — allow without gate check
@@ -341,22 +339,21 @@ pub fn process(
                                 .phase_file_hashes
                                 .insert(canonical_key.clone(), hash.clone());
                         } else {
-                            eprintln!("[sentinel] SECURITY: {}", tamper_msg);
+                            eprintln!("[sentinel] SECURITY: {tamper_msg}");
                             return block_with_context(
                                 input,
                                 format!(
                                     "+============================================================+\n\
                              |  BLOCKED: Phase File Tampering Detected                    |\n\
                              +============================================================+\n\
-                             |  {:<57}|\n\
+                             |  {canonical_key:<57}|\n\
                              |                                                            |\n\
                              |  The content of a phase file changed since it was first     |\n\
                              |  read in this session. This may indicate an attempt to      |\n\
                              |  weaken phase requirements mid-workflow.                    |\n\
                              |                                                            |\n\
                              |  Session must be restarted to proceed.                     |\n\
-                             +============================================================+",
-                                    canonical_key
+                             +============================================================+"
                                 ),
                             );
                         }
@@ -402,8 +399,7 @@ pub fn process(
                     // arbitrary state manipulation via crafted filenames.
                     let is_known_phase = workflows
                         .get(&skill_name)
-                        .map(|w| w.phases.iter().any(|p| p.id == phase_id))
-                        .unwrap_or(false);
+                        .is_some_and(|w| w.phases.iter().any(|p| p.id == phase_id));
 
                     if is_known_phase {
                         // Ensure workflow state exists for this skill
@@ -466,12 +462,10 @@ pub fn process(
             let skill = state.active_skill.as_deref().unwrap_or("unknown");
             let completed = state
                 .active_workflow()
-                .map(|w| w.completed_phases.len())
-                .unwrap_or(0);
+                .map_or(0, |w| w.completed_phases.len());
             let total = workflows
                 .get(skill)
-                .map(|w| w.phases.iter().filter(|p| p.required).count())
-                .unwrap_or(0);
+                .map_or(0, |w| w.phases.iter().filter(|p| p.required).count());
 
             let message = format_block_box(
                 skill,
@@ -579,7 +573,7 @@ fn check_blocked_bash_patterns(
                 // (legacy: cmd="steel-mcp" — still caught defensively)
                 (
                     "variable command execution",
-                    Regex::new(r#";\s*\$\w+"#).unwrap(),
+                    Regex::new(r";\s*\$\w+").unwrap(),
                 ),
                 // base64 decode piped to shell: | base64 -d | bash (or --decode)
                 (
@@ -632,13 +626,12 @@ fn check_blocked_bash_patterns(
                     "+============================================================+\n\
                  |  BLOCKED: Shell Obfuscation Detected                       |\n\
                  +============================================================+\n\
-                 |  Pattern: {:<48}|\n\
+                 |  Pattern: {desc:<48}|\n\
                  |                                                            |\n\
                  |  Commands using shell obfuscation techniques (eval, base64,|\n\
                  |  hex escapes, variable construction) are blocked when       |\n\
                  |  workflow enforcement is active.                           |\n\
                  +============================================================+",
-                    desc,
                 ),
             ));
         }
@@ -661,7 +654,7 @@ fn check_blocked_bash_patterns(
             std::sync::LazyLock::new(|| Regex::new(r"(?:\$\([^)]+\)|`[^`]+`)").unwrap());
         let segments: Vec<&str> = SEGMENT_SPLIT
             .split(cmd)
-            .map(|s| s.trim())
+            .map(str::trim)
             .filter(|s| !s.is_empty())
             .collect();
 
@@ -711,13 +704,12 @@ fn check_blocked_bash_patterns(
                             "+============================================================+\n\
                          |  BLOCKED: Command Substitution in Allowlisted Context      |\n\
                          +============================================================+\n\
-                         |  Segment: {:<48}|\n\
+                         |  Segment: {seg_display:<48}|\n\
                          |                                                            |\n\
                          |  Commands containing $(...) or backtick substitution are    |\n\
                          |  blocked because the inner command escapes allowlist        |\n\
                          |  enforcement. Only $(cat <<EOF ...) heredocs are allowed.   |\n\
                          +============================================================+",
-                            seg_display,
                         ),
                     ));
                 }
@@ -767,13 +759,12 @@ fn check_blocked_bash_patterns(
                         "+============================================================+\n\
                      |  BLOCKED: Command Segment Not in Bash Allowlist            |\n\
                      +============================================================+\n\
-                     |  Segment: {:<48}|\n\
+                     |  Segment: {seg_display:<48}|\n\
                      |                                                            |\n\
                      |  An active workflow restricts Bash to allowlisted commands  |\n\
                      |  only. Each chained segment (&&, ||, ;, |, \\n) must        |\n\
                      |  individually match the allowlist.                          |\n\
                      +============================================================+",
-                        seg_display,
                     ),
                 ));
             }
@@ -855,8 +846,7 @@ fn check_blocked_bash_patterns(
             Ok(r) => r,
             Err(e) => {
                 eprintln!(
-                    "[sentinel] WARNING: Invalid blocked_bash_pattern '{}': {}",
-                    pattern, e
+                    "[sentinel] WARNING: Invalid blocked_bash_pattern '{pattern}': {e}"
                 );
                 continue;
             }
@@ -871,15 +861,14 @@ fn check_blocked_bash_patterns(
                         "+============================================================+\n\
                      |  BLOCKED: Bash Command Matches Blocked Pattern             |\n\
                      +============================================================+\n\
-                     |  Skill: {:<50}|\n\
-                     |  Pattern: {:<48}|\n\
-                     |  Command: {:<48}|\n\
+                     |  Skill: {skill_name:<50}|\n\
+                     |  Pattern: {pattern:<48}|\n\
+                     |  Command: {cmd_display:<48}|\n\
                      |                                                            |\n\
                      |  This command is blocked because it could bypass the        |\n\
                      |  workflow's phase-gated tool enforcement.                   |\n\
                      |  Use the workflow's native MCP tools instead.              |\n\
                      +============================================================+",
-                        skill_name, pattern, cmd_display,
                     ),
                 ));
             }
@@ -1149,15 +1138,14 @@ fn check_protected_path_write(
             "+============================================================+\n\
              |  BLOCKED: Protected Path Modification Attempt               |\n\
              +============================================================+\n\
-             |  Tool: {:<51}|\n\
-             |  Target: {:<49}|\n\
-             |  Reason: {:<49}|\n\
+             |  Tool: {tool_name:<51}|\n\
+             |  Target: {display_path:<49}|\n\
+             |  Reason: {reason:<49}|\n\
              |                                                            |\n\
              |  Modifying sentinel infrastructure (phase files, config,    |\n\
              |  hooks, state, settings) is prohibited during active        |\n\
              |  workflow sessions.                                        |\n\
              +============================================================+",
-            tool_name, display_path, reason,
         );
         return Some(deny_with_context(input, message));
     }
@@ -1419,8 +1407,7 @@ fn check_post_merge_skip(
     let review_complete = state
         .workflows
         .get(&skill)
-        .map(|w| w.is_phase_complete("review"))
-        .unwrap_or(false);
+        .is_some_and(|w| w.is_phase_complete("review"));
 
     if (review_read || review_complete) && !qa_read {
         let message = format!(
@@ -1433,9 +1420,8 @@ fn check_post_merge_skip(
 |  After code review, you MUST load the QA handoff phase     |
 |  before making any further tool calls.                     |
 |                                                            |
-|  MANDATORY: Read(\"~/.claude/skills/{}/phases/qa-handoff.md\")|
-+============================================================+",
-            skill
+|  MANDATORY: Read(\"~/.claude/skills/{skill}/phases/qa-handoff.md\")|
++============================================================+"
         );
         return Some(deny_with_context(input, message));
     }

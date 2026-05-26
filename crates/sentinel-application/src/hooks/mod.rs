@@ -2,7 +2,7 @@
 //!
 //! All hooks run through the sentinel Rust engine.
 //! Each module implements one hook. Add new hooks here and
-//! update HOOK_NAMES to keep the count accurate.
+//! update `HOOK_NAMES` to keep the count accurate.
 
 pub mod account_cascade;
 pub mod activity_tracker;
@@ -138,8 +138,8 @@ pub fn metrics_dir(home: &std::path::Path) -> std::path::PathBuf {
 
 /// Return `<home>/.claude/sentinel/persistent-tasks`.
 ///
-/// Snapshots of the per-session TaskList (one subdir per project_hash). The
-/// authoritative source for `task_rehydrate` on SessionStart. Previously
+/// Snapshots of the per-session `TaskList` (one subdir per `project_hash`). The
+/// authoritative source for `task_rehydrate` on `SessionStart`. Previously
 /// lived at `<home>/.claude/persistent-tasks/` — moved under `sentinel/` so
 /// all sentinel-owned state is colocated.
 ///
@@ -354,12 +354,9 @@ where
             {
                 Ok(rt) => rt.block_on(async {
                     // Apply tokio timeout on top of reqwest timeouts
-                    match tokio::time::timeout(RUN_ASYNC_TIMEOUT, future).await {
-                        Ok(result) => result,
-                        Err(_) => {
-                            tracing::debug!("run_async: wall-clock timeout exceeded");
-                            T::default()
-                        }
+                    if let Ok(result) = tokio::time::timeout(RUN_ASYNC_TIMEOUT, future).await { result } else {
+                        tracing::debug!("run_async: wall-clock timeout exceeded");
+                        T::default()
                     }
                 }),
                 Err(_) => T::default(),
@@ -392,7 +389,7 @@ pub use sentinel_domain::ports::{
 /// Context passed to all hook `process()` functions.
 ///
 /// Bundles all injected ports so hook signatures stay stable as new
-/// ports are added. Constructed once in the dispatcher (hook_cmd.rs).
+/// ports are added. Constructed once in the dispatcher (`hook_cmd.rs`).
 pub struct HookContext<'a> {
     /// Git operations (branch, worktree, uncommitted changes).
     pub git: &'a dyn GitStatusPort,
@@ -416,7 +413,7 @@ pub struct HookContext<'a> {
     pub env: &'a dyn EnvPort,
 }
 
-impl<'a> HookContext<'a> {
+impl HookContext<'_> {
     /// Resolve the active Claude session ID by reading `CLAUDE_SESSION_ID`
     /// then falling back to `SESSION_ID`. Five hooks (`activity_tracker`,
     /// `commit_hygiene`, `context_monitor`, `doc_drift`, `verification_gate`)
@@ -433,7 +430,7 @@ impl<'a> HookContext<'a> {
     /// `task_rehydrate`.
     pub fn autopilot_enabled(&self) -> bool {
         match self.env.var("SENTINEL_AUTOPILOT").as_deref() {
-            None | Some("") | Some("0") => false,
+            None | Some("" | "0") => false,
             Some(_) => true,
         }
     }

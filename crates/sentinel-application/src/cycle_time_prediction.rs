@@ -13,7 +13,7 @@
 //!
 //! * **SEN-6 — Forced decomposition at Phase 1.5.** [`requires_decomposition`]
 //!   returns `true` when the prediction crosses a configurable threshold
-//!   (default: 2× the team's p90 OR `> 8h` raw estimate). The phase_gate
+//!   (default: 2× the team's p90 OR `> 8h` raw estimate). The `phase_gate`
 //!   hook blocks the transition into Phase 2 (worktree creation) until the
 //!   user explicitly decomposes via a sub-ticket.
 //!
@@ -72,7 +72,7 @@ impl Confidence {
     /// * `>= 5`  → Medium (workable estimate).
     /// * else    → Low (small-sample, surface a "~" prefix in the UI).
     #[must_use]
-    pub fn from_sample_count(n: usize) -> Self {
+    pub const fn from_sample_count(n: usize) -> Self {
         if n >= 20 {
             Self::High
         } else if n >= 5 {
@@ -113,8 +113,7 @@ pub fn predict_cycle_time(
     for stage_name in PREDICTION_PATH {
         let row = pick_breakdown_row(breakdown, team, stage_name);
         let (p50, p75, samples) = row
-            .map(|r| (r.p50_hours, r.p75_hours, r.sample_count))
-            .unwrap_or((0.0, 0.0, 0));
+            .map_or((0.0, 0.0, 0), |r| (r.p50_hours, r.p75_hours, r.sample_count));
         per_stage.push(StageDuration {
             stage: (*stage_name).to_string(),
             p50_hours: p50,

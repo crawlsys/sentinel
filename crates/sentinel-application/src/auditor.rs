@@ -6,7 +6,7 @@
 //! [`StaticReversibilityClassifier`](crate::reversibility_classifier::StaticReversibilityClassifier)
 //! pattern: hooks that take a `&dyn AuditorPort` use this in their unit
 //! tests, with the production adapter (Phase 3b in
-//! `sentinel-infrastructure`) doing real LLM calls via the OpenRouter
+//! `sentinel-infrastructure`) doing real LLM calls via the `OpenRouter`
 //! gateway pattern.
 
 use sentinel_domain::dry_run::{
@@ -29,7 +29,7 @@ pub struct StaticAuditor {
 impl StaticAuditor {
     /// Construct from an explicit verdict (or error).
     #[must_use]
-    pub fn new(verdict: Result<AuditorVerdict, AuditorError>) -> Self {
+    pub const fn new(verdict: Result<AuditorVerdict, AuditorError>) -> Self {
         Self { verdict }
     }
 
@@ -66,14 +66,14 @@ impl StaticAuditor {
 
     /// Convenience: auditor returns an error.
     #[must_use]
-    pub fn err(err: AuditorError) -> Self {
+    pub const fn err(err: AuditorError) -> Self {
         Self::new(Err(err))
     }
 
     /// Override the axes returned by [`Self::pass`] / [`Self::block`].
     /// Useful when a test cares about the specific `weakest_axis()` result.
     #[must_use]
-    pub fn with_axes(mut self, axes: AuditorAxes) -> Self {
+    pub const fn with_axes(mut self, axes: AuditorAxes) -> Self {
         if let Ok(ref mut v) = self.verdict {
             v.axes = axes;
         }

@@ -48,7 +48,7 @@ fn extract_banner(fs: &dyn FileSystemPort, skill: &str) -> Option<String> {
 }
 
 /// Directory for telemetry state files — inside sentinel's protected config dir
-/// instead of world-writable temp_dir(). Prevents other processes/users from
+/// instead of world-writable `temp_dir()`. Prevents other processes/users from
 /// injecting fake skill names or run IDs. (Attack #51)
 fn telemetry_dir(fs: &dyn FileSystemPort) -> Option<std::path::PathBuf> {
     fs.home_dir()
@@ -56,7 +56,7 @@ fn telemetry_dir(fs: &dyn FileSystemPort) -> Option<std::path::PathBuf> {
 }
 
 /// Path to the pending-skill state file for the given session. Lives under
-/// the sentinel state directory so the `skill_invocation_gate` PreToolUse
+/// the sentinel state directory so the `skill_invocation_gate` `PreToolUse`
 /// hook can pick it up on the next tool call. Scoped per session so two
 /// concurrent agent sessions don't fight over each other's pending skills.
 pub(crate) fn pending_skill_state_path(
@@ -82,7 +82,7 @@ pub(crate) fn pending_skill_state_path(
 }
 
 /// State written by `build_match_output` after a skill is detected.
-/// Read by `skill_invocation_gate` on the next PreToolUse call to decide
+/// Read by `skill_invocation_gate` on the next `PreToolUse` call to decide
 /// whether to block.
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub(crate) struct PendingSkillState {
@@ -115,7 +115,7 @@ fn write_pending_skill_state(
     }
 }
 
-/// Write telemetry state files so skill_telemetry can track the execution.
+/// Write telemetry state files so `skill_telemetry` can track the execution.
 fn write_telemetry_state(fs: &dyn FileSystemPort, skill: &str, run_id: &str) {
     let dir = match telemetry_dir(fs) {
         Some(d) => d,
@@ -312,7 +312,7 @@ fn build_match_output(
 ) -> HookOutput {
     let now_ms = chrono::Utc::now().timestamp_millis();
     let pid = std::process::id();
-    let run_id = format!("{}-{}", now_ms, pid % 100000);
+    let run_id = format!("{}-{}", now_ms, pid % 100_000);
 
     write_telemetry_state(fs, skill, &run_id);
     write_routing_entry(fs, skill, &run_id, source, input, prompt);
@@ -321,14 +321,14 @@ fn build_match_output(
     // Without this, the MANDATORY message below is just a polite request
     // — Claude can ignore it and use other tools without invoking the skill.
     if let Some(session_id) = input.session_id.as_deref() {
-        let skill_path_str = format!("~/.claude/skills/{}/SKILL.md", skill);
+        let skill_path_str = format!("~/.claude/skills/{skill}/SKILL.md");
         write_pending_skill_state(fs, skill, &skill_path_str, session_id);
     }
 
     // Log the routing source for diagnostics
     tracing::info!(skill = skill, source = source, "Skill routed");
 
-    let skill_path = format!("~/.claude/skills/{}/SKILL.md", skill);
+    let skill_path = format!("~/.claude/skills/{skill}/SKILL.md");
     // Always render a banner — falls back to a synthesized one built from the
     // skill's frontmatter description when the SKILL.md doesn't have an
     // explicit `## Activation Banner` section. Keeps the visual cue
@@ -336,10 +336,9 @@ fn build_match_output(
     let banner = extract_banner(fs, skill).unwrap_or_else(|| synthesize_banner(fs, skill));
 
     let context = format!(
-        "{}\n\n[Skill Router] Detected skill: {}. \
-         MANDATORY: You MUST Read(\"{}\") BEFORE responding. \
-         This is a non-negotiable requirement.",
-        banner, skill, skill_path
+        "{banner}\n\n[Skill Router] Detected skill: {skill}. \
+         MANDATORY: You MUST Read(\"{skill_path}\") BEFORE responding. \
+         This is a non-negotiable requirement."
     );
 
     HookOutput::inject_context(HookEvent::UserPromptSubmit, context)
