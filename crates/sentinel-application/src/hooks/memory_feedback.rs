@@ -167,15 +167,14 @@ fn record_outcomes_unified(
         outcomes.push((event_id, label));
     }
 
-    // Fire-and-forget: outcomes are best-effort. A transient memory-mcp
-    // failure must not block the Stop hook. Aggregate all calls under a
-    // single tokio runtime to minimise subprocess overhead.
-    //
-    // `run_async` requires `T: Send + Default`. `()` satisfies both, and
-    // the whole path is inherently fire-and-forget (errors from
-    // individual calls are already logged at WARN inside the loop), so
-    // we unwrap to () here.
-    crate::hooks::run_async(async move {
+    // Fire-and-forget, but NOT under the default 3s budget: this loops one
+    // `memory_record_outcome` call per injected atom (up to ~8), and each one
+    // cold-spawns memory-mcp (~2s). Under 3s only the first call or two would
+    // land before the timeout killed the rest — which is exactly why the
+    // feedback loop never closed and Loop 4 saw `used=0`. Give it a generous
+    // budget (Stop is async; this never blocks the user's turn). Errors per
+    // call are logged at WARN inside the loop.
+    crate::hooks::run_async_timeout(async move {
         for (event_id, outcome) in outcomes {
             let mut args = serde_json::Map::new();
             args.insert(
@@ -195,7 +194,7 @@ fn record_outcomes_unified(
                 );
             }
         }
-    });
+    }, std::time::Duration::from_secs(30));
 }
 
 // ---------------------------------------------------------------------------
