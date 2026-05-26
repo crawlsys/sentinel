@@ -1,3 +1,5 @@
+use std::fmt::Write as _;
+
 use sentinel_domain::events::HookInput;
 
 pub(super) fn append_block_context(message: impl Into<String>, input: &HookInput) -> String {
@@ -22,26 +24,27 @@ pub(super) fn append_block_context(message: impl Into<String>, input: &HookInput
     }
 
     if let Some(session_id) = session_id {
-        message.push_str(&format!("[sentinel] session: {session_id}\n"));
-        message.push_str(&format!(
+        let _ = write!(message, "[sentinel] session: {session_id}\n");
+        let _ = write!(
+            message,
             "[sentinel] state: ~/.claude/sentinel/state/{session_id}.json\n"
-        ));
+        );
     }
 
     if let Some(cwd) = cwd {
-        message.push_str(&format!("[sentinel] cwd: {cwd}\n"));
+        let _ = write!(message, "[sentinel] cwd: {cwd}\n");
     }
 
     if let Some(tool_name) = tool_name {
-        message.push_str(&format!("[sentinel] tool: {tool_name}\n"));
+        let _ = write!(message, "[sentinel] tool: {tool_name}\n");
     }
 
     if let Some(target) = target {
-        message.push_str(&format!("[sentinel] target: {target}\n"));
+        let _ = write!(message, "[sentinel] target: {target}\n");
     }
 
     if let Some(command) = command {
-        message.push_str(&format!("[sentinel] command: {command}\n"));
+        let _ = write!(message, "[sentinel] command: {command}\n");
     }
 
     if message.ends_with('\n') {

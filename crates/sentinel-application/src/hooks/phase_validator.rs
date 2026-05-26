@@ -31,6 +31,7 @@ fn skill_has_phases_dir(fs: &dyn super::FileSystemPort, skill: &str) -> bool {
 }
 
 /// Process a phase-validator hook event (`UserPromptSubmit`)
+#[allow(clippy::implicit_hasher)] // call sites in hook_cmd.rs are outside edit scope
 pub fn process(
     _input: &HookInput,
     state: &SessionState,
@@ -39,14 +40,12 @@ pub fn process(
     fs: &dyn super::FileSystemPort,
 ) -> HookOutput {
     // Only act when there's an active skill with a workflow
-    let skill_name = match &state.active_skill {
-        Some(s) => s,
-        None => return HookOutput::allow(),
+    let Some(skill_name) = &state.active_skill else {
+        return HookOutput::allow();
     };
 
-    let workflow = match workflows.get(skill_name) {
-        Some(wf) => wf,
-        None => return HookOutput::allow(),
+    let Some(workflow) = workflows.get(skill_name) else {
+        return HookOutput::allow();
     };
 
     // If the skill has no phases/ directory on disk, it uses an alternate
@@ -169,6 +168,8 @@ fn format_step_progress(
             wf_state.next_required_phase(workflow).map(|p| p.id.clone())
         });
 
+    #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    // Percentages from usize→f64→u32: precision loss negligible for display; value is always 0..=100
     let pct = if total_steps > 0 {
         (completed as f64 / total_steps as f64 * 100.0) as u32
     } else {
@@ -192,8 +193,7 @@ fn format_step_progress(
 
             // Show up to 5 steps for the current phase (context window friendly)
             let step_states = wf_state.phase_step_states(phase_id);
-            let mut shown = 0;
-            for step_def in &phase_steps.steps {
+            for (shown, step_def) in phase_steps.steps.iter().enumerate() {
                 if shown >= 5 {
                     let remaining = phase_total - shown;
                     if remaining > 0 {
@@ -226,7 +226,6 @@ fn format_step_progress(
                     "    {} {}: {}{}{}",
                     status_icon, step_def.id, step_def.description, blocker_tag, summary
                 ));
-                shown += 1;
             }
         }
     }

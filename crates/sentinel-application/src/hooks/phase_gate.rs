@@ -118,7 +118,10 @@ fn extract_phase_file(
     }
 
     // Must be a .md file
-    if !phase_file.ends_with(".md") {
+    if !std::path::Path::new(phase_file)
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("md"))
+    {
         return None;
     }
 
@@ -186,6 +189,8 @@ use sentinel_domain::path_safety::is_safe_name;
 /// This function handles two responsibilities:
 /// 1. Track `Read()` calls on phase files (recording them in state)
 /// 2. Gate non-safe tool calls based on workflow phase progress
+#[allow(clippy::implicit_hasher)] // call sites in hook_cmd.rs are outside edit scope
+#[allow(clippy::too_many_lines)] // security gate: cannot split without losing context
 pub fn process(
     input: &HookInput,
     state: &mut SessionState,
@@ -209,7 +214,7 @@ pub fn process(
                 detail: input
                     .tool_input
                     .as_ref()
-                    .and_then(|v| v.get("command").or(v.get("file_path")))
+                    .and_then(|v| v.get("command").or_else(|| v.get("file_path")))
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string(),
@@ -498,6 +503,8 @@ pub fn process(
 ///
 /// Checks patterns across ALL workflows with active state (not just
 /// `active_skill`), preventing the skill-switch bypass.
+#[allow(clippy::too_many_lines)] // security function: multi-layer bash analysis cannot be split
+#[allow(clippy::items_after_statements)] // static LazyLock regex items are placed near first use for readability
 fn check_blocked_bash_patterns(
     fs: &dyn super::FileSystemPort,
     state: &SessionState,
@@ -895,12 +902,8 @@ fn normalize_shell_quoting(cmd: &str) -> String {
 
     while i < chars.len() {
         match chars[i] {
-            // Skip standalone double quotes (quote-split concatenation)
-            '"' => {
-                i += 1;
-            }
-            // Skip standalone single quotes
-            '\'' => {
+            // Skip standalone double and single quotes (quote-split concatenation)
+            '"' | '\'' => {
                 i += 1;
             }
             // Backslash: if followed by a normal char, skip the backslash
@@ -910,15 +913,12 @@ fn normalize_shell_quoting(cmd: &str) -> String {
                 let next = chars[i + 1];
                 // If next char is alphanumeric or hyphen, it's an evasion attempt
                 // like s\t\e\e\l → steel. Strip the backslash.
-                if next.is_ascii_alphanumeric() || next == '-' || next == '_' {
-                    result.push(next);
-                    i += 2;
-                } else {
+                if !(next.is_ascii_alphanumeric() || next == '-' || next == '_') {
                     // Preserve the backslash for actual escape sequences
                     result.push('\\');
-                    result.push(next);
-                    i += 2;
                 }
+                result.push(next);
+                i += 2;
             }
             // Process substitution: <(...) — extract inner content
             '<' if i + 1 < chars.len() && chars[i + 1] == '(' => {
@@ -1179,7 +1179,9 @@ fn check_protected_textual(normalized: &str) -> Option<&'static str> {
         if let Some(skills_idx) = parts.iter().position(|p| *p == "skills") {
             if skills_idx + 3 < parts.len()
                 && parts[skills_idx + 2] == "phases"
-                && parts[skills_idx + 3].ends_with(".md")
+                && std::path::Path::new(parts[skills_idx + 3])
+                    .extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("md"))
             {
                 return Some("phase file modification");
             }

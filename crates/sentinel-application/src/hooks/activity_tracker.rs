@@ -8,6 +8,7 @@
 
 use sentinel_domain::constants;
 use sentinel_domain::events::{HookEvent, HookInput, HookOutput};
+use std::cmp::Reverse;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -56,9 +57,11 @@ struct ActivitySummary {
 }
 
 fn now_ms() -> u64 {
-    SystemTime::now()
+    #[allow(clippy::cast_possible_truncation)] // millis since epoch fit in u64 for centuries
+    let ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_millis() as u64)
+        .map_or(0, |d| d.as_millis() as u64);
+    ms
 }
 
 fn metrics_dir(fs: &dyn FileSystemPort) -> Option<PathBuf> {
@@ -85,13 +88,11 @@ fn cooldown_file(env: &dyn EnvPort) -> PathBuf {
 }
 
 fn cooldown_expired(fs: &dyn FileSystemPort, env: &dyn EnvPort) -> bool {
-    let content = match fs.read_to_string(&cooldown_file(env)) {
-        Ok(c) => c,
-        Err(_) => return true,
+    let Ok(content) = fs.read_to_string(&cooldown_file(env)) else {
+        return true;
     };
-    let last: u64 = match content.trim().parse() {
-        Ok(v) => v,
-        Err(_) => return true,
+    let Ok(last) = content.trim().parse::<u64>() else {
+        return true;
     };
     now_ms().saturating_sub(last) >= COOLDOWN_MS
 }
@@ -225,14 +226,12 @@ pub fn process_post_tool(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput
 pub fn process_stop(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     let session_id = input.session_id.as_deref().unwrap_or("unknown");
 
-    let path = match log_file(ctx.fs) {
-        Some(p) => p,
-        None => return HookOutput::allow(),
+    let Some(path) = log_file(ctx.fs) else {
+        return HookOutput::allow();
     };
 
-    let content = match ctx.fs.read_to_string(&path) {
-        Ok(c) => c,
-        Err(_) => return HookOutput::allow(),
+    let Ok(content) = ctx.fs.read_to_string(&path) else {
+        return HookOutput::allow();
     };
 
     // Filter entries for this session
@@ -255,11 +254,10 @@ pub fn process_stop(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
 
     for entry in &entries {
         // Normalize MCP tools to server level for counting
-        let count_key = if let Some(ref server) = entry.mcp_server {
-            format!("mcp__{server}__*")
-        } else {
-            entry.tool.clone()
-        };
+        let count_key = entry
+            .mcp_server
+            .as_deref()
+            .map_or_else(|| entry.tool.clone(), |server| format!("mcp__{server}__*"));
         *tool_counts.entry(count_key).or_insert(0) += 1;
 
         if let Some(ref fp) = entry.file_path {
@@ -290,7 +288,7 @@ pub fn process_stop(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     }
 
     let mut sorted_counts: Vec<(String, usize)> = tool_counts.into_iter().collect();
-    sorted_counts.sort_by(|a, b| b.1.cmp(&a.1));
+    sorted_counts.sort_by_key(|&(_, count)| Reverse(count));
 
     let summary = ActivitySummary {
         session_id: session_id.to_string(),
@@ -321,14 +319,12 @@ pub fn process_stop(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
 pub fn process_prompt(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     let session_id = input.session_id.as_deref().unwrap_or("unknown");
 
-    let path = match summary_file(ctx.fs, session_id) {
-        Some(p) => p,
-        None => return HookOutput::allow(),
+    let Some(path) = summary_file(ctx.fs, session_id) else {
+        return HookOutput::allow();
     };
 
-    let content = match ctx.fs.read_to_string(&path) {
-        Ok(c) => c,
-        Err(_) => return HookOutput::allow(),
+    let Ok(content) = ctx.fs.read_to_string(&path) else {
+        return HookOutput::allow();
     };
 
     let summary: ActivitySummary = match serde_json::from_str(&content) {
@@ -360,23 +356,21 @@ pub fn process_prompt(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
 
     write_cooldown(ctx.fs, ctx.env);
 
-    let context = build_summary_context(&summary);
-    HookOutput::inject_context(HookEvent::UserPromptSubmit, context)
+    let ctx_text = build_summary_context(&summary);
+    HookOutput::inject_context(HookEvent::UserPromptSubmit, ctx_text)
 }
 
 /// Check if context monitor reported Yellow+ zone for this session.
 fn check_elevated_context(fs: &dyn FileSystemPort, session_id: &str) -> bool {
-    let path = match metrics_dir(fs) {
-        Some(d) => d.join(format!("context-zone-{session_id}.json")),
-        None => return false,
+    let Some(path) = metrics_dir(fs).map(|d| d.join(format!("context-zone-{session_id}.json")))
+    else {
+        return false;
     };
-    let content = match fs.read_to_string(&path) {
-        Ok(c) => c,
-        Err(_) => return false,
+    let Ok(content) = fs.read_to_string(&path) else {
+        return false;
     };
-    let val: serde_json::Value = match serde_json::from_str(&content) {
-        Ok(v) => v,
-        Err(_) => return false,
+    let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) else {
+        return false;
     };
 
     // Must be same session
