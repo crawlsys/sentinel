@@ -42,6 +42,15 @@ export function SessionStrip({ data, selected, onSelect }: Props) {
   const summaryText = summaryQ.data?.text?.trim();
   const summaryAvailable = !!summaryText && summaryText.length > 0;
   const summaryDisabled = summaryQ.data?.source === "disabled";
+  // The /api/summary endpoint can resolve with `text: null` even
+  // when the LLM is configured — typically when the upstream call
+  // errored or the input window had no useful activity. The pre-
+  // P3-33 UI rendered NOTHING in that case, which looked like the
+  // AI feature was silently broken. Now we surface an explicit
+  // empty-state message so the operator can tell "no rollup
+  // available right now" from "the feature is broken".
+  const summaryFailedSilently =
+    !!summaryQ.data && !summaryAvailable && !summaryDisabled && !summaryQ.isPending;
   return (
     <li
       data-testid="session-strip"
@@ -142,6 +151,22 @@ export function SessionStrip({ data, selected, onSelect }: Props) {
         {!summaryAvailable && !summaryDisabled && !isStuck && summaryQ.isPending ? (
           <div className="mt-1 text-[10px] text-[#484f58] italic leading-tight">
             ai · generating summary…
+          </div>
+        ) : null}
+        {/* P3-33: explicit empty state when the summary endpoint
+            resolved with text=null. Without this, the operator
+            sees nothing where an AI summary should be and assumes
+            the feature is broken. */}
+        {summaryFailedSilently && !isStuck ? (
+          <div
+            data-testid="session-strip-ai-unavailable"
+            className="mt-1 text-[10px] text-[#484f58] italic leading-tight"
+            title={`Source: ${summaryQ.data?.source ?? "unknown"}`}
+          >
+            ai · no rollup available
+            {summaryQ.data?.source ? (
+              <span className="text-[#30363d] ml-1">({summaryQ.data.source})</span>
+            ) : null}
           </div>
         ) : null}
         {/* Stuck banner — only when the session is in awaiting_user

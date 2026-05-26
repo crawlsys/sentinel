@@ -33,6 +33,13 @@ const DEFAULT_OPENROUTER_MODEL: &str = "openai/gpt-4o-mini";
 /// fall back to this file (kept at mode 0600 by convention).
 const OPENROUTER_KEY_PATH: &str = ".config/openrouter/api_key";
 
+/// Public wrapper for callers outside this module (server.rs's
+/// set_config). Same behavior — looks at the operator-convention
+/// path `~/.config/openrouter/api_key`.
+pub fn load_openrouter_key_from_disk_public() -> Option<String> {
+    load_openrouter_key_from_disk()
+}
+
 fn load_openrouter_key_from_disk() -> Option<String> {
     let home = std::env::var("HOME").ok()?;
     let path = std::path::Path::new(&home).join(OPENROUTER_KEY_PATH);

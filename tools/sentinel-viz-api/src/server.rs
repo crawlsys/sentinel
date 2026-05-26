@@ -122,10 +122,14 @@ async fn get_config(State(state): State<Arc<AppState>>) -> axum::Json<ConfigResp
 
 #[derive(serde::Deserialize)]
 pub struct SetConfigBody {
-    /// "none" | "openai:<model>" | "local:<model>".
+    /// "none" | "openai:<model>" | "openrouter:<model>" | "local:<model>".
     pub model: String,
     /// OpenAI API key, only used when model is "openai:*".
     pub openai_api_key: Option<String>,
+    /// OpenRouter API key, only used when model is "openrouter:*".
+    /// If omitted, falls back to OPENROUTER_API_KEY env or the
+    /// on-disk key file (operator convention).
+    pub openrouter_api_key: Option<String>,
     /// Optional Ollama URL override (defaults to existing or http://127.0.0.1:11434).
     pub ollama_url: Option<String>,
 }
@@ -172,6 +176,24 @@ async fn set_config(
             }
             Some(ModelConfig::OpenAi { model, api_key: key })
         }
+        s if s.starts_with("openrouter:") => {
+            let model = s.trim_start_matches("openrouter:").to_string();
+            // Key resolution: posted body → env → on-disk fallback.
+            // Operator usually has the key on disk so they don't
+            // need to re-paste it every time they switch models.
+            let key = body
+                .openrouter_api_key
+                .filter(|k| !k.is_empty())
+                .or_else(|| std::env::var("OPENROUTER_API_KEY").ok().filter(|k| !k.is_empty()))
+                .or_else(crate::llm::load_openrouter_key_from_disk_public);
+            let Some(api_key) = key else {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    "openrouter_api_key (or OPENROUTER_API_KEY env / ~/.config/openrouter/api_key on disk) required for openrouter:*".into(),
+                ));
+            };
+            Some(ModelConfig::OpenRouter { model, api_key })
+        }
         s if s.starts_with("local:") => {
             let model = s.trim_start_matches("local:").to_string();
             let base = body.ollama_url
@@ -182,7 +204,9 @@ async fn set_config(
         other => {
             return Err((
                 StatusCode::BAD_REQUEST,
-                format!("model must be 'none', 'openai:*', or 'local:*' — got '{other}'"),
+                format!(
+                    "model must be 'none', 'openai:*', 'openrouter:*', or 'local:*' — got '{other}'"
+                ),
             ));
         }
     };

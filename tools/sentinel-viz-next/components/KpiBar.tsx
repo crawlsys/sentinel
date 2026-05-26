@@ -49,9 +49,16 @@ export function KpiBar() {
 
   if (!kpis) return null;
 
+  // P3-33: when there are no events in the last 5min, the cards
+  // visually read as "0" which looks broken. Mute them and show
+  // "idle" so the operator can tell "no events flowing through
+  // sentinel right now" from "kpi computation is wrong".
+  const isIdle = kpis.events_5m === 0;
+
   return (
     <div
       data-testid="kpi-bar"
+      data-idle={isIdle ? "true" : undefined}
       className="flex items-center gap-3 text-[10px] font-mono"
       title="auto-refreshes every 5s — derived from the cached graph snapshot + transcript JSONLs"
     >
@@ -62,10 +69,16 @@ export function KpiBar() {
       />
       <Card
         label="evt/min"
-        value={kpis.events_per_min.toFixed(0)}
-        accent="#58a6ff"
+        value={isIdle ? "idle" : kpis.events_per_min.toFixed(0)}
+        accent={isIdle ? "#484f58" : "#58a6ff"}
+        title={isIdle ? "no events in the last 5 minutes" : undefined}
       />
-      <Card label="5m" value={String(kpis.events_5m)} accent="#bc8cff" />
+      <Card
+        label="5m"
+        value={isIdle ? "—" : String(kpis.events_5m)}
+        accent={isIdle ? "#484f58" : "#bc8cff"}
+        title={isIdle ? "no events in the last 5 minutes" : undefined}
+      />
       {kpis.tokens_5m ? (
         <Card
           label="out/5m"

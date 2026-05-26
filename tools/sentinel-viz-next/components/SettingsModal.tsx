@@ -11,9 +11,19 @@ interface Props {
 
 const MODEL_PRESETS = [
   { value: "none", label: "Disabled (UUID fallback)" },
-  { value: "openai:gpt-4o-mini", label: "OpenAI · gpt-4o-mini" },
-  { value: "openai:gpt-4o", label: "OpenAI · gpt-4o" },
-  { value: "local:qwen2.5:1.5b", label: "Local · qwen2.5:1.5b (fast)" },
+  // OpenRouter group — instance-wide default per P3-32. Cheap +
+  // good options first, then a few stronger picks for when the
+  // operator wants longer / more accurate summaries.
+  { value: "openrouter:openai/gpt-4o-mini", label: "OpenRouter · gpt-4o-mini (cheap+good, default)" },
+  { value: "openrouter:google/gemini-2.0-flash-001", label: "OpenRouter · gemini-2.0-flash (very cheap)" },
+  { value: "openrouter:anthropic/claude-3.5-haiku", label: "OpenRouter · claude-3.5-haiku" },
+  { value: "openrouter:openai/gpt-4o", label: "OpenRouter · gpt-4o (stronger, costlier)" },
+  // Direct OpenAI — only relevant if operator wants to bypass
+  // OpenRouter and pay OpenAI directly.
+  { value: "openai:gpt-4o-mini", label: "OpenAI direct · gpt-4o-mini" },
+  { value: "openai:gpt-4o", label: "OpenAI direct · gpt-4o" },
+  // Local Ollama for fully-private workflows.
+  { value: "local:qwen2.5:1.5b", label: "Local · qwen2.5:1.5b (fast, private)" },
   { value: "local:qwen2.5-coder:7b", label: "Local · qwen2.5-coder:7b" },
 ];
 
@@ -41,17 +51,28 @@ export function SettingsModal({ open, onClose }: Props) {
 
   if (!open) return null;
 
-  const needsKey = pendingModel.startsWith("openai:");
-  const canSave = !saving && pendingModel !== "" && (!needsKey || pendingKey.length > 0 || (currentHasKey && pendingModel === currentModel));
+  const isOpenAi = pendingModel.startsWith("openai:");
+  const isOpenRouter = pendingModel.startsWith("openrouter:");
+  // openrouter has a server-side fallback (env or on-disk file),
+  // so the key field is OPTIONAL for openrouter even on first save.
+  const requiresKeyInput = isOpenAi && !currentHasKey;
+  const canSave =
+    !saving &&
+    pendingModel !== "" &&
+    (!requiresKeyInput || pendingKey.length > 0);
 
   async function onSave() {
     setSaving(true);
     setErr(null);
     try {
-      const body: { model: string; openai_api_key?: string; ollama_url?: string } = {
-        model: pendingModel,
-      };
-      if (needsKey && pendingKey) body.openai_api_key = pendingKey;
+      const body: {
+        model: string;
+        openai_api_key?: string;
+        openrouter_api_key?: string;
+        ollama_url?: string;
+      } = { model: pendingModel };
+      if (isOpenAi && pendingKey) body.openai_api_key = pendingKey;
+      if (isOpenRouter && pendingKey) body.openrouter_api_key = pendingKey;
       if (pendingOllama) body.ollama_url = pendingOllama;
       const r = await setConfig(body);
       setCurrentModel(r.model);
@@ -122,7 +143,7 @@ export function SettingsModal({ open, onClose }: Props) {
           </div>
         </div>
 
-        {needsKey ? (
+        {isOpenAi ? (
           <div className="mb-3">
             <label className="block text-[10px] uppercase tracking-wider text-[#6e7681] mb-1">
               openai api key {currentHasKey ? "(leave blank to keep current)" : ""}
@@ -136,6 +157,23 @@ export function SettingsModal({ open, onClose }: Props) {
             />
             <div className="text-[10px] text-[#6e7681] mt-1">
               Stays in-memory on the API server. Never persisted to disk.
+            </div>
+          </div>
+        ) : null}
+        {isOpenRouter ? (
+          <div className="mb-3">
+            <label className="block text-[10px] uppercase tracking-wider text-[#6e7681] mb-1">
+              openrouter api key (optional — server will fall back to env / on-disk)
+            </label>
+            <input
+              type="password"
+              value={pendingKey}
+              onChange={(e) => setPendingKey(e.target.value)}
+              placeholder="sk-or-v1-... (leave blank to use ~/.config/openrouter/api_key)"
+              className="w-full bg-[#0d1117] border border-[#30363d] rounded px-2 py-1 text-[#c9d1d9] font-mono"
+            />
+            <div className="text-[10px] text-[#6e7681] mt-1">
+              Pre-filled from the operator-convention path on the API host; leave blank to use it.
             </div>
           </div>
         ) : null}
