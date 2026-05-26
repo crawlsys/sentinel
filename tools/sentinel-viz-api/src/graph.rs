@@ -13,12 +13,18 @@ use crate::model::{
 };
 use crate::transcript;
 
-/// Window strategy constants. Per user feedback 2026-05-25:
-/// "support up to 5 concurrent sessions, 20 most-recent events from
-/// each aggregated into active view (100 datapoints total)."
+/// Window strategy constants. Original 2026-05-25 sizing was
+/// "5 sessions × 20 events = 100 datapoints" — that worked while
+/// rows were 1:1 with events. With P3-24 rollup collapsing
+/// adjacent same-category routine claude tool calls into single
+/// rows, 20 events per session yields very few visible rows after
+/// a tool-heavy turn. P3-29 bumps per-session cap 3× so the
+/// ticker has enough backlog to feel like the historical record
+/// it should be. Session count stays at 5 — that's an operator
+/// preference, not a perf concern.
 const K_SESSIONS: usize = 5;
-const PER_SESSION_CAP_DEFAULT: usize = 20;
-const PER_SESSION_CAP_FOCUSED: usize = 36;
+const PER_SESSION_CAP_DEFAULT: usize = 150;
+const PER_SESSION_CAP_FOCUSED: usize = 250;
 
 /// Liveness thresholds (seconds). Match `viz_server.py:574-578`.
 const FIRING_THRESHOLD: f64 = 30.0;
@@ -52,7 +58,10 @@ pub struct GraphOpts {
 impl Default for GraphOpts {
     fn default() -> Self {
         Self {
-            limit: 100,
+            // Matches K_SESSIONS × PER_SESSION_CAP_DEFAULT (5 × 150).
+            // Operator: "we should have a lot more events from the
+            // backlog" — P3-29.
+            limit: 750,
             since_secs: Some(6 * 3600),
             include_hooks: false,
             focused_session: None,
@@ -593,14 +602,18 @@ pub fn load_graph_with(conn: &Connection, opts: GraphOpts) -> Result<GraphRespon
         n.last_activity_age_s = if last_activity > 0.0 { Some(age as i64) } else { None };
     }
 
-    // Ticker tail. Per user direction 2026-05-25: up to 5 sessions
-    // × 20 events each = 100 datapoints in the active view. We
-    // walk newest-first and keep at most 20 per session_id.
+    // Ticker tail. Per-session cap (PER_SESSION_CAP_DEFAULT) keeps
+    // one session from monopolising the window when it has tens of
+    // thousands of events. Total cap is `limit` (defaults to
+    // K_SESSIONS × PER_SESSION_CAP_DEFAULT). P3-29 removed the
+    // hardcoded 100 here — operator wanted the full backlog visible
+    // and the frontend rollup keeps the row count manageable
+    // regardless of input size.
     let events_tail = {
         let mut per_sid_count: HashMap<String, usize> = HashMap::new();
-        let mut kept: Vec<RecentEvent> = Vec::with_capacity(100);
+        let mut kept: Vec<RecentEvent> = Vec::with_capacity(limit);
         for ev in recent_events.into_iter().rev() {
-            if kept.len() >= 100 {
+            if kept.len() >= limit {
                 break;
             }
             let sid = ev

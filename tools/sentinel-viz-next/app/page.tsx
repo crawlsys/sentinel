@@ -46,18 +46,72 @@ export default function Page() {
 
   const stuck = useMemo(() => stuckSessions(graph), [graph]);
   const sessionColors = useMemo(() => sessionColorMap(graph), [graph]);
-  // Sessions whose node carries a dormant/dead status. Events from
-  // these sessions are filtered out of the ticker so the active
-  // sessions get the airtime they deserve (P3-28).
+  // P3-29 (corrects P3-28 overcorrection). The earlier
+  // `status in {dormant, dead}` filter dropped sessions the bridge
+  // marks dormant after only a few minutes of inactivity — even
+  // when those sessions are the operator's primary work, so the
+  // ticker went absurdly sparse.
+  //
+  // New rule, computed per session:
+  //   - dead status        → dormant (always filter)
+  //   - awaiting_user      → ALWAYS keep (stuck sessions are signal)
+  //   - newest event > 6h  → dormant
+  //   - otherwise          → keep
+  //
+  // Also handles sessions appearing in graph.events without a node
+  // (K_SESSIONS overflow): use the event ts to decide freshness.
   const dormantSessionIds = useMemo(() => {
     const set = new Set<string>();
     if (!graph) return set;
+    const STALE_AFTER_MS = 6 * 60 * 60 * 1000; // 6h
+    const now = Date.now();
+
+    // sid → newest event ts (ms) — built from events list.
+    const newestEventTs = new Map<string, number>();
+    for (const e of graph.events) {
+      const sid =
+        typeof e.payload?.session_id === "string" ? (e.payload.session_id as string) : null;
+      if (!sid) continue;
+      // Bridge writes ts_sec without TZ; treat as UTC.
+      const tsStr =
+        typeof e.payload?.ts_sec === "string"
+          ? (e.payload.ts_sec as string)
+          : typeof e.payload?.ts === "string"
+            ? (e.payload.ts as string)
+            : e.ts;
+      const parseable = /T\d{2}:\d{2}:\d{2}(\.\d+)?$/.test(tsStr) ? `${tsStr}Z` : tsStr;
+      const t = Date.parse(parseable);
+      if (Number.isNaN(t)) continue;
+      const cur = newestEventTs.get(sid);
+      if (cur == null || t > cur) newestEventTs.set(sid, t);
+    }
+
+    // Status-aware pass: awaiting_user always kept, dead always
+    // filtered, otherwise defer to age.
+    const nodeStatus = new Map<string, string>();
     for (const n of graph.nodes) {
       if (n.type !== "SentinelSession") continue;
-      const status = n.session_status;
-      if (status === "dormant" || status === "dead") {
-        const sid = typeof n.data?.session_id === "string" ? (n.data.session_id as string) : null;
-        if (sid) set.add(sid);
+      const sid = typeof n.data?.session_id === "string" ? (n.data.session_id as string) : null;
+      if (sid && n.session_status) nodeStatus.set(sid, n.session_status);
+    }
+
+    const allSids = new Set<string>([...newestEventTs.keys(), ...nodeStatus.keys()]);
+    for (const sid of allSids) {
+      const status = nodeStatus.get(sid);
+      if (status === "awaiting_user") continue; // always keep stuck sessions
+      if (status === "dead") {
+        set.add(sid);
+        continue;
+      }
+      const newest = newestEventTs.get(sid);
+      // No event ts and no node → treat as stale.
+      if (newest == null && !nodeStatus.has(sid)) {
+        set.add(sid);
+        continue;
+      }
+      // Event ts age check.
+      if (newest != null && now - newest > STALE_AFTER_MS) {
+        set.add(sid);
       }
     }
     return set;

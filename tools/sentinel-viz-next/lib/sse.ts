@@ -47,7 +47,9 @@ export function useGraphStream(focusedSession: string | null = null): {
 
     const loadSnapshot = async (signal?: AbortSignal) => {
       try {
-        const data = await fetchGraph(100, signal, { focusedSession });
+        // Use fetchGraph's new default (300) so initial snapshot
+        // pulls the full backend window. P3-29 bump.
+        const data = await fetchGraph(undefined, signal, { focusedSession });
         if (!cancelled) {
           setGraph(data);
           setError(data.error ?? null);

@@ -25,7 +25,10 @@ async fn main() -> Result<()> {
     let window_limit: usize = std::env::var("SENTINEL_VIZ_WINDOW")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(100);
+        // P3-29: bumped from 100 to 750 (5 sessions × 150 cap).
+        // Operator wanted much more backlog visible; rollup keeps
+        // the visible row count tight even at this size.
+        .unwrap_or(750);
 
     let state = Arc::new(AppState {
         db_path: db_path.clone(),
