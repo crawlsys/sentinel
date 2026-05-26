@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { fireEvent, render, screen } from "@testing-library/react";
 
 import { EventTicker, shouldShowSubLine, compactSummaryFor } from "../../components/EventTicker";
@@ -246,6 +246,88 @@ describe("EventTicker — P3-24 smarter rollup", () => {
     expect(out.endsWith("EventTicker.tsx")).toBe(true);
   });
 
+  it("clicking the row body (not just the ×N badge) toggles the flyout open (P3-27)", () => {
+    const sessionId = "sess-clickopen";
+    const events: RecentEvent[] = [
+      tcEvent(1, sessionId, "Bash", "tcA"),
+      tcEvent(2, sessionId, "Read", "tcB"),
+      tcEvent(3, sessionId, "Edit", "tcC"),
+    ];
+    const onSelect = vi.fn();
+    const { container } = render(
+      <EventTicker events={events} onSelectNode={onSelect} />,
+    );
+    // Before click — no flyout rendered (rolled-preview is shown,
+    // but the flyout list is gated on isOpen).
+    expect(container.querySelector('[data-testid="ticker-flyout"]')).toBeNull();
+    // Click the row body via the label span (not the ×N badge).
+    // The whole non-flyout area is now a single clickable surface,
+    // so any element inside should bubble to the row-click handler.
+    const row = container.querySelector('[data-testid="ticker-rows"] li[data-actor]');
+    expect(row).not.toBeNull();
+    const labelTextEl = row!.querySelector("span.truncate.flex-1");
+    fireEvent.click(labelTextEl!);
+    // Flyout should now be open.
+    expect(container.querySelector('[data-testid="ticker-flyout"]')).not.toBeNull();
+    // AND the row's underlying node was selected — both actions
+    // happen on a single click for rolled rows.
+    expect(onSelect).toHaveBeenCalled();
+  });
+
+  it("single-tool rows DO NOT auto-toggle a flyout on click (no flyout to open)", () => {
+    const sessionId = "sess-single";
+    // Just ONE event = members.length === 1, no flyout exists.
+    const events: RecentEvent[] = [tcEvent(1, sessionId, "Bash", "tcA")];
+    const onSelect = vi.fn();
+    const { container } = render(
+      <EventTicker events={events} onSelectNode={onSelect} />,
+    );
+    const row = container.querySelector('[data-testid="ticker-rows"] li[data-actor]');
+    fireEvent.click(row!.querySelector("span.truncate.flex-1")!);
+    // Click still selects; no flyout opens (there's nothing to expand).
+    expect(onSelect).toHaveBeenCalled();
+    expect(container.querySelector('[data-testid="ticker-flyout"]')).toBeNull();
+  });
+
+  it("user prompt rows surface the actual prompt text from the prompt cache (P3-27)", () => {
+    _resetActivityCache();
+    const sessionId = "sess-userprompt";
+    // Pre-seed activity-cache with a user_input segment whose preview
+    // is the operator's prompt text. The ticker's user-prompt row at
+    // that ts should now display the text alongside the "user prompt"
+    // label instead of being content-free.
+    const fakeActivity: ActivityResponse = {
+      session_id: sessionId,
+      transcript: "x.jsonl",
+      events: [],
+      segments: [
+        {
+          ts: "2026-05-26T00:00:00",
+          kind: "user_input",
+          label: "user input",
+          preview: "fix the rolled-row preview list please",
+          tools: [],
+          tool_count: 0,
+        },
+      ],
+    };
+    indexActivity(sessionId, fakeActivity);
+
+    const events: RecentEvent[] = [userPromptEvent(1, sessionId)];
+    // The default userPromptEvent fixture uses ts_sec "2026-05-25T00:00:01"
+    // which is a day off — fix the timestamp to match our seeded segment.
+    events[0].payload.ts_sec = "2026-05-26T00:00:00";
+    events[0].ts = "2026-05-26T00:00:00Z";
+
+    const { container } = render(
+      <EventTicker events={events} onSelectNode={() => {}} />,
+    );
+    const userRow = container.querySelector('[data-testid="ticker-rows"] li[data-actor="user"]');
+    expect(userRow).not.toBeNull();
+    expect(userRow!.textContent).toContain("user prompt");
+    expect(userRow!.textContent).toContain("fix the rolled-row preview list please");
+  });
+
   it("flyout members show actual command from the activity-cache (not just tcid)", async () => {
     _resetActivityCache();
     const sessionId = "sess-flyout";
@@ -357,14 +439,17 @@ describe("EventTicker — P3-24 smarter rollup", () => {
     expect(previewText).toContain("cargo test");
   });
 
-  it("rolled-preview dedupes identical (tool, summary) pairs — 5 identical Bashes show 1 line", () => {
-    // Strict-sig collapse produces ONE row with members.length=5
-    // and tools=[Bash]. RolledPreview renders because members>1,
-    // and dedupe collapses the 5 identical (Bash, "git status")
-    // entries into a single preview line — confirming the dedup
-    // contract.
+  it("strict-collapsed single-tool rows DON'T render an inline preview (P3-27 consistency)", () => {
+    // 5 identical Bash events strict-collapse to ONE row with
+    // tools=[Bash] (length 1). The augment cache already gives
+    // this row inline context via its label (Bash · git status).
+    // Rendering a separate RolledPreview list below would just
+    // duplicate that text and break consistency with other
+    // single-tool rows. Operator screenshot: "the single 'Bash'
+    // (or Edit, whatever) event cards should just have the 1-line
+    // rendered like the other event cards."
     _resetActivityCache();
-    const sessionId = "sess-dup";
+    const sessionId = "sess-strict-1tool";
     const fakeActivity: ActivityResponse = {
       session_id: sessionId,
       transcript: "x.jsonl",
@@ -388,18 +473,12 @@ describe("EventTicker — P3-24 smarter rollup", () => {
       tcEvent(1, sessionId, "Bash", "tcA"),
       tcEvent(2, sessionId, "Bash", "tcB"),
       tcEvent(3, sessionId, "Bash", "tcC"),
-      tcEvent(4, sessionId, "Bash", "tcD"),
-      tcEvent(5, sessionId, "Bash", "tcE"),
     ];
     const { container } = render(
       <EventTicker events={events} onSelectNode={() => {}} />,
     );
     const preview = container.querySelector('[data-testid="rolled-preview"]');
-    expect(preview).not.toBeNull();
-    const lines = preview!.querySelectorAll("li");
-    // 5 identical (Bash, "git status --short") pairs → 1 line after dedup.
-    expect(lines.length).toBe(1);
-    expect((preview!.textContent ?? "")).toContain("git status");
+    expect(preview).toBeNull();
   });
 
   it("rolled-preview shows '(loading…)' placeholder when cache hasn't warmed yet (P3-26)", () => {

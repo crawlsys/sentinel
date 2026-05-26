@@ -24,7 +24,18 @@ interface CacheBuckets {
   [composite: string]: ToolCallSummary;
 }
 
+interface PromptCache {
+  // key = `${sessionId}\t${minuteIso}` → preview text from a user_input segment
+  [composite: string]: string;
+}
+
 const cache: CacheBuckets = {};
+/// Separate cache for user prompt previews. user_input segments
+/// carry the operator's actual prompt text in segment.preview; the
+/// ticker's bare "user prompt" rows used to show no content for
+/// older sessions. Operator screenshot review (P3-27): "should be
+/// populated with real activity".
+const promptCache: PromptCache = {};
 const listeners = new Set<() => void>();
 
 function notify() {
@@ -37,12 +48,24 @@ function key(sessionId: string, tool: string, ts: string): string {
 }
 
 /** Walk an activity response and stash every tool_call into the cache,
- *  keyed by its parent segment's ts (minute bucket). */
+ *  keyed by its parent segment's ts (minute bucket). Also indexes
+ *  user_input segments into the separate promptCache so the ticker
+ *  can surface the operator's actual prompt text on "user prompt"
+ *  rows that would otherwise be content-free. */
 export function indexActivity(sessionId: string, activity: ActivityResponse | undefined): void {
   if (!activity?.segments?.length) return;
   let added = 0;
   for (const seg of activity.segments) {
     const segTs = seg.ts;
+    if (seg.kind === "user_input") {
+      const minute = segTs.length >= 16 ? segTs.slice(0, 16) : segTs;
+      const k = `${sessionId}\t${minute}`;
+      const preview = (seg.preview ?? seg.text ?? "").trim();
+      if (preview && !promptCache[k]) {
+        promptCache[k] = preview;
+        added += 1;
+      }
+    }
     for (const tc of seg.tool_calls ?? []) {
       if (!tc.tool) continue;
       const k = key(sessionId, tc.tool, segTs);
@@ -53,6 +76,24 @@ export function indexActivity(sessionId: string, activity: ActivityResponse | un
     }
   }
   if (added > 0) notify();
+}
+
+/** Look up the user prompt text for the given session at the given
+ *  timestamp. Same ±1 minute tolerance as the tool-call cache —
+ *  bridge ts_sec and JSONL ts can straddle a minute boundary. */
+export function lookupUserPrompt(sessionId: string | null, ts: string | null): string | null {
+  if (!sessionId || !ts) return null;
+  const minute = ts.length >= 16 ? ts.slice(0, 16) : ts;
+  const exact = promptCache[`${sessionId}\t${minute}`];
+  if (exact) return exact;
+  const parsed = Date.parse(`${minute}:00Z`);
+  if (Number.isNaN(parsed)) return null;
+  for (const offsetMin of [-1, 1]) {
+    const shifted = new Date(parsed + offsetMin * 60_000).toISOString().slice(0, 16);
+    const hit = promptCache[`${sessionId}\t${shifted}`];
+    if (hit) return hit;
+  }
+  return null;
 }
 
 /** Look up a ToolCallSummary for the given (session, tool, ts). Returns
@@ -91,6 +132,7 @@ export function subscribe(fn: () => void): () => void {
 /** Test-only — drop everything. */
 export function _resetActivityCache(): void {
   for (const k of Object.keys(cache)) delete cache[k];
+  for (const k of Object.keys(promptCache)) delete promptCache[k];
 }
 
 /** Snapshot of current size — debug-friendly. */

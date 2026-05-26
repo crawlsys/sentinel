@@ -5,6 +5,7 @@ import {
   _resetActivityCache,
   indexActivity,
   lookup,
+  lookupUserPrompt,
   subscribe,
 } from "../../lib/activity-cache";
 import type { ActivityResponse } from "../../types/api";
@@ -60,6 +61,30 @@ describe("activity-cache", () => {
     indexActivity("sess-b", a);
     expect(lookup("sess-b", "Bash", "2026-05-25T13:25")).not.toBeNull();
     expect(lookup("sess-b", "Read", "2026-05-25T13:25")).not.toBeNull();
+  });
+
+  it("indexes user_input segments into a separate prompt cache (P3-27)", () => {
+    // user_input segments don't carry tool_calls — their content is in
+    // segment.preview (or .text). The prompt cache stores that so the
+    // ticker can surface real prompt text on bare "user prompt" rows.
+    const a = activityFor("sess-u", [
+      { ts: "2026-05-25T13:25:43.100Z", tools: [], summary: "" },
+    ]);
+    // override the user_input shape directly (helper builds assistant_turn)
+    a.segments[0].kind = "user_input";
+    a.segments[0].preview = "hey claude, can you fix the ticker rollup?";
+    indexActivity("sess-u", a);
+    expect(lookupUserPrompt("sess-u", "2026-05-25T13:25:00")).toContain("hey claude");
+    // Same ±1 minute tolerance as the tool-call cache.
+    expect(lookupUserPrompt("sess-u", "2026-05-25T13:26:00")).toContain("hey claude");
+    expect(lookupUserPrompt("sess-u", "2026-05-25T13:24:00")).toContain("hey claude");
+    expect(lookupUserPrompt("sess-u", "2026-05-25T13:27:00")).toBeNull();
+  });
+
+  it("user-prompt lookup returns null for unknown sessions / ts", () => {
+    expect(lookupUserPrompt(null, "2026-05-25T13:25")).toBeNull();
+    expect(lookupUserPrompt("sess-x", null)).toBeNull();
+    expect(lookupUserPrompt("sess-x", "2026-05-25T13:25")).toBeNull();
   });
 
   it("ignores empty input", () => {

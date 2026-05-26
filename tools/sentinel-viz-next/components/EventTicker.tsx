@@ -3,7 +3,11 @@
 import { memo, useEffect, useMemo, useState } from "react";
 
 import type { NodeCategory, RecentEvent } from "../types/api";
-import { lookup as lookupActivityCache, subscribe as subscribeActivityCache } from "../lib/activity-cache";
+import {
+  lookup as lookupActivityCache,
+  lookupUserPrompt,
+  subscribe as subscribeActivityCache,
+} from "../lib/activity-cache";
 import { categoryColor, categoryLabel, tickerTime } from "../lib/format";
 import {
   compactBashCommand,
@@ -205,6 +209,19 @@ export function EventTicker({ events, onSelectNode, sessionColors, stuckMeta }: 
     () =>
       rows.map((r) => {
         if (!r.sessionId) return r;
+        // User-prompt rows: pull the actual prompt text from the
+        // separate promptCache. P3-27: operator screenshot showed
+        // a tail of bare "user prompt" rows with no content because
+        // we only indexed tool_calls.
+        if (r.actor === "user") {
+          const prompt = lookupUserPrompt(r.sessionId, r.ts);
+          if (prompt) {
+            const compact = tildify(prompt).replace(/\s+/g, " ").trim();
+            const truncated = compact.length > 80 ? `${compact.slice(0, 78)}…` : compact;
+            return { ...r, augment: truncated };
+          }
+          return r;
+        }
         if (r.tools.length > 1) return r; // rolled row — no augment
         const lookupTool = r.tools[0] ?? "";
         if (!lookupTool) return r;
@@ -326,7 +343,17 @@ export function EventTicker({ events, onSelectNode, sessionColors, stuckMeta }: 
           : null}
         {orderedRows.map((row) => {
           const isOpen = expanded.has(row.key);
+          const isRolled = row.members.length > 1;
           const focus = () => {
+            // Single-click on the row body does BOTH things for
+            // rolled rows: selects the underlying node AND toggles
+            // the flyout open (or closed). For singletons it just
+            // selects. The ×N badge keeps stopPropagation so
+            // clicking it directly only toggles (no node selection
+            // change). Operator screenshot: "when any of these are
+            // clicked on they should fly out any folds
+            // automatically (dont require the fold specifically)."
+            if (isRolled) toggle(row.key);
             if (row.toolCallId) onSelectNode(row.toolCallId, row.ts);
             else if (row.sessionId) onSelectNode(`SentinelSession#${row.sessionId}`, row.ts);
           };
@@ -361,7 +388,15 @@ export function EventTicker({ events, onSelectNode, sessionColors, stuckMeta }: 
                 title={sessionColor ? `session ${row.sessionId?.slice(0, 8)}` : ""}
               />
               <div className="flex-1 min-w-0">
-              <div className="flex gap-2 items-baseline cursor-pointer" onClick={focus}>
+              {/* Click target spans the header + sub-line + stuck-
+                  reason + rolled-preview. Operator screenshot:
+                  "when any of these are clicked on they should fly
+                  out any folds automatically (dont require the fold
+                  specifically)." The flyout itself is rendered
+                  OUTSIDE this clickable region so clicks on flyout
+                  members don't collapse the parent. */}
+              <div className="cursor-pointer" onClick={focus}>
+              <div className="flex gap-2 items-baseline">
                 {/* Actor glyph — disambiguates "who initiated this
                     event" at a glance: ◇ Claude, ⚙ Sentinel, ↩ user.
                     Fixed-width column so labels still line up.
@@ -426,17 +461,16 @@ export function EventTicker({ events, onSelectNode, sessionColors, stuckMeta }: 
               ) : null}
               {/* Rolled rows: render 2-3 inline preview lines so the
                   operator sees WHAT was rolled up without expanding
-                  the flyout. Skipped when the row is expanded (the
-                  flyout below already shows everything) or when the
-                  row is a singleton tool (no roll-up). Activity
-                  previews come from the activity-cache via the
-                  member's (sid, tool, ts) — cache misses fall back
-                  to bare tool names so the operator still sees
-                  variety even before SessionConsole has warmed the
-                  full cache. */}
-              {row.members.length > 1 && row.sessionId && !isOpen ? (
+                  the flyout. Guarded on tools.length > 1 (MULTI-tool
+                  soft-rolled rows ONLY) so single-tool strict-sig
+                  collapsed rows like `×5 Bash` keep the 1-line
+                  rendering — the augment cache already gives them
+                  inline context via the label, an inline preview
+                  list would just duplicate that. */}
+              {row.tools.length > 1 && row.sessionId && !isOpen ? (
                 <RolledPreview row={row} />
               ) : null}
+              </div>{/* /click-target */}
               {isOpen ? (
                 <ul
                   className="mt-1 pl-4 border-l border-dashed border-[#30363d]"
