@@ -16,13 +16,40 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone)]
 pub enum ModelConfig {
     OpenAi { model: String, api_key: String },
+    /// OpenRouter is OpenAI-compatible — same request/response
+    /// shape, different base URL. Multi-vendor access through one
+    /// key. Default for the entire viz instance when
+    /// OPENROUTER_API_KEY is set and no other model is named.
+    OpenRouter { model: String, api_key: String },
     LocalOllama { model: String, base_url: String },
+}
+
+/// Default model when OPENROUTER_API_KEY is set but no
+/// SENTINEL_VIZ_NAMING_MODEL is. Cheap + good at summaries —
+/// operator-friendly default for an "always-on" AI helper layer.
+const DEFAULT_OPENROUTER_MODEL: &str = "openai/gpt-4o-mini";
+
+/// Operator-convention path on disk. If env doesn't expose a key,
+/// fall back to this file (kept at mode 0600 by convention).
+const OPENROUTER_KEY_PATH: &str = ".config/openrouter/api_key";
+
+fn load_openrouter_key_from_disk() -> Option<String> {
+    let home = std::env::var("HOME").ok()?;
+    let path = std::path::Path::new(&home).join(OPENROUTER_KEY_PATH);
+    let contents = std::fs::read_to_string(&path).ok()?;
+    let trimmed = contents.trim().to_string();
+    if trimmed.is_empty() {
+        None
+    } else {
+        tracing::info!(?path, "loaded OPENROUTER_API_KEY from disk fallback");
+        Some(trimmed)
+    }
 }
 
 impl ModelConfig {
     pub fn from_env() -> Option<Self> {
         let raw = std::env::var("SENTINEL_VIZ_NAMING_MODEL").ok();
-        match raw.as_deref() {
+        let explicit = match raw.as_deref() {
             None | Some("") | Some("none") => None,
             Some(s) if s.starts_with("openai:") => {
                 let m = s.trim_start_matches("openai:").to_string();
@@ -30,7 +57,17 @@ impl ModelConfig {
                     Ok(k) if !k.is_empty() => Some(Self::OpenAi { model: m, api_key: k }),
                     _ => {
                         tracing::warn!("openai:{m} requires OPENAI_API_KEY; disabling LLM features");
-                        None
+                        return None;
+                    }
+                }
+            }
+            Some(s) if s.starts_with("openrouter:") => {
+                let m = s.trim_start_matches("openrouter:").to_string();
+                match std::env::var("OPENROUTER_API_KEY") {
+                    Ok(k) if !k.is_empty() => Some(Self::OpenRouter { model: m, api_key: k }),
+                    _ => {
+                        tracing::warn!("openrouter:{m} requires OPENROUTER_API_KEY; disabling LLM features");
+                        return None;
                     }
                 }
             }
@@ -42,14 +79,39 @@ impl ModelConfig {
             }
             Some(other) => {
                 tracing::warn!("unknown SENTINEL_VIZ_NAMING_MODEL '{other}'; disabling LLM features");
-                None
+                return None;
             }
+        };
+
+        if let Some(cfg) = explicit {
+            return Some(cfg);
         }
+
+        // Default for the entire instance: if the operator has set
+        // OPENROUTER_API_KEY OR has the key on disk at
+        // ~/.config/openrouter/api_key (operator convention),
+        // wire up a cheap+good summary model. The on-disk path
+        // means the API picks the right key across reboots /
+        // launch contexts without needing the env to be in scope.
+        let key = std::env::var("OPENROUTER_API_KEY")
+            .ok()
+            .filter(|k| !k.is_empty())
+            .or_else(load_openrouter_key_from_disk);
+        if let Some(k) = key {
+            let m = std::env::var("SENTINEL_VIZ_NAMING_MODEL_DEFAULT")
+                .unwrap_or_else(|_| DEFAULT_OPENROUTER_MODEL.to_string());
+            tracing::info!(
+                "no explicit SENTINEL_VIZ_NAMING_MODEL set; defaulting to openrouter:{m}"
+            );
+            return Some(Self::OpenRouter { model: m, api_key: k });
+        }
+        None
     }
 
     pub fn label(&self) -> String {
         match self {
             Self::OpenAi { model, .. } => format!("openai:{model}"),
+            Self::OpenRouter { model, .. } => format!("openrouter:{model}"),
             Self::LocalOllama { model, .. } => format!("local:{model}"),
         }
     }
@@ -66,12 +128,40 @@ pub struct ChatRequest<'a> {
 
 pub async fn chat(model: &ModelConfig, req: ChatRequest<'_>) -> Result<String> {
     match model {
-        ModelConfig::OpenAi { model, api_key } => openai(model, api_key, &req).await,
+        ModelConfig::OpenAi { model, api_key } => {
+            openai_compatible("https://api.openai.com/v1/chat/completions", model, api_key, &req, None).await
+        }
+        ModelConfig::OpenRouter { model, api_key } => {
+            // OpenRouter recommends sending HTTP-Referer + X-Title
+            // headers for attribution; sending the viz identifier
+            // helps the operator track which app burned the credit.
+            openai_compatible(
+                "https://openrouter.ai/api/v1/chat/completions",
+                model,
+                api_key,
+                &req,
+                Some([
+                    ("HTTP-Referer", "https://github.com/kvncrw/sentinel-1"),
+                    ("X-Title", "sentinel-viz"),
+                ]
+                .as_ref()),
+            )
+            .await
+        }
         ModelConfig::LocalOllama { model, base_url } => ollama(model, base_url, &req).await,
     }
 }
 
-async fn openai(model: &str, api_key: &str, req: &ChatRequest<'_>) -> Result<String> {
+/// Shared OpenAI-compatible chat completions caller. OpenRouter
+/// piggy-backs on this with an extra `extra_headers` set for
+/// attribution per OpenRouter's docs.
+async fn openai_compatible(
+    url: &str,
+    model: &str,
+    api_key: &str,
+    req: &ChatRequest<'_>,
+    extra_headers: Option<&[(&'static str, &'static str)]>,
+) -> Result<String> {
     #[derive(Serialize)]
     struct Msg<'a> {
         role: &'a str,
@@ -109,15 +199,13 @@ async fn openai(model: &str, api_key: &str, req: &ChatRequest<'_>) -> Result<Str
         max_tokens: req.max_tokens,
         temperature: req.temperature,
     };
-    let resp: Resp = client
-        .post("https://api.openai.com/v1/chat/completions")
-        .bearer_auth(api_key)
-        .json(&body)
-        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await?;
+    let mut request = client.post(url).bearer_auth(api_key).json(&body);
+    if let Some(hs) = extra_headers {
+        for (k, v) in hs {
+            request = request.header(*k, *v);
+        }
+    }
+    let resp: Resp = request.send().await?.error_for_status()?.json().await?;
     Ok(resp
         .choices
         .into_iter()

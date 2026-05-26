@@ -1,7 +1,10 @@
 "use client";
 
+import { useQuery } from "@tanstack/react-query";
+
 import { bucketsToSparkline } from "../lib/session-strips";
 import type { SessionStripData } from "../lib/session-strips";
+import { fetchSummary } from "../lib/api";
 import { categoryColor, categoryLabel, statusColor } from "../lib/format";
 
 interface Props {
@@ -21,6 +24,24 @@ interface Props {
 export function SessionStrip({ data, selected, onSelect }: Props) {
   const isStuck = !!data.stuck;
   const statusText = data.status ?? "—";
+
+  // P3-32: pull the narrative AI summary for this session so the
+  // empty horizontal space on each strip carries a 1-2 line plain-
+  // english overview of what's happening. Cached 60s server-side
+  // (see summary.rs). The wait-kind variant fires instead when
+  // the session is awaiting_user — operator sees "what it's
+  // waiting on" in that case, which is the higher-signal copy.
+  const summaryKind = isStuck || data.status === "awaiting_user" ? "wait" : "narrative";
+  const summaryQ = useQuery({
+    queryKey: ["strip-summary", data.sessionId, summaryKind],
+    queryFn: ({ signal }) => fetchSummary(data.sessionId, { kind: summaryKind }, signal),
+    enabled: !!data.sessionId,
+    staleTime: 60_000,
+    refetchInterval: 60_000,
+  });
+  const summaryText = summaryQ.data?.text?.trim();
+  const summaryAvailable = !!summaryText && summaryText.length > 0;
+  const summaryDisabled = summaryQ.data?.source === "disabled";
   return (
     <li
       data-testid="session-strip"
@@ -99,9 +120,35 @@ export function SessionStrip({ data, selected, onSelect }: Props) {
           ))}
         </ul>
 
+        {/* AI summary line (P3-32). Fills the wide-screen empty
+            real estate with a 1-2 sentence narrative pulled from
+            the LLM. Only renders when we have actual text; the
+            stuck banner below takes precedence when both apply. */}
+        {summaryAvailable && !isStuck ? (
+          <div
+            data-testid="session-strip-ai-summary"
+            className="mt-1 text-[10px] text-[#8b949e] leading-tight line-clamp-2"
+            title={summaryText}
+          >
+            <span className="text-[#58a6ff] mr-1 uppercase tracking-wider text-[9px]">
+              ai
+            </span>
+            {summaryText}
+          </div>
+        ) : null}
+        {/* When the summary is loading and we don't yet have text,
+            keep the layout calm — show a tiny ghost placeholder so
+            the strip doesn't jump when the text arrives. */}
+        {!summaryAvailable && !summaryDisabled && !isStuck && summaryQ.isPending ? (
+          <div className="mt-1 text-[10px] text-[#484f58] italic leading-tight">
+            ai · generating summary…
+          </div>
+        ) : null}
         {/* Stuck banner — only when the session is in awaiting_user
             past the stuck threshold. Mirrors the EventTicker's
-            stuck-reason line styling. */}
+            stuck-reason line styling. Includes the AI "what it's
+            waiting on" rollup when available — operator gets both
+            the raw question and the LLM rollup in one line. */}
         {data.stuck ? (
           <div
             data-testid="session-strip-stuck"

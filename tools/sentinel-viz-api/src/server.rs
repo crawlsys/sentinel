@@ -110,6 +110,9 @@ async fn get_config(State(state): State<Arc<AppState>>) -> axum::Json<ConfigResp
         Some(crate::llm::ModelConfig::OpenAi { model, api_key }) => {
             (format!("openai:{model}"), !api_key.is_empty())
         }
+        Some(crate::llm::ModelConfig::OpenRouter { model, api_key }) => {
+            (format!("openrouter:{model}"), !api_key.is_empty())
+        }
         Some(crate::llm::ModelConfig::LocalOllama { model, .. }) => {
             (format!("local:{model}"), true)
         }

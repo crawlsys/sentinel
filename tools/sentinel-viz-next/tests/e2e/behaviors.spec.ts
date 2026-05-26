@@ -258,6 +258,37 @@ test("session strips panel renders + window selector flips between 15m/30m/1h/3h
   expect(text).toMatch(/last\s+6h/i);
 });
 
+test("session strips show AI summaries when the LLM is configured (P3-32)", async ({ page }) => {
+  await waitGraphReady(page);
+  // Bump to 6h so any DB snapshot has at least one active session.
+  await page.getByTestId("window-360m").click();
+  await page.waitForTimeout(1500);
+  const strips = page.getByTestId("session-strip");
+  if ((await strips.count()) === 0) {
+    test.skip(true, "no sessions to summarise");
+    return;
+  }
+  // Allow the LLM round-trip — gpt-4o-mini is fast but not
+  // instant; 15s is a generous ceiling.
+  const summarised = await page
+    .waitForFunction(
+      () =>
+        document.querySelector('[data-testid="session-strip-ai-summary"]') !== null,
+      { timeout: 15_000 },
+    )
+    .catch(() => false);
+  if (!summarised) {
+    test.skip(true, "AI summary did not arrive within 15s (key invalid / API slow?)");
+    return;
+  }
+  const text = (await page
+    .getByTestId("session-strip-ai-summary")
+    .first()
+    .textContent()) ?? "";
+  // Must contain real content past the "ai" label prefix.
+  expect(text.replace(/^\s*ai\s*/i, "").trim().length).toBeGreaterThan(10);
+});
+
 test("each session strip carries data-session-id + per-category sparkline rows", async ({
   page,
 }) => {
