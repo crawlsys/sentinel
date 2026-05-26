@@ -291,14 +291,114 @@ pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
         duration_ms,
     );
 
-    if let Some((hits, rendered)) = result {
+    // Dual-display capture notice: if the detached turn-capture from a prior
+    // turn left a one-shot notice, surface it to BOTH audiences — Gary via
+    // `systemMessage` (shown in his terminal, not in the model's context) and
+    // the model via `additionalContext`. Read-and-delete so it shows once.
+    let notice = take_capture_notice(ctx.fs);
+
+    let mut out = if let Some((hits, rendered)) = result {
         write_injected_state(ctx.fs, &hits, Some(prompt));
         debug!(atoms = hits.len(), "Injecting atoms via memory-mcp");
         HookOutput::inject_context(HookEvent::UserPromptSubmit, &rendered)
     } else {
         debug!("memory-mcp returned no hits — not injecting");
         HookOutput::allow()
+    };
+
+    if let Some((human_msg, model_msg)) = notice {
+        // Human-only channel.
+        out.system_message = Some(human_msg);
+        // Model channel: append to any recall context already being injected.
+        let hso = out
+            .hook_specific_output
+            .get_or_insert_with(|| sentinel_domain::events::HookSpecificOutput {
+                hook_event_name: HookEvent::UserPromptSubmit.to_string(),
+                ..Default::default()
+            });
+        hso.additional_context = Some(match hso.additional_context.take() {
+            Some(existing) => format!("{model_msg}\n\n{existing}"),
+            None => model_msg,
+        });
     }
+
+    out
+}
+
+/// Shape of `~/.claude/sentinel/state/pending-capture-notice.json`, written by
+/// the detached `memory turn-capture` CLI when atoms land.
+#[derive(serde::Deserialize)]
+struct CaptureNotice {
+    #[serde(default)]
+    project: String,
+    #[serde(default)]
+    written: usize,
+    #[serde(default)]
+    reinforced: usize,
+    #[serde(default)]
+    superseded: usize,
+    #[serde(default)]
+    quarantined: usize,
+    #[serde(default)]
+    names: Vec<String>,
+    #[serde(default)]
+    names_total: usize,
+}
+
+/// Read-and-delete the pending capture notice. Returns `(human_message,
+/// model_message)` when present. One-shot: the file is removed so the notice
+/// surfaces exactly once. Returns `None` when there's no notice or it can't be
+/// parsed.
+fn take_capture_notice(fs: &dyn FileSystemPort) -> Option<(String, String)> {
+    let path = state_dir(fs)?.join("pending-capture-notice.json");
+    if !fs.exists(&path) {
+        return None;
+    }
+    let content = fs.read_to_string(&path).ok()?;
+    // Delete immediately (best-effort) so it shows once even if parsing the
+    // already-read content somehow fails downstream.
+    let _ = fs.remove_file(&path);
+    let n: CaptureNotice = serde_json::from_str(&content).ok()?;
+    format_capture_notice(&n)
+}
+
+/// Pure formatter for a capture notice — returns `(human_message,
+/// model_message)` or `None` when nothing durable landed. Split out from
+/// `take_capture_notice` so the formatting is unit-testable without a
+/// filesystem stub.
+fn format_capture_notice(n: &CaptureNotice) -> Option<(String, String)> {
+    let landed = n.written + n.reinforced + n.superseded;
+    if landed == 0 {
+        return None;
+    }
+
+    // Compact bullet list of what landed (already capped to 6 by the writer).
+    let mut bullets = String::new();
+    for name in &n.names {
+        let short: String = name.chars().take(90).collect();
+        bullets.push_str("\n  • ");
+        bullets.push_str(&short);
+    }
+    let more = if n.names_total > n.names.len() {
+        format!("\n  • (+{} more)", n.names_total - n.names.len())
+    } else {
+        String::new()
+    };
+    let quar = if n.quarantined > 0 {
+        format!(" · {} quarantined", n.quarantined)
+    } else {
+        String::new()
+    };
+
+    let human = format!(
+        "💾 Memory captured last turn — {landed} atom(s) in {}{}{bullets}{more}",
+        n.project, quar
+    );
+    let model = format!(
+        "[Memory] Auto-captured last turn ({landed} durable atom(s) in {}{}):{bullets}{more}",
+        n.project, quar
+    );
+    Some((human, model))
 }
 
 /// Process Stop — no-op.
@@ -440,5 +540,37 @@ mod tests {
         assert_eq!(parsed.memories.len(), 1);
         assert_eq!(parsed.memories[0].id, "atom-1");
         assert_eq!(parsed.user_prompt.as_deref(), Some("why rust"));
+    }
+
+    #[test]
+    fn capture_notice_parses_and_formats_dual_messages() {
+        let json = r#"{
+            "ts":"t","project":"memory","written":2,"reinforced":0,
+            "superseded":1,"quarantined":1,
+            "names":["memory daemon/runs on port=3011","Firefly Pro/primary domain=fireflypro.com"],
+            "names_total":3
+        }"#;
+        let n: CaptureNotice = serde_json::from_str(json).unwrap();
+        let (human, model) = format_capture_notice(&n).expect("3 landed → Some");
+        // Human channel: friendly, names + counts + quarantine note.
+        assert!(human.contains("💾"));
+        assert!(human.contains("3 atom"));        // 2 written + 1 superseded
+        assert!(human.contains("memory"));         // project
+        assert!(human.contains("3011"));           // a name
+        assert!(human.contains("1 quarantined"));
+        assert!(human.contains("(+1 more)"));      // names_total 3 > 2 shown
+        // Model channel: same substance, [Memory] prefix.
+        assert!(model.starts_with("[Memory]"));
+        assert!(model.contains("3 durable atom"));
+    }
+
+    #[test]
+    fn capture_notice_none_when_nothing_landed() {
+        let n: CaptureNotice = serde_json::from_str(
+            r#"{"project":"p","written":0,"reinforced":0,"superseded":0,"quarantined":2,"names":[],"names_total":0}"#,
+        )
+        .unwrap();
+        // Only quarantined/dropped — nothing durable landed → no notice.
+        assert!(format_capture_notice(&n).is_none());
     }
 }
