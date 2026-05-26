@@ -645,17 +645,25 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
             // Only runs when the auditor is available; otherwise A3 is inert
             // and tool_usage_gate's four-check stack handles the upper
             // classes for Edit/Write.
-            if let Some(ref auditor_arc) = auditor {
-                let dry_run_output =
-                    time_and_record(ctx.fs, &mk_ctx("dry_run_then_commit"), || {
-                        hooks::dry_run_then_commit::process(
-                            &input,
-                            ctx.fs,
-                            &reversibility_classifier,
-                            auditor_arc.as_ref(),
-                        )
-                    });
-                output.merge(&dry_run_output);
+            //
+            // Skip it entirely when an earlier gate already blocked this call:
+            // `auditor.score()` is an LLM round-trip (up to a 30s timeout) and
+            // there's no point paying that latency to audit a tool that's
+            // already denied. Cheap string-matching gates above stay
+            // unconditional; only this network-bound one is guarded.
+            if output.blocked != Some(true) {
+                if let Some(ref auditor_arc) = auditor {
+                    let dry_run_output =
+                        time_and_record(ctx.fs, &mk_ctx("dry_run_then_commit"), || {
+                            hooks::dry_run_then_commit::process(
+                                &input,
+                                ctx.fs,
+                                &reversibility_classifier,
+                                auditor_arc.as_ref(),
+                            )
+                        });
+                    output.merge(&dry_run_output);
+                }
             }
 
             // Git hygiene — block on protected branch without worktree + uncommitted file limit
@@ -1714,6 +1722,27 @@ fn glass_break_dir() -> Option<std::path::PathBuf> {
     dirs::home_dir().map(|h| h.join(".claude").join("sentinel"))
 }
 
+/// Compute the integrity signature for a glass-break token over its
+/// `expiry` field. `SHA256(salt || "glass-break-token-v1:" || expiry)` — the
+/// salt is compiled into the binary and not observable, so a process that can
+/// write `.glass-break-token` (e.g. the agent) still cannot forge a valid
+/// signature. Mirrors the signed-override-token approach in
+/// `hooks::hygiene_override`. Returns lowercase hex.
+fn glass_break_token_sig(expiry: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    // Salt is per-build; rotating it invalidates outstanding tokens, which is
+    // the desired fail-closed behavior across an engine upgrade.
+    hasher.update(b"sentinel-glass-break-token-sig-v1:");
+    hasher.update(expiry.as_bytes());
+    let digest = hasher.finalize();
+    use std::fmt::Write as _;
+    digest.iter().fold(String::new(), |mut s, b| {
+        let _ = write!(s, "{b:02x}");
+        s
+    })
+}
+
 /// Check if a glass break override is active.
 ///
 /// Two-layer design:
@@ -1733,19 +1762,37 @@ fn check_glass_break_override() -> bool {
         None => return false,
     };
 
-    // Fast path: check for valid active token
+    // Fast path: check for a valid, SIGNED, non-expired token. The token is
+    // `{expiry_rfc3339}:{sig}` where `sig` is keyed on a binary-embedded salt
+    // (see `glass_break_token_sig`). An unsigned/forged file — e.g. one the
+    // agent writes itself via `Write`/`Bash` to bypass enforcement — fails
+    // signature verification and is rejected + deleted. This closes the
+    // forgery hole: only `check_glass_break_override`'s own confirmed-dialog
+    // path (which an AI cannot complete) can mint a valid token.
     let token_path = dir.join(".glass-break-token");
     if token_path.exists() {
         if let Ok(contents) = std::fs::read_to_string(&token_path) {
-            if let Some(expiry_str) = contents.lines().next() {
-                if let Ok(expiry) = chrono::DateTime::parse_from_rfc3339(expiry_str.trim()) {
-                    if expiry > chrono::Utc::now() {
-                        return true; // Token still valid
+            if let Some(line) = contents.lines().next() {
+                if let Some((expiry_str, sig)) = line.trim().rsplit_once(':') {
+                    let expected = glass_break_token_sig(expiry_str);
+                    if sig == expected {
+                        if let Ok(expiry) =
+                            chrono::DateTime::parse_from_rfc3339(expiry_str)
+                        {
+                            if expiry > chrono::Utc::now() {
+                                return true; // Valid signature + not expired
+                            }
+                        }
+                    } else {
+                        eprintln!(
+                            "[sentinel] SECURITY: .glass-break-token has an invalid signature \
+                             (forged or tampered). Rejecting + removing."
+                        );
                     }
                 }
             }
         }
-        // Token expired or invalid — clean up
+        // Expired, unsigned, forged, or malformed — clean up.
         let _ = std::fs::remove_file(&token_path);
     }
 
@@ -1762,9 +1809,13 @@ fn check_glass_break_override() -> bool {
     let _ = std::fs::remove_file(&trigger_path);
 
     if confirmed {
-        // Write a 15-minute token
+        // Write a 15-minute SIGNED token: `{expiry}:{sig}`. The signature is
+        // keyed on a binary-embedded salt so the token cannot be forged by
+        // anything that lacks the salt (i.e. the agent writing the file).
         let expiry = chrono::Utc::now() + chrono::Duration::minutes(15);
-        let _ = std::fs::write(&token_path, expiry.to_rfc3339());
+        let expiry_str = expiry.to_rfc3339();
+        let sig = glass_break_token_sig(&expiry_str);
+        let _ = std::fs::write(&token_path, format!("{expiry_str}:{sig}"));
 
         // Audit log
         let _ = sentinel_infrastructure::security_log::log_security_event(
