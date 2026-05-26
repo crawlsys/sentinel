@@ -140,10 +140,21 @@ describe("EventTicker — actor distinction (P3-19)", () => {
 });
 
 describe("EventTicker", () => {
-  it("renders empty state without crashing", () => {
+  it("renders skeleton placeholders in the empty state (P3-23 perceived perf)", () => {
+    // P3-23: empty ticker now renders skeleton rows so the operator
+    // sees the ticker structure during cold load instead of an
+    // empty 360px column. Real rows replace skeletons when data
+    // arrives — and crucially, skeletons carry their own testid so
+    // tests can distinguish "loading" from "no data".
     render(<EventTicker events={[]} onSelectNode={() => {}} />);
     expect(screen.getByTestId("event-ticker")).toBeInTheDocument();
-    expect(screen.getByTestId("ticker-rows").children).toHaveLength(0);
+    const skeletons = screen.getAllByTestId("ticker-skeleton");
+    expect(skeletons.length).toBeGreaterThan(0);
+    // No REAL rows (no data-actor attribute) in the empty state.
+    const realRows = screen
+      .getByTestId("ticker-rows")
+      .querySelectorAll("li[data-actor]");
+    expect(realRows.length).toBe(0);
   });
 
   it("groups consecutive tc events on the same (session,type,tool_call_id,outcome)", () => {

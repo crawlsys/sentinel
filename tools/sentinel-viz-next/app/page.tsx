@@ -127,14 +127,21 @@ export default function Page() {
             sessionColors={sessionColors}
           />
           {!graph ? (
+            // Subtle, NON-blocking placeholder. Before P3-23 we
+            // rendered a centred spinner that monopolised the whole
+            // panel during cold load — same 700-900ms TTFD, but
+            // felt much worse because the operator stared at an
+            // empty page with a spinning circle. Now they see the
+            // dashboard structure (status bar, panels, ticker
+            // skeleton rows) immediately and watch it fill in.
+            // `pointer-events-none` keeps the SVG zoom/pan
+            // interactions live underneath if we want them later.
             <div
               data-testid="loading-overlay"
-              className="absolute inset-0 flex items-center justify-center text-[#6e7681] font-mono text-xs pointer-events-none"
+              className="absolute bottom-3 right-3 flex items-center gap-2 text-[#6e7681] font-mono text-[10px] uppercase tracking-wider pointer-events-none"
             >
-              <div className="flex flex-col items-center gap-3">
-                <div className="w-8 h-8 border-2 border-[#30363d] border-t-[#58a6ff] rounded-full animate-spin" />
-                <span>{error ?? "connecting to sentinel.db…"}</span>
-              </div>
+              <div className="w-3 h-3 border-2 border-[#30363d] border-t-[#58a6ff] rounded-full animate-spin" />
+              <span>{error ?? "loading sentinel snapshot…"}</span>
             </div>
           ) : null}
         </div>

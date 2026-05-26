@@ -36,6 +36,10 @@ interface TickerMember {
   ts: string;
   toolCallId: string | null;
   outcome: string | null;
+  /** Specific tool the member event invoked (Bash, Read, …).
+   *  Null for non-tool events. Used by the expand drawer so each
+   *  member row in the ×N flyout can show its actual tool. */
+  tool: string | null;
 }
 
 /// Who originated this row's underlying event.
@@ -72,7 +76,28 @@ interface TickerRow {
    *  amber pulse — same severity tier as STUCK rows, but visually
    *  distinct so the operator can tell at a glance which is which. */
   isIntervention: boolean;
+  /** Deduped list of tools observed across this row's members.
+   *  Single-tool rows: ["Bash"]. Multi-tool rolled rows:
+   *  ["Bash", "Read", "Edit"]. The rendered label uses this when
+   *  it's >1 distinct tool (label = "Bash, Read, Edit"); single
+   *  entry falls through to the original tool name + augment-cache
+   *  summary. */
+  tools: string[];
   members: TickerMember[];
+}
+
+const MAX_TOOLS_IN_LABEL = 4;
+
+/// Render the label for a rolled-up row. Single-tool rows render
+/// the tool name directly; multi-tool rows render up to N distinct
+/// tools comma-separated, then "+M more". The label still fits in
+/// the existing `truncate flex-1` slot — CSS handles the right-edge
+/// ellipsis if needed.
+function formatRolledLabel(tools: string[]): string {
+  if (tools.length === 0) return "";
+  if (tools.length === 1) return tools[0];
+  if (tools.length <= MAX_TOOLS_IN_LABEL) return tools.join(", ");
+  return `${tools.slice(0, MAX_TOOLS_IN_LABEL).join(", ")} +${tools.length - MAX_TOOLS_IN_LABEL} more`;
 }
 
 const INTERVENTION_OUTCOMES = new Set([
@@ -259,6 +284,33 @@ export function EventTicker({ events, onSelectNode, sessionColors, stuckMeta }: 
         <span>{rows.length} rows</span>
       </header>
       <ul className="overflow-y-auto flex-1" data-testid="ticker-rows">
+        {/* Skeleton rows on cold load — operator sees STRUCTURE
+            immediately instead of an empty 360px column. Each
+            skeleton mirrors the height + color-tab + glyph slot of
+            a real row so the layout doesn't jump when real data
+            arrives. data-testid="ticker-skeleton" keeps it easy to
+            assert "loading → loaded" transitions in Playwright. */}
+        {orderedRows.length === 0
+          ? Array.from({ length: 8 }).map((_, i) => (
+              <li
+                key={`skel-${i}`}
+                data-testid="ticker-skeleton"
+                className="pl-0 pr-3 py-1 border-b border-[#21262d] flex animate-pulse"
+                style={{ opacity: Math.max(0.15, 1 - i * 0.1) }}
+              >
+                <span
+                  className="shrink-0 self-stretch"
+                  style={{ width: "4px", backgroundColor: "#21262d", marginRight: "8px" }}
+                />
+                <div className="flex-1 min-w-0 flex items-baseline gap-2 py-0.5">
+                  <span className="w-3 h-3 rounded-sm bg-[#21262d]" />
+                  <span className="w-2 h-2 rounded-full bg-[#21262d]" />
+                  <span className="w-8 h-2 rounded bg-[#21262d]" />
+                  <span className="flex-1 h-2 rounded bg-[#21262d]" />
+                </div>
+              </li>
+            ))
+          : null}
         {orderedRows.map((row) => {
           const isOpen = expanded.has(row.key);
           const focus = () => {
@@ -340,17 +392,20 @@ export function EventTicker({ events, onSelectNode, sessionColors, stuckMeta }: 
                   ) : null}
                 </span>
               </div>
-              <div className="text-[10px] text-[#6e7681] truncate pl-4">
-                {/* Operator-friendly status text. The session-color
-                    tab already encodes which session this is — no
-                    need to repeat the sid prefix. The sentinel_event
-                    name is internal jargon (PreToolUse, PostToolUse,
-                    Stop, UserPromptSubmit); translate it. Falls
-                    through to the raw event name for anything we
-                    haven't covered. */}
-                {sentinelEventPhrase(row.sentinelEvent)}
-                {row.outcome ? ` · ${row.outcome}` : ""}
-              </div>
+              {/* Sub-line gating: render ONLY when there's signal —
+                  an outcome (intervention or error), or an unusual
+                  event we don't have a friendly label for. Routine
+                  PreToolUse rows (99% of traffic) used to read
+                  "about to run" forever; that just duplicated the
+                  tool name in the label. Hide it on the routine
+                  case to drop visual noise. The
+                  shouldShowSubLine() helper is exported so the
+                  rule is testable. */}
+              {shouldShowSubLine(row) ? (
+                <div className="text-[10px] text-[#6e7681] truncate pl-4">
+                  {subLineText(row)}
+                </div>
+              ) : null}
               {pinnedKeys.has(row.key) && row.sessionId && stuckMeta?.get(row.sessionId) ? (
                 <StuckReasonLine meta={stuckMeta.get(row.sessionId)!} />
               ) : null}
@@ -360,10 +415,19 @@ export function EventTicker({ events, onSelectNode, sessionColors, stuckMeta }: 
                     <li
                       key={`${row.key}-m-${i}`}
                       onClick={() => m.toolCallId && onSelectNode(m.toolCallId, m.ts)}
-                      className="py-0.5 text-[10px] text-[#c9d1d9] hover:text-[#58a6ff] cursor-pointer"
+                      className="py-0.5 text-[10px] text-[#c9d1d9] hover:text-[#58a6ff] cursor-pointer flex gap-2"
                     >
-                      <TimeAgo ts={m.ts} className="text-[#6e7681] mr-2" />
-                      {m.toolCallId ? m.toolCallId.replace("SentinelToolCall#", "TC#") : "(no tc id)"}
+                      <TimeAgo ts={m.ts} className="text-[#6e7681]" />
+                      {/* Each rolled-up member shows its actual tool
+                          so the operator can scan the sequence even
+                          when the rolled-row label only shows the
+                          first N distinct tools. */}
+                      {m.tool ? (
+                        <span className="text-[#c9d1d9]">{m.tool}</span>
+                      ) : null}
+                      <span className="text-[#6e7681] truncate">
+                        {m.toolCallId ? m.toolCallId.replace("SentinelToolCall#", "TC#") : ""}
+                      </span>
                     </li>
                   ))}
                 </ul>
@@ -389,6 +453,58 @@ const TimeAgo = memo(function TimeAgo({ ts, className }: { ts: string; className
   }, []);
   return <span className={className}>{tickerTime(ts, now)}</span>;
 });
+
+/// Show a sub-line ONLY when it adds info. Routine PreToolUse rows
+/// would otherwise read "about to run" — useless duplication of the
+/// row label. Real signal: an outcome (intervention/error), the
+/// fall-through case where sentinel_event is unknown (so the
+/// translation didn't kick in), or a user prompt where the actor
+/// helps distinguish from a system event with the same label.
+///
+/// Exported for testing — the rule is small but central to keeping
+/// the ticker readable; lock it down so it can't silently regress.
+export function shouldShowSubLine(row: {
+  outcome: string | null;
+  sentinelEvent: string;
+  actor: RowActor;
+}): boolean {
+  // Real signal: any outcome the operator should see.
+  if (row.outcome && row.outcome.length > 0) return true;
+  // Unknown sentinel events — sentinelEventPhrase falls through so
+  // the operator sees the raw event name (better than hiding it).
+  if (row.sentinelEvent && !KNOWN_SENTINEL_EVENTS.has(row.sentinelEvent)) return true;
+  // User prompts already show "user prompt" as their LABEL — the
+  // glyph + label combo carries the actor info. The sub-line would
+  // just say "you submitted" which is the same fact twice.
+  return false;
+}
+
+const KNOWN_SENTINEL_EVENTS = new Set([
+  "PreToolUse",
+  "PostToolUse",
+  "UserPromptSubmit",
+  "Stop",
+  "Notification",
+  "SubagentStop",
+  "PreCompact",
+]);
+
+/// Subset of sentinel events that are tool-lifecycle bookkeeping:
+/// when one of these arrives with NO tool / hook / outcome, it's
+/// the bridge failing to extract the tool name — pure noise to the
+/// operator. Used by buildRows to drop those rows.
+const KNOWN_TOOL_LIFECYCLE = new Set([
+  "PreToolUse",
+  "PostToolUse",
+]);
+
+/// Sub-line text. Only called when shouldShowSubLine() returns
+/// true, so we always have signal to render. Format:
+///   <translated event> [· <outcome>]
+function subLineText(row: { sentinelEvent: string; outcome: string | null }): string {
+  const base = sentinelEventPhrase(row.sentinelEvent);
+  return row.outcome ? `${base} · ${row.outcome}` : base;
+}
 
 function StuckReasonLine({ meta }: { meta: StuckMeta }) {
   const ageLabel = formatAge(meta.ageSecs);
@@ -434,6 +550,22 @@ function buildRows(events: RecentEvent[]): TickerRow[] {
     const sentinelEvent = strField(e.payload, "sentinel_event") ?? e.type.replace(/^sentinel\./, "");
     const tool = strField(e.payload, "tool");
     const hook = strField(e.payload, "hook");
+    // P3-22 cleanup: skip "informationless" events entirely. The
+    // bridge sometimes emits PreToolUse / PostToolUse rows with no
+    // tool, no hook, and no outcome — we literally don't know
+    // what happened. On a real DB this was ~60% of traffic and
+    // produced "×N about to run" rolled rows that dominated the
+    // ticker. Bridge fix is the proper home; until then, hide
+    // the noise so the ticker shows actual operator signal.
+    if (
+      !tool &&
+      !hook &&
+      !outcome &&
+      sentinelEvent !== "UserPromptSubmit" &&
+      KNOWN_TOOL_LIFECYCLE.has(sentinelEvent)
+    ) {
+      continue;
+    }
     const ts = bestTs(e);
     const { label, category } = deriveLabelAndCategory(e.type, sentinelEvent, tool, hook);
     // Grouping signature deliberately excludes `tool_call_id` — every
@@ -442,14 +574,53 @@ function buildRows(events: RecentEvent[]): TickerRow[] {
     // tcid per member so each flyout entry remains clickable to the
     // specific node it represents.
     const sig = `${sid ?? ""}|${e.type}|${sentinelEvent}|${tool ?? ""}|${outcome ?? ""}`;
+    const actor = deriveActor(e.type, sentinelEvent, outcome);
+    const isIntervention = isInterventionOutcome(outcome);
     const prev = rows[rows.length - 1];
-    if (prev && prev.sig === sig) {
-      prev.members.push({ ts, toolCallId: tcid, outcome });
-      // Refresh the row's display ts to the freshest member so the
-      // visible time keeps up.
+
+    // STRICT merge: adjacent events sharing the full sig (same
+    // session + event type + tool + outcome). Preserves the
+    // single-tool label so the augment-cache lookup still hits.
+    // EXCEPTION: user prompts. Two adjacent UserPromptSubmit
+    // events share the same sig (no tool, no outcome) but almost
+    // always have different content — collapsing would silently
+    // hide one of the operator's prompts. Keep them distinct.
+    if (prev && prev.sig === sig && sentinelEvent !== "UserPromptSubmit") {
+      prev.members.push({ ts, toolCallId: tcid, outcome, tool });
       prev.ts = ts;
       continue;
     }
+
+    // SOFT merge (P3-24): collapse adjacent ROUTINE claude
+    // tool-call activity in the same session+category into a
+    // single rolled row. "Routine" = no outcome, not an
+    // intervention, actor=claude, not a user prompt. This is the
+    // big win — a typical session does 10 Bash + 3 Read + 2 Edit
+    // in a burst; without this they're 15 separate rows and the
+    // operator can't see which sessions are active. After: one
+    // row "Bash, Read, Edit ×15" they can expand on demand.
+    if (
+      prev &&
+      !outcome &&
+      !isIntervention &&
+      actor === "claude" &&
+      prev.actor === "claude" &&
+      !prev.outcome &&
+      !prev.isIntervention &&
+      category !== "prompt" &&
+      prev.category !== "prompt" &&
+      sid &&
+      prev.sessionId === sid &&
+      category === prev.category &&
+      tool
+    ) {
+      prev.members.push({ ts, toolCallId: tcid, outcome, tool });
+      if (!prev.tools.includes(tool)) prev.tools.push(tool);
+      prev.label = formatRolledLabel(prev.tools);
+      prev.ts = ts;
+      continue;
+    }
+
     rows.push({
       sig,
       key: `${sig}|${e.seq}`,
@@ -460,9 +631,10 @@ function buildRows(events: RecentEvent[]): TickerRow[] {
       toolCallId: tcid,
       outcome,
       category,
-      actor: deriveActor(e.type, sentinelEvent, outcome),
-      isIntervention: isInterventionOutcome(outcome),
-      members: [{ ts, toolCallId: tcid, outcome }],
+      actor,
+      isIntervention,
+      tools: tool ? [tool] : [],
+      members: [{ ts, toolCallId: tcid, outcome, tool }],
     });
   }
   return rows;

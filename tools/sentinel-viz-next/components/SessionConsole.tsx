@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 
 import { fetchActivity } from "../lib/api";
+import { indexActivity } from "../lib/activity-cache";
 import { colorForSession } from "../lib/session-colors";
 import type { GraphResponse, Segment } from "../types/api";
 
@@ -93,6 +94,14 @@ export function SessionConsole({
         for (const res of responses) {
           if (res.status !== "fulfilled") continue;
           const { sid, r } = res.value;
+          // Warm the activity-cache so EventTicker rows for this
+          // session can augment their labels with real tool args
+          // (e.g. "Bash · gh run view 26197..."). Previously the
+          // cache only filled when the operator opened the
+          // inspector; rolls of identical "Bash"/"Read" labels
+          // dominated the ticker. Now the live-log's 8s sweep
+          // doubles as ambient warming for the ticker.
+          indexActivity(sid, r);
           for (const s of r.segments) merged.push(segmentToEntry(sid, s));
         }
         const seen = new Set<string>();
