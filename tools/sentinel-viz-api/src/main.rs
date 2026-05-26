@@ -7,6 +7,14 @@ use sentinel_viz_api::{db, server::AppState};
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // `sentinel-viz-api ingest [--tail] [--store PATH]` — the metrics→events
+    // ingester (Rust replacement for the former sentinel_bridge.py). Handled
+    // before the server path so it stays a plain synchronous import.
+    let mut args = std::env::args().skip(1);
+    if args.next().as_deref() == Some("ingest") {
+        return run_ingest(args.collect());
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -59,4 +67,40 @@ async fn main() -> Result<()> {
     );
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+/// Parse the `ingest` subcommand args and dispatch one-shot or `--tail`.
+/// The store defaults to `db::default_db_path()` (honoring `$SENTINEL_VIZ_DB`),
+/// overridable with `--store PATH`.
+fn run_ingest(args: Vec<String>) -> Result<()> {
+    use sentinel_viz_api::ingest::{self, MetricsPaths};
+
+    let mut tail = false;
+    let mut store: Option<std::path::PathBuf> = None;
+    let mut it = args.into_iter();
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "--tail" => tail = true,
+            "--store" => {
+                store = Some(
+                    it.next()
+                        .map(std::path::PathBuf::from)
+                        .ok_or_else(|| anyhow::anyhow!("--store requires a PATH argument"))?,
+                );
+            }
+            other => anyhow::bail!("unknown ingest argument: {other}"),
+        }
+    }
+
+    let store = match store {
+        Some(p) => p,
+        None => db::default_db_path()?,
+    };
+    let paths = MetricsPaths::from_home()?;
+
+    if tail {
+        ingest::run_tail(&store, &paths)
+    } else {
+        ingest::run_one_shot(&store, &paths)
+    }
 }

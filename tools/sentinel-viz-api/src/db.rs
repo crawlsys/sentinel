@@ -7,10 +7,11 @@ use crate::model::Event;
 
 /// Default location of the bridge's `SQLite` store, overridable via env.
 ///
-/// WORKSTREAM: sentinel-bridge — this path is owned by
-/// `tools/sentinel-viz/sentinel_bridge.py`, which writes the file.
-/// The viz crate opens READ-ONLY. If the bridge moves, override
-/// `SENTINEL_VIZ_DB` rather than hard-coding a new default here.
+/// WORKSTREAM: sentinel-bridge — this path is written by the in-crate
+/// ingester (`crate::ingest`, `sentinel-viz-api ingest`), which materialises
+/// the `events` table from the sentinel metrics JSONL. The API server path
+/// opens it READ-ONLY here. If the store moves, override `SENTINEL_VIZ_DB`
+/// rather than hard-coding a new default.
 pub const DEFAULT_DB_ENV: &str = "SENTINEL_VIZ_DB";
 const DEFAULT_DB_REL: &str = ".agents/scratch/activegraph-bridge/sentinel.db";
 

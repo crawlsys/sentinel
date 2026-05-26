@@ -3,6 +3,7 @@ pub mod awaiting;
 pub mod db;
 pub mod graph;
 pub mod health;
+pub mod ingest;
 pub mod kpis;
 pub mod llm;
 pub mod model;
