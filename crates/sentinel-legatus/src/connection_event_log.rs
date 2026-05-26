@@ -95,6 +95,7 @@ impl ConnectionEventLog {
     /// `warn` and don't propagate (the WS loop must not block on
     /// disk).
     pub fn append(&self, event: &ConnectionEvent) {
+        use std::io::Write;
         if let Some(parent) = self.inner.path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
@@ -106,7 +107,6 @@ impl ConnectionEventLog {
             }
         };
         line.push('\n');
-        use std::io::Write;
         match std::fs::OpenOptions::new()
             .create(true)
             .append(true)

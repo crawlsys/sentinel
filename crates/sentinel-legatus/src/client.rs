@@ -452,13 +452,12 @@ pub async fn run_connect_hosted(
                             "consulate sent WS close frame".to_owned(),
                         );
                     },
-                    Some(Ok(WsMessage::Ping(_) | WsMessage::Pong(_))) => {
-                        // tokio-tungstenite auto-handles pings.
-                    },
+                    // tokio-tungstenite auto-handles pings; raw frames are
+                    // an internal type we never expect here. Both are no-ops.
+                    Some(Ok(WsMessage::Ping(_) | WsMessage::Pong(_) | WsMessage::Frame(_))) => {},
                     Some(Ok(WsMessage::Text(text))) => {
                         debug!(text = %text, "unexpected text frame; ignored");
                     },
-                    Some(Ok(WsMessage::Frame(_))) => {},
                     Some(Err(err)) => {
                         warn!(?err, "websocket recv error; closing");
                         break ExitReason::TransportFailed(format!("WS recv: {err}"));
@@ -569,7 +568,8 @@ async fn recv_signed(source: &mut WsSource, key: &MacKey) -> Result<ConsularMess
                     "consulate sent close mid-handshake".into(),
                 ));
             }
-            _ => continue,
+            // Ping/Pong/Text/Frame: ignore and wait for the next frame.
+            _ => {}
         }
     }
 }

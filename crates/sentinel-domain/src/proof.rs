@@ -132,6 +132,10 @@ impl PhaseProof {
 /// `{"kind":"phase",...}`, `{"kind":"step",...}`, or `{"kind":"disagreement",...}`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
+// Variants differ in size, but boxing would change every construction/match
+// site of this on-disk-serialized enum for no runtime gain (entries are owned,
+// not passed by value on a hot path).
+#[allow(clippy::large_enum_variant)]
 pub enum ProofEntry {
     Phase(PhaseProof),
     Step(StepProof),
@@ -417,7 +421,7 @@ impl ProofChain {
             }
             last_completed = Some(proof.completed_at);
 
-            expected_previous = proof.combined_hash.clone();
+            expected_previous.clone_from(&proof.combined_hash);
         }
 
         // After walking the legacy phase-only `proofs`, continue through

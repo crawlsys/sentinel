@@ -24,6 +24,8 @@
 //!   - The `project_hash` keying the global snapshot is SHA-256(cwd)[..4]; this
 //!     matches `task_rehydrate.rs` so rehydration paths stay aligned.
 
+use std::fmt::Write as _;
+
 use chrono::Utc;
 use sentinel_domain::events::{HookInput, HookOutput};
 use sha2::{Digest, Sha256};
@@ -111,7 +113,7 @@ fn sha256_hex(s: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(s.as_bytes());
     let result = hasher.finalize();
-    result.iter().map(|b| format!("{b:02x}")).collect()
+    result.iter().fold(String::new(), |mut s, b| { write!(s, "{b:02x}").unwrap(); s })
 }
 
 /// Get the persistent tasks directory for a project (under
@@ -154,7 +156,10 @@ fn has_task_files(fs: &dyn FileSystemPort, dir: &PathBuf) -> bool {
                     .file_name()
                     .map(|n| n.to_string_lossy().to_string())
                     .unwrap_or_default();
-                name.ends_with(".json") && !name.starts_with('.')
+                std::path::Path::new(&name)
+                    .extension()
+                    .is_some_and(|e| e.eq_ignore_ascii_case("json"))
+                    && !name.starts_with('.')
             })
         })
 }
@@ -168,7 +173,11 @@ fn read_tasks(fs: &dyn FileSystemPort, dir: &PathBuf) -> Vec<Task> {
                 .file_name()
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_default();
-            if !name.ends_with(".json") || name.starts_with('.') {
+            if !std::path::Path::new(&name)
+                .extension()
+                .map_or(false, |e| e.eq_ignore_ascii_case("json"))
+                || name.starts_with('.')
+            {
                 continue;
             }
             if let Ok(content) = fs.read_to_string(&path) {
@@ -203,53 +212,55 @@ fn read_linear_issues(fs: &dyn FileSystemPort, project_name: &str) -> Vec<Linear
     serde_json::from_str::<Vec<LinearIssue>>(&content).unwrap_or_default()
 }
 
+fn linear_status_rank(s: &str) -> u8 {
+    match s {
+        "started" => 0,   // In Progress
+        "unstarted" => 1, // Todo
+        "backlog" => 2,
+        "triage" => 3,
+        _ => 9,
+    }
+}
+
+fn linear_status_label(s: &str) -> &'static str {
+    match s {
+        "started" => "In Progress",
+        "unstarted" => "Todo",
+        "backlog" => "Backlog",
+        "triage" => "Triage",
+        "completed" => "Done",
+        "canceled" => "Canceled",
+        _ => "—",
+    }
+}
+
+fn linear_priority_label(v: &serde_json::Value) -> &'static str {
+    if let Some(s) = v.as_str() {
+        return match s.to_ascii_lowercase().as_str() {
+            "urgent" => "🔴",
+            "high" => "🟠",
+            "medium" => "🟡",
+            "low" => "🟢",
+            _ => "·",
+        };
+    }
+    if let Some(n) = v.as_u64() {
+        return match n {
+            1 => "🔴",
+            2 => "🟠",
+            3 => "🟡",
+            4 => "🟢",
+            _ => "·",
+        };
+    }
+    "·"
+}
+
 /// Render Linear-issue rows. Active states only (no completed/canceled);
 /// sorted by `status_type` rank then identifier.
 fn render_linear_section(issues: &[LinearIssue]) -> String {
     if issues.is_empty() {
         return String::new();
-    }
-
-    fn status_rank(s: &str) -> u8 {
-        match s {
-            "started" => 0,   // In Progress
-            "unstarted" => 1, // Todo
-            "backlog" => 2,
-            "triage" => 3,
-            _ => 9,
-        }
-    }
-    fn status_label(s: &str) -> &'static str {
-        match s {
-            "started" => "In Progress",
-            "unstarted" => "Todo",
-            "backlog" => "Backlog",
-            "triage" => "Triage",
-            "completed" => "Done",
-            "canceled" => "Canceled",
-            _ => "—",
-        }
-    }
-    fn priority_label(v: &serde_json::Value) -> &'static str {
-        if let Some(s) = v.as_str() {
-            return match s.to_ascii_lowercase().as_str() {
-                "urgent" => "🔴",
-                "high" => "🟠",
-                "medium" => "🟡",
-                "low" => "🟢",
-                _ => "·",
-            };
-        }
-        if let Some(n) = v.as_u64() {
-            return match n {
-                1 => "🔴",
-                2 => "🟠",
-                3 => "🟡",
-                4 => "🟢",
-                _ => "·",
-            };
-        }
-        "·"
     }
 
     let mut sorted: Vec<&LinearIssue> = issues
@@ -260,16 +271,13 @@ fn render_linear_section(issues: &[LinearIssue]) -> String {
         return String::new();
     }
     sorted.sort_by(|a, b| {
-        status_rank(&a.status_type)
-            .cmp(&status_rank(&b.status_type))
+        linear_status_rank(&a.status_type)
+            .cmp(&linear_status_rank(&b.status_type))
             .then(a.identifier.cmp(&b.identifier))
     });
 
     let mut md = String::from("## Linear Assigned\n\n");
-    md.push_str(&format!(
-        "_{} open issue(s) from Linear cache._\n\n",
-        sorted.len()
-    ));
+    writeln!(md, "_{} open issue(s) from Linear cache._\n", sorted.len()).unwrap();
     md.push_str("| Issue | Pri | State | Title |\n");
     md.push_str("|---|---|---|---|\n");
     for i in sorted.iter().take(50) {
@@ -278,16 +286,17 @@ fn render_linear_section(issues: &[LinearIssue]) -> String {
         } else {
             format!("[{}]({})", i.identifier, i.url)
         };
-        md.push_str(&format!(
-            "| {} | {} | {} | {} |\n",
+        writeln!(
+            md,
+            "| {} | {} | {} | {} |",
             id,
-            priority_label(&i.priority),
-            status_label(&i.status_type),
+            linear_priority_label(&i.priority),
+            linear_status_label(&i.status_type),
             i.title.replace('|', "\\|"),
-        ));
+        ).unwrap();
     }
     if sorted.len() > 50 {
-        md.push_str(&format!("\n…and {} more (truncated).\n", sorted.len() - 50));
+        writeln!(md, "\n…and {} more (truncated).", sorted.len() - 50).unwrap();
     }
     md.push('\n');
     md
@@ -310,17 +319,18 @@ fn render_auto_block_body(
 
     let mut md = String::new();
     md.push('\n');
-    md.push_str(&format!(
-        "<!-- This block is auto-managed by sentinel `task_persist` hook. Edit via TaskCreate / Linear, not by hand. Updated: {now} -->\n\n"
-    ));
-    md.push_str(&format!("# Tasks — {project_name}\n\n"));
-    md.push_str(&format!(
-        "**{total} total · {pending} pending · {in_prog} in progress · {done} completed**\n\n",
+    writeln!(md,
+        "<!-- This block is auto-managed by sentinel `task_persist` hook. Edit via TaskCreate / Linear, not by hand. Updated: {now} -->\n"
+    ).unwrap();
+    writeln!(md, "# Tasks — {project_name}\n").unwrap();
+    writeln!(
+        md,
+        "**{total} total · {pending} pending · {in_prog} in progress · {done} completed**\n",
         total = tasks.len(),
         pending = incomplete.len().saturating_sub(in_progress),
         in_prog = in_progress,
         done = completed.len(),
-    ));
+    ).unwrap();
 
     let linear_section = render_linear_section(linear_issues);
 
@@ -339,49 +349,42 @@ fn render_auto_block_body(
                 "in_progress" => "~",
                 _ => " ",
             };
-            md.push_str(&format!("### [{check}] {}. {}\n", task.id, task.subject));
-            md.push_str(&format!("- **Status:** {}\n", task.status));
+            writeln!(md, "### [{check}] {}. {}", task.id, task.subject).unwrap();
+            writeln!(md, "- **Status:** {}", task.status).unwrap();
             if !task.blocks.is_empty() {
-                md.push_str(&format!("- **Blocks:** {}\n", task.blocks.join(", ")));
+                writeln!(md, "- **Blocks:** {}", task.blocks.join(", ")).unwrap();
             }
             if !task.blocked_by.is_empty() {
-                md.push_str(&format!(
-                    "- **Blocked by:** {}\n",
-                    task.blocked_by.join(", ")
-                ));
+                writeln!(md, "- **Blocked by:** {}", task.blocked_by.join(", ")).unwrap();
             }
             if let Some(owner) = &task.owner {
-                md.push_str(&format!("- **Owner:** {owner}\n"));
+                writeln!(md, "- **Owner:** {owner}").unwrap();
             }
             if let Some(meta) = &task.metadata {
                 if let Some(obj) = meta.as_object() {
                     if let Some(priority) = obj.get("priority").and_then(|v| v.as_str()) {
-                        md.push_str(&format!("- **Priority:** {priority}\n"));
+                        writeln!(md, "- **Priority:** {priority}").unwrap();
                     }
                     if let Some(phase) = obj.get("phase").and_then(|v| v.as_str()) {
-                        md.push_str(&format!("- **Phase:** {phase}\n"));
+                        writeln!(md, "- **Phase:** {phase}").unwrap();
                     }
                     if let Some(tags) = obj.get("skill_tags").and_then(|v| v.as_array()) {
                         let tag_strs: Vec<&str> = tags.iter().filter_map(|t| t.as_str()).collect();
                         if !tag_strs.is_empty() {
-                            md.push_str(&format!("- **Tags:** {}\n", tag_strs.join(", ")));
+                            writeln!(md, "- **Tags:** {}", tag_strs.join(", ")).unwrap();
                         }
                     }
                 }
             }
             if !task.description.is_empty() {
-                md.push_str(&format!("- **Description:** {}\n", task.description));
+                writeln!(md, "- **Description:** {}", task.description).unwrap();
             }
             if !task.checklist.is_empty() {
                 let done = task.checklist.iter().filter(|c| c.completed).count();
-                md.push_str(&format!(
-                    "- **Checklist:** ({}/{})\n",
-                    done,
-                    task.checklist.len()
-                ));
+                writeln!(md, "- **Checklist:** ({}/{})", done, task.checklist.len()).unwrap();
                 for item in &task.checklist {
                     let mark = if item.completed { "x" } else { " " };
-                    md.push_str(&format!("  - [{mark}] {}\n", item.text));
+                    writeln!(md, "  - [{mark}] {}", item.text).unwrap();
                 }
             }
             md.push('\n');
@@ -391,7 +394,7 @@ fn render_auto_block_body(
     if !completed.is_empty() {
         md.push_str("## Completed\n\n");
         for task in &completed {
-            md.push_str(&format!("- [x] **{}. {}**\n", task.id, task.subject));
+            writeln!(md, "- [x] **{}. {}**", task.id, task.subject).unwrap();
         }
         md.push('\n');
     }
@@ -426,7 +429,7 @@ fn merge_with_existing(existing: Option<&str>, body: &str) -> String {
                 // Skip a trailing newline after MARKER_END so we don't accumulate blank lines.
                 let after = content[end_idx..]
                     .strip_prefix('\n')
-                    .unwrap_or(&content[end_idx..]);
+                    .unwrap_or_else(|| &content[end_idx..]);
                 format!("{before}{wrapped}{after}")
             }
             _ => {
@@ -629,21 +632,23 @@ fn write_memory_summary(
 
     let mut body = String::new();
     body.push_str("---\n");
-    body.push_str(&format!("name: Tasks for {proj_name}\n"));
-    body.push_str(&format!(
-        "description: Snapshot of native TaskList for {proj_name} — kept in sync by sentinel `task_persist` hook on TaskCreated/TaskCompleted/Stop. {open} open, {ip} in progress.\n",
+    writeln!(body, "name: Tasks for {proj_name}").unwrap();
+    writeln!(
+        body,
+        "description: Snapshot of native TaskList for {proj_name} — kept in sync by sentinel `task_persist` hook on TaskCreated/TaskCompleted/Stop. {open} open, {ip} in progress.",
         open = incomplete.len(),
         ip = in_progress,
-    ));
+    ).unwrap();
     body.push_str("type: project\n");
     body.push_str("source: auto\n");
     body.push_str("---\n\n");
-    body.push_str(&format!(
-        "**{open}** open · **{ip}** in progress · **{done}** completed (full state in `tasks.md` at the repo root)\n\n",
+    writeln!(
+        body,
+        "**{open}** open · **{ip}** in progress · **{done}** completed (full state in `tasks.md` at the repo root)\n",
         open = incomplete.len(),
         ip = in_progress,
         done = tasks.len() - incomplete.len(),
-    ));
+    ).unwrap();
 
     if incomplete.is_empty() {
         body.push_str("_No open tasks._\n");
@@ -655,14 +660,14 @@ fn write_memory_summary(
             } else {
                 " "
             };
-            body.push_str(&format!("- [{mark}] **#{}** {}", task.id, task.subject));
+            write!(body, "- [{mark}] **#{}** {}", task.id, task.subject).unwrap();
             if !task.blocked_by.is_empty() {
-                body.push_str(&format!(" _(blocked by {})_", task.blocked_by.join(", ")));
+                write!(body, " _(blocked by {})_", task.blocked_by.join(", ")).unwrap();
             }
             body.push('\n');
         }
         if incomplete.len() > 10 {
-            body.push_str(&format!("- _…and {} more._\n", incomplete.len() - 10));
+            writeln!(body, "- _…and {} more._", incomplete.len() - 10).unwrap();
         }
     }
 

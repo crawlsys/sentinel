@@ -87,8 +87,7 @@ impl JudgeTrustTier {
     #[must_use]
     pub fn judge_models(self) -> Vec<JudgeModel> {
         match self {
-            Self::Routine => vec![JudgeModel::Kimi],
-            Self::Review | Self::AuditGrade => vec![JudgeModel::Kimi],
+            Self::Routine | Self::Review | Self::AuditGrade => vec![JudgeModel::Kimi],
             Self::Critical => vec![JudgeModel::Kimi, JudgeModel::Sonnet],
             Self::CriticalStrict => {
                 vec![JudgeModel::Kimi, JudgeModel::Sonnet, JudgeModel::Opus]

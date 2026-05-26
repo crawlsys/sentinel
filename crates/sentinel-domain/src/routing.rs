@@ -81,7 +81,7 @@ impl RegexRouter {
     pub fn add_rule(&mut self, rule: RoutingRule) {
         self.rules.push(rule);
         // Keep sorted by priority (highest first)
-        self.rules.sort_by(|a, b| b.priority.cmp(&a.priority));
+        self.rules.sort_by_key(|r| std::cmp::Reverse(r.priority));
     }
 
     /// Route a message — returns best match or None
