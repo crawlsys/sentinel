@@ -29,6 +29,16 @@ interface Props {
    *  sub-line so the operator can see what's being asked without
    *  having to click anything. */
   stuckMeta?: Map<string, StuckMeta>;
+  /** session_ids whose corresponding SentinelSession node has
+   *  session_status of "dormant" or "dead". P3-28: the backend
+   *  returns up to K_SESSIONS=5 sessions of events; when only 2
+   *  are active, the other 3 slots are filled with old/stale
+   *  sessions and dominate the ticker with bare "user prompt"
+   *  rows. Excluding those events surfaces only what's currently
+   *  relevant — operator: "the other 3 should just kind of fall
+   *  off". Stuck/awaiting_user is NOT filtered: those are signal
+   *  even when old. */
+  dormantSessionIds?: Set<string>;
 }
 
 export interface StuckMeta {
@@ -182,7 +192,7 @@ const ACTOR_LABEL: Record<RowActor, string> = {
   user: "operator (you)",
 };
 
-export function EventTicker({ events, onSelectNode, sessionColors, stuckMeta }: Props) {
+export function EventTicker({ events, onSelectNode, sessionColors, stuckMeta, dormantSessionIds }: Props) {
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   // PERF: `now` used to live here and trigger a full list re-render
   // every 5 seconds purely to roll relative timestamps forward. The
@@ -197,7 +207,16 @@ export function EventTicker({ events, onSelectNode, sessionColors, stuckMeta }: 
   const [cacheTick, setCacheTick] = useState(0);
   useEffect(() => subscribeActivityCache(() => setCacheTick((n) => n + 1)), []);
 
-  const rows = useMemo(() => buildRows(events), [events]);
+  // Drop events from dormant/dead sessions BEFORE rollup so the
+  // collapse logic doesn't waste row budget on them.
+  const filteredEvents = useMemo(() => {
+    if (!dormantSessionIds || dormantSessionIds.size === 0) return events;
+    return events.filter((e) => {
+      const sid = typeof e.payload?.session_id === "string" ? (e.payload.session_id as string) : null;
+      return !sid || !dormantSessionIds.has(sid);
+    });
+  }, [events, dormantSessionIds]);
+  const rows = useMemo(() => buildRows(filteredEvents), [filteredEvents]);
   // Augment each row from the activity cache (cheap O(rows) lookup).
   // Recompute on cache updates via the cacheTick dep.
   // Rolled rows (multiple tools) don't get a single-tool augment —
@@ -433,15 +452,28 @@ export function EventTicker({ events, onSelectNode, sessionColors, stuckMeta }: 
                     ×{row.members.length} {isOpen ? "▾" : "▸"}
                   </button>
                 ) : null}
-                <span className="truncate flex-1">
-                  {row.label}
-                  {row.augment ? (
-                    <span className="text-[#6e7681] ml-1 text-[10px]" title={row.augment}>
-                      · {row.augment}
-                    </span>
-                  ) : null}
-                </span>
+                <span className="truncate flex-1">{row.label}</span>
               </div>
+              {/* Singleton augment block (P3-28). Operator screenshot
+                  asked the single-action card to render two-line:
+                    TaskUpdate
+                      task #19 → completed
+                  instead of `TaskUpdate · task #19 → completed`
+                  smashed onto one line. The augment indents under
+                  the label and uses line-clamp-2 so a long Bash
+                  command can span two lines when the row is alone.
+                  Only fires for singletons — rolled rows still get
+                  RolledPreview below, which already lives on its
+                  own lines. */}
+              {row.augment && row.tools.length <= 1 && row.members.length === 1 ? (
+                <div
+                  data-testid="singleton-augment"
+                  className="pl-3 text-[10px] text-[#8b949e] break-words leading-tight line-clamp-2"
+                  title={row.augment}
+                >
+                  {row.augment}
+                </div>
+              ) : null}
               {/* Sub-line gating: render ONLY when there's signal —
                   an outcome (intervention or error), or an unusual
                   event we don't have a friendly label for. Routine

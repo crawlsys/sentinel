@@ -65,9 +65,26 @@ export function SessionConsole({
   const visibleSessionIds = useMemo(() => {
     if (!graph) return [] as string[];
     const out: string[] = [];
+    // Active sessions (have SentinelSession nodes) come first.
     for (const n of graph.nodes) {
       if (n.type !== "SentinelSession") continue;
       const sid = typeof n.data?.session_id === "string" ? (n.data.session_id as string) : null;
+      if (sid && !out.includes(sid)) out.push(sid);
+    }
+    // ALSO include sessions whose events appear in the window even
+    // if they don't have a node — those are older sessions whose
+    // user_input rows would otherwise stay content-less because we
+    // wouldn't warm their activity cache. Without this, the operator
+    // sees bare "user prompt" rows for dormant sessions even after
+    // P3-27 added the prompt cache. Cap to avoid runaway fan-out
+    // on huge windows.
+    const MAX_BACKFILL_SIDS = 12;
+    for (const e of graph.events) {
+      if (out.length >= MAX_BACKFILL_SIDS) break;
+      const sid =
+        typeof e.payload?.session_id === "string"
+          ? (e.payload.session_id as string)
+          : null;
       if (sid && !out.includes(sid)) out.push(sid);
     }
     return out;

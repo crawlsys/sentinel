@@ -289,6 +289,80 @@ describe("EventTicker — P3-24 smarter rollup", () => {
     expect(container.querySelector('[data-testid="ticker-flyout"]')).toBeNull();
   });
 
+  it("events from dormant sessions are filtered out — they don't pad the ticker (P3-28)", () => {
+    // Two active session rows + two stale dormant ones. The
+    // dormant ones should never reach buildRows; we expect ONLY
+    // the two active rows to render.
+    const events: RecentEvent[] = [
+      tcEvent(1, "s-active", "Bash", "tcA"),
+      userPromptEvent(2, "s-dormant"),
+      tcEvent(3, "s-active", "Read", "tcB"),
+      userPromptEvent(4, "s-dormant"),
+    ];
+    const dormant = new Set(["s-dormant"]);
+    const { container } = render(
+      <EventTicker events={events} onSelectNode={() => {}} dormantSessionIds={dormant} />,
+    );
+    const rows = container.querySelectorAll('[data-testid="ticker-rows"] li[data-actor]');
+    // No row for s-dormant.
+    const sessionIds = Array.from(rows).map((r) => r.getAttribute("data-session-id"));
+    expect(sessionIds).not.toContain("s-dormant");
+    expect(sessionIds.filter((s) => s === "s-active").length).toBeGreaterThan(0);
+  });
+
+  it("empty dormantSessionIds set lets ALL events through (no filtering)", () => {
+    const events: RecentEvent[] = [
+      tcEvent(1, "s-a", "Bash", "tcA"),
+      userPromptEvent(2, "s-b"),
+    ];
+    const { container } = render(
+      <EventTicker events={events} onSelectNode={() => {}} dormantSessionIds={new Set()} />,
+    );
+    const sessionIds = Array.from(
+      container.querySelectorAll('[data-testid="ticker-rows"] li[data-actor]'),
+    ).map((r) => r.getAttribute("data-session-id"));
+    expect(sessionIds).toContain("s-a");
+    expect(sessionIds).toContain("s-b");
+  });
+
+  it("singleton row with augment renders TWO-LINE: label on one line, indented preview below (P3-28)", () => {
+    _resetActivityCache();
+    const sessionId = "sess-two-line";
+    const fakeActivity: ActivityResponse = {
+      session_id: sessionId,
+      transcript: "x.jsonl",
+      events: [],
+      segments: [
+        {
+          ts: "2026-05-26T00:00:00",
+          kind: "assistant_turn",
+          label: "TaskUpdate",
+          preview: "",
+          tools: ["TaskUpdate"],
+          tool_calls: [
+            { id: "tc-task", tool: "TaskUpdate", summary: "task #19 → completed" },
+          ],
+          tool_count: 1,
+        },
+      ],
+    };
+    indexActivity(sessionId, fakeActivity);
+    const events: RecentEvent[] = [tcEvent(1, sessionId, "TaskUpdate", "tcOne")];
+    const { container } = render(
+      <EventTicker events={events} onSelectNode={() => {}} />,
+    );
+    // The singleton-augment block (label-below content) is present.
+    const augBlock = container.querySelector('[data-testid="singleton-augment"]');
+    expect(augBlock).not.toBeNull();
+    expect(augBlock!.textContent).toContain("task #19");
+    // The header line should NOT also embed the augment — that'd
+    // be duplication. The header span (truncate flex-1) carries
+    // ONLY the label.
+    const row = container.querySelector('[data-testid="ticker-rows"] li[data-actor]');
+    const headerLabel = row!.querySelector("span.truncate.flex-1");
+    expect(headerLabel?.textContent?.trim()).toBe("TaskUpdate");
+  });
+
   it("user prompt rows surface the actual prompt text from the prompt cache (P3-27)", () => {
     _resetActivityCache();
     const sessionId = "sess-userprompt";

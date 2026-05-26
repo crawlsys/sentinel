@@ -46,6 +46,22 @@ export default function Page() {
 
   const stuck = useMemo(() => stuckSessions(graph), [graph]);
   const sessionColors = useMemo(() => sessionColorMap(graph), [graph]);
+  // Sessions whose node carries a dormant/dead status. Events from
+  // these sessions are filtered out of the ticker so the active
+  // sessions get the airtime they deserve (P3-28).
+  const dormantSessionIds = useMemo(() => {
+    const set = new Set<string>();
+    if (!graph) return set;
+    for (const n of graph.nodes) {
+      if (n.type !== "SentinelSession") continue;
+      const status = n.session_status;
+      if (status === "dormant" || status === "dead") {
+        const sid = typeof n.data?.session_id === "string" ? (n.data.session_id as string) : null;
+        if (sid) set.add(sid);
+      }
+    }
+    return set;
+  }, [graph]);
   const stuckMeta = useMemo(() => {
     const m = new Map<string, import("../components/EventTicker").StuckMeta>();
     for (const n of stuck) {
@@ -155,6 +171,7 @@ export default function Page() {
           onSelectNode={(id, ts) => selectNode(id, ts)}
           sessionColors={sessionColors}
           stuckMeta={stuckMeta}
+          dormantSessionIds={dormantSessionIds}
         />
       </div>
       <SessionConsole
