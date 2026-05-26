@@ -117,7 +117,7 @@ impl RegexRouter {
 
     /// Number of registered rules
     #[must_use]
-    pub fn rule_count(&self) -> usize {
+    pub const fn rule_count(&self) -> usize {
         self.rules.len()
     }
 }

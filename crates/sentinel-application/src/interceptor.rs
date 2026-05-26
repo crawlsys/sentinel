@@ -255,7 +255,7 @@ fn post_exec_cleanup(args: &[String], cwd: &str, code: &ExitCode) {
 /// Tolerates flag ordering: `--force` may appear before or after the path.
 /// Other args (long options like `--quiet`) are accepted and skipped.
 fn parse_worktree_remove_target(args: &[String], cwd: &str) -> Option<PathBuf> {
-    let mut iter = args.iter().peekable();
+    let mut iter = args.iter();
     if iter.next()?.as_str() != "worktree" {
         return None;
     }

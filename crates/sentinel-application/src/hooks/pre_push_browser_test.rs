@@ -193,7 +193,7 @@ fn repo_has_browser_test_config_in(
 /// Check if a repo name matches a project config's name or aliases.
 /// Matches against:
 /// - `name:` frontmatter field (e.g. "name: firefly-pro")
-/// - `aliases:` frontmatter array (e.g. aliases: ["firefly", "crm", "fpcrm"])
+/// - `aliases:` frontmatter array (e.g. aliases: [`firefly`, `crm`, `fpcrm`])
 /// - The filename stem of the project file
 ///
 /// Repo names are matched with normalization: "firefly-pro-crm" matches alias "fpcrm",

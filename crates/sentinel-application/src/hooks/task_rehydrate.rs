@@ -11,6 +11,7 @@
 
 use chrono::Utc;
 use sentinel_domain::events::{HookEvent, HookInput, HookOutput};
+use std::fmt::Write as _;
 use std::path::PathBuf;
 
 use super::{FileSystemPort, HookContext};
@@ -245,15 +246,16 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
             "in_progress" => "~",
             _ => " ",
         };
-        context.push_str(&format!(
+        let _ = write!(
+            context,
             "\n#{} [{status_icon}] {} ({})",
             task.id, task.subject, task.status
-        ));
+        );
         if !task.blocks.is_empty() {
-            context.push_str(&format!(" [blocks: {}]", task.blocks.join(", ")));
+            let _ = write!(context, " [blocks: {}]", task.blocks.join(", "));
         }
         if !task.blocked_by.is_empty() {
-            context.push_str(&format!(" [blocked by: {}]", task.blocked_by.join(", ")));
+            let _ = write!(context, " [blocked by: {}]", task.blocked_by.join(", "));
         }
         // Render metadata inline
         if let Some(meta) = &task.metadata {
@@ -266,7 +268,7 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
                     meta_parts.push(format!("phase={phase}"));
                 }
                 if !meta_parts.is_empty() {
-                    context.push_str(&format!(" [{}]", meta_parts.join(", ")));
+                    let _ = write!(context, " [{}]", meta_parts.join(", "));
                 }
             }
         }
@@ -277,12 +279,13 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
             } else {
                 task.description.clone()
             };
-            context.push_str(&format!("\n  {desc}"));
+            let _ = write!(context, "\n  {desc}");
         }
         // Render checklist progress
         if !task.checklist.is_empty() {
             let done = task.checklist.iter().filter(|c| c.completed).count();
-            context.push_str(&format!(
+            let _ = write!(
+                context,
                 "\n  Checklist ({}/{}): {}",
                 done,
                 task.checklist.len(),
@@ -294,14 +297,15 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
                     })
                     .collect::<Vec<_>>()
                     .join(", ")
-            ));
+            );
         }
     }
 
     if completed_count > 0 {
-        context.push_str(&format!(
+        let _ = write!(
+            context,
             "\n\n({completed_count} completed task(s) from previous session)"
-        ));
+        );
     }
 
     let instruction =

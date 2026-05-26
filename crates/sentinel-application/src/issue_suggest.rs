@@ -196,7 +196,7 @@ fn median_u32(values: &[u32]) -> Option<u32> {
     v.sort_unstable();
     let n = v.len();
     if n.is_multiple_of(2) {
-        Some((v[n / 2 - 1] + v[n / 2]) / 2)
+        Some(u32::midpoint(v[n / 2 - 1], v[n / 2]))
     } else {
         Some(v[n / 2])
     }

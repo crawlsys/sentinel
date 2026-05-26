@@ -339,7 +339,7 @@ fn aggregate_by_project(rows: &[&SessionRow]) -> Vec<ProjectAggregate> {
             }
         })
         .collect();
-    out.sort_by(|a, b| b.total_input_tokens.cmp(&a.total_input_tokens));
+    out.sort_by_key(|b| std::cmp::Reverse(b.total_input_tokens));
     out
 }
 

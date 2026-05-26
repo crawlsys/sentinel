@@ -146,13 +146,14 @@ pub fn aggregate_at(
     summary_path: &Path,
     now: DateTime<Utc>,
 ) -> Result<ChangeFailureSummary> {
+    type Key = (String, String);
+
     let deploys = read_deploys(deploys_path)?;
     let incidents = read_incidents(incidents_path)?;
     let cutoff = now - Duration::days(30);
 
     // Group deploys by (repo, env) within window, retaining timestamps so we
     // can attribute incidents to them.
-    type Key = (String, String);
     let mut deploys_by_key: BTreeMap<Key, Vec<DateTime<Utc>>> = BTreeMap::new();
     for d in &deploys {
         let ts = match DateTime::parse_from_rfc3339(&d.timestamp) {
@@ -281,8 +282,11 @@ fn median(sorted: &[f64]) -> f64 {
     if n == 0 {
         return 0.0;
     }
-    if n.is_multiple_of(2) {
-        (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0
+    #[allow(clippy::manual_is_multiple_of)]
+    if n % 2 == 0 {
+        #[allow(clippy::manual_midpoint)]
+        let mid = (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0;
+        mid
     } else {
         sorted[n / 2]
     }

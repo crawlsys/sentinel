@@ -85,7 +85,7 @@ pub struct EvalAxisScore {
 impl EvalAxisScore {
     /// Construct, clamping `raw` to `[0.0, 1.0]`.
     #[must_use]
-    pub fn new(axis: EvalAxis, raw: f32, weight: f32) -> Self {
+    pub const fn new(axis: EvalAxis, raw: f32, weight: f32) -> Self {
         Self {
             axis,
             raw: raw.clamp(0.0, 1.0),

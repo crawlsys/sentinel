@@ -437,7 +437,7 @@ fn print_report_tasks(entries: &[(String, TaskStatus)], cutoff_days: u64) {
             }
         }
     }
-    orphans.sort_by(|a, b| b.1.cmp(&a.1)); // oldest first
+    orphans.sort_by_key(|b| std::cmp::Reverse(b.1)); // oldest first
 
     println!("Session-tasks audit (cutoff: {cutoff_days} days):");
     println!("  total directories: {}", entries.len());

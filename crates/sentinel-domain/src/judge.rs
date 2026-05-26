@@ -102,7 +102,7 @@ impl JudgeVerdict {
     /// **Attack #127 fix**: Deserialized confidence values may be out of range
     /// (e.g., `-99999.0` or `1e308` from a forged judge response). Clamping
     /// prevents logic bypass via out-of-range confidence values.
-    fn clamp_confidence(c: f64) -> f64 {
+    const fn clamp_confidence(c: f64) -> f64 {
         c.clamp(0.0, 1.0)
     }
 

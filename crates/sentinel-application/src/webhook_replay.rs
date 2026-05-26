@@ -215,7 +215,7 @@ pub fn analyze_events(
     buckets.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.label.cmp(&b.label)));
 
     // Highlights sorted by score desc, keep top 5.
-    highlights.sort_by(|a, b| b.0.cmp(&a.0));
+    highlights.sort_by_key(|b| std::cmp::Reverse(b.0));
     let highlights: Vec<String> = highlights.into_iter().take(5).map(|(_, s)| s).collect();
 
     ReplayResult {

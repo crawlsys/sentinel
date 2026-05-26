@@ -175,7 +175,7 @@ fn read_tasks(fs: &dyn FileSystemPort, dir: &PathBuf) -> Vec<Task> {
                 .unwrap_or_default();
             if !std::path::Path::new(&name)
                 .extension()
-                .map_or(false, |e| e.eq_ignore_ascii_case("json"))
+                .is_some_and(|e| e.eq_ignore_ascii_case("json"))
                 || name.starts_with('.')
             {
                 continue;

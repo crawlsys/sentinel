@@ -370,7 +370,7 @@ fn parse_score(
     ))
 }
 
-fn axis_score(axis: EvalAxis, raw: f32, rubric: &ScoringRubric) -> EvalAxisScore {
+const fn axis_score(axis: EvalAxis, raw: f32, rubric: &ScoringRubric) -> EvalAxisScore {
     EvalAxisScore::new(axis, raw, rubric.weight(axis))
 }
 

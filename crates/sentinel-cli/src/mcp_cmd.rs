@@ -159,7 +159,7 @@ fn session_id_by_tool_use_id(tool_use_id: &str) -> Option<String> {
             transcripts.push((mtime, path, stem));
         }
     }
-    transcripts.sort_by(|a, b| b.0.cmp(&a.0)); // newest first
+    transcripts.sort_by_key(|b| std::cmp::Reverse(b.0)); // newest first
 
     for (_, path, session_id) in transcripts {
         if transcript_contains_tool_use_id(&path, tool_use_id) {
@@ -961,15 +961,17 @@ async fn handle_submit_phase(
     let (judge_model, phase_objectives) = workflow_configs
         .get(&skill)
         .and_then(|wf| wf.phases.iter().find(|p| p.id == phase_id))
-        .map(|phase| {
-            let desc = if phase.description.is_empty() {
-                format!("Complete the {phase_id} phase")
-            } else {
-                phase.description.clone()
-            };
-            (phase.judge, desc)
-        })
-        .unwrap_or((JudgeModel::Sonnet, format!("Complete the {phase_id} phase")));
+        .map_or_else(
+            || (JudgeModel::Sonnet, format!("Complete the {phase_id} phase")),
+            |phase| {
+                let desc = if phase.description.is_empty() {
+                    format!("Complete the {phase_id} phase")
+                } else {
+                    phase.description.clone()
+                };
+                (phase.judge, desc)
+            },
+        );
 
     // Build evidence from the summary + state context
     let evidence = {

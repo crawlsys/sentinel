@@ -9,6 +9,7 @@
 //! 2. The session is NOT already inside a worktree
 //! 3. The user prompt suggests code changes (edit, fix, update, refactor, etc.)
 
+use std::fmt::Write as _;
 use std::path::Path;
 
 use regex::Regex;
@@ -99,11 +100,12 @@ pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
                 .map(|b| format!("  git branch -d {b}"))
                 .collect::<Vec<_>>()
                 .join("\n");
-            msg.push_str(&format!(
+            let _ = write!(
+                msg,
                 "\n\n[Branch Cleanup] {} local `worktree-*` branch(es) merged into main \
                  — safe to delete:\n{cmds}",
                 merged_local.len()
-            ));
+            );
         }
     }
 

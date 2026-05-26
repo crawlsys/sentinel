@@ -80,6 +80,7 @@ fn acquire_lock(jsonl_path: &Path) -> Option<std::fs::File> {
     let lock_path = jsonl_path.with_extension("jsonl.lock");
     let file = std::fs::OpenOptions::new()
         .create(true)
+        .truncate(false)
         .read(true)
         .write(true)
         .open(&lock_path)
@@ -630,9 +631,9 @@ pub fn process_prompt(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
 
     // Re-verify drift is still real (docs might have been updated since detection)
     let cwd = Path::new(cwd_str);
-    let still_drifted: Vec<&DriftEntry> = entries
+    let any_still_drifted = entries
         .iter()
-        .filter(|e| {
+        .any(|e| {
             let doc_path = cwd.join(&e.doc);
             match e.doc.as_str() {
                 "README.md" => {
@@ -648,10 +649,9 @@ pub fn process_prompt(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
                 "CHANGELOG.md" | "BUILDING.md" | "LICENSE" | "SECURITY.md" => !doc_path.exists(),
                 _ => false,
             }
-        })
-        .collect();
+        });
 
-    if still_drifted.is_empty() {
+    if !any_still_drifted {
         // Drift has been resolved — clean up
         resolve_drift_for_cwd(ctx.fs, cwd_str);
         return HookOutput::allow();

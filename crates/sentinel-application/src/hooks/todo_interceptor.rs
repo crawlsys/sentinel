@@ -11,10 +11,12 @@
 //!   ~/.claude/todos/completed.jsonl
 //!   ~/.claude/todos/analytics/quick-stats.json
 
+use std::fmt::Write as _;
+use std::path::PathBuf;
+
 use chrono::Utc;
 use regex::Regex;
 use sentinel_domain::events::{HookInput, HookOutput};
-use std::path::PathBuf;
 
 use super::{FileSystemPort, HookContext};
 
@@ -130,8 +132,10 @@ fn append_todos(fs: &dyn FileSystemPort, path: &PathBuf, todos: &[RichTodo]) {
     let content: String = todos
         .iter()
         .filter_map(|t| serde_json::to_string(t).ok())
-        .map(|s| format!("{s}\n"))
-        .collect();
+        .fold(String::new(), |mut acc, s| {
+            let _ = writeln!(acc, "{s}");
+            acc
+        });
     let _ = fs.append(path, content.as_bytes());
 }
 
@@ -285,7 +289,7 @@ fn handle_task_update(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
 
     if let Some(idx) = idx {
         let mut todo = active_todos.remove(idx);
-        todo.updated_at = timestamp.clone();
+        todo.updated_at.clone_from(&timestamp);
 
         if let Some(subj) = new_subject {
             todo.content = clean_description(subj);

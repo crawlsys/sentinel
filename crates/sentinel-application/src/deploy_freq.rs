@@ -142,15 +142,7 @@ impl DoraTier {
     /// rather classify than refuse to report.
     #[must_use]
     pub fn from_change_failure_rate(rate: f64) -> Self {
-        let r = if !rate.is_finite() {
-            0.0
-        } else if rate < 0.0 {
-            0.0
-        } else if rate > 1.0 {
-            1.0
-        } else {
-            rate
-        };
+        let r = if rate.is_finite() { rate.clamp(0.0, 1.0) } else { 0.0 };
         if r <= 0.15 {
             Self::Elite
         } else if r <= 0.30 {

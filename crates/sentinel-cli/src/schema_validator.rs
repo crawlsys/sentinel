@@ -97,7 +97,7 @@ pub struct SkillReport {
 }
 
 impl SkillReport {
-    pub fn is_clean(&self) -> bool {
+    pub const fn is_clean(&self) -> bool {
         self.dangling_refs.is_empty() && self.suspicious_tools.is_empty()
     }
 }

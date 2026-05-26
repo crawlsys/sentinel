@@ -83,7 +83,7 @@ pub struct VerifyReport {
 
 impl VerifyReport {
     #[must_use]
-    pub fn ok(&self) -> bool {
+    pub const fn ok(&self) -> bool {
         self.failures.is_empty()
     }
 }
@@ -224,7 +224,7 @@ pub fn run_verify(opts: VerifyOptions) -> Result<VerifyReport> {
 
     // Default strict to true if any entry is signed AND we have a key.
     let has_signed = manifest.entries.iter().any(|e| e.signature.is_some());
-    let strict = opts.strict.unwrap_or(has_signed && verifying.is_some());
+    let strict = opts.strict.unwrap_or_else(|| has_signed && verifying.is_some());
 
     let mut report = VerifyReport::default();
     let steps_dir = opts.config_dir.join("steps");

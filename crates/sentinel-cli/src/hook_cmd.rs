@@ -140,7 +140,7 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
             sentinel_infrastructure::config::load_skill_steps(&config_dir, skill)
                 .ok()
                 .flatten()
-                .map(|steps| [(skill.to_string(), steps)].into_iter().collect())
+                .map(|steps| std::iter::once((skill.to_string(), steps)).collect())
         })
         .unwrap_or_default();
 

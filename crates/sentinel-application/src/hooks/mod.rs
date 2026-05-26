@@ -126,7 +126,11 @@ pub fn project_hash(cwd: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(canonical.as_bytes());
     let result = hasher.finalize();
-    result[..4].iter().map(|b| format!("{b:02x}")).collect()
+    use std::fmt::Write as _;
+    result[..4].iter().fold(String::new(), |mut acc, b| {
+        let _ = write!(acc, "{b:02x}");
+        acc
+    })
 }
 
 /// Return `<home>/.claude/sentinel/metrics`.

@@ -4,6 +4,8 @@
 //! Pure AI classification — no regex patterns. Opus handles slash commands,
 //! natural language, typos, and everything in between.
 
+use std::fmt::Write as _;
+
 use sentinel_domain::events::{HookEvent, HookInput, HookOutput};
 
 use super::FileSystemPort;
@@ -76,8 +78,10 @@ pub(crate) fn pending_skill_state_path(
     hasher.update(session_id.as_bytes());
     let h: String = hasher.finalize()[..6]
         .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect();
+        .fold(String::new(), |mut s, b| {
+            let _ = write!(s, "{b:02x}");
+            s
+        });
     Some(dir.join(format!("skill-pending-{h}.json")))
 }
 
@@ -189,10 +193,7 @@ fn strip_hook_context(prompt: &str) -> String {
     // Remove all <system-reminder>...</system-reminder> blocks (multi-line).
     let mut buf = String::with_capacity(prompt.len());
     let mut rest = prompt;
-    loop {
-        let Some(start) = rest.find("<system-reminder>") else {
-            break;
-        };
+    while let Some(start) = rest.find("<system-reminder>") {
         buf.push_str(&rest[..start]);
         let after = &rest[start + "<system-reminder>".len()..];
         if let Some(end) = after.find("</system-reminder>") {
@@ -208,10 +209,7 @@ fn strip_hook_context(prompt: &str) -> String {
     let with_reminders_stripped = buf.clone();
     let mut buf2 = String::with_capacity(with_reminders_stripped.len());
     let mut rest = with_reminders_stripped.as_str();
-    loop {
-        let Some(start) = rest.find("<channel ").or_else(|| rest.find("<channel>")) else {
-            break;
-        };
+    while let Some(start) = rest.find("<channel ").or_else(|| rest.find("<channel>")) {
         buf2.push_str(&rest[..start]);
         let after = &rest[start..];
         if let Some(end) = after.find("</channel>") {

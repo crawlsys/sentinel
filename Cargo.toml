@@ -16,7 +16,7 @@ edition = "2021"
 authors = ["Gary Somerhalder"]
 license = "MIT"
 repository = "https://github.com/garysomerhalder/sentinel"
-rust-version = "1.84"
+rust-version = "1.87"
 
 [workspace.dependencies]
 # Internal crates
@@ -155,6 +155,14 @@ implicit_hasher = "allow"
 return_self_not_must_use = "allow"
 type_complexity = "allow"
 zero_sized_map_values = "allow"
+# Final style/nursery batch — taste-level, left explicit by choice.
+items_after_statements = "allow"               # local `use`/`const` next to its use site reads fine
+case_sensitive_file_extension_comparisons = "allow"  # several sites compare non-path tokens, not extensions
+missing_const_for_fn = "allow"                 # nursery; not const-promoting fns that may gain logic
+match_same_arms = "allow"                      # distinct arms kept separate for future divergence
+unreadable_literal = "allow"                   # a few hashes/ids read fine without separators
+default_trait_access = "allow"
+field_reassign_with_default = "allow"
 
 [profile.release]
 opt-level = 3

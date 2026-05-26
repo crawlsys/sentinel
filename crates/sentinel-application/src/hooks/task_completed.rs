@@ -4,6 +4,8 @@
 //! their work before marking it done. This is the team-level equivalent
 //! of the `verification_gate` hook.
 
+use std::fmt::Write as _;
+
 use sentinel_domain::events::{HookEvent, HookInput, HookOutput};
 
 /// Extract a Linear issue ID from a task subject containing `@linear:{ID}`.
@@ -90,7 +92,8 @@ pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
                 .filter_map(|item| item.get("text").and_then(|v| v.as_str()))
                 .collect();
             if !incomplete.is_empty() {
-                context.push_str(&format!(
+                let _ = write!(
+                    context,
                     "\n\n⚠ [Checklist Warning] {} of {} checklist items are NOT completed:\n{}",
                     incomplete.len(),
                     checklist.len(),
@@ -99,14 +102,15 @@ pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
                         .map(|t| format!("  - [ ] {t}"))
                         .collect::<Vec<_>>()
                         .join("\n")
-                ));
+                );
             }
         }
     }
 
     // If task is bound to a Linear issue, append sync instructions
     if let Some(linear_id) = extract_linear_id(task_subject) {
-        context.push_str(&format!(
+        let _ = write!(
+            context,
             "\n\n\
              [Linear Sync] Task is bound to Linear issue {linear_id}.\n\
              After verifying the task is complete:\n\
@@ -114,7 +118,7 @@ pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
              2. Check if ALL tasks with @linear:{linear_id} are now completed (use TaskList)\n\
              3. If all tasks done → transition the Linear issue to the next workflow state\n\
              4. If tasks remain → note progress in the comment (e.g., \"3/5 tasks complete\")"
-        ));
+        );
     }
 
     // Emit channel event for real-time push notification

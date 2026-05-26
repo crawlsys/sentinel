@@ -13,6 +13,7 @@
 //!     computed over `{type}:{session_id}:{timestamp}` with a secret salt.
 //!     A simple `touch` produces an empty/invalid file that fails verification.
 
+use std::fmt::Write as _;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -65,7 +66,10 @@ fn sha256_hash(input: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(input.as_bytes());
     let result = hasher.finalize();
-    result.iter().take(16).map(|b| format!("{b:02x}")).collect()
+    result.iter().take(16).fold(String::new(), |mut s, b| {
+        let _ = write!(s, "{b:02x}");
+        s
+    })
 }
 
 /// Compute HMAC-like signature for override content.
@@ -81,7 +85,10 @@ fn compute_override_sig(override_type: &str, session_id: &str, timestamp: u64) -
     hasher.update(b":");
     hasher.update(timestamp.to_string().as_bytes());
     let result = hasher.finalize();
-    result.iter().map(|b| format!("{b:02x}")).collect()
+    result.iter().fold(String::new(), |mut s, b| {
+        let _ = write!(s, "{b:02x}");
+        s
+    })
 }
 
 /// Verify an override file's content is a valid signed token.

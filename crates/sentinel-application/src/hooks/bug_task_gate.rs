@@ -11,7 +11,7 @@
 //!   - Patterns must appear in `tool_result` (`PostToolUse`), not chat text.
 //!   - Only three high-confidence patterns trigger: `test result: FAILED`,
 //!     `error[E0000]` codes, and Rust `panicked at`.
-//! False positives nag the user; missed signals are recoverable.
+//!   - False positives nag the user; missed signals are recoverable.
 //!
 //! State file: `~/.claude/sentinel/state/pending-bug-{repo_hash}.json`.
 //! TTL: 10 minutes — bug signals are time-sensitive.
@@ -74,8 +74,7 @@ fn repo_hash(repo_root: &str) -> String {
     hasher.update(repo_root.as_bytes());
     hasher.finalize()[..4]
         .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
+        .fold(String::new(), |mut s, b| { use std::fmt::Write; write!(s, "{b:02x}").unwrap(); s })
 }
 
 fn state_file(fs: &dyn FileSystemPort, repo_root: &str) -> Option<PathBuf> {

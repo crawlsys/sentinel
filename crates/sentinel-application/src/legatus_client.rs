@@ -367,8 +367,8 @@ pub fn classify_outcome(
     }
     let denied_tools: Vec<&str> = signals
         .iter()
-        .filter_map(|s| match s {
-            TurnSignal::PermissionDenied { tool } => Some(tool.as_str()),
+        .map(|s| match s {
+            TurnSignal::PermissionDenied { tool } => tool.as_str(),
         })
         .collect();
     if !denied_tools.is_empty() {
@@ -490,13 +490,14 @@ pub fn consume_catastrophic_approval(session_id: &str, action_class: &str) -> bo
 /// Minimal percent-encoder for path segments. Encodes any byte
 /// that isn't an unreserved character per RFC 3986 §2.3.
 fn percent_encode_path(s: &str) -> String {
+    use std::fmt::Write as _;
     const UNRESERVED: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~";
     let mut out = String::with_capacity(s.len());
     for &b in s.as_bytes() {
         if UNRESERVED.contains(&b) {
             out.push(b as char);
         } else {
-            out.push_str(&format!("%{b:02X}"));
+            let _ = write!(out, "%{b:02X}");
         }
     }
     out

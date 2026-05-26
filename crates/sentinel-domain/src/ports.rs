@@ -888,7 +888,7 @@ pub struct SpecChallengeScore {
 impl SpecChallengeScore {
     /// Construct, clamping every axis to `[0.0, 1.0]`.
     #[must_use]
-    pub fn new(
+    pub const fn new(
         assumptions: f32,
         gaps: f32,
         ambiguities: f32,

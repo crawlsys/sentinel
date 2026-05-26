@@ -310,7 +310,7 @@ pub fn parse_frontmatter(content: &str) -> BTreeMap<String, String> {
 }
 
 /// Extract `@use` dependencies from SKILL.md content.
-/// Only matches `@use` in ````skills` fenced code blocks.
+/// Only matches `@use` in `` ```skills `` fenced code blocks.
 pub fn extract_dependencies(content: &str) -> Vec<SkillDependency> {
     let normalized = content.replace("\r\n", "\n");
     let mut deps = Vec::new();

@@ -8,6 +8,7 @@
 //! - `git push` to a branch (not main) → check CI results
 //! - `git merge` to main → verify push + changelog
 
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use sentinel_domain::events::{HookEvent, HookInput, HookOutput};
@@ -117,11 +118,12 @@ pub fn process(input: &HookInput) -> HookOutput {
              `git push origin --delete <branch>` if the branch was pushed to origin"
         );
         if let Some(branch) = extract_worktree_branch_name(cmd) {
-            msg.push_str(&format!(
+            let _ = write!(
+                msg,
                 "\n\nMerged branch: `{branch}` — run:\n  \
                  git branch -d {branch}\n  \
                  git push origin --delete {branch}"
-            ));
+            );
         }
         return HookOutput::inject_context(HookEvent::PostToolUse, msg);
     }

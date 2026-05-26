@@ -207,7 +207,7 @@ impl<T> ChallengeCategory<T> {
     /// True when the category is "filled" — either has items or has
     /// an explicit-none assertion.
     #[must_use]
-    pub fn is_filled(&self) -> bool {
+    pub const fn is_filled(&self) -> bool {
         !self.items.is_empty() || self.explicit_assertion_of_none.is_some()
     }
 }

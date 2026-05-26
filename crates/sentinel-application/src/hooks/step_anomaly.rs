@@ -117,7 +117,7 @@ pub struct StepAnomalyReport {
 impl StepAnomalyReport {
     /// Convenience: returns `true` iff the report contains zero anomalies.
     #[must_use]
-    pub fn is_clean(&self) -> bool {
+    pub const fn is_clean(&self) -> bool {
         self.anomalies.is_empty()
     }
 

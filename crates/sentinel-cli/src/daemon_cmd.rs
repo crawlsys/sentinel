@@ -111,7 +111,11 @@ fn generate_bearer_token() -> String {
         );
         bytes.copy_from_slice(&hasher.finalize());
     }
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+    bytes.iter().fold(String::with_capacity(bytes.len() * 2), |mut s, b| {
+        use std::fmt::Write as _;
+        let _ = write!(s, "{b:02x}");
+        s
+    })
 }
 
 /// Write the bearer token to a file so authorized clients can read it.
@@ -467,6 +471,9 @@ pub struct LegatusRouteState {
     pub connection_status: ConnectionStatus,
 }
 
+// The function spawns a tokio task with `.await` inside the async block, but has
+// no top-level `.await` itself. Keeping `async` so the call site can use `.await?`.
+#[allow(clippy::unused_async)]
 async fn start_legatus_if_configured(
     options: LegatusOptions,
 ) -> Result<Option<LegatusRouteState>> {

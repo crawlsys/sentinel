@@ -12,9 +12,11 @@
 //! client-side scoring helpers (`decay_lambda`, `temporal_score`, shingle
 //! dedup, precompute cache) are all gone.
 
+use std::fmt::Write as _;
+use std::path::PathBuf;
+
 use chrono::Utc;
 use sentinel_domain::events::{HookEvent, HookInput, HookOutput};
-use std::path::PathBuf;
 use tracing::{debug, warn};
 
 use super::{run_async, FileSystemPort, MemoryMcpPort};
@@ -175,10 +177,11 @@ fn render_context(hits: &[UnifiedHit]) -> String {
     let mut out = format!("[Memory] {} relevant atom(s):\n", hits.len());
     for h in hits {
         let short = compact_summary(&h.value, 150);
-        out.push_str(&format!(
+        let _ = write!(
+            out,
             "\n- [{:.2}] **{}/{}={}** ({}):\n  {}\n",
             h.final_score, h.subject, h.predicate, h.value, h.project, short
-        ));
+        );
     }
     out
 }

@@ -230,7 +230,7 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     if let Some(cache) = cache_path(ctx.fs, cwd_str) {
         let _ = ctx
             .fs
-            .create_dir_all(cache.parent().unwrap_or(Path::new(".")));
+            .create_dir_all(cache.parent().unwrap_or_else(|| Path::new(".")));
         let _ = ctx.fs.write(&cache, results.join("\n\n").as_bytes());
     }
 

@@ -661,8 +661,8 @@ fn list_linear_accounts(claude_dir: &Path) -> Vec<String> {
                 if let Ok(content) = fs::read_to_string(&path) {
                     for line in content.lines() {
                         let trimmed = line.trim();
-                        if trimmed.starts_with("linear_account:") {
-                            let acct = trimmed["linear_account:".len()..].trim().trim_matches('"');
+                        if let Some(rest) = trimmed.strip_prefix("linear_account:") {
+                            let acct = rest.trim().trim_matches('"');
                             if !acct.is_empty() && !accounts.contains(&acct.to_string()) {
                                 accounts.push(acct.to_string());
                             }
@@ -725,6 +725,7 @@ fn list_linear_accounts(claude_dir: &Path) -> Vec<String> {
 /// live `TaskList` state. Pair with auto-regenerate hooks on `TaskCreated`
 /// and `TaskCompleted` for continuous sync.
 pub fn render_tasks_section(cwd: &Path) -> String {
+    use std::fmt::Write as FmtWrite;
     let cwd_str = cwd.to_string_lossy();
     let hash = project_hash_for_cwd(&cwd_str);
 
@@ -807,9 +808,7 @@ pub fn render_tasks_section(cwd: &Path) -> String {
         } else {
             blocked_by.join(", ")
         };
-        out.push_str(&format!(
-            "| #{id} | {subject} | {status} | {priority} | {blocked} |\n"
-        ));
+        let _ = writeln!(out, "| #{id} | {subject} | {status} | {priority} | {blocked} |");
     }
     out.push('\n');
     out
@@ -1835,8 +1834,8 @@ fn cache_linear_team_keys(claude_dir: &Path) {
             }
 
             // Also extract issue_prefix: FPCRM
-            if trimmed.starts_with("issue_prefix:") {
-                let prefix = trimmed["issue_prefix:".len()..].trim();
+            if let Some(rest) = trimmed.strip_prefix("issue_prefix:") {
+                let prefix = rest.trim();
                 if !prefix.is_empty() && !keys.contains(&prefix.to_string()) {
                     keys.push(prefix.to_string());
                 }

@@ -227,7 +227,7 @@ fn build_window(
     sen13: Option<&Sen13Summary>,
     now_ts: u64,
 ) -> RoiWindow {
-    let label = window_days.map_or("all-time".to_string(), |d| format!("{d}d"));
+    let label = window_days.map_or_else(|| "all-time".to_string(), |d| format!("{d}d"));
 
     // Filter rows by window.
     let filtered: Vec<&TokenRow> = match window_days {
