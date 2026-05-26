@@ -141,10 +141,13 @@ fn detect_used_memories<'a>(
 /// negative than "contradicted" in the EMA (see
 /// `OutcomeSignal::WeakNegative` vs `StrongNegative`).
 fn record_outcomes_unified(
+    fs: &dyn FileSystemPort,
     memory_mcp: &dyn MemoryMcpPort,
+    session_id: Option<&str>,
     injected: &[InjectedMemory],
     used: &[&InjectedMemory],
     correction_detected: bool,
+    correction_signal: Option<&str>,
 ) {
     let used_ids: std::collections::HashSet<&str> = used.iter().map(|m| m.id.as_str()).collect();
 
@@ -166,6 +169,17 @@ fn record_outcomes_unified(
         };
         outcomes.push((event_id, label));
     }
+
+    // Telemetry: emit a `feedback` event with the per-atom classification so
+    // the end-to-end loop trace shows used/ignored/contradicted ratios. Emitted
+    // before the async move consumes `outcomes`. See crate::memory_telemetry.
+    crate::memory_telemetry::record_feedback(
+        fs,
+        session_id,
+        injected.len(),
+        &outcomes,
+        correction_signal,
+    );
 
     // Fire-and-forget, but NOT under the default 3s budget: this loops one
     // `memory_record_outcome` call per injected atom (up to ~8), and each one
@@ -233,7 +247,15 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     let response = input.last_assistant_message.as_deref().unwrap_or("");
     let used = detect_used_memories(&state.memories, response);
     let correction = state.user_prompt.as_deref().and_then(detect_correction);
-    record_outcomes_unified(ctx.memory_mcp, &state.memories, &used, correction.is_some());
+    record_outcomes_unified(
+        ctx.fs,
+        ctx.memory_mcp,
+        input.session_id.as_deref(),
+        &state.memories,
+        &used,
+        correction.is_some(),
+        correction,
+    );
 
     // Never block
     HookOutput::allow()

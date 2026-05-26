@@ -31,6 +31,7 @@ pub mod judge_enforcement;
 pub mod judge_service;
 pub mod lead_time;
 pub mod legatus_client;
+pub mod memory_telemetry;
 pub mod master_dashboard;
 pub mod mcp_handler;
 pub mod pr_review;

@@ -258,7 +258,40 @@ pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
     }
 
     let cwd = input.cwd.as_deref().unwrap_or(".");
-    if let Some((hits, rendered)) = search_memory_engine(ctx.memory_mcp, prompt, cwd) {
+    let project = project_from_cwd(cwd);
+    let started = std::time::Instant::now();
+    let result = search_memory_engine(ctx.memory_mcp, prompt, cwd);
+    let duration_ms = started.elapsed().as_millis() as u64;
+
+    // Telemetry: emit a `recall` event whether or not anything was surfaced —
+    // a zero-hit recall is itself signal for the end-to-end trace. See
+    // crate::memory_telemetry.
+    let hits_for_telem: Vec<(String, Option<String>, String, f64)> = result
+        .as_ref()
+        .map(|(hits, _)| {
+            hits.iter()
+                .map(|h| {
+                    (
+                        h.atom_id.clone(),
+                        h.event_id.clone(),
+                        format!("{}/{}={}", h.subject, h.predicate, h.value),
+                        h.final_score,
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    crate::memory_telemetry::record_recall(
+        ctx.fs,
+        input.session_id.as_deref(),
+        &project,
+        prompt.len(),
+        result.is_some(),
+        &hits_for_telem,
+        duration_ms,
+    );
+
+    if let Some((hits, rendered)) = result {
         write_injected_state(ctx.fs, &hits, Some(prompt));
         debug!(atoms = hits.len(), "Injecting atoms via memory-mcp");
         HookOutput::inject_context(HookEvent::UserPromptSubmit, &rendered)
