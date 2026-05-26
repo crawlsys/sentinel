@@ -3,11 +3,11 @@
 //!
 //! Exercises the SAME code path `hook_cmd.rs` runs on `PostToolUse`: a
 //! completed step-tool call -> `step_judge::process` -> the real
-//! `MultiModelJudge` adapter -> OpenRouter -> a `Judged` verdict -> the
+//! `MultiModelJudge` adapter -> `OpenRouter` -> a `Judged` verdict -> the
 //! `judge_enforcement::Mode` gate that `submit_step_complete` consults.
 //!
 //! Run:
-//!   OPENROUTER_API_KEY=... cargo test -p sentinel --test e2e_judge_integration \
+//!   `OPENROUTER_API_KEY`=... cargo test -p sentinel --test `e2e_judge_integration` \
 //!     -- --ignored --nocapture
 
 use std::collections::HashMap;

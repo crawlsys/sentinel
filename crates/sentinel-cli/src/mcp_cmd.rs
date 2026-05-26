@@ -1965,7 +1965,7 @@ mod tests {
     /// `isError` flag and the parsed inner data.
     fn extract_data_and_is_error(response: &JsonRpcResponse) -> (serde_json::Value, bool) {
         let result = extract_result(response);
-        let is_error = result.get("isError").and_then(|v| v.as_bool()).unwrap_or(false);
+        let is_error = result.get("isError").and_then(serde_json::Value::as_bool).unwrap_or(false);
         let text = result
             .get("content")
             .and_then(|c| c.as_array())

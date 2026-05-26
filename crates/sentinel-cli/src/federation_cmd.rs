@@ -627,7 +627,7 @@ mod tests {
     use tempfile::tempdir;
 
     /// Build a temp config dir with a `steps/` subdir and write the
-    /// supplied (skill_name, toml_content) pairs. Returns the temp dir
+    /// supplied (`skill_name`, `toml_content`) pairs. Returns the temp dir
     /// (kept alive by the caller via the returned guard).
     fn temp_config(skills: &[(&str, &str)]) -> (tempfile::TempDir, std::path::PathBuf) {
         let dir = tempdir().expect("tempdir");
@@ -715,7 +715,7 @@ id = "claim"
 
     #[test]
     fn compose_lifts_malformed_toml_to_error() {
-        let invalid = r#"this is not valid toml = "#;
+        let invalid = r"this is not valid toml = ";
         let (_guard, path) = temp_config(&[("brokenskill", invalid)]);
         let report = compose(&path).unwrap();
         assert!(!report.ok(), "malformed toml must be an error");

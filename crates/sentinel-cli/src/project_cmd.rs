@@ -778,7 +778,7 @@ mod tests {
         // The default config string must parse — catches typos at compile-bake time.
         let v: serde_json::Value = serde_json::from_str(DEFAULT_CONFIG_JSON).expect("valid JSON");
         assert!(v.is_object());
-        assert_eq!(v.get("version").and_then(|x| x.as_i64()), Some(1));
+        assert_eq!(v.get("version").and_then(serde_json::Value::as_i64), Some(1));
     }
 
     #[test]
@@ -957,7 +957,7 @@ mod tests {
         std::fs::create_dir_all(&lessons).unwrap();
         std::fs::write(lessons.join("L-042.json"), "{}").unwrap();
 
-        run_lesson(Some(repo.clone()), "T".to_string(), None, vec![]).unwrap();
+        run_lesson(Some(repo), "T".to_string(), None, vec![]).unwrap();
         assert!(lessons.join("L-043.json").is_file());
     }
 
@@ -973,7 +973,7 @@ mod tests {
     #[test]
     fn run_lesson_errors_on_empty_title() {
         let tmp = tempfile::tempdir().unwrap();
-        let err = run_lesson(Some(tmp.path().to_path_buf()), "".to_string(), None, vec![]).unwrap_err();
+        let err = run_lesson(Some(tmp.path().to_path_buf()), String::new(), None, vec![]).unwrap_err();
         assert!(err.to_string().contains("title"));
     }
 }

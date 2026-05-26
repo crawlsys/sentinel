@@ -174,7 +174,7 @@ mod tests {
     /// test holding the lock leaves it poisoned, but the env state itself
     /// is still recoverable from the saved `prev`).
     fn lock_env() -> std::sync::MutexGuard<'static, ()> {
-        ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+        ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     #[test]
