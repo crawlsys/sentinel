@@ -90,6 +90,21 @@ export function SessionStrip({ data, selected, onSelect }: Props) {
             {data.displayName}
           </span>
           <span className="text-[#999] text-[10px]">{statusText}</span>
+          {data.sourceHarness ? (
+            <span
+              data-testid="session-strip-harness"
+              data-harness={data.sourceHarness}
+              className="text-[9px] uppercase tracking-wider px-1.5 py-0.5 rounded border"
+              style={{
+                color: harnessColor(data.sourceHarness),
+                borderColor: harnessColor(data.sourceHarness),
+                backgroundColor: harnessColor(data.sourceHarness) + "1A",
+              }}
+              title={`harness: ${data.sourceHarness}`}
+            >
+              {data.sourceHarness}
+            </span>
+          ) : null}
           <span className="ml-auto text-[#999] text-[10px] whitespace-nowrap">
             {formatAge(data.lastActivityAgeS)} · {data.totalEvents} ev
           </span>
@@ -247,4 +262,20 @@ function formatStuckAge(secs: number): string {
   if (secs < 60) return `${Math.round(secs)}s`;
   if (secs < 3600) return `${Math.round(secs / 60)}m`;
   return `${Math.round(secs / 3600)}h`;
+}
+
+/// Per-harness identity color. Distinct from session palette so the
+/// operator can scan-filter by harness independent of session colour.
+/// claude=info-blue (the canonical home harness), codex=warning-amber
+/// (OpenAI), opencode=purple, qwen=teal (Alibaba), gemini=success-green
+/// (Google). Unknown harnesses fall through to text-secondary.
+function harnessColor(h: string): string {
+  switch (h) {
+    case "claude":   return "#5B9BF6";
+    case "codex":    return "#D4A843";
+    case "opencode": return "#bc8cff";
+    case "qwen":     return "#4FB3B3";
+    case "gemini":   return "#4A9E5C";
+    default:         return "#999999";
+  }
 }

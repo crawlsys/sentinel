@@ -25,6 +25,10 @@ export interface SessionStripData {
   /** Hex colour from the session palette. */
   color: string;
   status: string | null;
+  /** Which harness produced this session — claude / codex / opencode
+   *  / qwen / gemini. Sourced from SentinelSession.data.source_harness
+   *  set by sentinel_bridge.py during ingestion. Null = unknown. */
+  sourceHarness: string | null;
   /** Seconds since the session's last activity. Null when unknown. */
   lastActivityAgeS: number | null;
   /** Stuck context when the session is awaiting_user past the
@@ -156,6 +160,7 @@ export function buildSessionStrips(
     const name = opts.names?.get(sid) ?? null;
     const shortSid = sid.slice(0, 8);
     const displayName = name && name.length > 0 ? `${name} · s:${shortSid}` : `s:${shortSid}`;
+    const sourceHarness = (node?.data?.source_harness as string | undefined) ?? null;
 
     out.push({
       sessionId: sid,
@@ -163,6 +168,7 @@ export function buildSessionStrips(
       shortSid,
       color,
       status,
+      sourceHarness,
       lastActivityAgeS,
       stuck,
       rows,
@@ -187,6 +193,7 @@ export function buildSessionStrips(
         shortSid: sid.slice(0, 8),
         color: opts.colors.get(sid) ?? "#6e7681",
         status: node?.session_status ?? "awaiting_user",
+        sourceHarness: (node?.data?.source_harness as string | undefined) ?? null,
         lastActivityAgeS: node?.last_activity_age_s ?? null,
         stuck: opts.stuck.get(sid) ?? null,
         rows: [],

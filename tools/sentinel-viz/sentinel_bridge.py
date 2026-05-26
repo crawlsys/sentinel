@@ -40,6 +40,7 @@ METRICS_DIRS = [
     Path.home() / ".codex/sentinel/metrics",           # codex rollout shim
     Path.home() / ".opencode/sentinel/metrics",        # opencode log shim
     Path.home() / ".qwen/sentinel/metrics",            # qwen chat shim
+    Path.home() / ".gemini/sentinel/metrics",          # gemini cli shim
 ]
 HOOK_INVOCATIONS_PATHS = [d / "hook-invocations.jsonl" for d in METRICS_DIRS]
 SESSIONS_JSONL_PATHS   = [d / "sessions.jsonl"         for d in METRICS_DIRS]
@@ -107,6 +108,10 @@ def _ingest_sessions(graph: ag.Graph, sessions: list[dict]) -> dict[str, str]:
                 "cwd": s.get("cwd", ""),
                 "platform": s.get("platform", ""),
                 "started_at": s.get("ts", ""),
+                # Only the native Claude path writes sessions.jsonl
+                # records; per-harness shims seed their sessions via
+                # the hook-invocations path. Tag accordingly.
+                "source_harness": "claude",
             },
             actor="sentinel_bridge",
         )
@@ -177,6 +182,10 @@ def _ingest_hooks(
         added += 1
 
         sid = h.get("session_id", "unknown")
+        # source_harness is set by the per-harness shims (codex_shim,
+        # opencode_shim, qwen_shim, gemini_shim). Native Claude hooks
+        # don't set it — treat empty as "claude" for display.
+        harness = h.get("source_harness", "") or "claude"
 
         # Ensure we have a session object (create stub if not seen in sessions.jsonl)
         if sid not in session_map:
@@ -184,9 +193,12 @@ def _ingest_hooks(
                 type="SentinelSession",
                 data={
                     "session_id": sid,
-                    "cwd": "",
+                    "cwd": h.get("repo_root", ""),
                     "platform": "",
                     "started_at": "",
+                    # Tag the session with its harness so the UI can
+                    # surface a per-harness chip on each strip.
+                    "source_harness": harness,
                 },
                 actor="sentinel_bridge",
             )
@@ -203,6 +215,7 @@ def _ingest_hooks(
                 "duration_us": h.get("duration_us", 0),
                 "repo_root": h.get("repo_root", ""),
                 "ts": h.get("ts", ""),
+                "source_harness": harness,
             },
             actor="sentinel_bridge",
         )
