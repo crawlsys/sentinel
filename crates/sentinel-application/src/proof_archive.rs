@@ -110,6 +110,45 @@ fn index_path(home: &Path) -> PathBuf {
     proofs_dir(home).join("index.jsonl")
 }
 
+/// Load every archived [`ProofChain`] for `skill` across all prior sessions.
+///
+/// Reads the full `<session>__<skill>.json` records (not the index summaries),
+/// so callers get the complete `entries` — e.g. `step_anomaly` comparing the
+/// current run against the historical distribution of prior runs of a step.
+/// Missing dir / unreadable / wrong-schema / wrong-skill files are skipped;
+/// the result is best-effort (an empty Vec on a cold machine is correct, not
+/// an error). Chains are returned in filesystem-listing order.
+#[must_use]
+pub fn read_chains_for_skill(fs: &dyn FileSystemPort, home: &Path, skill: &str) -> Vec<ProofChain> {
+    let safe_skill = skill.replace(['/', '\\', ':'], "_");
+    let suffix = format!("__{safe_skill}.json");
+    let Ok(entries) = fs.read_dir(&proofs_dir(home)) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for path in entries {
+        let is_match = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.ends_with(&suffix));
+        if !is_match {
+            continue;
+        }
+        let Ok(content) = fs.read_to_string(&path) else {
+            continue;
+        };
+        if let Ok(record) = serde_json::from_str::<ArchivedChainRecord>(&content) {
+            // Only honor schemas we understand (today: v1). Belt-and-braces
+            // double-check the chain's own skill matches, in case of a
+            // filename collision after sanitisation.
+            if record.schema_version <= SCHEMA_VERSION && record.chain.skill == skill {
+                out.push(record.chain);
+            }
+        }
+    }
+    out
+}
+
 /// Build the summary line for a chain at archive time.
 fn summarize(chain: &ProofChain) -> ArchivedChainSummary {
     let step_entries: Vec<&sentinel_domain::step_proof::StepProof> = chain
@@ -424,6 +463,34 @@ mod tests {
         assert_eq!(summary.phase_count, 1);
         assert!(summary.all_sufficient);
         assert!(summary.step_sequence.is_empty());
+    }
+
+    #[test]
+    fn read_chains_for_skill_round_trips_archived_chains() {
+        let _g = ENV_LOCK.lock();
+        let tmp = tempfile::tempdir().unwrap();
+        let fs = ScopedHomeFs {
+            home: tmp.path().to_path_buf(),
+        };
+        // Two prior sessions of `linear`, one of `git`.
+        archive_chains(&build_state("sess-a", "linear"), &fs, tmp.path()).unwrap();
+        archive_chains(&build_state("sess-b", "linear"), &fs, tmp.path()).unwrap();
+        archive_chains(&build_state("sess-c", "git"), &fs, tmp.path()).unwrap();
+
+        let linear = read_chains_for_skill(&fs, tmp.path(), "linear");
+        assert_eq!(linear.len(), 2, "two archived linear chains expected");
+        assert!(linear.iter().all(|c| c.skill == "linear"));
+
+        let git = read_chains_for_skill(&fs, tmp.path(), "git");
+        assert_eq!(git.len(), 1);
+
+        // Unknown skill / cold machine → empty, not an error.
+        assert!(read_chains_for_skill(&fs, tmp.path(), "deploy").is_empty());
+        let cold = tempfile::tempdir().unwrap();
+        let cold_fs = ScopedHomeFs {
+            home: cold.path().to_path_buf(),
+        };
+        assert!(read_chains_for_skill(&cold_fs, cold.path(), "linear").is_empty());
     }
 
     #[test]

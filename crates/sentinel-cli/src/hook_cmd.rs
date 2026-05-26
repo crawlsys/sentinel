@@ -1716,17 +1716,28 @@ async fn handle_post_tool_use(
                 // PostToolUse never blocks (the proof chain is the enforcement
                 // substrate); anomalies surface as context for the model.
                 //
-                // History is the live session's ProofChain for this skill
-                // (intra-session distribution). First run = no chain yet =>
-                // empty history => detectors don't fire. Cross-session history
-                // (proof archive) is a follow-up. Duration isn't exposed at this
-                // site yet, so duration-based detectors stay quiet (0).
-                let empty_history =
+                // History = this session's live chain for the skill PLUS every
+                // archived cross-session chain for the same skill (the full
+                // historical distribution). Merged into one ProofChain so the
+                // detectors see the widest baseline; empty on a cold machine
+                // (no archive, no live chain) => detectors stay quiet. Duration
+                // is still 0 here (see #58 — the step isn't sealed at this
+                // PostToolUse site, so no duration_ms exists yet).
+                let mut history =
                     sentinel_domain::proof::ProofChain::new(skill.clone(), String::new());
-                let history = state.proof_chains.get(skill).unwrap_or(&empty_history);
+                if let Some(live) = state.proof_chains.get(skill) {
+                    history.entries.extend(live.entries.iter().cloned());
+                }
+                if let Some(home) = dirs::home_dir() {
+                    for archived in sentinel_application::proof_archive::read_chains_for_skill(
+                        ctx.fs, &home, skill,
+                    ) {
+                        history.entries.extend(archived.entries);
+                    }
+                }
                 let detectors = hooks::step_anomaly::default_detectors();
                 let anomaly_report = hooks::step_anomaly::run_detectors(
-                    &detectors, skill, phase_id, step_id, evidence, 0, history,
+                    &detectors, skill, phase_id, step_id, evidence, 0, &history,
                 );
                 if !anomaly_report.is_clean() {
                     let lines: Vec<String> = anomaly_report
