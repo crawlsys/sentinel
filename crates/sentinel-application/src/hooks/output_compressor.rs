@@ -44,11 +44,35 @@ pub fn should_compress(command: &str, bypass: bool) -> bool {
 }
 
 /// Build the rewritten command that pipes the original through the compressor.
-/// The original command is passed verbatim after `--` so its own quoting /
-/// chaining (`cd … && cargo test`) is preserved as a single shell string.
+///
+/// The original command is wrapped in a **single-quoted** argument so the outer
+/// shell (the harness's Bash tool) hands it to `sentinel compress` as ONE token.
+/// Without quoting, a compound command like `cd /repo && cargo test` is split by
+/// the outer shell at the top-level `&&` into `(sentinel compress -- cd /repo)
+/// && (cargo test)` — so only `cd /repo` reaches the compressor and `cargo test`
+/// runs separately, un-compressed, in the wrong directory. `compress_cmd::run`
+/// then re-runs the single quoted string through its own inner shell, where the
+/// `&&` / pipes / redirects / env-prefixes all apply correctly.
 #[must_use]
 pub fn wrap_command(command: &str) -> String {
-    format!("sentinel compress -- {command}")
+    format!("sentinel compress -- {}", shell_single_quote(command))
+}
+
+/// POSIX single-quote a string so it survives the outer shell as one argument.
+/// Embedded single quotes are escaped via the standard `'\''` idiom (close the
+/// quote, emit an escaped literal quote, reopen).
+fn shell_single_quote(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('\'');
+    for ch in s.chars() {
+        if ch == '\'' {
+            out.push_str("'\\''");
+        } else {
+            out.push(ch);
+        }
+    }
+    out.push('\'');
+    out
 }
 
 /// Process a `PreToolUse` event. Rewrites a compressible Bash command's input
@@ -115,10 +139,22 @@ mod tests {
     }
 
     #[test]
-    fn wrap_preserves_original_command_verbatim() {
+    fn wrap_single_quotes_compound_command_so_outer_shell_keeps_it_intact() {
+        // The whole command must be one single-quoted token, otherwise the
+        // outer shell splits at `&&` and only `cd /repo` reaches the compressor.
         assert_eq!(
             wrap_command("cd /repo && cargo test -p foo"),
-            "sentinel compress -- cd /repo && cargo test -p foo"
+            "sentinel compress -- 'cd /repo && cargo test -p foo'"
+        );
+    }
+
+    #[test]
+    fn wrap_escapes_embedded_single_quotes() {
+        // `grep 'foo bar' src` → the inner quotes must be escaped via '\'' so
+        // the outer shell still sees a single argument.
+        assert_eq!(
+            wrap_command("grep 'foo bar' src"),
+            r"sentinel compress -- 'grep '\''foo bar'\'' src'"
         );
     }
 
@@ -138,7 +174,7 @@ mod tests {
         let updated = hso.updated_input.expect("updated_input");
         assert_eq!(
             updated.get("command").and_then(|c| c.as_str()),
-            Some("sentinel compress -- cargo test --workspace")
+            Some("sentinel compress -- 'cargo test --workspace'")
         );
         // Other fields preserved.
         assert_eq!(updated.get("timeout").and_then(serde_json::Value::as_u64), Some(5000));
