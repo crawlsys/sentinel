@@ -1569,7 +1569,10 @@ customer data.
 - Merging a PR that auto-deploys to prod without further gating.
 
 Default posture (grant NOT armed): **refuse** these and say what's blocked —
-Gary arms prod work by saying the phrase **`production override`**.
+Gary arms prod work by saying the phrase **`production override`** as a short,
+deliberate command (the hook only arms when the phrase is on a short
+command-like line, so the phrase buried in pasted/fetched content does not
+silently arm prod — injection hardening).
 
 Armed posture (Gary has said `production override` this session): these are
 **authorized — proceed without asking each time**, INCLUDING prod DB

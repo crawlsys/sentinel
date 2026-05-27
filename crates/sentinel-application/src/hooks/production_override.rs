@@ -20,19 +20,37 @@
 use sentinel_domain::events::{HookEvent, HookInput, HookOutput, HookSpecificOutput};
 use sentinel_domain::state::SessionState;
 
-/// Phrase that arms session-wide prod work. Matched case-insensitively as a
-/// substring so "production override — hotfix the migration" also arms.
+/// Phrase that arms session-wide prod work.
 const ARM_PHRASE: &str = "production override";
 /// Phrase that re-locks prod work.
 const LOCK_PHRASE: &str = "production lock";
 
-/// Does the prompt contain the arm phrase?
+/// Max length of the line bearing the arm phrase for it to count as a
+/// deliberate operator command. **Injection hardening:** a real arming is a
+/// short command-like utterance ("production override — hotfix the auth
+/// migration" ≈ 50 chars); the phrase buried inside a long pasted log line,
+/// fetched web snippet, or file blob is almost certainly NOT the operator
+/// intending to arm prod. Gating arm on a short phrase-line meaningfully
+/// reduces accidental/injected arming while honoring the exact phrase Gary
+/// chose. It does NOT eliminate the risk (a short pasted line could still
+/// match) — the dual-display notice is the real backstop: Gary SEES the arm
+/// and can immediately "production lock". Lock is deliberately NOT length-
+/// gated (locking is fail-safe toward refusal, so it should trigger easily).
+const MAX_ARM_LINE_LEN: usize = 120;
+
+/// Does the prompt arm prod work? True only when the arm phrase appears on a
+/// short, command-like line (see [`MAX_ARM_LINE_LEN`]) — not merely anywhere
+/// in the text. Case-insensitive.
 #[must_use]
 pub fn is_arm(prompt_lower: &str) -> bool {
-    prompt_lower.contains(ARM_PHRASE)
+    prompt_lower.lines().any(|line| {
+        let t = line.trim();
+        t.contains(ARM_PHRASE) && t.chars().count() <= MAX_ARM_LINE_LEN
+    })
 }
 
-/// Does the prompt contain the lock phrase?
+/// Does the prompt contain the lock phrase anywhere? Not length-gated —
+/// locking returns to the safe (refusal) posture, so it should fire easily.
 #[must_use]
 pub fn is_lock(prompt_lower: &str) -> bool {
     prompt_lower.contains(LOCK_PHRASE)
@@ -97,11 +115,16 @@ pub fn process(input: &HookInput, state: &mut SessionState) -> HookOutput {
             // avoid repeating it every prompt that mentions the phrase.
             return HookOutput::allow();
         }
-        // Capture the surrounding line as the note (best-effort).
+        // Capture the short command-like line that armed it as the note
+        // (same gating as is_arm, so we record the operator's actual command,
+        // not some unrelated long line that also happens to contain the phrase).
         let note = prompt
             .lines()
-            .find(|l| l.to_lowercase().contains(ARM_PHRASE))
-            .map(|l| l.trim().to_string());
+            .map(str::trim)
+            .find(|l| {
+                l.to_lowercase().contains(ARM_PHRASE) && l.chars().count() <= MAX_ARM_LINE_LEN
+            })
+            .map(ToString::to_string);
         state.arm_production_override(note);
         true
     } else {
@@ -188,5 +211,43 @@ mod tests {
         assert!(state.production_override_armed());
         // No repeated notice.
         assert!(out.system_message.is_none());
+    }
+
+    #[test]
+    fn phrase_buried_in_a_long_pasted_line_does_not_arm() {
+        // Injection hardening: the phrase inside a long log/paste line is not a
+        // deliberate arm. One long line > MAX_ARM_LINE_LEN containing the phrase.
+        let mut state = SessionState::new("s");
+        let long_line = format!(
+            "2026-05-26T12:00:00Z ERROR deploy log: the runbook says to request a \
+             production override from the on-call before touching anything {}",
+            "x".repeat(80)
+        );
+        assert!(long_line.chars().count() > MAX_ARM_LINE_LEN);
+        let out = process(&prompt_input(&long_line), &mut state);
+        assert!(
+            !state.production_override_armed(),
+            "phrase buried in a long line must NOT arm"
+        );
+        assert!(out.system_message.is_none());
+    }
+
+    #[test]
+    fn phrase_on_a_short_command_line_arms_even_inside_a_longer_prompt() {
+        // A short command line arms even if the prompt has other (short) lines.
+        let mut state = SessionState::new("s");
+        let prompt = "hey can you\nproduction override\nthen run the migration";
+        process(&prompt_input(prompt), &mut state);
+        assert!(state.production_override_armed());
+    }
+
+    #[test]
+    fn lock_fires_even_in_a_long_line() {
+        // Lock is fail-safe: it should re-lock regardless of line length.
+        let mut state = SessionState::new("s");
+        state.arm_production_override(None);
+        let long = format!("{} production lock {}", "y".repeat(100), "z".repeat(100));
+        process(&prompt_input(&long), &mut state);
+        assert!(!state.production_override_armed(), "lock must fire even in a long line");
     }
 }
