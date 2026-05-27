@@ -286,4 +286,80 @@ impl CompiledPhaseGraph {
             .await
             .map_err(GraphEngineError::from_graph)
     }
+
+    /// Load the checkpointed state for a session, or initialise a fresh one
+    /// (at `current_phase = Some(0)`) when no checkpoint exists yet.
+    ///
+    /// # Errors
+    /// Returns [`GraphEngineError`] on checkpointer failure.
+    pub async fn load_or_init(&self, skill: &str, session_id: &str) -> Result<PhaseGraphState> {
+        if let Some(existing) = self.load_latest(session_id).await? {
+            return Ok(existing);
+        }
+        let mut fresh = PhaseGraphState::new(skill, session_id, self.phase_ids.clone());
+        fresh.current_phase = Some(0);
+        Ok(fresh)
+    }
+
+    /// Apply a judge verdict for `phase_id` and persist the resulting state as
+    /// a new checkpoint (parent-linked to the prior one, so the history forms
+    /// the time-travel fork tree).
+    ///
+    /// `passed = true` advances to the next phase (or marks the workflow
+    /// complete after the last phase); `passed = false` keeps `current_phase`
+    /// on the failed phase (loop-back). This mirrors [`next_phase_target`] and
+    /// produces the same [`WorkflowState`] transition as the legacy
+    /// `advance_sequential`, so it is a drop-in authority for phase
+    /// progression.
+    ///
+    /// Returns the new state. The semantics of the out-of-process judge gate
+    /// (`LangGraph`'s `interrupt` + resume) are realised here: the phase node is
+    /// paused awaiting a verdict, and this call is the resume that supplies it.
+    ///
+    /// # Errors
+    /// Returns [`GraphEngineError`] if `phase_id` is unknown to this workflow,
+    /// or on checkpointer failure.
+    pub async fn apply_verdict(
+        &self,
+        skill: &str,
+        session_id: &str,
+        phase_id: &str,
+        passed: bool,
+    ) -> Result<PhaseGraphState> {
+        let idx = self
+            .phase_ids
+            .iter()
+            .position(|p| p == phase_id)
+            .ok_or_else(|| GraphEngineError::UnknownPhase {
+                skill: skill.to_string(),
+                phase: phase_id.to_string(),
+            })?;
+
+        let mut state = self.load_or_init(skill, session_id).await?;
+        let verdict = if passed { Verdict::Pass } else { Verdict::Fail };
+        state.last_verdict = verdict;
+
+        if passed {
+            if !state.completed_phases.iter().any(|p| p == phase_id) {
+                state.completed_phases.push(phase_id.to_string());
+            }
+            let target = next_phase_target(verdict, idx, &self.phase_ids);
+            if target.as_str() == END {
+                state.complete = true;
+                state.current_phase = Some(self.phase_ids.len());
+            } else if let Some(next_idx) = self.phase_ids.iter().position(|p| *p == target) {
+                state.current_phase = Some(next_idx);
+            }
+        } else {
+            // Loop back: stay on this phase.
+            state.current_phase = Some(idx);
+        }
+
+        self.inner
+            .update_state(session_id, state.clone())
+            .await
+            .map_err(GraphEngineError::from_graph)?;
+
+        Ok(state)
+    }
 }

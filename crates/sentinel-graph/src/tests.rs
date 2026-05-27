@@ -147,3 +147,62 @@ async fn fresh_process_restores_checkpoint() {
         assert_eq!(restored.completed_phases, vec!["claim".to_string()]);
     }
 }
+
+#[tokio::test]
+async fn apply_verdict_pass_advances_and_persists() {
+    let saver = phase_saver(":memory:").await.expect("saver");
+    let graph = compile_skill_graph(&fixture(), saver).expect("compile");
+
+    let s = graph
+        .apply_verdict("linear", "sess-pass", "claim", true)
+        .await
+        .expect("apply pass");
+    assert_eq!(s.completed_phases, vec!["claim".to_string()]);
+    assert_eq!(s.current_phase, Some(1)); // advanced to fetch
+    assert!(!s.complete);
+
+    // Re-load proves it persisted as a checkpoint.
+    let reloaded = graph.load_latest("sess-pass").await.expect("load").expect("present");
+    assert_eq!(reloaded.completed_phases, vec!["claim".to_string()]);
+    assert_eq!(reloaded.current_phase, Some(1));
+}
+
+#[tokio::test]
+async fn apply_verdict_fail_keeps_phase() {
+    let saver = phase_saver(":memory:").await.expect("saver");
+    let graph = compile_skill_graph(&fixture(), saver).expect("compile");
+
+    let s = graph
+        .apply_verdict("linear", "sess-fail", "claim", false)
+        .await
+        .expect("apply fail");
+    assert!(s.completed_phases.is_empty());
+    assert_eq!(s.current_phase, Some(0)); // stayed on claim
+    assert!(!s.complete);
+}
+
+#[tokio::test]
+async fn apply_verdict_pass_on_last_phase_completes() {
+    let saver = phase_saver(":memory:").await.expect("saver");
+    let graph = compile_skill_graph(&fixture(), saver).expect("compile");
+
+    graph.apply_verdict("linear", "s", "claim", true).await.expect("p1");
+    graph.apply_verdict("linear", "s", "fetch", true).await.expect("p2");
+    let s = graph.apply_verdict("linear", "s", "review", true).await.expect("p3");
+
+    assert_eq!(
+        s.completed_phases,
+        vec!["claim".to_string(), "fetch".to_string(), "review".to_string()],
+    );
+    assert!(s.complete);
+}
+
+#[tokio::test]
+async fn apply_verdict_unknown_phase_errors() {
+    let saver = phase_saver(":memory:").await.expect("saver");
+    let graph = compile_skill_graph(&fixture(), saver).expect("compile");
+    assert!(graph
+        .apply_verdict("linear", "s", "nonexistent", true)
+        .await
+        .is_err());
+}

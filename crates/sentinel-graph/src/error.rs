@@ -9,6 +9,15 @@ pub enum GraphEngineError {
     #[error("workflow '{0}' has no phases")]
     EmptyWorkflow(String),
 
+    /// A verdict was submitted for a phase id not present in the workflow.
+    #[error("phase '{phase}' is not part of skill '{skill}' workflow")]
+    UnknownPhase {
+        /// Skill whose workflow was queried.
+        skill: String,
+        /// The unknown phase id.
+        phase: String,
+    },
+
     /// The sqlite checkpointer could not be initialised.
     #[error("checkpointer error: {0}")]
     Checkpointer(String),
