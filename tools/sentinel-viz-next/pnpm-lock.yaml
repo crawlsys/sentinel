@@ -9,37 +9,37 @@ importers:
   .:
     dependencies:
       '@emotion/react':
-        specifier: ^11.14.0
+        specifier: 11.14.0
         version: 11.14.0(@types/react@19.2.15)(react@19.2.4)
       '@emotion/styled':
-        specifier: ^11.14.1
+        specifier: 11.14.1
         version: 11.14.1(@emotion/react@11.14.0(@types/react@19.2.15)(react@19.2.4))(@types/react@19.2.15)(react@19.2.4)
       '@mui/icons-material':
-        specifier: ^9.0.1
+        specifier: 9.0.1
         version: 9.0.1(@mui/material@9.0.1(@emotion/react@11.14.0(@types/react@19.2.15)(react@19.2.4))(@emotion/styled@11.14.1(@emotion/react@11.14.0(@types/react@19.2.15)(react@19.2.4))(@types/react@19.2.15)(react@19.2.4))(@types/react@19.2.15)(react-dom@19.2.4(react@19.2.4))(react@19.2.4))(@types/react@19.2.15)(react@19.2.4)
       '@mui/material':
-        specifier: ^9.0.1
+        specifier: 9.0.1
         version: 9.0.1(@emotion/react@11.14.0(@types/react@19.2.15)(react@19.2.4))(@emotion/styled@11.14.1(@emotion/react@11.14.0(@types/react@19.2.15)(react@19.2.4))(@types/react@19.2.15)(react@19.2.4))(@types/react@19.2.15)(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
       '@mui/material-nextjs':
-        specifier: ^9.0.1
+        specifier: 9.0.1
         version: 9.0.1(@emotion/cache@11.14.0)(@emotion/react@11.14.0(@types/react@19.2.15)(react@19.2.4))(@types/react@19.2.15)(next@16.2.6(@babel/core@7.29.0)(@playwright/test@1.60.0)(react-dom@19.2.4(react@19.2.4))(react@19.2.4))(react@19.2.4)
       '@tanstack/react-query':
-        specifier: ^5.100.14
+        specifier: 5.100.14
         version: 5.100.14(react@19.2.4)
       d3-force:
-        specifier: ^3.0.0
+        specifier: 3.0.0
         version: 3.0.0
       d3-selection:
-        specifier: ^3.0.0
+        specifier: 3.0.0
         version: 3.0.0
       d3-transition:
-        specifier: ^3.0.1
+        specifier: 3.0.1
         version: 3.0.1(d3-selection@3.0.0)
       d3-zoom:
-        specifier: ^3.0.0
+        specifier: 3.0.0
         version: 3.0.0
       lucide-react:
-        specifier: ^1.16.0
+        specifier: 1.16.0
         version: 1.16.0(react@19.2.4)
       next:
         specifier: 16.2.6
@@ -52,61 +52,61 @@ importers:
         version: 19.2.4(react@19.2.4)
     devDependencies:
       '@playwright/test':
-        specifier: ^1.60.0
+        specifier: 1.60.0
         version: 1.60.0
       '@tailwindcss/postcss':
-        specifier: ^4
+        specifier: 4.3.0
         version: 4.3.0
       '@testing-library/jest-dom':
-        specifier: ^6.9.1
+        specifier: 6.9.1
         version: 6.9.1
       '@testing-library/react':
-        specifier: ^16.3.2
+        specifier: 16.3.2
         version: 16.3.2(@testing-library/dom@10.4.1)(@types/react-dom@19.2.3(@types/react@19.2.15))(@types/react@19.2.15)(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
       '@types/d3-force':
-        specifier: ^3.0.10
+        specifier: 3.0.10
         version: 3.0.10
       '@types/d3-selection':
-        specifier: ^3.0.11
+        specifier: 3.0.11
         version: 3.0.11
       '@types/d3-transition':
-        specifier: ^3.0.9
+        specifier: 3.0.9
         version: 3.0.9
       '@types/d3-zoom':
-        specifier: ^3.0.8
+        specifier: 3.0.8
         version: 3.0.8
       '@types/node':
-        specifier: ^20
+        specifier: 20.19.41
         version: 20.19.41
       '@types/react':
-        specifier: ^19
+        specifier: 19.2.15
         version: 19.2.15
       '@types/react-dom':
-        specifier: ^19
+        specifier: 19.2.3
         version: 19.2.3(@types/react@19.2.15)
       '@vitejs/plugin-react':
-        specifier: ^6.0.2
+        specifier: 6.0.2
         version: 6.0.2(vite@8.0.14(@types/node@20.19.41)(jiti@2.7.0))
       eslint:
-        specifier: ^9
+        specifier: 9.39.4
         version: 9.39.4(jiti@2.7.0)
       eslint-config-next:
         specifier: 16.2.6
         version: 16.2.6(@typescript-eslint/parser@8.59.4(eslint@9.39.4(jiti@2.7.0))(typescript@5.9.3))(eslint@9.39.4(jiti@2.7.0))(typescript@5.9.3)
       happy-dom:
-        specifier: ^20.9.0
+        specifier: 20.9.0
         version: 20.9.0
       jsdom:
-        specifier: ^29.1.1
+        specifier: 29.1.1
         version: 29.1.1
       tailwindcss:
-        specifier: ^4
+        specifier: 4.3.0
         version: 4.3.0
       typescript:
-        specifier: ^5
+        specifier: 5.9.3
         version: 5.9.3
       vitest:
-        specifier: ^4.1.7
+        specifier: 4.1.7
         version: 4.1.7(@types/node@20.19.41)(happy-dom@20.9.0)(jsdom@29.1.1)(vite@8.0.14(@types/node@20.19.41)(jiti@2.7.0))
 
 packages:

@@ -1,3 +1,9 @@
-ignoredBuiltDependencies:
+allowBuilds:
+  sharp: true
+  unrs-resolver: true
+# Allowlist of packages whose install/postinstall scripts may run.
+# Audit each addition: read the package's scripts before adding.
+# Everything else is sandboxed by default (pnpm 11+ behavior).
+onlyBuiltDependencies:
   - sharp
   - unrs-resolver
