@@ -93,6 +93,45 @@ export interface ConfigResponse {
   has_key: boolean;
 }
 
+export interface RollupMember {
+  tool: string;
+  /** Pre-extracted summary line from the activity-cache, or "" when
+   *  the client doesn't have one yet. Server falls back to the bare
+   *  tool name in that case. */
+  summary: string;
+}
+
+export interface RollupSummaryRequest {
+  cache_key: string;
+  session_id: string;
+  members: RollupMember[];
+}
+
+export interface RollupSummaryResponse {
+  cache_key: string;
+  session_id: string;
+  /** 5-10 word blurb, or null when the LLM is unavailable / failed. */
+  summary: string | null;
+  /** Diagnostic — "cache", "llm:<model>", "no-model", "no-members",
+   *  "llm-error". Useful for surfacing why a blurb didn't appear. */
+  source: string;
+  cached: boolean;
+}
+
+export async function fetchRollupSummary(
+  req: RollupSummaryRequest,
+  signal?: AbortSignal,
+): Promise<RollupSummaryResponse> {
+  const res = await fetch(`${apiBase()}/api/rollup-summary`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(req),
+    signal,
+  });
+  if (!res.ok) throw new Error(`rollup-summary: ${res.status}`);
+  return res.json();
+}
+
 export async function fetchConfig(signal?: AbortSignal): Promise<ConfigResponse> {
   const res = await fetch(`${apiBase()}/api/config`, { signal });
   if (!res.ok) throw new Error(`config: ${res.status}`);

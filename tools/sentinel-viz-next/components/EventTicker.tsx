@@ -8,6 +8,11 @@ import {
   lookupUserPrompt,
   subscribe as subscribeActivityCache,
 } from "../adapters/activity-cache";
+import {
+  peek as peekRollupSummary,
+  request as requestRollupSummary,
+  subscribe as subscribeRollupSummary,
+} from "../adapters/rollup-summary-cache";
 import { categoryColor, categoryLabel, tickerTime } from "../domain/format";
 import {
   compactBashCommand,
@@ -655,6 +660,20 @@ export function EventTicker({ events, onSelectNode, sessionColors, stuckMeta, do
               {pinnedKeys.has(row.key) && row.sessionId && stuckMeta?.get(row.sessionId) ? (
                 <StuckReasonLine meta={stuckMeta.get(row.sessionId)!} />
               ) : null}
+              {/* AI summary blurb. Renders above the per-call
+                  preview lines as the prominent context line —
+                  "edited EventTicker.tsx, ran tests, pushed" beats
+                  three raw call lines for at-a-glance scanning.
+                  Fires only at AI_BLURB_MIN_MEMBERS (3+) since
+                  smaller rollups read fine from previews alone.
+                  Cache-backed so re-renders don't re-fetch. */}
+              {row.members.length >= AI_BLURB_MIN_MEMBERS && row.sessionId && !isOpen ? (
+                <AiBlurb
+                  cacheKey={rollupCacheKey(row)}
+                  sessionId={row.sessionId}
+                  members={row.members}
+                />
+              ) : null}
               {/* Rolled rows: render 2-3 inline preview lines so the
                   operator sees WHAT was rolled up without expanding
                   the flyout. Guarded on members.length > 1 — covers
@@ -694,6 +713,90 @@ export function EventTicker({ events, onSelectNode, sessionColors, stuckMeta, do
     </aside>
   );
 }
+
+/// Minimum members before we fire the AI blurb request. Two
+/// reasons for the floor:
+///   1. A 2-member rollup is already legible from its existing
+///      preview lines + label augment; the blurb adds noise more
+///      than signal.
+///   2. Per-rollup LLM cost is real. 3+ members is where the
+///      operator actually starts losing context to the "×N tool"
+///      label alone — that's where the blurb earns its keep.
+const AI_BLURB_MIN_MEMBERS = 3;
+
+/// Stable cache key for a rollup's AI blurb. Combines the
+/// grouping signature with the member count so different cluster
+/// sizes get different cached blurbs (a `×3 Bash` and a `×9 Bash`
+/// on the same session deserve different summaries).
+function rollupCacheKey(row: { sig: string; members: { ts: string }[] }): string {
+  return `${row.sig}|n=${row.members.length}`;
+}
+
+/// AI-summary blurb for an ×N rollup. Mounts → fires a
+/// /api/rollup-summary request via the shared cache adapter,
+/// renders `(summarizing…)` placeholder, swaps in the blurb when
+/// it lands. Subsequent mounts hit the cache and render
+/// synchronously.
+///
+/// Memoised on cacheKey so React doesn't re-fire the effect on
+/// unrelated parent re-renders.
+const AiBlurb = memo(function AiBlurb({
+  cacheKey,
+  sessionId,
+  members,
+}: {
+  cacheKey: string;
+  sessionId: string;
+  members: { tool: string | null; ts: string; toolCallId: string | null }[];
+}) {
+  // Re-render tick — flipped when the shared cache notifies that
+  // a new entry landed. Cheap; only this component subscribes per
+  // mount.
+  const [tick, setTick] = useState(0);
+  useEffect(() => {
+    const unsub = subscribeRollupSummary(() => setTick((t) => t + 1));
+    return () => { unsub(); };
+  }, []);
+  useEffect(() => {
+    // Skip the request when the cache already has it (peek
+    // returns truthy). Map members into the wire shape — pull
+    // each member's activity-cache summary when warm; the server
+    // falls back to bare tool name when empty.
+    if (peekRollupSummary(cacheKey)) return;
+    const wire = members.map((m) => {
+      const tool = m.tool ?? "";
+      if (!tool || !sessionId) return { tool, summary: "" };
+      const tc = lookupActivityCache(sessionId, tool, m.ts);
+      const summary = tc?.summary ? compactSummaryFor(tool, tc.summary) : "";
+      return { tool, summary };
+    });
+    requestRollupSummary(cacheKey, sessionId, wire).catch(() => {
+      /* swallowed — adapter already logs */
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cacheKey, sessionId]);
+
+  const entry = peekRollupSummary(cacheKey);
+  // tick is only here to force re-read of peek() after the cache
+  // notifies. Marked as void so eslint-no-unused-vars stays quiet.
+  void tick;
+
+  const text = entry?.summary ?? null;
+  const placeholder = entry === undefined; // not-yet-responded
+  return (
+    <div
+      data-testid="rollup-blurb"
+      className="pl-3 text-[10px] leading-tight truncate"
+      title={text ?? "AI summary"}
+    >
+      {placeholder ? (
+        <span className="text-[#666] italic">(summarizing…)</span>
+      ) : text ? (
+        <span className="text-[#D4A843]">{text}</span>
+      ) : null}
+    </div>
+  );
+});
 
 /// Tool-aware summary compaction. Different tools have different
 /// data shapes:

@@ -37,6 +37,7 @@ async fn main() -> Result<()> {
     // startup cost is at most ~3s when both probes time out.
     let naming = sentinel_viz_api::naming::NamingState::from_env().await;
     let summary = sentinel_viz_api::summary::SummaryState::from_env().await;
+    let rollup = sentinel_viz_api::rollup_summary::RollupState::from_env().await;
     let state = Arc::new(AppState {
         db_path: db_path.clone(),
         window_limit,
@@ -45,6 +46,7 @@ async fn main() -> Result<()> {
         activity_cache: std::sync::RwLock::new(Vec::new()),
         naming,
         summary,
+        rollup,
     });
 
     let app = sentinel_viz_api::server::router(state);

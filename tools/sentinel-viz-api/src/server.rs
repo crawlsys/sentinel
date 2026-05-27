@@ -15,6 +15,7 @@ use crate::graph::{self, GraphOpts};
 use crate::health;
 use crate::model::{ActivityResponse, GraphResponse};
 use crate::naming::{self, NamingState};
+use crate::rollup_summary::{self, RollupRequest, RollupResponse, RollupState};
 use crate::sse;
 use crate::summary::{self, SummaryKind, SummaryState};
 
@@ -24,6 +25,7 @@ pub struct AppState {
     pub started_at: Instant,
     pub naming: NamingState,
     pub summary: SummaryState,
+    pub rollup: RollupState,
     /// Snapshot cache keyed by opts. Avoids re-scanning 90k events
     /// on every refresh when the store hasn't advanced. Holds at most
     /// a few entries — one per unique (limit, since_secs, include_hooks).
@@ -64,6 +66,7 @@ pub fn router(state: Arc<AppState>) -> axum::Router {
         .route("/api/activity/{session_id}", get(activity_endpoint))
         .route("/api/name-session/{session_id}", get(name_session_endpoint))
         .route("/api/summary/{session_id}", get(summary_endpoint))
+        .route("/api/rollup-summary", axum::routing::post(rollup_summary_endpoint))
         .route("/api/config", get(get_config).post(set_config))
         .route("/api/kpis", get(kpis_endpoint))
         .route("/api/stream", get(sse::stream))
@@ -93,6 +96,13 @@ async fn summary_endpoint(
         .ok_or_else(|| (StatusCode::BAD_REQUEST, "kind must be card|wait|narrative".into()))?;
     let r = summary::summarize(&state.summary, &session_id, kind, q.at_ts.as_deref()).await;
     Ok(axum::Json(r))
+}
+
+async fn rollup_summary_endpoint(
+    State(state): State<Arc<AppState>>,
+    axum::Json(req): axum::Json<RollupRequest>,
+) -> axum::Json<RollupResponse> {
+    axum::Json(rollup_summary::summarize(&state.rollup, req).await)
 }
 
 #[derive(serde::Serialize)]
@@ -237,7 +247,8 @@ async fn set_config(
         }
     };
     state.naming.set_model(parsed.clone());
-    state.summary.set_model(parsed);
+    state.summary.set_model(parsed.clone());
+    state.rollup.set_model(parsed);
     Ok(get_config(State(state)).await)
 }
 

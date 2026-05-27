@@ -7,6 +7,7 @@ pub mod kpis;
 pub mod llm;
 pub mod model;
 pub mod naming;
+pub mod rollup_summary;
 pub mod server;
 pub mod sse;
 pub mod summary;
