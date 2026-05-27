@@ -206,3 +206,46 @@ async fn apply_verdict_unknown_phase_errors() {
         .await
         .is_err());
 }
+
+#[tokio::test]
+async fn phase_history_accumulates_checkpoints() {
+    let saver = phase_saver(":memory:").await.expect("saver");
+    let graph = compile_skill_graph(&fixture(), saver).expect("compile");
+
+    graph.apply_verdict("linear", "h", "claim", true).await.expect("p1");
+    graph.apply_verdict("linear", "h", "fetch", true).await.expect("p2");
+
+    let history = graph.phase_history("h").await.expect("history");
+    // At least one checkpoint per verdict; latest reflects 2 completed phases.
+    assert!(history.len() >= 2, "expected >=2 checkpoints, got {}", history.len());
+    let latest = history.last().expect("non-empty");
+    assert_eq!(latest.completed_phases, vec!["claim".to_string(), "fetch".to_string()]);
+}
+
+/// Time-travel: complete claim+fetch, then replay fetch — it forks back to a
+/// state where fetch is no longer completed and `current_phase` points at fetch.
+#[tokio::test]
+async fn replay_phase_forks_before_target() {
+    let saver = phase_saver(":memory:").await.expect("saver");
+    let graph = compile_skill_graph(&fixture(), saver).expect("compile");
+
+    graph.apply_verdict("linear", "r", "claim", true).await.expect("p1");
+    graph.apply_verdict("linear", "r", "fetch", true).await.expect("p2");
+
+    let forked = graph.replay_phase("linear", "r", "fetch").await.expect("replay");
+    // claim stays done (it's before fetch); fetch is dropped for the re-run.
+    assert_eq!(forked.completed_phases, vec!["claim".to_string()]);
+    assert_eq!(forked.current_phase, Some(1)); // back on fetch
+    assert!(!forked.complete);
+
+    // The fork persisted as the new latest checkpoint.
+    let latest = graph.load_latest("r").await.expect("load").expect("present");
+    assert_eq!(latest.completed_phases, vec!["claim".to_string()]);
+}
+
+#[tokio::test]
+async fn replay_unknown_phase_errors() {
+    let saver = phase_saver(":memory:").await.expect("saver");
+    let graph = compile_skill_graph(&fixture(), saver).expect("compile");
+    assert!(graph.replay_phase("linear", "r", "ghost").await.is_err());
+}

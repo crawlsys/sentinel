@@ -44,7 +44,9 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
-use langgraph_core::application::services::{CompilationResult, GraphCompiler};
+use langgraph_core::application::services::{
+    CheckpointStateSnapshot, CompilationResult, GraphCompiler,
+};
 use langgraph_core::domain::value_objects::{InterruptConfig, NodeError, END, START};
 use langgraph_core::ports::CheckpointSaver;
 use langgraph_core::{SqliteCheckpointer, StateGraphBuilder};
@@ -361,5 +363,85 @@ impl CompiledPhaseGraph {
             .map_err(GraphEngineError::from_graph)?;
 
         Ok(state)
+    }
+
+    /// The full checkpoint history for a session, oldest first. Each entry is
+    /// the `PhaseGraphState` as it stood at that checkpoint. Used to project
+    /// per-phase progress to the dashboard / JSONL stream and to locate a fork
+    /// point for [`replay_phase`].
+    ///
+    /// # Errors
+    /// Returns [`GraphEngineError`] on checkpointer failure.
+    pub async fn phase_history(&self, session_id: &str) -> Result<Vec<PhaseGraphState>> {
+        let mut snapshots = self
+            .inner
+            .get_state_history(session_id)
+            .await
+            .map_err(GraphEngineError::from_graph)?;
+        // `get_state_history` does not guarantee ordering; sort by the
+        // monotonic per-thread step number so oldest is first / newest is last.
+        snapshots.sort_by_key(|s| s.metadata().step_number());
+        Ok(snapshots.into_iter().map(CheckpointStateSnapshot::into_state).collect())
+    }
+
+    /// Time-travel: re-attempt `phase_id` by forking from the checkpoint as it
+    /// stood *before* that phase was last completed.
+    ///
+    /// Finds the most recent checkpoint whose `completed_phases` does NOT yet
+    /// contain `phase_id` (the state just before that phase passed), rewinds
+    /// `current_phase` to that phase with a fresh [`Verdict::Pending`], and
+    /// persists it as a new checkpoint — a fork in the history tree. The phase
+    /// can then be re-run and re-judged. This realises the QA-failed
+    /// re-attempt as first-class `LangGraph` time-travel (replay/fork).
+    ///
+    /// If no prior checkpoint exists, seeds a fresh state positioned at
+    /// `phase_id`.
+    ///
+    /// # Errors
+    /// Returns [`GraphEngineError::UnknownPhase`] if `phase_id` is not part of
+    /// this workflow, or on checkpointer failure.
+    pub async fn replay_phase(
+        &self,
+        skill: &str,
+        session_id: &str,
+        phase_id: &str,
+    ) -> Result<PhaseGraphState> {
+        let idx = self
+            .phase_ids
+            .iter()
+            .position(|p| p == phase_id)
+            .ok_or_else(|| GraphEngineError::UnknownPhase {
+                skill: skill.to_string(),
+                phase: phase_id.to_string(),
+            })?;
+
+        let history = self.phase_history(session_id).await?;
+        // Most recent checkpoint that predates this phase's completion.
+        let mut fork = history
+            .into_iter()
+            .rev()
+            .find(|s| !s.completed_phases.iter().any(|p| p == phase_id))
+            .unwrap_or_else(|| {
+                PhaseGraphState::new(skill, session_id, self.phase_ids.clone())
+            });
+
+        // Rewind to the phase being replayed, dropping it and anything after
+        // from the completed set so the re-run is judged fresh.
+        fork.completed_phases.retain(|p| {
+            self.phase_ids
+                .iter()
+                .position(|x| x == p)
+                .is_some_and(|completed_idx| completed_idx < idx)
+        });
+        fork.current_phase = Some(idx);
+        fork.complete = false;
+        fork.last_verdict = Verdict::Pending;
+
+        self.inner
+            .update_state(session_id, fork.clone())
+            .await
+            .map_err(GraphEngineError::from_graph)?;
+
+        Ok(fork)
     }
 }
