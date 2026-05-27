@@ -5,7 +5,7 @@ import { useQuery } from "@tanstack/react-query";
 import { IconButton, Tooltip } from "@mui/material";
 import CloseIcon from "@mui/icons-material/CloseRounded";
 
-import type { Node } from "../types/api";
+import type { Node, RecentEvent } from "../types/api";
 import { fetchActivity, fetchSummary } from "../adapters/http";
 import { indexActivity } from "../adapters/activity-cache";
 import { categoryColor, categoryLabel, relTime, statusColor } from "../domain/format";
@@ -71,10 +71,14 @@ interface Props {
   /** Anchor timestamp from the ticker click. When set, activity is
    * fetched as a ±60s window around it instead of just the tail. */
   anchorTs?: string | null;
+  /** Recent events from the current graph snapshot. Used by the
+   * codex/non-claude fallback timeline view when transcript JSONLs
+   * aren't available. */
+  events?: RecentEvent[];
   onClose: () => void;
 }
 
-export function PanelInspector({ node, anchorTs, onClose }: Props) {
+export function PanelInspector({ node, anchorTs, events, onClose }: Props) {
   const sessionId =
     node?.type === "SentinelSession"
       ? (node.data?.session_id as string | undefined)
@@ -83,7 +87,9 @@ export function PanelInspector({ node, anchorTs, onClose }: Props) {
   // /api/activity and /api/summary both read claude transcript JSONLs
   // from ~/.claude/projects/. Non-claude harnesses don't have those,
   // so gate the fetch by harness to avoid stuck "loading…" /
-  // "generating…" placeholders.
+  // "generating…" placeholders. Codex sessions get a different
+  // fallback panel (CodexEventTimeline below) sourced from the
+  // graph's event stream instead.
   const harness = (node?.data?.source_harness as string | undefined) ?? null;
   const harnessSupportsTranscript = !harness || harness === "claude";
 
@@ -191,7 +197,15 @@ export function PanelInspector({ node, anchorTs, onClose }: Props) {
         </pre>
       </details>
 
-      {sessionId ? (
+      {sessionId && !harnessSupportsTranscript ? (
+        <CodexEventTimeline
+          sessionId={sessionId}
+          harness={harness}
+          events={events ?? []}
+        />
+      ) : null}
+
+      {sessionId && harnessSupportsTranscript ? (
         <div className="mt-4 border-t border-[#222] pt-3">
           <SummaryCard
             kind={summaryKind}
@@ -314,6 +328,86 @@ interface SummaryCardProps {
   source: string | null;
   loading: boolean;
   error: string | null;
+}
+
+/// Event-timeline panel for non-claude harnesses (codex). Built from
+/// graph.events filtered to the current session. The transcript-based
+/// activity panel can't fire here because find_transcript() only
+/// scans claude paths — but the bridge has been producing hook
+/// records for codex sessions all along via the shim, so we already
+/// have everything we need from the events stream.
+///
+/// Exported for testing. Renders into the inspector body when the
+/// surrounding session is non-claude AND has events in the current
+/// snapshot.
+export function CodexEventTimeline({
+  sessionId,
+  harness,
+  events,
+}: {
+  sessionId: string;
+  harness: string | null;
+  events: RecentEvent[];
+}) {
+  const filtered = events
+    .filter((e) => e.payload.session_id === sessionId)
+    .slice(-20)
+    .reverse();
+
+  return (
+    <div className="mt-4 border-t border-[#222] pt-3">
+      <h4 className="text-[10px] uppercase tracking-wider text-[#999] mb-2 flex justify-between">
+        <span>{harness ?? "non-claude"} timeline</span>
+        <span className="text-[#666]">last {filtered.length}</span>
+      </h4>
+      {filtered.length === 0 ? (
+        <p className="text-[10px] text-[#999] italic">
+          no events for this session in the current snapshot
+        </p>
+      ) : (
+        <ul className="space-y-1" data-testid="codex-event-timeline">
+          {filtered.map((e, i) => {
+            const tool = typeof e.payload.tool === "string" ? (e.payload.tool as string) : "";
+            const eventName = typeof e.payload.event === "string"
+              ? (e.payload.event as string)
+              : e.type;
+            const outcome = typeof e.payload.outcome === "string"
+              ? (e.payload.outcome as string)
+              : "";
+            const accent = outcomeAccent(outcome);
+            return (
+              <li
+                key={`${e.seq}-${i}`}
+                className="p-1.5 rounded border-l-2 text-[10px]"
+                style={{ borderLeftColor: accent, backgroundColor: "#000" }}
+              >
+                <div className="flex justify-between gap-2 mb-0.5">
+                  <span className="font-bold" style={{ color: accent }}>
+                    {tool || eventName}
+                  </span>
+                  <span className="text-[#999] whitespace-nowrap">{relTime(e.ts)}</span>
+                </div>
+                <div className="flex justify-between gap-2 text-[#999]">
+                  <span>{eventName}</span>
+                  {outcome ? <span>{outcome}</span> : null}
+                </div>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+/// Mirror of EventTicker's outcome categorisation, narrowed for the
+/// codex timeline. Intervention outcomes pop in red; routine allows
+/// stay muted; everything else is the default text accent.
+function outcomeAccent(outcome: string): string {
+  if (outcome === "deny" || outcome === "block" || outcome === "force_stop") return "#D71921";
+  if (outcome === "inject") return "#D4A843";
+  if (outcome === "allow" || outcome === "") return "#999999";
+  return "#5B9BF6";
 }
 
 function SummaryCard({ kind, text, source, loading, error }: SummaryCardProps) {

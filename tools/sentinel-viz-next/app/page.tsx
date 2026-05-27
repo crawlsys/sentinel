@@ -143,8 +143,25 @@ export default function Page() {
   // to the freshest event (latest of graph.events). Operator
   // interaction immediately disables auto via the auto-watch hook,
   // so this only fires while the user is genuinely hands-off.
+  //
+  // Codex-pin exemption: if the operator deliberately selected a
+  // non-claude session, don't bulldoze it. Quiet sessions lose every
+  // freshness race against busier claude main sessions, so without
+  // this guard a codex selection drifts back to main within seconds
+  // of being made.
   useEffect(() => {
     if (!auto.on || !graph || graph.events.length === 0) return;
+
+    if (selectedNodeId) {
+      const selected = graph.nodes.find((n) => n.id === selectedNodeId);
+      const selectedHarness = typeof selected?.data?.source_harness === "string"
+        ? (selected.data.source_harness as string)
+        : null;
+      if (selected?.type === "SentinelSession" && selectedHarness && selectedHarness !== "claude") {
+        return;
+      }
+    }
+
     const latest = graph.events[graph.events.length - 1];
     const tcid = typeof latest.payload.tool_call_id === "string"
       ? (latest.payload.tool_call_id as string)
@@ -276,6 +293,7 @@ export default function Page() {
           <PanelInspector
             node={selectedNode}
             anchorTs={anchorTs}
+            events={graph?.events ?? []}
             onClose={() => selectNode(null)}
           />
         </div>
