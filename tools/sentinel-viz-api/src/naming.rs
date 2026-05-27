@@ -335,6 +335,6 @@ mod tests {
             std::env::remove_var("SENTINEL_VIZ_NAMING_MODEL");
         }
         let s = NamingState::from_env();
-        assert!(s.model.is_none());
+        assert!(s.model.read().unwrap().is_none());
     }
 }

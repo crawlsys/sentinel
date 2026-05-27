@@ -112,7 +112,7 @@ fn graph_default_hides_hooks_and_synthesises_session_to_tc_edges() {
     let conn = db::open_ro(&path).unwrap();
     let g = graph::load_graph_with(
         &conn,
-        GraphOpts { limit: 50, since_secs: None, include_hooks: false },
+        GraphOpts { limit: 50, since_secs: None, include_hooks: false, focused_session: None },
     )
     .unwrap();
 
@@ -156,7 +156,7 @@ fn graph_include_hooks_keeps_them_and_derived_chain_edges() {
     let conn = db::open_ro(&path).unwrap();
     let g = graph::load_graph_with(
         &conn,
-        GraphOpts { limit: 50, since_secs: None, include_hooks: true },
+        GraphOpts { limit: 50, since_secs: None, include_hooks: true, focused_session: None },
     )
     .unwrap();
 
@@ -180,7 +180,7 @@ fn graph_time_floor_drops_old_events() {
     // floor against `now` should drop them all from the ticker.
     let g = graph::load_graph_with(
         &conn,
-        GraphOpts { limit: 50, since_secs: Some(1), include_hooks: false },
+        GraphOpts { limit: 50, since_secs: Some(1), include_hooks: false, focused_session: None },
     )
     .unwrap();
     assert_eq!(g.events.len(), 0, "time floor should drop ancient events");
