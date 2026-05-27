@@ -37,7 +37,7 @@ pub struct SessionState {
     pub active: bool,
 
     /// Phase files that have been `Read()` by Claude, keyed by skill name.
-    /// E.g., `{"linear": ["claim.md", "fetch.md"], "steel": ["claim.md"]}`.
+    /// E.g., `{"linear": ["claim.md", "fetch.md"], "browserbase": ["setup.md"]}`.
     ///
     /// **Attack #50**: Was a global `Vec<String>` — reading skill A's `review.md`
     /// would satisfy checks for skill B's `review.md`. Now per-skill.
@@ -73,16 +73,25 @@ pub struct SessionState {
     #[serde(default)]
     pub glass_break: Option<GlassBreak>,
 
+    /// Session-wide **production override**. When `Some`, the operator has
+    /// armed prod work by saying "production override"; prod actions (deploys,
+    /// prod Doppler/Auth0, destructive prod, prod DB ops/migrations) are
+    /// authorized for the rest of the session without per-action asking, each
+    /// surfaced via a dual-display notice. Cleared by "production lock" or
+    /// session end. `None` = the default prod-refusal posture.
+    #[serde(default)]
+    pub production_override: Option<ProductionOverride>,
+
     /// **Agent revocation kill switch (AEGIS pattern)**: agent IDs that
     /// have been explicitly revoked via `sentinel agent revoke <id>` or
     /// auto-revoked by the violation policy. Tool calls bearing these
-    /// agent_ids in `HookInput.agent_id` are denied at PreToolUse with
+    /// `agent_ids` in `HookInput.agent_id` are denied at `PreToolUse` with
     /// a `[Sentinel-Authority]` message.
     ///
-    /// Per-session today; revocation does NOT persist across SessionStart
+    /// Per-session today; revocation does NOT persist across `SessionStart`
     /// because a fresh session is the natural place to give an agent
     /// another chance. Operators who want durable revocations can
-    /// re-issue `sentinel agent revoke` at SessionStart via a hook.
+    /// re-issue `sentinel agent revoke` at `SessionStart` via a hook.
     #[serde(default)]
     pub revoked_agents: HashSet<String>,
 
@@ -103,10 +112,21 @@ pub struct SessionState {
     /// (proof chain persistence) since both walk the same disk archive.
     #[serde(default)]
     pub step_baselines: HashMap<String, BaselineCounter>,
+
+    /// Independent step verdicts produced by the `step_judge` `PostToolUse`
+    /// hook, keyed by `skill:phase_id:step_id` (#12 — close the self-certify
+    /// gap). `submit_step_complete` reads these to enforce the judge's OWN
+    /// verdict over the caller-supplied one: an agent can pass any `verdict`
+    /// arg, but the independently-judged verdict here is what gates the seal
+    /// in warn/enforce mode. The hook persists this to disk via `state_store`;
+    /// the MCP handler sees it because `with_session_state` loads the same
+    /// per-session state before running the tool.
+    #[serde(default)]
+    pub independent_verdicts: HashMap<String, IndependentVerdict>,
 }
 
 /// Counter tracking successful judgements for a single
-/// `(skill, phase_id, step_id)` tuple. Used by step_judge to decide
+/// `(skill, phase_id, step_id)` tuple. Used by `step_judge` to decide
 /// whether the step has cleared its cold-start window.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct BaselineCounter {
@@ -129,12 +149,27 @@ pub struct BaselineCounter {
     pub last_observed_at: Option<DateTime<Utc>>,
 }
 
+/// The independent verdict the `step_judge` hook produced for a step,
+/// persisted so `submit_step_complete` can enforce it over the
+/// caller-supplied verdict (#12). Minimal by design — only what the seal
+/// gate needs to decide.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IndependentVerdict {
+    /// Whether the independent judge found the evidence sufficient.
+    pub sufficient: bool,
+    /// The independent judge's confidence in `sufficient`.
+    pub confidence: f64,
+    /// When the hook recorded this verdict.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub judged_at: Option<DateTime<Utc>>,
+}
+
 impl BaselineCounter {
     /// Returns true if this counter has cleared the threshold for
     /// enforcement to engage. `threshold == 0` means "enforce
     /// immediately" — return true even on a fresh counter.
     #[must_use]
-    pub fn cleared(&self, threshold: u64) -> bool {
+    pub const fn cleared(&self, threshold: u64) -> bool {
         self.successful_count >= threshold
     }
 }
@@ -181,6 +216,20 @@ pub struct BreakToolUse {
     pub ts: String,
 }
 
+/// Session-wide production-override grant. Armed by the operator saying
+/// "production override"; cleared by "production lock" or session end.
+/// Deliberately simple (no challenge code / expiry) — it's an operator-
+/// driven, session-scoped grant surfaced via a dual-display notice, not a
+/// cryptographically-gated break like [`GlassBreak`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProductionOverride {
+    /// When the operator armed prod work (RFC3339 UTC).
+    pub armed_at: DateTime<Utc>,
+    /// Optional operator-supplied note captured alongside the phrase
+    /// (e.g. "production override — hotfix the auth migration").
+    pub note: Option<String>,
+}
+
 /// Tracks failed submission attempts for rate limiting
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SubmissionAttempts {
@@ -224,13 +273,36 @@ impl SessionState {
             phase_file_hashes: HashMap::new(),
             state_generation: 0,
             glass_break: None,
+            production_override: None,
             step_baselines: HashMap::new(),
+            independent_verdicts: HashMap::new(),
             revoked_agents: HashSet::new(),
         }
     }
 
+    /// Arm the session-wide production override (operator said "production
+    /// override"). Idempotent — re-arming refreshes `armed_at`/`note`.
+    pub fn arm_production_override(&mut self, note: Option<String>) {
+        self.production_override = Some(ProductionOverride {
+            armed_at: Utc::now(),
+            note,
+        });
+    }
+
+    /// Revoke the production override (operator said "production lock", or a
+    /// fresh lock is desired). No-op if not armed.
+    pub fn revoke_production_override(&mut self) {
+        self.production_override = None;
+    }
+
+    /// Whether prod actions are currently authorized for this session.
+    #[must_use]
+    pub const fn production_override_armed(&self) -> bool {
+        self.production_override.is_some()
+    }
+
     /// Revoke an agent — every subsequent tool call carrying this
-    /// `agent_id` will be denied at PreToolUse. Idempotent (revoking
+    /// `agent_id` will be denied at `PreToolUse`. Idempotent (revoking
     /// an already-revoked agent is a no-op).
     pub fn revoke_agent(&mut self, agent_id: impl Into<String>) {
         self.revoked_agents.insert(agent_id.into());
@@ -242,14 +314,14 @@ impl SessionState {
         self.revoked_agents.remove(agent_id)
     }
 
-    /// Check whether an agent_id has been revoked.
+    /// Check whether an `agent_id` has been revoked.
     #[must_use]
     pub fn is_agent_revoked(&self, agent_id: &str) -> bool {
         self.revoked_agents.contains(agent_id)
     }
 
     /// Build the `(skill, phase_id, step_id)` baseline key. Static helper
-    /// so both step_judge and the persistence layer compute keys
+    /// so both `step_judge` and the persistence layer compute keys
     /// identically.
     #[must_use]
     pub fn baseline_key(skill: &str, phase_id: &str, step_id: &str) -> String {
@@ -257,7 +329,7 @@ impl SessionState {
     }
 
     /// Record a step judgement against the cold-start baseline.
-    /// Called by step_judge after every verdict — both passing and failing
+    /// Called by `step_judge` after every verdict — both passing and failing
     /// judgements bump their respective counters so telemetry shows
     /// warmup-time false-positive rates.
     ///
@@ -291,6 +363,44 @@ impl SessionState {
             .get(&Self::baseline_key(skill, phase_id, step_id))
             .cloned()
             .unwrap_or_default()
+    }
+
+    /// Record the independent `step_judge` verdict for a step (#12). Keyed
+    /// the same way as the baseline counter. Overwrites any prior verdict
+    /// for the step — the most recent independent judgement is what gates
+    /// the seal. Called by the `step_judge` hook after every judgement.
+    pub fn record_independent_verdict(
+        &mut self,
+        skill: &str,
+        phase_id: &str,
+        step_id: &str,
+        sufficient: bool,
+        confidence: f64,
+    ) {
+        let key = Self::baseline_key(skill, phase_id, step_id);
+        self.independent_verdicts.insert(
+            key,
+            IndependentVerdict {
+                sufficient,
+                confidence,
+                judged_at: Some(Utc::now()),
+            },
+        );
+    }
+
+    /// Read the independent verdict for a step, if the `step_judge` hook
+    /// recorded one. `None` means no independent judgement exists for this
+    /// step — the seal gate treats that as "no override available" and
+    /// falls back to the caller-supplied verdict.
+    #[must_use]
+    pub fn independent_verdict(
+        &self,
+        skill: &str,
+        phase_id: &str,
+        step_id: &str,
+    ) -> Option<&IndependentVerdict> {
+        self.independent_verdicts
+            .get(&Self::baseline_key(skill, phase_id, step_id))
     }
 
     /// **Attack #169 fix**: Maximum distinct skills per session.
@@ -524,7 +634,7 @@ impl SessionState {
             Some(_) => Ok(()), // Same hash — no change
             None => {
                 self.phase_file_hashes
-                    .insert(canonical_path.to_string(), content_hash.to_string());
+                    .insert(canonical_path.clone(), content_hash.to_string());
                 Ok(())
             }
         }
@@ -643,7 +753,7 @@ mod tests {
         state.record_phase_read("linear", "claim.md");
         assert_eq!(state.phases_read_count(), 1);
         assert!(state.has_phase_been_read("linear", "claim.md"));
-        assert!(!state.has_phase_been_read("steel", "claim.md")); // per-skill isolation
+        assert!(!state.has_phase_been_read("browserbase", "claim.md")); // per-skill isolation
 
         // Idempotent — recording same file twice doesn't duplicate
         state.record_phase_read("linear", "claim.md");

@@ -1,11 +1,11 @@
-//! SubagentStart hook — inject skill context into spawned agents
+//! `SubagentStart` hook — inject skill context into spawned agents
 //!
 //! When a subagent is spawned, injects the active skill context and
 //! project configuration so the agent has relevant information.
 
 use sentinel_domain::events::{HookEvent, HookInput, HookOutput};
 
-/// Process SubagentStart event
+/// Process `SubagentStart` event
 ///
 /// Injects active skill and project context into the spawned agent.
 pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
@@ -29,17 +29,16 @@ pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
         state
             .get("active_skill")
             .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
+            .map(std::string::ToString::to_string)
     });
 
     let context = if let Some(skill) = &active_skill {
         format!(
-            "[Subagent Context] Agent type '{}' spawned during skill '{}'.\n\
-             The parent session is executing the '{}' skill — align your work accordingly.",
-            agent_type, skill, skill
+            "[Subagent Context] Agent type '{agent_type}' spawned during skill '{skill}'.\n\
+             The parent session is executing the '{skill}' skill — align your work accordingly."
         )
     } else {
-        format!("[Subagent Context] Agent type '{}' spawned.", agent_type)
+        format!("[Subagent Context] Agent type '{agent_type}' spawned.")
     };
 
     HookOutput::inject_context(HookEvent::SubagentStart, &context)

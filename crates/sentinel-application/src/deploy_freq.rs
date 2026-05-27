@@ -142,15 +142,7 @@ impl DoraTier {
     /// rather classify than refuse to report.
     #[must_use]
     pub fn from_change_failure_rate(rate: f64) -> Self {
-        let r = if !rate.is_finite() {
-            0.0
-        } else if rate < 0.0 {
-            0.0
-        } else if rate > 1.0 {
-            1.0
-        } else {
-            rate
-        };
+        let r = if rate.is_finite() { rate.clamp(0.0, 1.0) } else { 0.0 };
         if r <= 0.15 {
             Self::Elite
         } else if r <= 0.30 {
@@ -389,8 +381,8 @@ pub fn aggregate_at(
     };
 
     ensure_parent(summary_path)?;
-    let mut f = File::create(summary_path)
-        .with_context(|| format!("create {}", summary_path.display()))?;
+    let mut f =
+        File::create(summary_path).with_context(|| format!("create {}", summary_path.display()))?;
     f.write_all(serde_json::to_string_pretty(&summary)?.as_bytes())?;
     f.flush()?;
 
@@ -676,7 +668,10 @@ mod tests {
         assert_eq!(DoraTier::from_change_failure_rate(0.15), DoraTier::Elite);
         assert_eq!(DoraTier::from_change_failure_rate(0.150001), DoraTier::High);
         assert_eq!(DoraTier::from_change_failure_rate(0.30), DoraTier::High);
-        assert_eq!(DoraTier::from_change_failure_rate(0.30001), DoraTier::Medium);
+        assert_eq!(
+            DoraTier::from_change_failure_rate(0.30001),
+            DoraTier::Medium
+        );
         assert_eq!(DoraTier::from_change_failure_rate(0.45), DoraTier::Medium);
         assert_eq!(DoraTier::from_change_failure_rate(0.46), DoraTier::Low);
         assert_eq!(DoraTier::from_change_failure_rate(1.0), DoraTier::Low);
@@ -686,7 +681,10 @@ mod tests {
     fn from_change_failure_rate_clamps_garbage_input() {
         assert_eq!(DoraTier::from_change_failure_rate(-0.5), DoraTier::Elite);
         assert_eq!(DoraTier::from_change_failure_rate(2.5), DoraTier::Low);
-        assert_eq!(DoraTier::from_change_failure_rate(f64::NAN), DoraTier::Elite);
+        assert_eq!(
+            DoraTier::from_change_failure_rate(f64::NAN),
+            DoraTier::Elite
+        );
     }
 
     #[test]

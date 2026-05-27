@@ -371,10 +371,7 @@ mod tests {
             self.saved.lock().unwrap().push(challenge.clone());
             Ok(())
         }
-        fn load(
-            &self,
-            _: &WorkId,
-        ) -> Result<Option<SpecChallenge>, SpecChallengeStoreError> {
+        fn load(&self, _: &WorkId) -> Result<Option<SpecChallenge>, SpecChallengeStoreError> {
             Ok(self.saved.lock().unwrap().last().cloned())
         }
     }
@@ -384,10 +381,7 @@ mod tests {
     }
 
     impl SpecChallengeScorerPort for StubScorer {
-        fn score(
-            &self,
-            _: &SpecChallenge,
-        ) -> Result<SpecChallengeScore, SpecChallengeScorerError> {
+        fn score(&self, _: &SpecChallenge) -> Result<SpecChallengeScore, SpecChallengeScorerError> {
             self.result.clone()
         }
     }
@@ -481,9 +475,10 @@ mod tests {
     #[test]
     fn malformed_challenge_denies_under_default_blocking() {
         let mut input = HookInput::default();
-        input
-            .extra
-            .insert("spec_challenge".to_string(), serde_json::json!("not an object"));
+        input.extra.insert(
+            "spec_challenge".to_string(),
+            serde_json::json!("not an object"),
+        );
         let out = process(
             &input,
             ReversibilityClass::Irreversible,
@@ -525,7 +520,10 @@ mod tests {
         assert!(is_deny(&out));
         let reason = deny_reason(&out).unwrap();
         assert!(reason.contains("incomplete"), "got {reason}");
-        assert!(reason.contains("assumptions"), "should name the failing category; got {reason}");
+        assert!(
+            reason.contains("assumptions"),
+            "should name the failing category; got {reason}"
+        );
     }
 
     #[test]
@@ -608,7 +606,10 @@ mod tests {
         assert!(is_deny(&out));
         let reason = deny_reason(&out).unwrap();
         assert!(reason.contains("scorer rejected"));
-        assert!(reason.contains("gaps=0.40"), "should surface per-axis scores; got {reason}");
+        assert!(
+            reason.contains("gaps=0.40"),
+            "should surface per-axis scores; got {reason}"
+        );
     }
 
     #[test]
@@ -655,7 +656,9 @@ mod tests {
         // Scorer would fail if called; but DefaultBlocking shouldn't call it
         // for Irreversible.
         let scorer = StubScorer {
-            result: Err(SpecChallengeScorerError::Backend("should not be called".into())),
+            result: Err(SpecChallengeScorerError::Backend(
+                "should not be called".into(),
+            )),
         };
         let out = process(
             &input,

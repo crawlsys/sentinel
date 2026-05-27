@@ -1,6 +1,6 @@
 //! Error Reporter Hook
 //!
-//! Runs on UserPromptSubmit. Reads `~/.claude/metrics/errors.jsonl` for
+//! Runs on `UserPromptSubmit`. Reads `~/.claude/metrics/errors.jsonl` for
 //! unresolved infrastructure errors. If any found and cooldown (10 min) has
 //! expired, injects context instructing Claude to file Linear issues.
 
@@ -83,8 +83,7 @@ struct ErrorEntry {
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
+        .map_or(0, |d| d.as_millis() as u64)
 }
 
 fn errors_file(fs: &dyn FileSystemPort) -> PathBuf {
@@ -108,7 +107,7 @@ fn read_unresolved_errors(fs: &dyn FileSystemPort, path: &PathBuf) -> Vec<ErrorE
         .filter(|l| !l.trim().is_empty())
         .filter_map(|line| serde_json::from_str::<ErrorEntry>(line).ok())
         .filter(|entry| entry.resolved.is_none())
-        .filter(|entry| is_actionable_error(entry))
+        .filter(is_actionable_error)
         .collect()
 }
 
@@ -193,7 +192,7 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
         resolutions_path,
         error_lines.join("\n"),
         if extra > 0 {
-            format!("(+{} more in errors.jsonl)", extra)
+            format!("(+{extra} more in errors.jsonl)")
         } else {
             String::new()
         }

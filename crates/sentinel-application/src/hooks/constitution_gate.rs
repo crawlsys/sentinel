@@ -93,7 +93,10 @@ fn extract_file_path(args: &serde_json::Value) -> Option<&str> {
 /// inspect; the conservative move is to not over-block).
 fn extract_candidate_content(tool: &str, args: &serde_json::Value) -> Option<String> {
     match tool {
-        "Write" => args.get("content").and_then(|v| v.as_str()).map(String::from),
+        "Write" => args
+            .get("content")
+            .and_then(|v| v.as_str())
+            .map(String::from),
         "Edit" => args
             .get("new_string")
             .and_then(|v| v.as_str())
@@ -112,7 +115,7 @@ fn extract_candidate_content(tool: &str, args: &serde_json::Value) -> Option<Str
             } else {
                 Some(out)
             }
-        },
+        }
         "NotebookEdit" => args
             .get("new_source")
             .and_then(|v| v.as_str())
@@ -222,7 +225,10 @@ mod tests {
     #[test]
     fn write_with_banned_pattern_outside_protected_path_is_allowed() {
         // Same banned pattern, but the path isn't under the rule.
-        let input = write_input("crates/consul-storage/src/sqlite.rs", "use sqlx::SqlitePool;");
+        let input = write_input(
+            "crates/consul-storage/src/sqlite.rs",
+            "use sqlx::SqlitePool;",
+        );
         let out = process(&input, &[rule_consul_domain_no_sqlx()]);
         assert!(out.blocked.is_none(), "unprotected path → allow");
     }
@@ -294,7 +300,10 @@ mod tests {
             "crates/consul-protocol/src/messages.rs",
             "use anthropic_sdk::Client;",
         );
-        let rules = vec![rule_consul_domain_no_sqlx(), rule_consul_protocol_no_vendor()];
+        let rules = vec![
+            rule_consul_domain_no_sqlx(),
+            rule_consul_protocol_no_vendor(),
+        ];
         let out = process(&input, &rules);
         assert_eq!(out.blocked, Some(true));
         let reason = denied_reason(&out).expect("denied");

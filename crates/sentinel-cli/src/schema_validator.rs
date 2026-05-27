@@ -43,7 +43,7 @@
 //! fields are silently dropped by serde's `deny_unknown_fields`-off
 //! default. Re-parsing the TOML with a struct that knows about them
 //! is the cheapest way to validate without forcing changes to the
-//! canonical loader (which would ripple through federation_cmd's
+//! canonical loader (which would ripple through `federation_cmd`'s
 //! 1200+ lines).
 //!
 //! Long-term, M2.10 (references/ subdirs) or a unified Apollo-style
@@ -97,7 +97,7 @@ pub struct SkillReport {
 }
 
 impl SkillReport {
-    pub fn is_clean(&self) -> bool {
+    pub const fn is_clean(&self) -> bool {
         self.dangling_refs.is_empty() && self.suspicious_tools.is_empty()
     }
 }
@@ -520,6 +520,7 @@ artifact_schema = { issue_id = "string (from claim/-0.1)" }
     #[test]
     #[ignore = "depends on repo layout; run manually via --ignored"]
     fn production_step_configs_are_clean() {
+        use std::fmt::Write as _;
         let manifest_dir = env!("CARGO_MANIFEST_DIR");
         let steps_dir = std::path::Path::new(manifest_dir)
             .parent()
@@ -541,15 +542,12 @@ artifact_schema = { issue_id = "string (from claim/-0.1)" }
             dirty.sort_by(|a, b| a.skill.cmp(&b.skill));
             let mut msg = String::from("step-config schema issues found:\n");
             for r in &dirty {
-                msg.push_str(&format!(
-                    "\n  {} ({} steps):\n",
-                    r.skill, r.step_count
-                ));
+                let _ = write!(msg, "\n  {} ({} steps):\n", r.skill, r.step_count);
                 for (p, s, d) in &r.dangling_refs {
-                    msg.push_str(&format!("    DANGLING REF {p}/{s}: {d}\n"));
+                    let _ = writeln!(msg, "    DANGLING REF {p}/{s}: {d}");
                 }
                 for (p, s, t) in &r.suspicious_tools {
-                    msg.push_str(&format!("    SUSPICIOUS TOOL {p}/{s}: {t}\n"));
+                    let _ = writeln!(msg, "    SUSPICIOUS TOOL {p}/{s}: {t}");
                 }
             }
             panic!("{msg}");

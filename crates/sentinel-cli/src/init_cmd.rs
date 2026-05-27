@@ -156,7 +156,7 @@ fn run_batch(dry_run: bool, force: bool) -> anyhow::Result<()> {
                 .collect();
 
             if result.created.is_empty() {
-                eprintln!("  {} {} — nothing created", "–".dimmed(), dir_name,);
+                eprintln!("  {} {} — nothing created", "–".dimmed(), dir_name);
             } else {
                 eprintln!(
                     "  {} {} — created: {}",

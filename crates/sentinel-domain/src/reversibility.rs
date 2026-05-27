@@ -142,10 +142,11 @@ mod tests {
         // equal
         assert!(ReversibilityClass::Irreversible.at_least(ReversibilityClass::Irreversible));
         // strictly less
-        assert!(!ReversibilityClass::ReversibleWithEffort.at_least(ReversibilityClass::Irreversible));
         assert!(
-            !ReversibilityClass::TriviallyReversible.at_least(ReversibilityClass::ReversibleWithEffort)
+            !ReversibilityClass::ReversibleWithEffort.at_least(ReversibilityClass::Irreversible)
         );
+        assert!(!ReversibilityClass::TriviallyReversible
+            .at_least(ReversibilityClass::ReversibleWithEffort));
     }
 
     #[test]
@@ -191,7 +192,10 @@ mod tests {
         let err = "Unknown".parse::<ReversibilityClass>().unwrap_err();
         assert_eq!(err.invalid_input(), "Unknown");
         let msg = err.to_string();
-        assert!(msg.contains("Unknown"), "message should quote the input: {msg}");
+        assert!(
+            msg.contains("Unknown"),
+            "message should quote the input: {msg}"
+        );
         assert!(
             msg.contains("Catastrophic"),
             "message should list valid options: {msg}"

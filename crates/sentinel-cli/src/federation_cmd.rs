@@ -107,7 +107,7 @@ pub struct ComposeReport {
 impl ComposeReport {
     /// True when no errors were found (warnings ok).
     #[must_use]
-    pub fn ok(&self) -> bool {
+    pub const fn ok(&self) -> bool {
         self.error_count == 0
     }
 }
@@ -237,7 +237,9 @@ fn check_skill(
         for step in &phase.steps {
             report.total_steps += 1;
             let coord = (phase.phase_id.clone(), step.id.clone());
-            if seen_coords.contains_key(&coord) {
+            if let std::collections::hash_map::Entry::Vacant(e) = seen_coords.entry(coord) {
+                e.insert(());
+            } else {
                 report.findings.push(ComposeFinding {
                     severity: ComposeSeverity::Error,
                     skill: Some(skill.into()),
@@ -250,8 +252,6 @@ fn check_skill(
                         step_id = step.id,
                     ),
                 });
-            } else {
-                seen_coords.insert(coord, ());
             }
         }
     }
@@ -627,7 +627,7 @@ mod tests {
     use tempfile::tempdir;
 
     /// Build a temp config dir with a `steps/` subdir and write the
-    /// supplied (skill_name, toml_content) pairs. Returns the temp dir
+    /// supplied (`skill_name`, `toml_content`) pairs. Returns the temp dir
     /// (kept alive by the caller via the returned guard).
     fn temp_config(skills: &[(&str, &str)]) -> (tempfile::TempDir, std::path::PathBuf) {
         let dir = tempdir().expect("tempdir");
@@ -715,7 +715,7 @@ id = "claim"
 
     #[test]
     fn compose_lifts_malformed_toml_to_error() {
-        let invalid = r#"this is not valid toml = "#;
+        let invalid = r"this is not valid toml = ";
         let (_guard, path) = temp_config(&[("brokenskill", invalid)]);
         let report = compose(&path).unwrap();
         assert!(!report.ok(), "malformed toml must be an error");

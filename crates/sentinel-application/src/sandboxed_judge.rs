@@ -27,7 +27,7 @@
 //! - **Panic isolation** — the inner judge is invoked via
 //!   `tokio::spawn`, so a panic in the judge becomes a `JoinError`
 //!   at this layer rather than unwinding the calling task. The
-//!   sandbox converts the JoinError to a `sufficient=false` verdict
+//!   sandbox converts the `JoinError` to a `sufficient=false` verdict
 //!   tagged `PANIC:` so callers see something happened.
 //!
 //! - **Predictable error shape** — every sandboxed failure produces
@@ -90,7 +90,7 @@ impl SandboxedJudge {
     }
 
     /// Synthetic verdict for "the sandbox killed the call." Tagged so
-    /// callers that scan for SANDBOX:/PANIC: prefixes can filter.
+    /// callers that scan for <SANDBOX:/PANIC>: prefixes can filter.
     fn sandbox_timeout_verdict(timeout: Duration) -> JudgeVerdict {
         JudgeVerdict::fail(
             0.0,
@@ -173,7 +173,14 @@ impl JudgeService for SandboxedJudge {
 
         let handle = tokio::spawn(async move {
             inner
-                .evaluate_step(&skill, &phase_id, &step_id, &step_description, &evidence, model)
+                .evaluate_step(
+                    &skill,
+                    &phase_id,
+                    &step_id,
+                    &step_description,
+                    &evidence,
+                    model,
+                )
                 .await
         });
 
@@ -189,7 +196,7 @@ impl JudgeService for SandboxedJudge {
     /// judge's `evaluate_multi` (which may have an overridden parallel
     /// implementation worth preserving). Same wrap-with-timeout-and-
     /// panic-isolation pattern. Per-judge errors INSIDE the inner
-    /// multi-call already become ERROR JudgeRuns by the trait's
+    /// multi-call already become ERROR `JudgeRuns` by the trait's
     /// default contract; the sandbox layers on top of that.
     async fn evaluate_multi(
         &self,
@@ -220,7 +227,11 @@ impl JudgeService for SandboxedJudge {
                 // built from a single PANIC run — callers that consume
                 // MultiJudgeVerdict still get a typed answer.
                 let panic_run = sentinel_domain::multi_judge::JudgeRun {
-                    model: tier.judge_models().first().copied().unwrap_or(JudgeModel::Kimi),
+                    model: tier
+                        .judge_models()
+                        .first()
+                        .copied()
+                        .unwrap_or(JudgeModel::Kimi),
                     verdict: Self::sandbox_panic_verdict(&join_err.to_string()),
                     cost_usd: None,
                     provider: Some("sandbox".to_string()),
@@ -231,7 +242,11 @@ impl JudgeService for SandboxedJudge {
                 // Timeout — synthesize a single-run multi-verdict
                 // marking SANDBOX timeout.
                 let timeout_run = sentinel_domain::multi_judge::JudgeRun {
-                    model: tier.judge_models().first().copied().unwrap_or(JudgeModel::Kimi),
+                    model: tier
+                        .judge_models()
+                        .first()
+                        .copied()
+                        .unwrap_or(JudgeModel::Kimi),
                     verdict: Self::sandbox_timeout_verdict(timeout),
                     cost_usd: None,
                     provider: Some("sandbox".to_string()),
@@ -333,8 +348,7 @@ mod tests {
             // Much longer than the sandbox timeout.
             delay: Duration::from_secs(5),
         };
-        let sandbox =
-            SandboxedJudge::with_timeout(Arc::new(slow), Duration::from_millis(50));
+        let sandbox = SandboxedJudge::with_timeout(Arc::new(slow), Duration::from_millis(50));
         let verdict = sandbox
             .evaluate(
                 "linear",
@@ -383,8 +397,7 @@ mod tests {
         let slow = SlowJudge {
             delay: Duration::from_secs(5),
         };
-        let sandbox =
-            SandboxedJudge::with_timeout(Arc::new(slow), Duration::from_millis(50));
+        let sandbox = SandboxedJudge::with_timeout(Arc::new(slow), Duration::from_millis(50));
         let verdict = sandbox
             .evaluate_step(
                 "linear",
@@ -405,8 +418,7 @@ mod tests {
         let slow = SlowJudge {
             delay: Duration::from_secs(5),
         };
-        let sandbox =
-            SandboxedJudge::with_timeout(Arc::new(slow), Duration::from_millis(50));
+        let sandbox = SandboxedJudge::with_timeout(Arc::new(slow), Duration::from_millis(50));
         let verdict = sandbox
             .evaluate_multi(
                 "linear",
@@ -421,7 +433,10 @@ mod tests {
         // synthesized; the multi-verdict reflects that.
         assert!(!verdict.sufficient);
         assert_eq!(verdict.individuals.len(), 1);
-        assert!(verdict.individuals[0].verdict.reasoning.starts_with("SANDBOX:"));
+        assert!(verdict.individuals[0]
+            .verdict
+            .reasoning
+            .starts_with("SANDBOX:"));
         assert_eq!(verdict.individuals[0].provider.as_deref(), Some("sandbox"));
     }
 

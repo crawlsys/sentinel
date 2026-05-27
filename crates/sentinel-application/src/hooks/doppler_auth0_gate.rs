@@ -31,8 +31,7 @@ use super::{EnvPort, HookContext};
 /// True iff `SENTINEL_AUTOPILOT` is set to `1` or `true` (case-insensitive).
 fn is_autopilot(env: &dyn EnvPort) -> bool {
     env.var("SENTINEL_AUTOPILOT")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
+        .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
 }
 
 /// Case-insensitive scan for prod markers inside a tool-input value. Returns
@@ -114,7 +113,7 @@ const DOPPLER_READ_OPS: &[&str] = &[
     "share_secret_plain",
 ];
 
-/// Process a PreToolUse event. Blocks Doppler/Auth0 mutation tools.
+/// Process a `PreToolUse` event. Blocks Doppler/Auth0 mutation tools.
 ///
 /// Doppler mutations can be unblocked by a signed session override written
 /// by `hygiene_override::process` when the user's prompt matches
@@ -152,7 +151,7 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
         let op = tool.strip_prefix("mcp__doppler__").unwrap_or("");
 
         // Allow read-only operations
-        if DOPPLER_READ_OPS.iter().any(|&read_op| op == read_op) {
+        if DOPPLER_READ_OPS.contains(&op) {
             return HookOutput::allow();
         }
 
@@ -189,8 +188,7 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
         if let Ok(paths) = ctx.fs.read_dir(&overrides_dir) {
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
+                .map_or(0, |d| d.as_secs());
             for path in paths {
                 let file_name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
                 if !file_name.starts_with("doppler-") {

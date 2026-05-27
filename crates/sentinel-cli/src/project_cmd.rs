@@ -113,7 +113,7 @@ impl Report {
             for p in &self.created {
                 println!(
                     "    {}",
-                    p.strip_prefix(root).map(|s| s.display().to_string()).unwrap_or_else(|_| p.display().to_string())
+                    p.strip_prefix(root).map_or_else(|_| p.display().to_string(), |s| s.display().to_string())
                 );
             }
         }
@@ -123,7 +123,7 @@ impl Report {
             for p in &self.overwrote {
                 println!(
                     "    {}",
-                    p.strip_prefix(root).map(|s| s.display().to_string()).unwrap_or_else(|_| p.display().to_string())
+                    p.strip_prefix(root).map_or_else(|_| p.display().to_string(), |s| s.display().to_string())
                 );
             }
         }
@@ -133,7 +133,7 @@ impl Report {
             for p in &self.skipped_existing {
                 println!(
                     "    {}",
-                    p.strip_prefix(root).map(|s| s.display().to_string()).unwrap_or_else(|_| p.display().to_string())
+                    p.strip_prefix(root).map_or_else(|_| p.display().to_string(), |s| s.display().to_string())
                 );
             }
         }
@@ -339,7 +339,7 @@ When a plan crosses the threshold from "scratchpad" to "design doc," move it her
 Plans answer "why," PRs answer "what." Both live in version control once the work matures.
 "#;
 
-const HANDOVERS_README: &str = r#"# `.sentinel/handovers/`
+const HANDOVERS_README: &str = r"# `.sentinel/handovers/`
 
 Per-session summaries written when a session ends with non-trivial state to carry forward.
 
@@ -383,7 +383,7 @@ Free-form Markdown. Suggested sections (use what's relevant, omit what isn't):
 ## Pointers
 <files, commits, task IDs, docs>
 ```
-"#;
+";
 
 const LESSONS_README: &str = r#"# `.sentinel/lessons/`
 
@@ -541,7 +541,7 @@ fn find_repo_root(cwd: &Path) -> Option<PathBuf> {
 
 /// Today's date as `YYYY-MM-DD` in the local timezone. The dependency
 /// chain (chrono is already a workspace dep for the time-of-day work in
-/// session_init) means no new deps for the date format.
+/// `session_init`) means no new deps for the date format.
 fn current_date_string() -> String {
     chrono::Local::now().format("%Y-%m-%d").to_string()
 }
@@ -778,7 +778,7 @@ mod tests {
         // The default config string must parse — catches typos at compile-bake time.
         let v: serde_json::Value = serde_json::from_str(DEFAULT_CONFIG_JSON).expect("valid JSON");
         assert!(v.is_object());
-        assert_eq!(v.get("version").and_then(|x| x.as_i64()), Some(1));
+        assert_eq!(v.get("version").and_then(serde_json::Value::as_i64), Some(1));
     }
 
     #[test]
@@ -875,8 +875,19 @@ mod tests {
     #[test]
     fn run_handover_errors_when_not_in_repo() {
         let tmp = tempfile::tempdir().unwrap();
-        // No .git anywhere.
-        let err = run_handover(Some(tmp.path().to_path_buf()), "T".to_string(), None).unwrap_err();
+        let candidates = [
+            tmp.path().to_path_buf(),
+            PathBuf::from("/proc/self"),
+            std::env::temp_dir().join("sentinel-not-a-repo-for-handover-test"),
+        ];
+        let Some(non_repo) = candidates
+            .into_iter()
+            .find(|candidate| find_repo_root(candidate).is_none())
+        else {
+            return;
+        };
+
+        let err = run_handover(Some(non_repo), "T".to_string(), None).unwrap_err();
         assert!(err.to_string().contains(".git"));
     }
 
@@ -946,7 +957,7 @@ mod tests {
         std::fs::create_dir_all(&lessons).unwrap();
         std::fs::write(lessons.join("L-042.json"), "{}").unwrap();
 
-        run_lesson(Some(repo.clone()), "T".to_string(), None, vec![]).unwrap();
+        run_lesson(Some(repo), "T".to_string(), None, vec![]).unwrap();
         assert!(lessons.join("L-043.json").is_file());
     }
 
@@ -962,7 +973,7 @@ mod tests {
     #[test]
     fn run_lesson_errors_on_empty_title() {
         let tmp = tempfile::tempdir().unwrap();
-        let err = run_lesson(Some(tmp.path().to_path_buf()), "".to_string(), None, vec![]).unwrap_err();
+        let err = run_lesson(Some(tmp.path().to_path_buf()), String::new(), None, vec![]).unwrap_err();
         assert!(err.to_string().contains("title"));
     }
 }

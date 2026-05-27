@@ -4,7 +4,7 @@
 //! orphaned root-level docs). Writes findings to
 //! `~/.claude/metrics/doc-cleanup.json`.
 //!
-//! **UserPromptSubmit phase:** Reads findings, checks cooldown (30 min),
+//! **`UserPromptSubmit` phase:** Reads findings, checks cooldown (30 min),
 //! injects cleanup instructions.
 
 use regex::Regex;
@@ -58,8 +58,7 @@ struct CleanupState {
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
+        .map_or(0, |d| d.as_millis() as u64)
 }
 
 fn state_file(fs: &dyn FileSystemPort) -> Option<PathBuf> {

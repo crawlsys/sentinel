@@ -147,6 +147,25 @@ pub trait FileSystemPort: Send + Sync {
     /// Get the user's home directory.
     fn home_dir(&self) -> Option<PathBuf>;
 
+    /// Resolve the Claude Code config/state directory.
+    ///
+    /// All sentinel state (metrics, sessions, persistent tasks, plans,
+    /// extracted memories, telemetry, etc.) lives under this directory.
+    /// By default this is `$HOME/.claude`, but adapters MAY override —
+    /// the real filesystem adapter honors `SENTINEL_CLAUDE_DIR` to
+    /// support fully-isolated sandbox profiles (running sentinel
+    /// alongside an existing Claude Code installation without
+    /// clobbering its state).
+    ///
+    /// Test stubs that mock `home_dir()` inherit the default join
+    /// behavior automatically — no need to override unless they want
+    /// to assert different resolution.
+    fn claude_dir(&self) -> PathBuf {
+        self.home_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(".claude")
+    }
+
     /// Read a file's contents as a string.
     fn read_to_string(&self, path: &Path) -> anyhow::Result<String>;
 
@@ -288,6 +307,12 @@ pub enum LlmModel {
     Sonnet,
     /// Heavy reasoning.
     Opus,
+    /// Adversarial / code worker tier (delegation). Maps to the Codex
+    /// model — strong at code reasoning and adversarial critique.
+    Codex,
+    /// Cheap context-scanning worker tier (delegation). Maps to Kimi —
+    /// large-context, low-cost reads over big inputs.
+    Kimi,
 }
 
 // ---------------------------------------------------------------------------
@@ -811,8 +836,7 @@ mod ba_port_tests {
 
     #[test]
     fn provenance_error_display_names_each_variant() {
-        let unavailable =
-            ProvenanceError::StoreUnavailable("disk full".to_string()).to_string();
+        let unavailable = ProvenanceError::StoreUnavailable("disk full".to_string()).to_string();
         assert!(unavailable.contains("unavailable"));
         assert!(unavailable.contains("disk full"));
 
@@ -889,7 +913,7 @@ pub struct SpecChallengeScore {
 impl SpecChallengeScore {
     /// Construct, clamping every axis to `[0.0, 1.0]`.
     #[must_use]
-    pub fn new(
+    pub const fn new(
         assumptions: f32,
         gaps: f32,
         ambiguities: f32,
@@ -1128,16 +1152,20 @@ mod spec_challenge_port_tests {
         assert!(SpecChallengeScorerError::Malformed("bad axes".to_string())
             .to_string()
             .contains("malformed"));
-        assert!(SpecChallengeScorerError::Configuration("no model".to_string())
-            .to_string()
-            .contains("configuration"));
+        assert!(
+            SpecChallengeScorerError::Configuration("no model".to_string())
+                .to_string()
+                .contains("configuration")
+        );
     }
 
     #[test]
     fn store_error_display_names_each_variant() {
-        assert!(SpecChallengeStoreError::StoreUnavailable("disk".to_string())
-            .to_string()
-            .contains("unavailable"));
+        assert!(
+            SpecChallengeStoreError::StoreUnavailable("disk".to_string())
+                .to_string()
+                .contains("unavailable")
+        );
         assert!(SpecChallengeStoreError::Malformed("schema".to_string())
             .to_string()
             .contains("malformed"));

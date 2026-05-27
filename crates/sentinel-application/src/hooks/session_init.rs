@@ -1,4 +1,4 @@
-//! Session Init — SessionStart hook
+//! Session Init — `SessionStart` hook
 //!
 //! Handles session initialization:
 //! - Logs session start to sentinel/metrics/sessions.jsonl
@@ -117,7 +117,7 @@ const SYNC_DIRS_RECURSIVE: &[&str] = &[];
 /// Minimum number of skill directories for a valid sync.
 const MIN_SKILL_DIRS: usize = sentinel_domain::constants::MIN_SKILL_DIRS;
 
-/// Process SessionStart event
+/// Process `SessionStart` event
 pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
     let session_id = input.session_id.as_deref().unwrap_or("unknown");
     let cwd = input.cwd.as_deref().unwrap_or(".");
@@ -169,8 +169,10 @@ pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
     // 6. Auto-init disabled — run `sentinel init` manually when needed
     let init_result: Option<sentinel_domain::project::InitResult> = None;
 
-    // 6.5. Background Qdrant memory sync — catches files missed between sessions
-    spawn_qdrant_sync(ctx.process);
+    // 6.5. (Removed) Background flat-`.md` → Qdrant sync. The `qdrant sync`
+    // path imported markdown files directly, bypassing the dual-judge gate.
+    // Memories are now captured from conversation turns by
+    // `memory_turn_capture` (LLM → dual-judge → atom). No flat-file sync.
 
     // 7. Build startup context
     let context =
@@ -191,9 +193,9 @@ pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
         // Detect project from cwd path
         let project = detect_project_from_cwd(cwd);
         if let Some(ref proj) = project {
-            lines.push(format!("CLAUDE_PROJECT={}", proj));
+            lines.push(format!("CLAUDE_PROJECT={proj}"));
         }
-        lines.push(format!("SENTINEL_SESSION_ID={}", session_id));
+        lines.push(format!("SENTINEL_SESSION_ID={session_id}"));
 
         if !lines.is_empty() {
             if let Err(e) = std::fs::write(&env_file, lines.join("\n") + "\n") {
@@ -295,7 +297,7 @@ fn log_session_start(
 
 /// One-time migration: move `~/.claude/metrics/*` → `~/.claude/sentinel/metrics/`.
 ///
-/// Runs on every SessionStart but only does work when the old directory exists
+/// Runs on every `SessionStart` but only does work when the old directory exists
 /// and contains files. After moving, the old directory is removed.
 fn migrate_metrics_dir(claude_dir: &Path) {
     let old_dir = claude_dir.join("metrics");
@@ -317,13 +319,7 @@ fn migrate_metrics_dir(claude_dir: &Path) {
         let src = entry.path();
         if src.is_file() {
             let dst = new_dir.join(entry.file_name());
-            if !dst.exists() {
-                // Move file (copy + remove for cross-device safety)
-                if fs::copy(&src, &dst).is_ok() {
-                    let _ = fs::remove_file(&src);
-                    moved += 1;
-                }
-            } else {
+            if dst.exists() {
                 // Destination already exists — append JSONL files, skip others
                 let name = entry.file_name();
                 let name_str = name.to_string_lossy();
@@ -339,14 +335,19 @@ fn migrate_metrics_dir(claude_dir: &Path) {
                     moved += 1;
                 }
                 // Non-JSONL duplicates: leave the old copy for safety
+            } else {
+                // Move file (copy + remove for cross-device safety)
+                if fs::copy(&src, &dst).is_ok() {
+                    let _ = fs::remove_file(&src);
+                    moved += 1;
+                }
             }
         }
     }
 
     // Remove old directory if empty
     if fs::read_dir(&old_dir)
-        .map(|mut d| d.next().is_none())
-        .unwrap_or(false)
+        .is_ok_and(|mut d| d.next().is_none())
     {
         let _ = fs::remove_dir(&old_dir);
     }
@@ -361,7 +362,7 @@ fn migrate_metrics_dir(claude_dir: &Path) {
 
 /// One-time migration: move `~/.claude/.last-sync-commit` → `~/.claude/sentinel/state/last-sync-commit`.
 ///
-/// Runs on every SessionStart but only does work when the old file exists.
+/// Runs on every `SessionStart` but only does work when the old file exists.
 fn migrate_last_sync_commit(claude_dir: &Path) {
     let old_file = claude_dir.join(".last-sync-commit");
     if !old_file.exists() {
@@ -409,55 +410,6 @@ fn find_marketplace_repo() -> Option<PathBuf> {
 /// Check if a directory is the marketplace git repo
 fn is_marketplace_repo(dir: &Path) -> bool {
     dir.join(".git").exists() && dir.join("skills").exists() && dir.join("install.js").exists()
-}
-
-/// Spawn a background Qdrant memory sync.
-/// Runs `qdrant sync` in a detached process so it doesn't block session startup.
-/// This catches any memory files written between sessions that the Stop hook missed.
-fn spawn_qdrant_sync(process: &dyn super::ProcessPort) {
-    // Check if qdrant CLI exists
-    let qdrant_bin = which_qdrant();
-    let Some(bin) = qdrant_bin else {
-        tracing::debug!("qdrant CLI not found — skipping session-start sync");
-        return;
-    };
-
-    // Fire and forget — don't block startup
-    let bin_str = bin.to_string_lossy().to_string();
-    match process.spawn_detached(&bin_str, &["sync"]) {
-        Ok(()) => tracing::debug!("Spawned background qdrant sync"),
-        Err(e) => tracing::debug!(error = %e, "Failed to spawn qdrant sync"),
-    }
-}
-
-/// Find the qdrant CLI binary
-fn which_qdrant() -> Option<std::path::PathBuf> {
-    // Check ~/.cargo/bin first (common install location)
-    if let Some(home) = dirs::home_dir() {
-        let cargo_bin = home.join(".cargo").join("bin").join("qdrant.exe");
-        if cargo_bin.exists() {
-            return Some(cargo_bin);
-        }
-        // Unix variant
-        let cargo_bin_unix = home.join(".cargo").join("bin").join("qdrant");
-        if cargo_bin_unix.exists() {
-            return Some(cargo_bin_unix);
-        }
-    }
-    // Check release build
-    if let Some(home) = dirs::home_dir() {
-        let dev_bin = home
-            .join("Documents")
-            .join("GitHub")
-            .join("qdrant-cli-rust")
-            .join("target")
-            .join("release")
-            .join("qdrant.exe");
-        if dev_bin.exists() {
-            return Some(dev_bin);
-        }
-    }
-    None
 }
 
 /// Sync marketplace repo to ~/.claude/
@@ -598,8 +550,7 @@ fn validate_sync(claude_dir: &Path) -> ValidationResult {
         let skill_count = count_subdirs(&skills_dir);
         if skill_count < MIN_SKILL_DIRS {
             reasons.push(format!(
-                "Only {} skill directories found (minimum: {})",
-                skill_count, MIN_SKILL_DIRS
+                "Only {skill_count} skill directories found (minimum: {MIN_SKILL_DIRS})"
             ));
         }
     } else {
@@ -609,14 +560,13 @@ fn validate_sync(claude_dir: &Path) -> ValidationResult {
     // 3. sentinel engine should be available
     let cargo_bin = dirs::home_dir().map(|h| h.join(".cargo").join("bin"));
     let sentinel_available = cargo_bin
-        .map(|d| {
+        .is_some_and(|d| {
             if cfg!(windows) {
                 d.join("sentinel.exe").exists() || d.join("sentinel-engine.exe").exists()
             } else {
                 d.join("sentinel").exists() || d.join("sentinel-engine").exists()
             }
-        })
-        .unwrap_or(false);
+        });
     if !sentinel_available {
         reasons.push("sentinel binary not found in ~/.cargo/bin/".to_string());
     }
@@ -661,7 +611,7 @@ fn list_project_configs(claude_dir: &Path) -> Vec<String> {
     }
     let mut names = Vec::new();
     if let Ok(entries) = fs::read_dir(&projects_dir) {
-        for entry in entries.filter_map(|e| e.ok()) {
+        for entry in entries.filter_map(std::result::Result::ok) {
             let name = entry.file_name().to_string_lossy().to_string();
             if name.ends_with(".md") && !name.starts_with('_') {
                 names.push(name.trim_end_matches(".md").to_string());
@@ -702,7 +652,7 @@ fn list_linear_accounts(claude_dir: &Path) -> Vec<String> {
     let projects_dir = claude_dir.join("sentinel").join("projects");
     if projects_dir.exists() {
         if let Ok(entries) = fs::read_dir(&projects_dir) {
-            for entry in entries.filter_map(|e| e.ok()) {
+            for entry in entries.filter_map(std::result::Result::ok) {
                 let path = entry.path();
                 let name = entry.file_name().to_string_lossy().to_string();
                 if !name.ends_with(".md") || name.starts_with('_') {
@@ -711,8 +661,8 @@ fn list_linear_accounts(claude_dir: &Path) -> Vec<String> {
                 if let Ok(content) = fs::read_to_string(&path) {
                     for line in content.lines() {
                         let trimmed = line.trim();
-                        if trimmed.starts_with("linear_account:") {
-                            let acct = trimmed["linear_account:".len()..].trim().trim_matches('"');
+                        if let Some(rest) = trimmed.strip_prefix("linear_account:") {
+                            let acct = rest.trim().trim_matches('"');
                             if !acct.is_empty() && !accounts.contains(&acct.to_string()) {
                                 accounts.push(acct.to_string());
                             }
@@ -775,6 +725,7 @@ fn list_linear_accounts(claude_dir: &Path) -> Vec<String> {
 /// live `TaskList` state. Pair with auto-regenerate hooks on `TaskCreated`
 /// and `TaskCompleted` for continuous sync.
 pub fn render_tasks_section(cwd: &Path) -> String {
+    use std::fmt::Write as FmtWrite;
     let cwd_str = cwd.to_string_lossy();
     let hash = project_hash_for_cwd(&cwd_str);
 
@@ -857,9 +808,7 @@ pub fn render_tasks_section(cwd: &Path) -> String {
         } else {
             blocked_by.join(", ")
         };
-        out.push_str(&format!(
-            "| #{id} | {subject} | {status} | {priority} | {blocked} |\n"
-        ));
+        let _ = writeln!(out, "| #{id} | {subject} | {status} | {priority} | {blocked} |");
     }
     out.push('\n');
     out
@@ -884,11 +833,7 @@ fn generate_claude_md(
     let date_str = now.format("%A, %B %-d, %Y").to_string();
     let year = now.format("%Y").to_string();
     let month = now.format("%B").to_string();
-    let time_str = format!(
-        "{} {}",
-        now.format("%I:%M %p"),
-        local_tz_abbreviation(&now)
-    );
+    let time_str = format!("{} {}", now.format("%I:%M %p"), local_tz_abbreviation(&now));
     let user_name = user_name();
     let greeting = time_greeting();
 
@@ -898,7 +843,7 @@ fn generate_claude_md(
     } else {
         let list = project_names
             .iter()
-            .map(|n| format!("  - `{}`", n))
+            .map(|n| format!("  - `{n}`"))
             .collect::<Vec<_>>()
             .join("\n");
         format!(
@@ -913,11 +858,11 @@ fn generate_claude_md(
     } else {
         let list = linear_accounts
             .iter()
-            .map(|a| format!("  - `{}`", a))
+            .map(|a| format!("  - `{a}`"))
             .collect::<Vec<_>>()
             .join("\n");
         format!(
-            "\n### Linear Multi-Account\n\nSwitch between Linear workspaces using `mcp__linear__switch_account(account_name: \"<name>\")`.\n\n**Available accounts:**\n{}\n\nEach project config specifies its `linear_account` — the skill router auto-switches when detecting issue prefixes.
+            "\n### Linear Multi-Account\n\nSwitch between Linear workspaces using `mcp__linear__switch_account(account_name: \"<name>\")`.\n\n**Available accounts:**\n{list}\n\nEach project config specifies its `linear_account` — the skill router auto-switches when detecting issue prefixes.
 
 ### Linear Workflow Automation
 
@@ -928,8 +873,7 @@ Firefly Pro repos (and any project adopting the convention) use a fixed Linear p
 3. **QA pass** — tester moves to **Completed**.
 4. **QA fail** — tester moves to **QA Failed** and reassigns to whoever owns the next attempt.
 
-The workflow needs a `LINEAR_API_KEY` repo secret (workspace-scoped). Assignee and target-state UUIDs are hardcoded per repo for stability — new repos copy `.github/workflows/linear-on-merge.yml` from the reference implementation in `firefly-pro-crm` and adjust those two constants for their Linear workspace + QA tester.\n",
-            list
+The workflow needs a `LINEAR_API_KEY` repo secret (workspace-scoped). Assignee and target-state UUIDs are hardcoded per repo for stability — new repos copy `.github/workflows/linear-on-merge.yml` from the reference implementation in `firefly-pro-crm` and adjust those two constants for their Linear workspace + QA tester.\n"
         )
     };
 
@@ -1023,13 +967,13 @@ Sentinel just demonstrated it can drive your real `EnterPlanMode` permission sta
 1. **Git Hygiene** — hourly at :03
    ```
    CronCreate(cron: "3 * * * *", recurring: true,
-     prompt: "Check for unpushed commits: run git log @{{upstream}}..HEAD --oneline. Check for uncommitted changes: run git status --short. If either has results, remind Gary to push or commit.")
+     prompt: "First run git rev-parse --is-inside-work-tree. If that fails or is not true, report 'not in a git repository; skipping git hygiene' and do not run git commands. Check for upstream with git rev-parse --abbrev-ref --symbolic-full-name @{{upstream}}. If no upstream is configured, report 'no upstream configured' and skip the unpushed-commit check. Otherwise run git log @{{upstream}}..HEAD --oneline. Check for uncommitted changes with git status --short. If either check has results, remind Gary to push or commit.")
    ```
 
 2. **Worktree Cleanup** — hourly at :17
    ```
    CronCreate(cron: "17 * * * *", recurring: true,
-     prompt: "Run git worktree list. For each worktree, check if its branch is merged into main with git branch --merged main. Report any stale worktrees that should be cleaned up.")
+     prompt: "First run git rev-parse --is-inside-work-tree. If that fails or is not true, report 'not in a git repository; skipping worktree cleanup' and do not run git commands. Otherwise run git worktree list. For each worktree, check if its branch is merged into main with git branch --merged main. Report any stale worktrees that should be cleaned up.")
    ```
 
 3. **Task Audit** — hourly at :33
@@ -1254,7 +1198,7 @@ Per-project settings live in `~/.claude/sentinel/projects/{{name}}.md` with YAML
 - **Doppler**: project name, config names (dev/stg/prd)
 - **Linear**: team ID, team key, issue prefix, project IDs, labels
 - **Deploy**: staging/production URLs, hosting provider
-- **QA**: Steel test user, Doppler secret path for test password
+- **QA**: Browser test user (Browserbase remote or CDP local), Doppler secret path for test password
 - **Auth**: Auth0 domains, callback URLs
 
 The skill router auto-detects the active project from issue prefixes (e.g. `FIR-123`), project aliases, or cwd path matching, and injects project context into every skill.
@@ -1266,7 +1210,7 @@ The skill router auto-detects the active project from issue prefixes (e.g. `FIR-
 | **SessionStart** | New session opens | Marketplace sync, CLAUDE.md gen, project auto-init, Linear key cache |
 | **SessionEnd** | Session closes | Session cleanup, metrics flush (1.5s timeout) |
 | **UserPromptSubmit** | Every user message | Skill router, phase validator, error reporter, todo loader, doc drift*, commit hygiene*, context monitor*, verification gate* |
-| **PreToolUse** | Before Claude uses a tool | Phase gate (blocks tools until phase loaded), git hygiene (Edit/Write), commit validator (Bash), pre-push Steel test (Bash), wrangler guard (Bash) |
+| **PreToolUse** | Before Claude uses a tool | Phase gate (blocks tools until phase loaded), git hygiene (Edit/Write), commit validator (Bash), pre-push browser test (Bash), wrangler guard (Bash) |
 | **PostToolUse** | After Claude uses a tool | MCP health check, todo interceptor, evidence collector, plan organizer (ExitPlanMode) |
 | **PostToolUseFailure** | After tool execution fails | Pass-through (logged) |
 | **Stop** | Claude finishes responding | Execution log, skill telemetry, context monitor*, commit hygiene*, doc drift*, verification gate* |
@@ -1578,18 +1522,24 @@ enforce — these do):
     memory.
   * You hit an unfamiliar convention and want to check if there's a
     stored reason for it.
-  Use `mcp__qdrant__search_memory`, the `memory` skill, or read the
-  file-based memory at `~/.claude/session-env/.../memory/`.
-- **Store memory after concrete events**:
-  * The user corrected your approach — save a `feedback` memory with
-    the rule, **Why:**, and **How to apply:** lines.
-  * You made a non-obvious judgement call future sessions would
-    re-derive with effort — `project` or `feedback`.
-  * The user shared a constraint, deadline, or stakeholder fact —
-    `project`, with relative dates converted to absolute.
-  * You discovered quirky external-system behaviour not documented
-    in the code.
-- **Run the Steel test when the change touches UI surface** — any
+  Use `mcp__memory-mcp__memory_search` (the atom engine) or the `memory`
+  skill. Relevant atoms are also auto-injected each turn by the
+  `memory_inject` hook.
+- **Store memory after concrete events.** Capture is automatic — the
+  `memory_turn_capture` hook extracts atoms from each turn and routes
+  them through the dual-judge gate. To force one the extractor would
+  miss, call `mcp__memory-mcp__memory_capture` (subject/predicate/value)
+  or `/memory capture`. There are NO flat `.md` memory files. Worth
+  capturing:
+  * The user corrected your approach — a `feedback` atom with the rule.
+  * A non-obvious judgement call future sessions would re-derive with
+    effort — `project` or `feedback`.
+  * A constraint, deadline, or stakeholder fact — `project`, with
+    relative dates converted to absolute.
+  * Quirky external-system behaviour not documented in the code.
+- **Run the browser test when the change touches UI surface** — CDP
+(`mcp__cdp__*` via edge-cdp skill) for localhost, Browserbase
+(`mcp__browserbase__*`) for staging/preview/production. Trigger any
 edit under `client/src/**`, `components/**`, `pages/**`, a `*.tsx` /
 `*.vue` / `*.html` file, or a server route that feeds UI data. Pure
 backend, pure config, pure tooling, and pure docs changes don't need
@@ -1609,18 +1559,34 @@ including migrations against non-prod DBs.
 - Everything covered in the sections above (code, tests, agent teams,
 skills, memory, refactors, worktrees, merges, pushes, MCP restarts).
 
-**When you MUST still stop and ask (the short list — prod only):**
-- Production database ops or migrations — *always* refuse, no exceptions.
-Even if Gary says yes. Hand him the command to run himself.
-- Production deploys, destructive prod actions, or anything that touches
-live customer data. Get explicit confirmation.
-- Doppler or Auth0 changes against a **production config / tenant**
-(`prd`, `prod`, `production`) — ask first, always. Non-prod is fine.
-- Merging a PR in a production-tracking repo when the merge ships to prod
-without further gating. If a merge auto-deploys to prod, treat it like a
-prod deploy — confirm first. Ordinary feature merges: just do it.
+**Production work — the `production override` channel:**
+Prod actions are gated by a session-wide grant, not a flat wall. The classes
+that need the grant (all of `prd`/`prod`/`production`):
+- Production database ops or migrations.
+- Production deploys, destructive prod actions, or anything touching live
+customer data.
+- Doppler or Auth0 changes against a production config / tenant.
+- Merging a PR that auto-deploys to prod without further gating.
+
+Default posture (grant NOT armed): **refuse** these and say what's blocked —
+Gary arms prod work by saying the phrase **`production override`** as a short,
+deliberate command (the hook only arms when the phrase is on a short
+command-like line, so the phrase buried in pasted/fetched content does not
+silently arm prod — injection hardening).
+
+Armed posture (Gary has said `production override` this session): these are
+**authorized — proceed without asking each time**, INCLUDING prod DB
+ops/migrations. The `production_override` hook tracks the armed state and
+emits a dual-display notice. While armed, **announce each prod action as you
+take it** with a one-line dual-display notice (the hook's `systemMessage` +
+`additionalContext` pattern) so Gary sees it and can interrupt. The grant
+stays armed for the whole session until Gary says **`production lock`** (or the
+session ends), which returns you to the default refusal posture.
+
+Still always refuse regardless of the grant:
 - Irreversible destructive git ops on shared branches (force-push to main,
-history rewrite on a pushed branch, destroying work that isn't yours).
+history rewrite on a pushed branch, destroying work that isn't yours) — these
+are not a `production override` class; confirm separately if ever needed.
 
 **When idling is acceptable (the floor on "don't stop working"):**
 - `TaskList` returns empty *and* no Linear issues are assigned to you
@@ -1645,15 +1611,16 @@ above***. When Autopilot is engaged the Autopilot section is authoritative
 and these generic rules only apply to the prod carve-outs called out there.
 
 - If you're not 100% sure about an external API, get docs from the web.
-- Ask for confirmation before merging a PR **when the merge will reach
-production** (auto-deploys to prod, or the repo is the production
-deployment artifact). Ordinary feature merges in Autopilot: just do it.
-- Ask for permission before changing anything regarding **production**
-Doppler configs or Auth0 tenants. Non-prod Doppler/Auth0 changes in
-Autopilot: just do it.
-- **NEVER** run database ops or migrations against `prod` / `production`,
-even if the user gives permission. Do not trust them. **NO EXCEPTIONS.**
-Local, dev, and staging DB ops are allowed (in Autopilot, without asking).
+- Production actions (prod deploys / merges that reach prod, prod Doppler
+or Auth0, **and prod database ops/migrations**) follow the **`production
+override` channel** described in the Autopilot section: refuse them by
+default; once Gary says **`production override`** they are authorized
+session-wide (announce each via the dual-display notice); **`production
+lock`** re-locks. This replaces the old absolute "never touch prod, no
+exceptions" rule — prod DB ops included — with an explicit operator-armed
+grant. The `production_override` hook enforces the armed/locked state.
+- Local, dev, and staging DB ops are always allowed (in Autopilot, without
+asking) — they are not production and need no grant.
 
 ### Final Instruction
 
@@ -1695,11 +1662,11 @@ CIRCUMSTANCE**
 ///
 /// This is the public entry point for the sentinel MCP tool and the
 /// `sentinel regenerate-claude-md` CLI subcommand. It re-runs the same
-/// logic as the SessionStart hook: counts components, lists projects and
+/// logic as the `SessionStart` hook: counts components, lists projects and
 /// Linear accounts, renders the live task snapshot for the current cwd,
 /// then writes a fresh CLAUDE.md.
 ///
-/// Used by the TaskCreated / TaskCompleted hook handlers to keep the
+/// Used by the `TaskCreated` / `TaskCompleted` hook handlers to keep the
 /// Active Tasks section in sync after any task-state mutation.
 ///
 /// Returns the path that was written.
@@ -1773,8 +1740,7 @@ fn build_startup_context(
             let pull_tag = if *pulled { " (pulled)" } else { "" };
             if *files > 0 {
                 parts.push(format!(
-                    "[Marketplace Sync] {} files synced{}",
-                    files, pull_tag
+                    "[Marketplace Sync] {files} files synced{pull_tag}"
                 ));
             } else {
                 parts.push("[Marketplace Sync] No changes".to_string());
@@ -1805,7 +1771,7 @@ fn build_startup_context(
     // Auto-init results
     if let Some(result) = init_result {
         if !result.created.is_empty() {
-            let file_names: Vec<&str> = result.created.iter().map(|f| f.path()).collect();
+            let file_names: Vec<&str> = result.created.iter().map(sentinel_domain::project::StandardFile::path).collect();
             parts.push(format!(
                 "[Project Init] Auto-generated {} standard file(s): {}",
                 result.created.len(),
@@ -1829,7 +1795,7 @@ fn build_startup_context(
 // Linear team key caching (marketplace → sentinel)
 // ---------------------------------------------------------------------------
 
-/// Read all ~/.claude/sentinel/projects/*.md files, extract linear_teams keys from
+/// Read all ~/.claude/sentinel/projects/*.md files, extract `linear_teams` keys from
 /// YAML frontmatter, and write them to ~/.claude/sentinel/linear-teams.json
 /// so the skill router can consume them without hardcoding.
 fn cache_linear_team_keys(claude_dir: &Path) {
@@ -1846,7 +1812,7 @@ fn cache_linear_team_keys(claude_dir: &Path) {
         Err(_) => return,
     };
 
-    for entry in entries.filter_map(|e| e.ok()) {
+    for entry in entries.filter_map(std::result::Result::ok) {
         let path = entry.path();
         let file_name = entry.file_name().to_string_lossy().to_string();
         if !file_name.ends_with(".md") || file_name.starts_with('_') {
@@ -1885,8 +1851,8 @@ fn cache_linear_team_keys(claude_dir: &Path) {
             }
 
             // Also extract issue_prefix: FPCRM
-            if trimmed.starts_with("issue_prefix:") {
-                let prefix = trimmed["issue_prefix:".len()..].trim();
+            if let Some(rest) = trimmed.strip_prefix("issue_prefix:") {
+                let prefix = rest.trim();
                 if !prefix.is_empty() && !keys.contains(&prefix.to_string()) {
                     keys.push(prefix.to_string());
                 }
@@ -1922,7 +1888,7 @@ fn cache_linear_team_keys(claude_dir: &Path) {
 /// Auto-generate missing standard project files in the cwd.
 /// Only runs if the directory looks like a git repo.
 /// Never overwrites existing files (force=false).
-/// Detect project name from cwd for CLAUDE_ENV_FILE injection.
+/// Detect project name from cwd for `CLAUDE_ENV_FILE` injection.
 fn detect_project_from_cwd(cwd: &str) -> Option<String> {
     let dir_name = Path::new(cwd).file_name()?.to_str()?;
     let project = match dir_name {

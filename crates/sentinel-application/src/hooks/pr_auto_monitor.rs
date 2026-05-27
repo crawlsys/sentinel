@@ -1,13 +1,14 @@
 //! PR Auto-Monitor
 //!
-//! PostToolUse hook that detects PR-related git operations and injects
-//! CronCreate instructions for automated monitoring.
+//! `PostToolUse` hook that detects PR-related git operations and injects
+//! `CronCreate` instructions for automated monitoring.
 //!
 //! Detects:
 //! - `gh pr create` → monitor CI, reviews, conflicts every 5 min
 //! - `git push` to a branch (not main) → check CI results
 //! - `git merge` to main → verify push + changelog
 
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use sentinel_domain::events::{HookEvent, HookInput, HookOutput};
@@ -49,14 +50,17 @@ fn git_config_path(cwd: &Path) -> Option<PathBuf> {
             let content = std::fs::read_to_string(&dot_git).ok()?;
             let gitdir = content.trim().strip_prefix("gitdir: ")?;
             let gitdir = Path::new(gitdir.trim());
-            return gitdir.parent().and_then(|p| p.parent()).map(|p| p.join("config"));
+            return gitdir
+                .parent()
+                .and_then(|p| p.parent())
+                .map(|p| p.join("config"));
         }
         cur = dir.parent();
     }
     None
 }
 
-/// Process a PostToolUse Bash event for PR-related commands.
+/// Process a `PostToolUse` Bash event for PR-related commands.
 pub fn process(input: &HookInput) -> HookOutput {
     let cmd = match extract_bash_command(input) {
         Some(c) => c,
@@ -114,11 +118,12 @@ pub fn process(input: &HookInput) -> HookOutput {
              `git push origin --delete <branch>` if the branch was pushed to origin"
         );
         if let Some(branch) = extract_worktree_branch_name(cmd) {
-            msg.push_str(&format!(
+            let _ = write!(
+                msg,
                 "\n\nMerged branch: `{branch}` — run:\n  \
                  git branch -d {branch}\n  \
                  git push origin --delete {branch}"
-            ));
+            );
         }
         return HookOutput::inject_context(HookEvent::PostToolUse, msg);
     }
@@ -149,7 +154,7 @@ fn extract_pr_from_result(input: &HookInput) -> Option<String> {
     // Look for PR URL pattern
     if let Some(pos) = text.find("/pull/") {
         let after = &text[pos + 6..];
-        let num: String = after.chars().take_while(|c| c.is_ascii_digit()).collect();
+        let num: String = after.chars().take_while(char::is_ascii_digit).collect();
         if !num.is_empty() {
             return Some(format!("#{num}"));
         }
@@ -158,7 +163,7 @@ fn extract_pr_from_result(input: &HookInput) -> Option<String> {
     // Look for "Created pull request #N"
     if let Some(pos) = text.find('#') {
         let after = &text[pos + 1..];
-        let num: String = after.chars().take_while(|c| c.is_ascii_digit()).collect();
+        let num: String = after.chars().take_while(char::is_ascii_digit).collect();
         if !num.is_empty() {
             return Some(format!("#{num}"));
         }
@@ -257,9 +262,7 @@ mod tests {
 
         let input = HookInput {
             tool_name: Some("Bash".to_string()),
-            tool_input: Some(
-                serde_json::json!({"command": "git merge feat/foo --no-edit"}),
-            ),
+            tool_input: Some(serde_json::json!({"command": "git merge feat/foo --no-edit"})),
             cwd: Some(tmp.path().to_string_lossy().into_owned()),
             ..Default::default()
         };
@@ -294,9 +297,7 @@ mod tests {
 
         let input = HookInput {
             tool_name: Some("Bash".to_string()),
-            tool_input: Some(
-                serde_json::json!({"command": "git merge feat/foo --no-edit"}),
-            ),
+            tool_input: Some(serde_json::json!({"command": "git merge feat/foo --no-edit"})),
             cwd: Some(tmp.path().to_string_lossy().into_owned()),
             ..Default::default()
         };

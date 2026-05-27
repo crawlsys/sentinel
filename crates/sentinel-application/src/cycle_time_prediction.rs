@@ -13,7 +13,7 @@
 //!
 //! * **SEN-6 — Forced decomposition at Phase 1.5.** [`requires_decomposition`]
 //!   returns `true` when the prediction crosses a configurable threshold
-//!   (default: 2× the team's p90 OR `> 8h` raw estimate). The phase_gate
+//!   (default: 2× the team's p90 OR `> 8h` raw estimate). The `phase_gate`
 //!   hook blocks the transition into Phase 2 (worktree creation) until the
 //!   user explicitly decomposes via a sub-ticket.
 //!
@@ -72,7 +72,7 @@ impl Confidence {
     /// * `>= 5`  → Medium (workable estimate).
     /// * else    → Low (small-sample, surface a "~" prefix in the UI).
     #[must_use]
-    pub fn from_sample_count(n: usize) -> Self {
+    pub const fn from_sample_count(n: usize) -> Self {
         if n >= 20 {
             Self::High
         } else if n >= 5 {
@@ -113,8 +113,7 @@ pub fn predict_cycle_time(
     for stage_name in PREDICTION_PATH {
         let row = pick_breakdown_row(breakdown, team, stage_name);
         let (p50, p75, samples) = row
-            .map(|r| (r.p50_hours, r.p75_hours, r.sample_count))
-            .unwrap_or((0.0, 0.0, 0));
+            .map_or((0.0, 0.0, 0), |r| (r.p50_hours, r.p75_hours, r.sample_count));
         per_stage.push(StageDuration {
             stage: (*stage_name).to_string(),
             p50_hours: p50,
@@ -189,10 +188,7 @@ impl Default for DecompositionRule {
 }
 
 #[must_use]
-pub fn requires_decomposition(
-    prediction: &CycleTimePrediction,
-    rule: DecompositionRule,
-) -> bool {
+pub fn requires_decomposition(prediction: &CycleTimePrediction, rule: DecompositionRule) -> bool {
     // Rule 1: raw estimate over the ceiling.
     if let Some(est) = prediction.estimate {
         if f64::from(est) > rule.estimate_ceiling {
@@ -297,7 +293,7 @@ mod tests {
     fn predict_picks_lowest_sample_count_for_confidence() {
         let b = breakdown(vec![
             row(Some("X"), "In Progress", 4.0, 6.0, 50),
-            row(Some("X"), "Code Review", 2.0, 4.0, 3),   // smallest
+            row(Some("X"), "Code Review", 2.0, 4.0, 3), // smallest
             row(Some("X"), "QA Testing", 6.0, 8.0, 100),
         ]);
         let p = predict_cycle_time(&b, Some("X"), None, None);
@@ -307,12 +303,7 @@ mod tests {
 
     #[test]
     fn predict_records_input_metadata() {
-        let p = predict_cycle_time(
-            &breakdown(vec![]),
-            Some("FPCRM"),
-            Some(2),
-            Some(5),
-        );
+        let p = predict_cycle_time(&breakdown(vec![]), Some("FPCRM"), Some(2), Some(5));
         assert_eq!(p.team.as_deref(), Some("FPCRM"));
         assert_eq!(p.priority, Some(2));
         assert_eq!(p.estimate, Some(5));

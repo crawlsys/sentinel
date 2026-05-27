@@ -5,6 +5,7 @@
 //! creating a tamper-evident chain — same trust model as blockchain.
 
 use chrono::{DateTime, Utc};
+use consul_domain::identity::republic::RoleBinding;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -52,6 +53,23 @@ pub struct PhaseProof {
     pub started_at: DateTime<Utc>,
     pub completed_at: DateTime<Utc>,
     pub duration_ms: u64,
+
+    // ── Republic-of-Agents actor binding (Fabrica ADR-001, ADR-003) ──
+    //
+    // The Praefectus-issued `RoleBinding` that authorized the action this
+    // proof attests. `None` until Praefectus is wired into Sentinel
+    // (Fabrica task #24 phase 2c); once wired, every PhaseProof carries
+    // the named operator + business + constitution version + spec contract
+    // ref + miles/auxilium/centurion identity.
+    //
+    // `#[serde(default)]` so existing on-disk proof chains parse cleanly
+    // as `actor: None` — backward compatible per ADR-003 §Implementation.
+    //
+    // **Not yet part of `combined_hash`** — adding the actor to the hash
+    // would invalidate every pre-actor proof on disk. Migration to a
+    // hash-included actor is tracked separately (post-Praefectus-wiring).
+    #[serde(default)]
+    pub actor: Option<RoleBinding>,
 }
 
 impl PhaseProof {
@@ -114,11 +132,15 @@ impl PhaseProof {
 /// `{"kind":"phase",...}`, `{"kind":"step",...}`, or `{"kind":"disagreement",...}`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
+// Variants differ in size, but boxing would change every construction/match
+// site of this on-disk-serialized enum for no runtime gain (entries are owned,
+// not passed by value on a hot path).
+#[allow(clippy::large_enum_variant)]
 pub enum ProofEntry {
     Phase(PhaseProof),
     Step(StepProof),
     /// Multi-judge disagreement marker (#82 Stage B). Appended right
-    /// after the StepProof that triggered the disagreement so chain
+    /// after the `StepProof` that triggered the disagreement so chain
     /// walkers can find disagreements by filtering on the variant.
     Disagreement(crate::disagreement::DisagreementMarker),
 }
@@ -168,7 +190,7 @@ impl ProofEntry {
     /// `Disagreement` markers use `recorded_at` for both — they're a
     /// point-in-time annotation, not a span.
     #[must_use]
-    pub fn started_at(&self) -> DateTime<Utc> {
+    pub const fn started_at(&self) -> DateTime<Utc> {
         match self {
             Self::Phase(p) => p.started_at,
             Self::Step(s) => s.started_at,
@@ -178,7 +200,7 @@ impl ProofEntry {
 
     /// `completed_at` timestamp for cross-entry temporal ordering checks.
     #[must_use]
-    pub fn completed_at(&self) -> DateTime<Utc> {
+    pub const fn completed_at(&self) -> DateTime<Utc> {
         match self {
             Self::Phase(p) => p.completed_at,
             Self::Step(s) => s.completed_at,
@@ -242,7 +264,7 @@ impl ProofChain {
     /// Get the hash that the next proof must reference as `previous_hash`.
     ///
     /// Resolution order: tail of `entries` (mixed chain), else tail of
-    /// `proofs` (legacy phase-only chain), else GENESIS_HASH. This keeps
+    /// `proofs` (legacy phase-only chain), else `GENESIS_HASH`. This keeps
     /// chains that were started in phase-only mode working when callers
     /// later switch to step-level appends — the next step's `previous_hash`
     /// correctly references the last phase's `combined_hash`.
@@ -328,7 +350,7 @@ impl ProofChain {
     /// Append a `DisagreementMarker` to the chain (#82 Stage B).
     /// Behaves like `add_step_proof` — capacity check, link check,
     /// internal-hash check — but for the multi-judge disagreement
-    /// entry. Producers call this right after a StepProof when the
+    /// entry. Producers call this right after a `StepProof` when the
     /// per-step `MultiJudgeVerdict.disagreement` is `true`.
     ///
     /// # Errors
@@ -399,7 +421,7 @@ impl ProofChain {
             }
             last_completed = Some(proof.completed_at);
 
-            expected_previous = proof.combined_hash.clone();
+            expected_previous.clone_from(&proof.combined_hash);
         }
 
         // After walking the legacy phase-only `proofs`, continue through
@@ -553,7 +575,79 @@ mod tests {
             started_at: Utc::now(),
             completed_at: Utc::now(),
             duration_ms: 100,
+            actor: None,
         }
+    }
+
+    // ── Actor backward-compat (Fabrica ADR-003) ─────────────────────
+
+    #[test]
+    fn actor_defaults_to_none_when_field_absent_in_json() {
+        // Old on-disk proof shape (pre-ADR-003) had no `actor` field.
+        // The #[serde(default)] attribute means deserializing such a
+        // proof must yield `actor: None` rather than failing.
+        //
+        // Construct via serialization of a real proof (handles whatever
+        // Evidence's shape happens to be), then strip the actor field
+        // from the JSON to simulate an old on-disk record.
+        let with_actor = make_proof("claim", "linear", GENESIS_HASH);
+        let mut as_value: serde_json::Value = serde_json::to_value(&with_actor).unwrap();
+        as_value
+            .as_object_mut()
+            .expect("PhaseProof serializes as object")
+            .remove("actor");
+        assert!(
+            !as_value.to_string().contains("\"actor\""),
+            "actor field must be absent for backward-compat test setup"
+        );
+
+        let parsed: PhaseProof = serde_json::from_value(as_value)
+            .expect("old-shape proof must parse cleanly with actor defaulting to None");
+        assert!(parsed.actor.is_none());
+    }
+
+    #[test]
+    fn actor_roundtrip_when_populated() {
+        use consul_domain::identity::republic::{
+            AuxiliumId, BusinessId, CenturionId, ConstitutionVersion, MilesId, OperatorId, ProofId,
+            RoleBinding, SpecContractRef,
+        };
+
+        let proof_with_actor = PhaseProof {
+            phase_id: "claim".into(),
+            skill: "linear".into(),
+            session_id: "test-session".into(),
+            evidence: Evidence::default(),
+            evidence_hash: "0".repeat(64),
+            previous_hash: GENESIS_HASH.into(),
+            combined_hash: "0".repeat(64),
+            judge_model: "sonnet-4.6".into(),
+            judge_verdict: JudgeVerdict::pass(0.95, "ok"),
+            started_at: Utc::now(),
+            completed_at: Utc::now(),
+            duration_ms: 1,
+            actor: Some(RoleBinding {
+                miles: MilesId::new(),
+                auxilium: AuxiliumId::new("support-auxilium"),
+                centurion: CenturionId::new(),
+                spec_contract: SpecContractRef::new("support-auxilium.refund-miles@1.0.0"),
+                constitution_version: ConstitutionVersion::new("1.0.0"),
+                operator: OperatorId::new(),
+                business: BusinessId::new(),
+                authorized_at: Utc::now(),
+                authorized_by_proof: ProofId::new(),
+            }),
+        };
+
+        let json = serde_json::to_string(&proof_with_actor).unwrap();
+        assert!(
+            json.contains("\"actor\""),
+            "actor field must be present in serialized form"
+        );
+        let parsed: PhaseProof = serde_json::from_str(&json).unwrap();
+        let actor = parsed.actor.expect("actor must round-trip as Some");
+        assert_eq!(actor.auxilium.as_str(), "support-auxilium");
+        assert_eq!(actor.constitution_version.as_str(), "1.0.0");
     }
 
     #[test]
@@ -672,6 +766,7 @@ mod tests {
             started_at: now,
             completed_at: now - chrono::Duration::seconds(60),
             duration_ms: 100,
+            actor: None,
         };
 
         assert!(
@@ -741,13 +836,20 @@ mod tests {
             started_at: Utc::now(),
             completed_at: Utc::now(),
             duration_ms: 5,
+            actor: None,
         }
     }
 
     #[test]
     fn test_add_step_proof_to_empty_chain() {
         let mut chain = ProofChain::new("linear", "sess-1");
-        let step = make_step("1", "claim", "linear", GENESIS_HASH, serde_json::Value::Null);
+        let step = make_step(
+            "1",
+            "claim",
+            "linear",
+            GENESIS_HASH,
+            serde_json::Value::Null,
+        );
         chain.add_step_proof(step).expect("add step on empty chain");
         assert_eq!(chain.entries.len(), 1);
         assert!(chain.proofs.is_empty(), "phase-only vec stays empty");
@@ -810,7 +912,11 @@ mod tests {
         chain.add_step_proof(s3).unwrap();
 
         let v = chain.verify();
-        assert!(v.valid, "multi-step chain must verify, errors: {:?}", v.errors);
+        assert!(
+            v.valid,
+            "multi-step chain must verify, errors: {:?}",
+            v.errors
+        );
         assert_eq!(v.steps_verified, 3);
         assert_eq!(v.phases_verified, 0, "no phase entries in this chain");
     }
@@ -865,7 +971,10 @@ mod tests {
             "chain_valid": true
         }"#;
         let chain: ProofChain = serde_json::from_str(legacy_json).expect("legacy chain loads");
-        assert!(chain.entries.is_empty(), "missing `entries` defaults to empty Vec");
+        assert!(
+            chain.entries.is_empty(),
+            "missing `entries` defaults to empty Vec"
+        );
         assert!(chain.proofs.is_empty());
     }
 
@@ -885,8 +994,14 @@ mod tests {
 
         let phase_json = serde_json::to_string(&phase_entry).unwrap();
         let step_json = serde_json::to_string(&step_entry).unwrap();
-        assert!(phase_json.contains(r#""kind":"phase""#), "phase tag missing: {phase_json}");
-        assert!(step_json.contains(r#""kind":"step""#), "step tag missing: {step_json}");
+        assert!(
+            phase_json.contains(r#""kind":"phase""#),
+            "phase tag missing: {phase_json}"
+        );
+        assert!(
+            step_json.contains(r#""kind":"step""#),
+            "step tag missing: {step_json}"
+        );
 
         // Round trip back into Rust.
         let phase_back: ProofEntry = serde_json::from_str(&phase_json).unwrap();
@@ -946,12 +1061,17 @@ mod tests {
             serde_json::Value::Null,
         );
         chain.add_step_proof(step).unwrap();
-        let marker =
-            make_disagreement("linear", "sess-1", "1", "claim", chain.head_hash());
-        chain.add_disagreement(marker).expect("disagreement after step");
+        let marker = make_disagreement("linear", "sess-1", "1", "claim", chain.head_hash());
+        chain
+            .add_disagreement(marker)
+            .expect("disagreement after step");
         assert_eq!(chain.entries.len(), 2);
         let v = chain.verify();
-        assert!(v.valid, "chain with disagreement marker must verify, errors: {:?}", v.errors);
+        assert!(
+            v.valid,
+            "chain with disagreement marker must verify, errors: {:?}",
+            v.errors
+        );
     }
 
     #[test]
@@ -968,8 +1088,7 @@ mod tests {
         );
         chain.add_step_proof(step).unwrap();
         // Wrong previous_hash — points at GENESIS, not the step's hash.
-        let bad =
-            make_disagreement("linear", "sess-1", "1", "claim", GENESIS_HASH);
+        let bad = make_disagreement("linear", "sess-1", "1", "claim", GENESIS_HASH);
         assert!(matches!(
             chain.add_disagreement(bad),
             Err(ProofChainError::BrokenChain { .. })
@@ -990,8 +1109,7 @@ mod tests {
             serde_json::Value::Null,
         );
         chain.add_step_proof(step).unwrap();
-        let mut marker =
-            make_disagreement("linear", "sess-1", "1", "claim", chain.head_hash());
+        let mut marker = make_disagreement("linear", "sess-1", "1", "claim", chain.head_hash());
         // Tamper after construction — combined_hash and multi_judge_hash
         // no longer match the captured verdict.
         marker.multi_judge.sufficient = !marker.multi_judge.sufficient;

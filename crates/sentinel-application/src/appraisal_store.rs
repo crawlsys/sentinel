@@ -54,7 +54,10 @@ impl InMemoryAppraisalStore {
 
 impl AppraisalStorePort for InMemoryAppraisalStore {
     fn record(&self, record: AppraisalRecord) {
-        let key = (record.agent_id.clone(), record.requirement_signature.clone());
+        let key = (
+            record.agent_id.clone(),
+            record.requirement_signature.clone(),
+        );
         match self.records.write() {
             Ok(mut guard) => {
                 guard.entry(key).or_default().push(record);
@@ -150,7 +153,11 @@ mod tests {
     #[test]
     fn empty_store_aggregates_to_empty() {
         let s = InMemoryAppraisalStore::new();
-        let agg = s.aggregate(&agent("kimi"), &sig("deadbeefdeadbeef"), AppraisalWindow::All);
+        let agg = s.aggregate(
+            &agent("kimi"),
+            &sig("deadbeefdeadbeef"),
+            AppraisalWindow::All,
+        );
         assert!(!agg.has_data());
         assert_eq!(agg.cohort_size, 0);
     }
@@ -218,7 +225,10 @@ mod tests {
         }
         let last2 = s.aggregate(&a, &g, AppraisalWindow::LastN(2));
         assert_eq!(last2.cohort_size, 2);
-        assert!((last2.success_rate - 1.0).abs() < 1e-5, "last 2 are both Success");
+        assert!(
+            (last2.success_rate - 1.0).abs() < 1e-5,
+            "last 2 are both Success"
+        );
     }
 
     #[test]

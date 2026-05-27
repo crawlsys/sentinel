@@ -403,10 +403,7 @@ mod tests {
             run_id: EvalRunId::new("r1").unwrap(),
             started_at: ts(1_700_000_000),
             completed_at: ts(1_700_001_000),
-            case_results: vec![
-                successful_case("c1", "r1", 0.8),
-                errored_case("c2", "r1"),
-            ],
+            case_results: vec![successful_case("c1", "r1", 0.8), errored_case("c2", "r1")],
         };
         let json = serde_json::to_string(&original).unwrap();
         let parsed: EvalRunResult = serde_json::from_str(&json).unwrap();

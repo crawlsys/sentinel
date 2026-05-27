@@ -38,11 +38,9 @@ fn detect_language(fs: &dyn FileSystemPort, dir: &Path) -> &'static str {
     "unknown"
 }
 
-/// Directory for telemetry state files — must match skill_router::telemetry_dir().
+/// Directory for telemetry state files — must match `skill_router::telemetry_dir()`.
 fn telemetry_state_dir(fs: &dyn FileSystemPort) -> PathBuf {
-    fs.home_dir()
-        .map(|h| h.join(".claude").join("sentinel").join("telemetry"))
-        .unwrap_or_else(|| std::env::temp_dir())
+    fs.home_dir().map_or_else(std::env::temp_dir, |h| h.join(".claude").join("sentinel").join("telemetry"))
 }
 
 /// Read the current skill from the telemetry state file written by skill-router.
@@ -107,7 +105,7 @@ fn regenerate_summary(fs: &dyn FileSystemPort, telemetry_path: &Path, summary_pa
             .to_string();
         let duration = entry
             .get("duration_ms")
-            .and_then(|v| v.as_i64())
+            .and_then(serde_json::Value::as_i64)
             .unwrap_or(0);
 
         *skill_counts.entry(skill.clone()).or_insert(0) += 1;
@@ -121,9 +119,9 @@ fn regenerate_summary(fs: &dyn FileSystemPort, telemetry_path: &Path, summary_pa
         .collect();
     skills_by_usage.sort_by(|a, b| {
         b.get("count")
-            .and_then(|v| v.as_u64())
+            .and_then(serde_json::Value::as_u64)
             .unwrap_or(0)
-            .cmp(&a.get("count").and_then(|v| v.as_u64()).unwrap_or(0))
+            .cmp(&a.get("count").and_then(serde_json::Value::as_u64).unwrap_or(0))
     });
 
     let mut langs_by_usage: Vec<serde_json::Value> = lang_counts
@@ -132,9 +130,9 @@ fn regenerate_summary(fs: &dyn FileSystemPort, telemetry_path: &Path, summary_pa
         .collect();
     langs_by_usage.sort_by(|a, b| {
         b.get("count")
-            .and_then(|v| v.as_u64())
+            .and_then(serde_json::Value::as_u64)
             .unwrap_or(0)
-            .cmp(&a.get("count").and_then(|v| v.as_u64()).unwrap_or(0))
+            .cmp(&a.get("count").and_then(serde_json::Value::as_u64).unwrap_or(0))
     });
 
     let avg_durations: Vec<serde_json::Value> = skill_durations
@@ -182,8 +180,7 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     let run_id = read_run_id(ctx.fs).unwrap_or_default();
     let start_time = read_start_time(ctx.fs);
     let duration_ms = start_time
-        .map(|st| chrono::Utc::now().timestamp_millis() - st)
-        .unwrap_or(0);
+        .map_or(0, |st| chrono::Utc::now().timestamp_millis() - st);
 
     let language = detect_language(ctx.fs, cwd);
     let timestamp = chrono::Utc::now().to_rfc3339();
@@ -232,8 +229,7 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     let line_count = ctx
         .fs
         .read_to_string(&telemetry_file)
-        .map(|c| c.lines().filter(|l| !l.is_empty()).count())
-        .unwrap_or(0);
+        .map_or(0, |c| c.lines().filter(|l| !l.is_empty()).count());
 
     if line_count > 0 && line_count % 10 == 0 {
         let summary_file = metrics.join("telemetry-summary.json");

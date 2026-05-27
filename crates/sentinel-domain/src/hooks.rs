@@ -70,11 +70,8 @@ impl HookSpec {
             return true;
         }
 
-        // If a tool matcher is provided, check if it's in our list
-        match tool_matcher {
-            Some(tool) => self.matcher.iter().any(|m| m == tool),
-            None => true, // No tool context = match everything
-        }
+        // If a tool matcher is provided, check if it's in our list; None = match everything
+        tool_matcher.is_none_or(|tool| self.matcher.iter().any(|m| m == tool))
     }
 }
 

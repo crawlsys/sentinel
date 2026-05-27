@@ -4,6 +4,7 @@
 //!
 //! Reads log files from ~/.claude/sentinel/metrics/ and returns sorted, filtered entries.
 
+use std::cmp::Reverse;
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
@@ -67,7 +68,7 @@ fn metrics_dir() -> PathBuf {
         .join("metrics")
 }
 
-fn read_jsonl_file(file_path: &PathBuf, category: &str, source: &str) -> Vec<LogEntry> {
+fn read_jsonl_file(file_path: &std::path::Path, category: &str, source: &str) -> Vec<LogEntry> {
     let Ok(content) = fs::read_to_string(file_path) else {
         return Vec::new();
     };
@@ -115,7 +116,7 @@ fn get_all_logs() -> (Vec<LogEntry>, HashMap<String, usize>) {
         all_entries.extend(entries);
     }
 
-    all_entries.sort_by(|a, b| parse_ts(b).cmp(&parse_ts(a)));
+    all_entries.sort_by_key(|e| Reverse(parse_ts(e)));
 
     let result = (all_entries, categories);
     cache.entries = Some(result.clone());

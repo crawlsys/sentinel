@@ -100,7 +100,15 @@ pub async fn draft<L>(
 where
     L: LlmPort + ?Sized,
 {
-    draft_with_model(request, llm, agent_id, clock, DEFAULT_MODEL, DEFAULT_MAX_TOKENS).await
+    draft_with_model(
+        request,
+        llm,
+        agent_id,
+        clock,
+        DEFAULT_MODEL,
+        DEFAULT_MAX_TOKENS,
+    )
+    .await
 }
 
 /// [`draft`] with an explicit model + max-token override.
@@ -395,9 +403,14 @@ mod tests {
     #[tokio::test]
     async fn draft_returns_recommendation_for_well_formed_request() {
         let llm = StubLlm::returning(&well_formed_response());
-        let rec = draft(&well_formed_request(), &llm, "ba-orchestrator", fixed_clock())
-            .await
-            .expect("should draft");
+        let rec = draft(
+            &well_formed_request(),
+            &llm,
+            "ba-orchestrator",
+            fixed_clock(),
+        )
+        .await
+        .expect("should draft");
         assert_eq!(rec.brief, "scale the platform");
         assert_eq!(rec.agent_id, "ba-orchestrator");
         assert_eq!(rec.stakeholder_audience, StakeholderAudience::Exec);

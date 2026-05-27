@@ -7,12 +7,12 @@
 //! Supported events:
 //!
 //! - `pull_request`: opened, closed (w/ merge detection), reopened, edited,
-//!   synchronize, ready_for_review, labeled
-//! - `pull_request_review`: submitted (approved/changes_requested/commented),
+//!   synchronize, `ready_for_review`, labeled
+//! - `pull_request_review`: submitted (`approved/changes_requested/commented`),
 //!   edited, dismissed
 //! - `issue_comment`: created (PR review-comment body), edited, deleted
 //! - `pull_request_review_comment`: inline file-level PR review comments
-//! - `check_run`: completed (success/failure/cancelled/timed_out), rerequested
+//! - `check_run`: completed (`success/failure/cancelled/timed_out`), rerequested
 //! - `check_suite`: completed
 //! - `push`: commits to a ref (detects branch, count, head sha)
 //! - `workflow_run`: completed (conclusion surfaced)
@@ -94,9 +94,7 @@ fn decode_pull_request(action: Option<&str>, body: &Value) -> Option<String> {
         Some("closed") if merged => {
             let sha = pr
                 .get("merge_commit_sha")
-                .and_then(Value::as_str)
-                .map(short_sha)
-                .unwrap_or_else(|| "?".to_string());
+                .and_then(Value::as_str).map_or_else(|| "?".to_string(), short_sha);
             let base_ref = pr
                 .pointer("/base/ref")
                 .and_then(Value::as_str)
@@ -131,9 +129,7 @@ fn decode_pull_request(action: Option<&str>, body: &Value) -> Option<String> {
         Some("synchronize") => {
             let sha = pr
                 .pointer("/head/sha")
-                .and_then(Value::as_str)
-                .map(short_sha)
-                .unwrap_or_else(|| "?".to_string());
+                .and_then(Value::as_str).map_or_else(|| "?".to_string(), short_sha);
             Some(format!("PR #{number} updated (new head {sha}) in {repo}"))
         }
         Some(other) => Some(format!(
@@ -218,10 +214,10 @@ fn decode_issue_comment(action: Option<&str>, body: &Value) -> Option<String> {
         format!("issue #{number}")
     };
 
-    let excerpt = if !comment_body.is_empty() {
-        format!(": \"{}\"", truncate_inline(comment_body, 100))
-    } else {
+    let excerpt = if comment_body.is_empty() {
         String::new()
+    } else {
+        format!(": \"{}\"", truncate_inline(comment_body, 100))
     };
 
     let verb = match action {
@@ -343,8 +339,7 @@ fn decode_push(body: &Value) -> Option<String> {
     let count = body
         .get("commits")
         .and_then(Value::as_array)
-        .map(|a| a.len())
-        .unwrap_or(0);
+        .map_or(0, std::vec::Vec::len);
     let pusher = body
         .pointer("/pusher/name")
         .and_then(Value::as_str)

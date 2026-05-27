@@ -15,8 +15,10 @@ use sentinel_domain::judge::{JudgeModel, JudgeVerdict};
 use sentinel_domain::proof::{PhaseProof, ProofChain};
 use sentinel_domain::state::SessionState;
 use sentinel_domain::step_proof::StepProof;
+use ed25519_dalek::SigningKey;
 
 use crate::judge_service::JudgeService;
+use crate::praefectus_client::{InMemoryPraefectusClient, PraefectusClient};
 
 /// Proof engine — builds and verifies proof chains
 pub struct ProofEngine {
@@ -25,11 +27,77 @@ pub struct ProofEngine {
 
     /// AI judge service
     judge: Arc<dyn JudgeService>,
+
+    /// Praefectus client for populating ProofBundle.actor per Fabrica
+    /// ADR-001 §IX. Defaults to an `InMemoryPraefectusClient` (returns
+    /// None for every lookup → existing behavior preserved). Production
+    /// deployments call [`Self::with_praefectus`] to wire a real
+    /// HTTP/IPC adapter against consul-app's Praefectus.
+    praefectus: Arc<dyn PraefectusClient>,
+
+    /// Optional Ed25519 signing key (#4 — proof attestation). When present,
+    /// every sealed `StepProof` is signed over its `combined_hash`, so verifiers
+    /// can confirm "the holder of this key authored this chain entry" — beyond
+    /// the SHA-256 hash chain. Loaded from `SENTINEL_SIGNING_KEY` by the CLI
+    /// layer (sentinel-domain stays pure / key-agnostic). `None` = unsigned
+    /// (hash-chain integrity only), the back-compat default.
+    signing_key: Option<SigningKey>,
+
+    /// When true, sealing REFUSES to proceed without a signing key — the
+    /// mandatory-attestation posture for audit-grade deployments. Set from
+    /// `SENTINEL_SIGNING_REQUIRED`. With no key configured, every seal errors
+    /// rather than silently writing an unsigned (un-attestable) proof.
+    signing_required: bool,
 }
 
 impl ProofEngine {
     pub fn new(state: Arc<RwLock<SessionState>>, judge: Arc<dyn JudgeService>) -> Self {
-        Self { state, judge }
+        Self {
+            state,
+            judge,
+            praefectus: Arc::new(InMemoryPraefectusClient::new()),
+            signing_key: None,
+            signing_required: false,
+        }
+    }
+
+    /// Replace the default in-memory Praefectus stub with a production
+    /// client (typically an HTTP/IPC adapter pointing at consul-app).
+    ///
+    /// Builder shape so existing callers (which pass `(state, judge)`)
+    /// keep compiling unchanged.
+    #[must_use]
+    pub fn with_praefectus(mut self, praefectus: Arc<dyn PraefectusClient>) -> Self {
+        self.praefectus = praefectus;
+        self
+    }
+
+    /// Wire an Ed25519 signing key + the mandatory-signing posture (#4).
+    /// When `key` is `Some`, every sealed `StepProof` is signed. When
+    /// `required` is true, sealing without a key is refused (error) — the
+    /// audit-grade attestation guarantee. Builder shape; existing callers
+    /// keep the unsigned default.
+    #[must_use]
+    pub fn with_signing(mut self, key: Option<SigningKey>, required: bool) -> Self {
+        self.signing_key = key;
+        self.signing_required = required;
+        self
+    }
+
+    /// Look up the active `RoleBinding` for a session, swallowing any
+    /// client error as `None`. Binding lookup is a best-effort
+    /// enrichment of the proof chain — a Praefectus outage must not
+    /// block proof construction (the chain stays valid with
+    /// `actor: None`; the absence is itself an audit signal).
+    async fn lookup_actor(
+        &self,
+        session_id: &str,
+    ) -> Option<consul_domain::identity::republic::RoleBinding> {
+        self.praefectus
+            .current_role_binding(session_id)
+            .await
+            .ok()
+            .flatten()
     }
 
     /// Minimum seconds between resubmissions after a failure.
@@ -62,10 +130,7 @@ impl ProofEngine {
             ) {
                 let count = state.submission_attempts(&phase_key).map_or(0, |a| a.count);
                 bail!(
-                    "Phase '{}' resubmission blocked — wait {}s (failed {} time(s))",
-                    phase_id,
-                    remaining,
-                    count
+                    "Phase '{phase_id}' resubmission blocked — wait {remaining}s (failed {count} time(s))"
                 );
             }
         }
@@ -116,6 +181,10 @@ impl ProofEngine {
             let combined_hash =
                 PhaseProof::compute_combined_hash(phase_id, &evidence_hash, &previous_hash);
 
+            // Best-effort actor lookup — Praefectus outage doesn't block
+            // proof construction; absent binding is itself an audit signal.
+            let actor = self.lookup_actor(&state.session_id).await;
+
             let proof = PhaseProof {
                 phase_id: phase_id.to_string(),
                 skill: skill.to_string(),
@@ -131,6 +200,7 @@ impl ProofEngine {
                 duration_ms: (completed_at - started_at)
                     .num_milliseconds()
                     .unsigned_abs(),
+                actor,
             };
 
             // Add to chain
@@ -157,9 +227,8 @@ impl ProofEngine {
                         );
                     } else {
                         bail!(
-                            "Phase '{}' cannot be advanced — prior required phases are incomplete. \
-                             Phases must be completed in order.",
-                            phase_id
+                            "Phase '{phase_id}' cannot be advanced — prior required phases are incomplete. \
+                             Phases must be completed in order."
                         );
                     }
                 } else {
@@ -168,9 +237,8 @@ impl ProofEngine {
                     // enforcement. Now refuse to advance without a workflow definition.
                     // ProofEngine callers MUST provide a workflow parameter.
                     bail!(
-                        "Phase '{}' for skill '{}' cannot be advanced — no workflow definition provided. \
-                         ProofEngine requires workflow context for sequential enforcement.",
-                        phase_id, skill
+                        "Phase '{phase_id}' for skill '{skill}' cannot be advanced — no workflow definition provided. \
+                         ProofEngine requires workflow context for sequential enforcement."
                     );
                 }
             }
@@ -208,7 +276,7 @@ impl ProofEngine {
     /// 3. **Insufficient verdicts hard-fail with no chain mutation.** If
     ///    `verdict.sufficient == false`, we return an error without
     ///    appending — the chain only carries verdicts that passed. Failed
-    ///    verdicts are still observable via the JudgeError surface in
+    ///    verdicts are still observable via the `JudgeError` surface in
     ///    `step_judge` and via tracing logs.
     ///
     /// On success, returns the sealed `StepProof` so callers can hash its
@@ -266,6 +334,9 @@ impl ProofEngine {
                 &previous_hash,
             );
 
+            // Best-effort actor lookup — same pattern as PhaseProof above.
+            let actor = self.lookup_actor(&state.session_id).await;
+
             let proof = StepProof {
                 step_id: step_id.to_string(),
                 phase_id: phase_id.to_string(),
@@ -280,14 +351,29 @@ impl ProofEngine {
                 combined_hash: combined_hash.clone(),
                 judge_model: judge_model.to_string(),
                 judge_verdict: verdict,
-                signature: None, // M1.7 (Ed25519 opt-in) wires this when configured
+                signature: None, // signed below via sign_with when a key is configured (#4)
                 trace_context: None, // M4.5 — exporter wiring lands separately
                 started_at,
                 completed_at,
                 duration_ms: (completed_at - started_at)
                     .num_milliseconds()
                     .unsigned_abs(),
+                actor,
             };
+
+            // #4 — Ed25519 attestation. Mandatory-signing posture: refuse to
+            // seal an unsigned proof when signing is required but no key is
+            // configured (audit-grade must be attestable, never silently
+            // unsigned). Otherwise sign when a key is present; leave unsigned
+            // (hash-chain only) when neither key nor requirement is set.
+            let mut proof = proof;
+            match (&self.signing_key, self.signing_required) {
+                (Some(key), _) => proof.sign_with(key),
+                (None, true) => bail!(
+                    "SENTINEL_SIGNING_REQUIRED is set but no SENTINEL_SIGNING_KEY                      is configured — refusing to seal an unsigned StepProof for                      '{phase_id}.{step_id}' (skill '{skill}'). Provide a 32-byte                      hex Ed25519 seed in SENTINEL_SIGNING_KEY, or unset                      SENTINEL_SIGNING_REQUIRED."
+                ),
+                (None, false) => {}
+            }
 
             // Append to chain — creates a fresh ProofChain on first step.
             let session_id = state.session_id.clone();
@@ -320,7 +406,7 @@ impl ProofEngine {
         let chain = state
             .proof_chains
             .get(skill)
-            .ok_or_else(|| anyhow::anyhow!("No proof chain for skill '{}'", skill))?;
+            .ok_or_else(|| anyhow::anyhow!("No proof chain for skill '{skill}'"))?;
         Ok(chain.verify())
     }
 }
@@ -363,6 +449,81 @@ mod step_evidence_tests {
     }
 
     #[tokio::test]
+    async fn praefectus_client_populates_actor_on_step_proof() {
+        use crate::praefectus_client::InMemoryPraefectusClient;
+        use consul_domain::identity::republic::{
+            AuxiliumId, BusinessId, CenturionId, ConstitutionVersion, MilesId, OperatorId, ProofId,
+            RoleBinding, SpecContractRef,
+        };
+
+        let state = Arc::new(RwLock::new(SessionState::new("test-session")));
+        let session_id = state.read().await.session_id.clone();
+
+        let praefectus = Arc::new(InMemoryPraefectusClient::new());
+        let installed_binding = RoleBinding {
+            miles: MilesId::new(),
+            auxilium: AuxiliumId::new("support-auxilium"),
+            centurion: CenturionId::new(),
+            spec_contract: SpecContractRef::new("support-auxilium.refund-miles@1.0.0"),
+            constitution_version: ConstitutionVersion::new("1.0.0"),
+            operator: OperatorId::new(),
+            business: BusinessId::new(),
+            authorized_at: Utc::now(),
+            authorized_by_proof: ProofId::new(),
+        };
+        praefectus.set_role_binding(session_id, installed_binding.clone());
+
+        let eng = ProofEngine::new(state, Arc::new(StubJudge)).with_praefectus(praefectus.clone());
+
+        let proof = eng
+            .submit_step_evidence(
+                "linear",
+                "claim",
+                "1",
+                "Open PR with Ref FPCRM-XXX",
+                Evidence::default(),
+                JudgeVerdict::pass(0.93, "evidence sufficient"),
+                JudgeModel::Sonnet,
+                serde_json::json!({"pr_url": "https://github.com/foo/bar/pull/9"}),
+                Some("firefly-pro".into()),
+                Utc::now() - chrono::Duration::milliseconds(50),
+            )
+            .await
+            .unwrap();
+
+        // The proof should carry the binding the Praefectus stub had registered.
+        let actor = proof
+            .actor
+            .expect("actor must be populated when Praefectus returns Some");
+        assert_eq!(actor.auxilium.as_str(), "support-auxilium");
+        assert_eq!(actor.constitution_version.as_str(), "1.0.0");
+        assert_eq!(actor.operator, installed_binding.operator);
+    }
+
+    #[tokio::test]
+    async fn praefectus_client_absent_binding_yields_actor_none() {
+        // Default engine uses InMemoryPraefectusClient with no installed
+        // bindings — actor should be None, matching pre-wire behavior.
+        let eng = engine();
+        let proof = eng
+            .submit_step_evidence(
+                "linear",
+                "claim",
+                "1",
+                "Open PR",
+                Evidence::default(),
+                JudgeVerdict::pass(0.93, "ok"),
+                JudgeModel::Sonnet,
+                serde_json::json!({}),
+                None,
+                Utc::now() - chrono::Duration::milliseconds(50),
+            )
+            .await
+            .unwrap();
+        assert!(proof.actor.is_none());
+    }
+
+    #[tokio::test]
     async fn passing_verdict_seals_step_proof_into_chain() {
         let eng = engine();
         let result = eng
@@ -399,6 +560,89 @@ mod step_evidence_tests {
         }
     }
 
+    // #4 — Ed25519 attestation tests.
+
+    #[tokio::test]
+    async fn signing_key_present_produces_a_signature_on_the_sealed_proof() {
+        use ed25519_dalek::{SigningKey, VerifyingKey};
+        let key = SigningKey::from_bytes(&[7u8; 32]);
+        let verifying: VerifyingKey = key.verifying_key();
+        let eng = engine().with_signing(Some(key), false);
+        let proof = eng
+            .submit_step_evidence(
+                "linear",
+                "claim",
+                "1",
+                "step",
+                Evidence::default(),
+                JudgeVerdict::pass(0.95, "ok"),
+                JudgeModel::Opus,
+                serde_json::Value::Null,
+                None,
+                Utc::now(),
+            )
+            .await
+            .expect("seals with a key");
+        assert!(
+            proof.signature.is_some(),
+            "a configured signing key must produce a signature"
+        );
+        assert!(
+            proof.verify_signature(&verifying).expect("verify ok"),
+            "the signature must verify against the signing key's public key"
+        );
+    }
+
+    #[tokio::test]
+    async fn signing_required_without_a_key_refuses_to_seal() {
+        // Audit-grade posture: required + no key => hard error, never an
+        // unsigned (un-attestable) proof, and the chain stays unmutated.
+        let eng = engine().with_signing(None, true);
+        let result = eng
+            .submit_step_evidence(
+                "linear",
+                "claim",
+                "1",
+                "step",
+                Evidence::default(),
+                JudgeVerdict::pass(0.95, "ok"),
+                JudgeModel::Opus,
+                serde_json::Value::Null,
+                None,
+                Utc::now(),
+            )
+            .await;
+        assert!(result.is_err(), "required signing without a key must error");
+        let msg = format!("{:#}", result.unwrap_err());
+        assert!(
+            msg.contains("SENTINEL_SIGNING_REQUIRED") && msg.contains("unsigned"),
+            "error must explain the missing-key refusal: {msg}"
+        );
+        let state = eng.state.read().await;
+        assert!(
+            state.proof_chains.get("linear").is_none(),
+            "refused seal must not mutate the chain"
+        );
+    }
+
+    #[tokio::test]
+    async fn no_key_no_requirement_seals_unsigned_backcompat() {
+        let eng = engine(); // default: no key, not required
+        let proof = eng
+            .submit_step_evidence(
+                "linear", "claim", "1", "step",
+                Evidence::default(),
+                JudgeVerdict::pass(0.95, "ok"),
+                JudgeModel::Opus,
+                serde_json::Value::Null,
+                None,
+                Utc::now(),
+            )
+            .await
+            .expect("unsigned seal is the back-compat default");
+        assert!(proof.signature.is_none(), "no key => unsigned (hash-chain only)");
+    }
+
     #[tokio::test]
     async fn insufficient_verdict_hard_fails_without_mutating_chain() {
         let eng = engine();
@@ -423,8 +667,14 @@ mod step_evidence_tests {
 
         assert!(res.is_err(), "insufficient verdict must error");
         let err = res.unwrap_err().to_string();
-        assert!(err.contains("insufficient"), "error mentions 'insufficient', got: {err}");
-        assert!(err.contains("PR body missing"), "error includes judge reasoning");
+        assert!(
+            err.contains("insufficient"),
+            "error mentions 'insufficient', got: {err}"
+        );
+        assert!(
+            err.contains("PR body missing"),
+            "error includes judge reasoning"
+        );
 
         // No chain mutation on failure.
         let state = eng.state.read().await;
@@ -529,6 +779,7 @@ mod step_evidence_tests {
                 started_at: Utc::now() - chrono::Duration::seconds(10),
                 completed_at: Utc::now() - chrono::Duration::seconds(5),
                 duration_ms: 5000,
+                actor: None,
             };
             chain.add_proof(phase_proof).expect("seed phase");
             state.proof_chains.insert("linear".into(), chain);
@@ -539,7 +790,12 @@ mod step_evidence_tests {
         // proofs-tail, and there's no entries-tail yet.
         let phase_combined = {
             let state = eng.state.read().await;
-            state.proof_chains.get("linear").unwrap().head_hash().to_string()
+            state
+                .proof_chains
+                .get("linear")
+                .unwrap()
+                .head_hash()
+                .to_string()
         };
 
         let step = eng
@@ -565,7 +821,11 @@ mod step_evidence_tests {
 
         // The chain should now have 1 phase + 1 step and verify clean.
         let verification = eng.verify_chain("linear").await.expect("verifies");
-        assert!(verification.valid, "mixed chain errors: {:?}", verification.errors);
+        assert!(
+            verification.valid,
+            "mixed chain errors: {:?}",
+            verification.errors
+        );
         assert_eq!(verification.phases_verified, 1);
         assert_eq!(verification.steps_verified, 1);
     }

@@ -152,6 +152,70 @@ pub struct LegatusRuntime {
     pub(crate) escalation_loopback: mpsc::UnboundedSender<OutboxItem>,
     pub(crate) inbox: Option<PersistentInbox>,
     pub(crate) outbox: Option<PersistentEscalationOutbox>,
+    /// Optional approval cache the inbound `CatastrophicAck` handler
+    /// writes to. Set on the daemon path via
+    /// [`LegatusRuntime::with_approval_cache`] before the runtime
+    /// is handed to `run_connect_hosted`. Standalone CLI builds
+    /// leave it `None` (`CatastrophicAcks` are logged-only).
+    pub(crate) approval_cache: Option<std::sync::Arc<crate::approval_cache::CatastrophicApprovalCache>>,
+    /// Optional cryptographic witness verifier consulted by
+    /// `handle_inbound` BEFORE recording a `CatastrophicAck` approval
+    /// in the cache. `None` (default) preserves the v0.1 daemon-
+    /// local trust model: every ack is recorded unconditionally.
+    /// `Some(...)` enforces verification: failures are logged and
+    /// the cache is not written. Wired by the daemon via
+    /// [`LegatusRuntime::with_witness_verifier`].
+    pub(crate) witness_verifier:
+        Option<std::sync::Arc<dyn crate::witness_verifier::WitnessVerifierPort>>,
+    /// Optional spent-nonce log consulted by `handle_inbound` BEFORE
+    /// any other verification. Rejects `CatastrophicAcks` whose
+    /// `voiceprint_witness.challenge_nonce` was already seen.
+    /// `None` (default) skips replay protection. Wired by the
+    /// daemon via [`LegatusRuntime::with_spent_nonce_log`].
+    pub(crate) spent_nonces:
+        Option<std::sync::Arc<crate::spent_nonce_log::SpentNonceLog>>,
+}
+
+impl LegatusRuntime {
+    /// Install a [`CatastrophicApprovalCache`] handle. Called from
+    /// the daemon path between `make_pair_with_persistence` and
+    /// `run_connect_hosted`. Standalone CLI invocations don't call
+    /// this; their inbound `CatastrophicAck`s are debug-logged
+    /// without altering any retry-allow state.
+    pub fn with_approval_cache(
+        mut self,
+        cache: std::sync::Arc<crate::approval_cache::CatastrophicApprovalCache>,
+    ) -> Self {
+        self.approval_cache = Some(cache);
+        self
+    }
+
+    /// Install a [`WitnessVerifierPort`]. When set, the inbound
+    /// `CatastrophicAck` handler verifies the witness BEFORE writing
+    /// to the approval cache; failed verifications are logged and
+    /// the approval is dropped. When unset (default), every ack
+    /// records an approval (the v0.1 daemon-local trust model).
+    pub fn with_witness_verifier(
+        mut self,
+        verifier: std::sync::Arc<dyn crate::witness_verifier::WitnessVerifierPort>,
+    ) -> Self {
+        self.witness_verifier = Some(verifier);
+        self
+    }
+
+    /// Install a [`SpentNonceLog`] for replay protection. When set,
+    /// the inbound `CatastrophicAck` handler checks-and-spends the
+    /// witness's `challenge_nonce` BEFORE any other processing.
+    /// Already-spent nonces yield rejection without verifier
+    /// invocation or cache write. When unset, replay protection
+    /// is skipped (production daemon paths SHOULD wire it).
+    pub fn with_spent_nonce_log(
+        mut self,
+        log: std::sync::Arc<crate::spent_nonce_log::SpentNonceLog>,
+    ) -> Self {
+        self.spent_nonces = Some(log);
+        self
+    }
 }
 
 /// Construct a paired `(handle, runtime)` with no persistent inbox
@@ -171,6 +235,9 @@ pub fn make_pair() -> (LegatusHandle, LegatusRuntime) {
     let runtime = LegatusRuntime {
         escalation_rx,
         escalation_loopback: escalation_tx,
+        approval_cache: None,
+        witness_verifier: None,
+        spent_nonces: None,
         inbox: None,
         outbox: None,
     };
@@ -191,6 +258,9 @@ pub fn make_pair_with_inbox(inbox: PersistentInbox) -> (LegatusHandle, LegatusRu
     let runtime = LegatusRuntime {
         escalation_rx,
         escalation_loopback: escalation_tx,
+        approval_cache: None,
+        witness_verifier: None,
+        spent_nonces: None,
         inbox: Some(inbox),
         outbox: None,
     };
@@ -218,6 +288,9 @@ pub fn make_pair_with_persistence(
     let runtime = LegatusRuntime {
         escalation_rx,
         escalation_loopback: escalation_tx,
+        approval_cache: None,
+        witness_verifier: None,
+        spent_nonces: None,
         inbox: Some(inbox),
         outbox: Some(outbox),
     };

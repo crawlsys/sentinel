@@ -125,7 +125,7 @@ impl VectorStorePort for QdrantAdapter {
             .iter()
             .filter_map(|p| {
                 let id = p.get("id")?.as_str()?.to_string();
-                let payload = p.get("payload").cloned().unwrap_or(serde_json::json!({}));
+                let payload = p.get("payload").cloned().unwrap_or_else(|| serde_json::json!({}));
                 Some(VectorScrollResult { id, payload })
             })
             .collect();

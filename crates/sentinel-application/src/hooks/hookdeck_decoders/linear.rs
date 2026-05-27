@@ -253,9 +253,7 @@ fn decode_project_update(action: &str, data: &Value, body: &Value) -> Option<Str
 fn decode_cycle(action: &str, data: &Value, body: &Value) -> Option<String> {
     let number = data
         .get("number")
-        .and_then(Value::as_u64)
-        .map(|n| format!("Cycle {n}"))
-        .unwrap_or_else(|| "Cycle".to_string());
+        .and_then(Value::as_u64).map_or_else(|| "Cycle".to_string(), |n| format!("Cycle {n}"));
     let actor = actor_name(body);
     let line = format!("{number} {action}");
     Some(format_with_actor(&line, actor.as_deref()))

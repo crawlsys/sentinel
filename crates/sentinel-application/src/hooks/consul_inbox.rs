@@ -23,6 +23,8 @@
 //! nudges; non-destructive divergence is acceptable per the
 //! operator's stated reliability target (~90-95%).
 
+use std::fmt::Write as _;
+
 use sentinel_domain::events::{HookEvent, HookInput, HookOutput};
 use sentinel_legatus::RelayInstruction;
 
@@ -74,12 +76,13 @@ fn format_pending(instructions: &[RelayInstruction]) -> String {
         } else {
             ""
         };
-        out.push_str(&format!(
+        let _ = write!(
+            out,
             "{n}. instruction_id={id}{destructive_tag}\n   {content}\n\n",
             n = idx + 1,
             id = instr.instruction_id,
             content = instr.content,
-        ));
+        );
     }
     out.push_str(
         "[END OF RELAYED INSTRUCTIONS] — Act on the above, then if appropriate \

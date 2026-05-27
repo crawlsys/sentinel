@@ -219,7 +219,12 @@ pub struct SystemProcessExecutor;
 impl ProcessExecutorPort for SystemProcessExecutor {
     fn exec(&self, binary: &Path, args: &[String]) -> ExitCode {
         match Command::new(binary).args(args).status() {
-            Ok(status) => ExitCode::from(status.code().unwrap_or(1) as u8),
+            Ok(status) => {
+                // Exit codes are 0-255 by POSIX/Windows convention; truncation
+                // and sign loss are intentional — negative codes are treated as 1.
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                ExitCode::from(status.code().unwrap_or(1) as u8)
+            }
             Err(e) => {
                 eprintln!(
                     "\x1b[0;31mFailed to execute {}: {e}\x1b[0m",
@@ -260,9 +265,8 @@ pub struct TomlRedirectLoader;
 impl RedirectLoaderPort for TomlRedirectLoader {
     fn load_overrides(&self) -> HashMap<String, String> {
         let config_path = config_path();
-        let content = match std::fs::read_to_string(&config_path) {
-            Ok(c) => c,
-            Err(_) => return HashMap::new(),
+        let Ok(content) = std::fs::read_to_string(&config_path) else {
+            return HashMap::new();
         };
 
         let mut overrides = HashMap::new();

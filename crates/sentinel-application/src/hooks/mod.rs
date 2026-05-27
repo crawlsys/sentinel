@@ -2,7 +2,7 @@
 //!
 //! All hooks run through the sentinel Rust engine.
 //! Each module implements one hook. Add new hooks here and
-//! update HOOK_NAMES to keep the count accurate.
+//! update `HOOK_NAMES` to keep the count accurate.
 
 pub mod account_cascade;
 pub mod activity_tracker;
@@ -12,6 +12,7 @@ mod block_context;
 pub mod bug_task_gate;
 pub mod build_auto_monitor;
 pub mod build_notify;
+pub mod catastrophic_escalation;
 pub mod commit_hygiene;
 pub mod commit_message_validator;
 pub mod constitution_gate;
@@ -28,6 +29,7 @@ pub mod error_reporter;
 pub mod evidence_collector;
 pub mod execution_log;
 pub mod git_hygiene;
+pub mod glass_break_gate;
 pub mod good_citizen_observer;
 pub mod hookdeck_decoders;
 pub mod hygiene_override;
@@ -37,8 +39,10 @@ pub mod mcp_health;
 pub mod memory_extract;
 pub mod memory_feedback;
 pub mod memory_inject;
+pub mod memory_turn_capture;
 pub mod memory_verify;
 pub mod orchestration_nudge;
+pub mod output_compressor;
 pub mod permission_denied;
 pub mod phase_gate;
 pub mod phase_validator;
@@ -48,11 +52,12 @@ pub mod pr_auto_monitor;
 pub mod pr_merge_gate;
 pub mod pre_commit_verification;
 pub mod pre_compact;
-pub mod prompt_injection_nudge;
+pub mod production_action_notice;
+pub mod production_override;
 pub mod pre_push_browser_test;
+pub mod prompt_injection_nudge;
 pub mod provenance_validate;
 pub mod requirements_traceability_gate;
-pub mod spec_challenge_gate;
 pub mod session_end;
 pub mod session_index;
 pub mod session_init;
@@ -60,6 +65,7 @@ pub mod setup;
 pub mod skill_invocation_gate;
 pub mod skill_router;
 pub mod skill_telemetry;
+pub mod spec_challenge_gate;
 pub mod step_anomaly;
 pub mod step_gate;
 pub mod step_judge;
@@ -77,6 +83,7 @@ pub mod test_evidence_recorder;
 pub mod todo_interceptor;
 pub mod todo_loader;
 pub mod tool_usage_gate;
+pub mod upstream_block;
 pub mod verification_gate;
 pub mod worktree_reminder;
 
@@ -123,7 +130,11 @@ pub fn project_hash(cwd: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(canonical.as_bytes());
     let result = hasher.finalize();
-    result[..4].iter().map(|b| format!("{b:02x}")).collect()
+    use std::fmt::Write as _;
+    result[..4].iter().fold(String::new(), |mut acc, b| {
+        let _ = write!(acc, "{b:02x}");
+        acc
+    })
 }
 
 /// Return `<home>/.claude/sentinel/metrics`.
@@ -135,8 +146,8 @@ pub fn metrics_dir(home: &std::path::Path) -> std::path::PathBuf {
 
 /// Return `<home>/.claude/sentinel/persistent-tasks`.
 ///
-/// Snapshots of the per-session TaskList (one subdir per project_hash). The
-/// authoritative source for `task_rehydrate` on SessionStart. Previously
+/// Snapshots of the per-session `TaskList` (one subdir per `project_hash`). The
+/// authoritative source for `task_rehydrate` on `SessionStart`. Previously
 /// lived at `<home>/.claude/persistent-tasks/` — moved under `sentinel/` so
 /// all sentinel-owned state is colocated.
 ///
@@ -190,7 +201,11 @@ pub fn migrate_persistent_tasks_dir(fs: &dyn FileSystemPort, home: &std::path::P
     }
     let entries = fs.read_dir(&legacy_root).unwrap_or_default();
     for entry in entries {
-        let Some(name) = entry.file_name().and_then(|n| n.to_str()).map(str::to_string) else {
+        let Some(name) = entry
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(str::to_string)
+        else {
             continue;
         };
         let dest = new_root.join(&name);
@@ -243,6 +258,7 @@ pub const HOOK_NAMES: &[&str] = &[
     "audit_extract",
     "bug_task_gate",
     "build_auto_monitor",
+    "catastrophic_escalation",
     "commit_hygiene",
     "commit_message_validator",
     "constitution_gate",
@@ -268,6 +284,7 @@ pub const HOOK_NAMES: &[&str] = &[
     "memory_feedback",
     "memory_inject",
     "memory_verify",
+    "output_compressor",
     "permission_denied",
     "phase_gate",
     "phase_validator",
@@ -278,6 +295,8 @@ pub const HOOK_NAMES: &[&str] = &[
     "pre_commit_verification",
     "pre_compact",
     "pre_push_browser_test",
+    "production_action_notice",
+    "production_override",
     "prompt_injection_nudge",
     "provenance_validate",
     "requirements_traceability_gate",
@@ -306,6 +325,7 @@ pub const HOOK_NAMES: &[&str] = &[
     "todo_interceptor",
     "todo_loader",
     "tool_usage_gate",
+    "upstream_block",
     "verification_gate",
     "worktree_reminder",
 ];
@@ -329,7 +349,22 @@ const RUN_ASYNC_TIMEOUT: std::time::Duration = sentinel_domain::constants::RUN_A
 ///    if the future doesn't complete in time.
 ///
 /// Used by all memory/Qdrant hooks that need to make async HTTP calls.
+/// Most hook work must be quick (the default 3s budget). For the few paths
+/// where a slightly-slower-but-must-complete call is acceptable (e.g. recall
+/// search, which cold-starts memory-mcp + embeds + vector-searches and can
+/// exceed 3s), use [`run_async_timeout`] with an explicit budget.
 pub fn run_async<F, T>(future: F) -> T
+where
+    F: std::future::Future<Output = T> + Send,
+    T: Send + Default,
+{
+    run_async_timeout(future, RUN_ASYNC_TIMEOUT)
+}
+
+/// Like [`run_async`] but with an explicit wall-clock timeout. Use for hook
+/// work that legitimately needs more than the default 3s (recall search, etc.)
+/// — never for the hot blocking path of a gate.
+pub fn run_async_timeout<F, T>(future: F, timeout: std::time::Duration) -> T
 where
     F: std::future::Future<Output = T> + Send,
     T: Send + Default,
@@ -345,12 +380,9 @@ where
             {
                 Ok(rt) => rt.block_on(async {
                     // Apply tokio timeout on top of reqwest timeouts
-                    match tokio::time::timeout(RUN_ASYNC_TIMEOUT, future).await {
-                        Ok(result) => result,
-                        Err(_) => {
-                            tracing::debug!("run_async: wall-clock timeout exceeded");
-                            T::default()
-                        }
+                    if let Ok(result) = tokio::time::timeout(timeout, future).await { result } else {
+                        tracing::debug!("run_async: wall-clock timeout exceeded");
+                        T::default()
                     }
                 }),
                 Err(_) => T::default(),
@@ -383,7 +415,7 @@ pub use sentinel_domain::ports::{
 /// Context passed to all hook `process()` functions.
 ///
 /// Bundles all injected ports so hook signatures stay stable as new
-/// ports are added. Constructed once in the dispatcher (hook_cmd.rs).
+/// ports are added. Constructed once in the dispatcher (`hook_cmd.rs`).
 pub struct HookContext<'a> {
     /// Git operations (branch, worktree, uncommitted changes).
     pub git: &'a dyn GitStatusPort,
@@ -407,7 +439,7 @@ pub struct HookContext<'a> {
     pub env: &'a dyn EnvPort,
 }
 
-impl<'a> HookContext<'a> {
+impl HookContext<'_> {
     /// Resolve the active Claude session ID by reading `CLAUDE_SESSION_ID`
     /// then falling back to `SESSION_ID`. Five hooks (`activity_tracker`,
     /// `commit_hygiene`, `context_monitor`, `doc_drift`, `verification_gate`)
@@ -424,7 +456,7 @@ impl<'a> HookContext<'a> {
     /// `task_rehydrate`.
     pub fn autopilot_enabled(&self) -> bool {
         match self.env.var("SENTINEL_AUTOPILOT").as_deref() {
-            None | Some("") | Some("0") => false,
+            None | Some("" | "0") => false,
             Some(_) => true,
         }
     }
@@ -700,16 +732,24 @@ mod migrate_tests {
     fn persistent_tasks_root_is_under_sentinel() {
         let home = PathBuf::from("/some/home");
         let root = persistent_tasks_root(&home);
-        assert!(root.ends_with(".claude/sentinel/persistent-tasks") || root.ends_with(r".claude\sentinel\persistent-tasks"),
-            "got: {}", root.display());
+        assert!(
+            root.ends_with(".claude/sentinel/persistent-tasks")
+                || root.ends_with(r".claude\sentinel\persistent-tasks"),
+            "got: {}",
+            root.display()
+        );
     }
 
     #[test]
     fn legacy_persistent_tasks_root_unchanged() {
         let home = PathBuf::from("/some/home");
         let root = legacy_persistent_tasks_root(&home);
-        assert!(root.ends_with(".claude/persistent-tasks") || root.ends_with(r".claude\persistent-tasks"),
-            "got: {}", root.display());
+        assert!(
+            root.ends_with(".claude/persistent-tasks")
+                || root.ends_with(r".claude\persistent-tasks"),
+            "got: {}",
+            root.display()
+        );
     }
 }
 

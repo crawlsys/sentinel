@@ -59,9 +59,8 @@ pub fn evaluate(
                 let (next_phase, next_file) = next.unwrap_or_default();
                 return GateDecision::Block {
                     reason: format!(
-                        "Workflow '{}': tool '{}' is blocked (matches blocked prefix '{}').\n\
-                         Use the workflow's native tools instead of equivalent alternatives.",
-                        wf_skill, tool_name, prefix
+                        "Workflow '{wf_skill}': tool '{tool_name}' is blocked (matches blocked prefix '{prefix}').\n\
+                         Use the workflow's native tools instead of equivalent alternatives."
                     ),
                     next_phase,
                     next_phase_file: next_file,
@@ -81,7 +80,7 @@ pub fn evaluate(
     //      fall through to incomplete workflow check
     //
     // Cases 2 and 3 both search for previously-activated incomplete workflows.
-    // This prevents: activate steel → say "hello" (clears skill) → all tools pass.
+    // This prevents: activate browserbase → say "hello" (clears skill) → all tools pass.
     let (workflow, workflow_state, effective_skill) = match &state.active_skill {
         Some(skill_name) => match workflows.get(skill_name.as_str()) {
             Some(wf) => match state.workflows.get(skill_name.as_str()) {
@@ -173,7 +172,7 @@ fn find_incomplete_workflow<'a>(
 
     for (prev_skill, prev_state) in &state.workflows {
         // Skip the excluded skill (e.g., the current active Tier 0 skill)
-        if exclude_skill.map_or(false, |ex| ex == prev_skill) {
+        if exclude_skill == Some(prev_skill) {
             continue;
         }
 
@@ -195,7 +194,7 @@ fn find_incomplete_workflow<'a>(
         let progress = prev_state.completed_phases.len();
         if best
             .as_ref()
-            .map_or(true, |(_, _, _, best_p)| progress < *best_p)
+            .is_none_or(|(_, _, _, best_p)| progress < *best_p)
         {
             best = Some((prev_wf, prev_state, prev_skill.clone(), progress));
         }

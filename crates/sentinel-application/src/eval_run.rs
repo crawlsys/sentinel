@@ -45,9 +45,7 @@ use std::time::Instant;
 
 use chrono::{DateTime, Utc};
 
-use sentinel_domain::eval::{
-    EvalCase, EvalCaseId, EvalCaseResult, EvalRunId, EvalRunResult,
-};
+use sentinel_domain::eval::{EvalCase, EvalCaseId, EvalCaseResult, EvalRunId, EvalRunResult};
 use sentinel_domain::ports::EvalScorerPort;
 
 /// Execute the benchmark runner over a batch of cases.
@@ -268,7 +266,10 @@ mod tests {
         let cases = vec![make_case("c1"), make_case("c2"), make_case("c3")];
         let mut outputs: HashMap<EvalCaseId, String> = HashMap::new();
         for c in &cases {
-            outputs.insert(c.case_id.clone(), format!("output for {}", c.case_id.as_str()));
+            outputs.insert(
+                c.case_id.clone(),
+                format!("output for {}", c.case_id.as_str()),
+            );
         }
         let producer = static_candidate_producer(outputs);
         let scorer = StubScorer::always(0.75);
@@ -394,10 +395,7 @@ mod tests {
 
         // 3 clock calls total: started_at, case[0].completed_at, run.completed_at.
         // tick_clock returns successive seconds 1700000000, 1700000001, 1700000002.
-        assert_eq!(
-            run.started_at,
-            Utc.timestamp_opt(1_700_000_000, 0).unwrap()
-        );
+        assert_eq!(run.started_at, Utc.timestamp_opt(1_700_000_000, 0).unwrap());
         assert_eq!(
             run.case_results[0].completed_at,
             Utc.timestamp_opt(1_700_000_001, 0).unwrap()
@@ -489,6 +487,9 @@ mod tests {
         let mut producer = static_candidate_producer(outputs);
         let case = make_case("missing");
         let err = producer(&case).expect_err("should error on missing");
-        assert!(err.contains("missing"), "error should name case_id; got {err}");
+        assert!(
+            err.contains("missing"),
+            "error should name case_id; got {err}"
+        );
     }
 }

@@ -148,8 +148,8 @@ pub fn scan_token_usage(projects_root: &Path, output: &Path) -> Result<ScanRepor
         .collect();
 
     ensure_parent(output)?;
-    let mut file = File::create(output)
-        .with_context(|| format!("create output {}", output.display()))?;
+    let mut file =
+        File::create(output).with_context(|| format!("create output {}", output.display()))?;
     for row in &rows {
         let line = serde_json::to_string(row)?;
         writeln!(file, "{line}")?;
@@ -204,13 +204,11 @@ fn ingest_session(
     };
     report.mapped_sessions += 1;
 
-    let agg = by_ticket
-        .entry(ticket.clone())
-        .or_insert_with(|| AggBuild {
-            ticket: ticket.clone(),
-            confidence,
-            ..AggBuild::default()
-        });
+    let agg = by_ticket.entry(ticket.clone()).or_insert_with(|| AggBuild {
+        ticket: ticket.clone(),
+        confidence,
+        ..AggBuild::default()
+    });
     // Path-attributed sessions outrank prompt-attributed ones.
     if confidence == Confidence::High {
         agg.confidence = Confidence::High;
@@ -331,8 +329,7 @@ pub fn extract_ticket_from_prompts(jsonl: &Path, max_lines: usize) -> Option<Str
 /// Parse a session JSONL: walk every line, sum `usage` blocks from
 /// `assistant`-type messages, record observed model ids.
 fn parse_session(jsonl: &Path) -> Result<SessionRollup> {
-    let file = File::open(jsonl)
-        .with_context(|| format!("open session {}", jsonl.display()))?;
+    let file = File::open(jsonl).with_context(|| format!("open session {}", jsonl.display()))?;
     let reader = BufReader::new(file);
     let mut rollup = SessionRollup::default();
 
@@ -487,8 +484,9 @@ mod tests {
     fn end_to_end_scan_writes_aggregated_jsonl() {
         let dir = TempDir::new().unwrap();
         let projects = dir.path().join("projects");
-        let session_dir = projects
-            .join("C--Users-test-Documents-GitHub-firefly-pro-crm--claude-worktrees-feat-fpcrm-289-foo");
+        let session_dir = projects.join(
+            "C--Users-test-Documents-GitHub-firefly-pro-crm--claude-worktrees-feat-fpcrm-289-foo",
+        );
         fs::create_dir_all(&session_dir).unwrap();
 
         // Session A: 1 assistant message, 1Mtok input, 1Mtok output on opus.

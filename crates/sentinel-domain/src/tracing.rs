@@ -21,8 +21,8 @@
 //!   key-value list, max 32 entries per spec.
 //!
 //! When future MCP transports (M2.12 streamable HTTP) carry these headers,
-//! sentinel parses them on PreToolUse and propagates them into the StepProof
-//! that gets emitted on PostToolUse. Outbound calls (when sentinel is the
+//! sentinel parses them on `PreToolUse` and propagates them into the `StepProof`
+//! that gets emitted on `PostToolUse`. Outbound calls (when sentinel is the
 //! caller, not the callee) format the context back into headers via
 //! [`TraceContext::to_traceparent`] and [`TraceContext::to_tracestate`].
 //!
@@ -60,7 +60,7 @@ pub const FLAG_SAMPLED: u8 = 0x01;
 /// to the trace it was emitted under so corpus queries can pivot to OTEL
 /// dashboards.
 ///
-/// Stored in StepProof as `Option<TraceContext>` — `None` for proofs that
+/// Stored in `StepProof` as `Option<TraceContext>` — `None` for proofs that
 /// ran without OTEL configured (the common case until the OTLP exporter
 /// lands), `Some(ctx)` once tracing is wired up. Never affects the
 /// combined hash: trace context is operational metadata, not part of the
@@ -76,7 +76,7 @@ pub struct TraceContext {
     pub span_id: String,
 
     /// 16 hex chars when set, `None` for the trace's root span. Threading
-    /// this through StepProofs means a corpus search can reconstruct the
+    /// this through `StepProofs` means a corpus search can reconstruct the
     /// span tree even if the OTEL collector dropped events for retention.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_span_id: Option<String>,
@@ -108,7 +108,7 @@ pub enum TraceParseError {
     InvalidSpanId,
     /// `flags` not 2 hex chars.
     InvalidFlags,
-    /// A character in trace_id / span_id / flags wasn't lowercase hex.
+    /// A character in `trace_id` / `span_id` / flags wasn't lowercase hex.
     NonHexCharacter,
     /// Tracestate entry malformed (not `key=value`).
     MalformedTracestateEntry(String),
@@ -130,13 +130,15 @@ impl std::fmt::Display for TraceParseError {
                 f,
                 "trace_id must be 32 lowercase hex chars and not all-zero",
             ),
-            Self::InvalidSpanId => write!(
-                f,
-                "span_id must be 16 lowercase hex chars and not all-zero",
-            ),
+            Self::InvalidSpanId => {
+                write!(f, "span_id must be 16 lowercase hex chars and not all-zero")
+            }
             Self::InvalidFlags => write!(f, "flags must be exactly 2 hex chars"),
             Self::NonHexCharacter => {
-                write!(f, "trace_id / span_id / flags contained a non-hex character")
+                write!(
+                    f,
+                    "trace_id / span_id / flags contained a non-hex character"
+                )
             }
             Self::MalformedTracestateEntry(s) => {
                 write!(f, "malformed tracestate entry '{s}' (expected key=value)")
@@ -153,12 +155,12 @@ impl std::error::Error for TraceParseError {}
 impl TraceContext {
     /// True when the `sampled` bit is set in `flags`.
     #[must_use]
-    pub fn is_sampled(&self) -> bool {
+    pub const fn is_sampled(&self) -> bool {
         self.flags & FLAG_SAMPLED != 0
     }
 
     /// Set or clear the `sampled` bit.
-    pub fn set_sampled(&mut self, sampled: bool) {
+    pub const fn set_sampled(&mut self, sampled: bool) {
         if sampled {
             self.flags |= FLAG_SAMPLED;
         } else {
@@ -172,8 +174,8 @@ impl TraceContext {
     /// - Exactly 4 hyphen-delimited fields.
     /// - Field 1 = `00` (we accept newer versions but only by reading the
     ///   first 4 fields and ignoring tail; non-hex versions are rejected).
-    /// - Field 2 = trace_id (32 lowercase hex, not all-zero).
-    /// - Field 3 = span_id (16 lowercase hex, not all-zero).
+    /// - Field 2 = `trace_id` (32 lowercase hex, not all-zero).
+    /// - Field 3 = `span_id` (16 lowercase hex, not all-zero).
     /// - Field 4 = flags (2 hex chars).
     pub fn parse_traceparent(s: &str) -> Result<Self, TraceParseError> {
         let parts: Vec<&str> = s.trim().split('-').collect();
@@ -196,7 +198,9 @@ impl TraceContext {
 
         let trace_id = parts[1];
         if trace_id.len() != TRACE_ID_HEX_LEN
-            || trace_id.chars().any(|c| !c.is_ascii_hexdigit() || c.is_ascii_uppercase())
+            || trace_id
+                .chars()
+                .any(|c| !c.is_ascii_hexdigit() || c.is_ascii_uppercase())
         {
             // Distinguish "wrong length" from "non-hex" for clearer errors.
             if trace_id.chars().any(|c| !c.is_ascii_hexdigit()) {
@@ -210,7 +214,9 @@ impl TraceContext {
 
         let span_id = parts[2];
         if span_id.len() != SPAN_ID_HEX_LEN
-            || span_id.chars().any(|c| !c.is_ascii_hexdigit() || c.is_ascii_uppercase())
+            || span_id
+                .chars()
+                .any(|c| !c.is_ascii_hexdigit() || c.is_ascii_uppercase())
         {
             if span_id.chars().any(|c| !c.is_ascii_hexdigit()) {
                 return Err(TraceParseError::NonHexCharacter);
@@ -225,8 +231,7 @@ impl TraceContext {
         if flags_str.len() != 2 || flags_str.chars().any(|c| !c.is_ascii_hexdigit()) {
             return Err(TraceParseError::InvalidFlags);
         }
-        let flags = u8::from_str_radix(flags_str, 16)
-            .map_err(|_| TraceParseError::InvalidFlags)?;
+        let flags = u8::from_str_radix(flags_str, 16).map_err(|_| TraceParseError::InvalidFlags)?;
 
         Ok(Self {
             trace_id: trace_id.to_string(),
@@ -448,10 +453,7 @@ mod tests {
     #[test]
     fn rejects_malformed_tracestate_entry() {
         let err = TraceContext::parse_tracestate("noequalshere").unwrap_err();
-        assert!(matches!(
-            err,
-            TraceParseError::MalformedTracestateEntry(_)
-        ));
+        assert!(matches!(err, TraceParseError::MalformedTracestateEntry(_)));
     }
 
     #[test]
@@ -460,10 +462,7 @@ mod tests {
         let many: Vec<String> = (0..40).map(|i| format!("k{i}=v{i}")).collect();
         let s = many.join(",");
         let err = TraceContext::parse_tracestate(&s).unwrap_err();
-        assert!(matches!(
-            err,
-            TraceParseError::TracestateTooManyEntries(40)
-        ));
+        assert!(matches!(err, TraceParseError::TracestateTooManyEntries(40)));
     }
 
     // ── to_traceparent / to_tracestate round-trip ────────────────────

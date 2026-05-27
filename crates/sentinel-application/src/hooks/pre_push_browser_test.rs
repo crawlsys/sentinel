@@ -1,10 +1,15 @@
-//! Pre-Push Steel Test Hook
+//! Pre-Push Browser Test Hook
 //!
-//! Blocks `git push` commands when a Steel browser test hasn't been run
-//! in the current session AND the push includes frontend file changes.
-//! Ensures UI changes are browser-verified before code reaches the remote.
+//! Blocks `git push` commands when a browser test hasn't been run in the
+//! current session AND the push includes frontend file changes. Ensures
+//! UI changes are browser-verified before code reaches the remote.
 //!
-//! This is the safety net behind Layer 2.5 (pre-push local Steel test) in
+//! "Browser test" here means either a local CDP test (`mcp__cdp`__*, edge-cdp
+//! skill) for localhost OR a remote Browserbase test (`mcp__browserbase`__*)
+//! for preview/staging URLs. Either one counts as proof that someone drove
+//! the UI in a real browser since the last frontend change.
+//!
+//! This is the safety net behind Layer 2.5 (pre-push local browser test) in
 //! the Linear review phase. If the skill-level gate was followed, the state
 //! file will already exist and this hook allows the push instantly.
 //!
@@ -13,12 +18,12 @@
 //!
 //! Logic:
 //! 1. Only fires on `git push` commands
-//! 2. Matches cwd repo name against project configs with Steel settings
-//! 3. If current repo has no matching Steel-configured project → allow
+//! 2. Matches cwd repo name against project configs with browser test settings
+//! 3. If current repo has no matching browser-test-configured project → allow
 //! 4. Checks if diff includes frontend files (.tsx, .jsx, .css, .scss, .styled)
 //! 5. If no frontend files → allow (backend-only push)
-//! 6. If frontend files + recent Steel test → allow
-//! 7. If frontend files + no Steel test → block with instructions
+//! 6. If frontend files + recent browser test → allow
+//! 7. If frontend files + no browser test → block with instructions
 
 use chrono::Utc;
 use regex::Regex;
@@ -27,15 +32,15 @@ use sentinel_domain::events::{HookInput, HookOutput};
 use std::path::PathBuf;
 use std::time::Duration;
 
-/// Steel test validity window.
-const TEST_VALIDITY: Duration = constants::STEEL_TEST_VALIDITY;
+/// Browser test validity window.
+const TEST_VALIDITY: Duration = constants::BROWSER_TEST_VALIDITY;
 
-/// Frontend file extensions that trigger Steel test requirement
+/// Frontend file extensions that trigger browser test requirement
 const FRONTEND_EXTENSIONS: &[&str] = &[".tsx", ".jsx", ".css", ".scss", ".styled"];
 
-/// Path to the Steel test state file for a given session.
-/// **Attack #61 fix**: Moved from world-writable temp_dir() to sentinel's
-/// protected directory. Also sanitizes session_id to prevent path traversal.
+/// Path to the browser test state file for a given session.
+/// **Attack #61 fix**: Moved from world-writable `temp_dir()` to sentinel's
+/// protected directory. Also sanitizes `session_id` to prevent path traversal.
 fn state_file_path(fs: &dyn super::FileSystemPort, session_id: &str) -> PathBuf {
     // Sanitize session_id — only allow alphanumeric, hyphen, underscore
     let safe_id: String = session_id
@@ -57,13 +62,13 @@ fn state_file_path(fs: &dyn super::FileSystemPort, session_id: &str) -> PathBuf 
         .join(format!("{id}.json"))
 }
 
-/// Check if a passing Steel test exists for this session within the validity window
-/// (Public wrapper for CLI access — caller injects the FS adapter).
+/// Check if a passing browser test exists for this session within the validity window.
+/// (Public wrapper for CLI access — caller injects the FS adapter.)
 pub fn has_recent_browser_test_pub(fs: &dyn super::FileSystemPort, session_id: &str) -> bool {
     has_recent_browser_test(fs, session_id)
 }
 
-/// Check if a passing Steel test exists for this session within the validity window
+/// Check if a passing browser test exists for this session within the validity window.
 fn has_recent_browser_test(fs: &dyn super::FileSystemPort, session_id: &str) -> bool {
     let path = state_file_path(fs, session_id);
     let content = match fs.read_to_string(&path) {
@@ -79,7 +84,7 @@ fn has_recent_browser_test(fs: &dyn super::FileSystemPort, session_id: &str) -> 
     // Verify passed flag and session match
     let passed = state
         .get("passed")
-        .and_then(|v| v.as_bool())
+        .and_then(serde_json::Value::as_bool)
         .unwrap_or(false);
     let state_session = state
         .get("sessionId")
@@ -99,7 +104,7 @@ fn has_recent_browser_test(fs: &dyn super::FileSystemPort, session_id: &str) -> 
     match chrono::DateTime::parse_from_rfc3339(timestamp) {
         Ok(test_time) => {
             let elapsed = Utc::now().signed_duration_since(test_time);
-            elapsed.num_seconds() >= 0 && elapsed.to_std().map_or(false, |d| d < TEST_VALIDITY)
+            elapsed.num_seconds() >= 0 && elapsed.to_std().is_ok_and(|d| d < TEST_VALIDITY)
         }
         Err(_) => false,
     }
@@ -116,12 +121,12 @@ fn repo_name_from_cwd(cwd: &str) -> Option<String> {
     Some(base.to_lowercase())
 }
 
-/// Check if the current repo matches a project config that has Steel test settings.
+/// Check if the current repo matches a project config that has browser test settings.
 /// Scoped check: only returns true if the repo name matches the project's name or aliases
-/// AND that project has steel_test_email configured.
+/// AND that project has `browser_test_email` (or legacy `steel_test_email`) configured.
 ///
 /// Accepts an optional override path for testing; uses ~/.claude/skills/linear/projects/ by default.
-fn repo_has_steel_config_in(
+fn repo_has_browser_test_config_in(
     fs: &dyn super::FileSystemPort,
     cwd: Option<&str>,
     projects_dir: Option<&std::path::Path>,
@@ -156,19 +161,21 @@ fn repo_has_steel_config_in(
     };
 
     for path in entries {
-        if path.extension().map_or(true, |e| e != "md") {
+        if path.extension().is_none_or(|e| e != "md") {
             continue;
         }
         if path
             .file_name()
-            .map_or(false, |n| n.to_string_lossy().starts_with('_'))
+            .is_some_and(|n| n.to_string_lossy().starts_with('_'))
         {
             continue;
         }
 
         if let Ok(content) = fs.read_to_string(&path) {
-            // Must have steel_test_email to be a Steel-configured project
-            if !content.contains("steel_test_email") {
+            // Must have browser_test_email (or legacy steel_test_email) to be
+            // a browser-test-configured project. Legacy field accepted during
+            // migration so old project configs keep working until renamed.
+            if !content.contains("browser_test_email") && !content.contains("steel_test_email") {
                 continue;
             }
 
@@ -186,7 +193,7 @@ fn repo_has_steel_config_in(
 /// Check if a repo name matches a project config's name or aliases.
 /// Matches against:
 /// - `name:` frontmatter field (e.g. "name: firefly-pro")
-/// - `aliases:` frontmatter array (e.g. aliases: ["firefly", "crm", "fpcrm"])
+/// - `aliases:` frontmatter array (e.g. aliases: [`firefly`, `crm`, `fpcrm`])
 /// - The filename stem of the project file
 ///
 /// Repo names are matched with normalization: "firefly-pro-crm" matches alias "fpcrm",
@@ -223,9 +230,9 @@ fn repo_matches_project(repo: &str, content_lower: &str) -> bool {
     false
 }
 
-/// Check if the current repo has Steel test config (default projects path)
-fn repo_has_steel_config(fs: &dyn super::FileSystemPort, cwd: Option<&str>) -> bool {
-    repo_has_steel_config_in(fs, cwd, None)
+/// Check if the current repo has browser test config (default projects path).
+fn repo_has_browser_test_config(fs: &dyn super::FileSystemPort, cwd: Option<&str>) -> bool {
+    repo_has_browser_test_config_in(fs, cwd, None)
 }
 
 /// Check if the git diff (staged or branch) includes frontend file changes.
@@ -282,8 +289,11 @@ fn diff_has_frontend_files(git: &dyn super::GitStatusPort, cwd: Option<&str>) ->
         .any(|line| FRONTEND_EXTENSIONS.iter().any(|ext| line.ends_with(ext)))
 }
 
-/// Write the Steel test state file after a successful Steel session.
-/// Called from the PostToolUse handler when `mcp__steel__release_session` succeeds.
+/// Write the browser test state file after a successful browser test session.
+/// Called from the `PostToolUse` handler when:
+///   - `mcp__browserbase__release_session` succeeds (Browserbase remote test), OR
+///   - `mcp__cdp__close_instance` succeeds (CDP local test), OR
+///   - `mcp__steel__release_session` succeeds (legacy Steel, kept for compat).
 pub fn record_browser_test_passed(fs: &dyn super::FileSystemPort, session_id: &str) {
     let path = state_file_path(fs, session_id);
     // Ensure parent directory exists (Attack #61: now in ~/.claude/sentinel/browser-test/)
@@ -299,18 +309,21 @@ pub fn record_browser_test_passed(fs: &dyn super::FileSystemPort, session_id: &s
         &path,
         serde_json::to_string(&state).unwrap_or_default().as_bytes(),
     ) {
-        tracing::warn!("Failed to write Steel test state file: {e}");
+        tracing::warn!("Failed to write browser test state file: {e}");
     } else {
         tracing::debug!("Browser test state recorded at {}", path.display());
     }
 }
 
-/// PostToolUse handler — detect successful browser tests and record test state.
+/// `PostToolUse` handler — detect successful browser tests and record test state.
 /// Triggers on:
-/// 1. `mcp__steel__release_session` — Steel MCP test completed
-/// 2. Bash tool result containing `STEEL_TEST_PASS` — CDP/Puppeteer test completed
+/// 1. `mcp__browserbase__release_session` — Browserbase remote test completed
+/// 2. `mcp__cdp__close_instance`         — CDP local test completed
+/// 3. `mcp__steel__release_session`      — legacy Steel, kept as defense-in-depth
+/// 4. Bash tool result containing `BROWSER_TEST_PASS` or legacy `STEEL_TEST_PASS`
+///    — CDP/Puppeteer/Playwright script test completed
 ///
-/// Should be called from the PostToolUse event dispatch in hook_cmd.rs.
+/// Should be called from the `PostToolUse` event dispatch in `hook_cmd.rs`.
 pub fn process_post_tool(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
     let tool = match &input.tool_name {
         Some(name) => name.as_str(),
@@ -319,21 +332,28 @@ pub fn process_post_tool(input: &HookInput, ctx: &super::HookContext<'_>) -> Hoo
 
     let session_id = input.session_id.as_deref().unwrap_or("unknown");
 
-    // Path 1: Steel MCP release_session
-    if tool == "mcp__steel__release_session" {
+    // Path 1-3: any MCP browser-test completion signal
+    if matches!(
+        tool,
+        "mcp__browserbase__release_session"
+            | "mcp__cdp__close_instance"
+            | "mcp__steel__release_session"
+    ) {
         record_browser_test_passed(ctx.fs, session_id);
         return HookOutput::allow();
     }
 
-    // Path 2: Bash tool with STEEL_TEST_PASS marker in output
-    // This supports CDP, Puppeteer, Playwright, or any browser test that
-    // prints "STEEL_TEST_PASS" on success.
+    // Path 4: Bash tool with BROWSER_TEST_PASS marker in output
+    // (or legacy STEEL_TEST_PASS). Supports CDP, Puppeteer, Playwright, or
+    // any browser test that prints the marker on success.
     if tool == "Bash" {
         let has_marker = input
             .tool_result
             .as_ref()
             .and_then(|r| r.as_str())
-            .map_or(false, |s| s.contains("STEEL_TEST_PASS"));
+            .is_some_and(|s| {
+                s.contains("BROWSER_TEST_PASS") || s.contains("STEEL_TEST_PASS")
+            });
         if has_marker {
             record_browser_test_passed(ctx.fs, session_id);
         }
@@ -342,7 +362,7 @@ pub fn process_post_tool(input: &HookInput, ctx: &super::HookContext<'_>) -> Hoo
     HookOutput::allow()
 }
 
-/// Process a pre-push Steel test hook event (PreToolUse)
+/// Process a pre-push browser test hook event (`PreToolUse`).
 pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
     // Only act on Bash tool calls
     let tool = match &input.tool_name {
@@ -369,43 +389,45 @@ pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
         return HookOutput::allow();
     }
 
-    // Check if THIS repo's project has Steel test config (not all projects globally)
+    // Check if THIS repo's project has browser test config (not all projects globally)
     let cwd = input.cwd.as_deref();
-    if !repo_has_steel_config(ctx.fs, cwd) {
+    if !repo_has_browser_test_config(ctx.fs, cwd) {
         return HookOutput::allow();
     }
 
     // Check if the diff includes frontend files
     if !diff_has_frontend_files(ctx.git, cwd) {
-        // Backend-only change — no Steel test needed
+        // Backend-only change — no browser test needed
         return HookOutput::allow();
     }
 
     // Get session ID
     let session_id = input.session_id.as_deref().unwrap_or("unknown");
 
-    // Check if Steel test passed recently
+    // Check if a browser test passed recently
     if has_recent_browser_test(ctx.fs, session_id) {
         return HookOutput::allow();
     }
 
-    // Block — frontend files changed but no Steel test run
+    // Block — frontend files changed but no browser test run
     let message = "\
-+============================================================+
-|  BLOCKED: Steel Test Required — Frontend Changes Detected  |
-+============================================================+
-|  Your push includes frontend file changes (.tsx/.jsx/.css) |
-|  but no Steel browser test has been run this session.      |
-|                                                            |
-|  Run Layer 2.5 (Pre-Push Local Steel Test) first:          |
-|  1. Start local dev server                                 |
-|  2. Start cloudflared tunnel                               |
-|  3. Create Steel session → login → screenshot → verify     |
-|  4. Check console errors                                   |
-|                                                            |
-|  Or push manually from your terminal:                      |
-|  -> git push origin <branch>                               |
-+============================================================+"
++=============================================================+
+|  BLOCKED: Browser Test Required — Frontend Changes Detected |
++=============================================================+
+|  Your push includes frontend file changes (.tsx/.jsx/.css)  |
+|  but no browser test has been run this session.             |
+|                                                             |
+|  Run Layer 2.5 (Pre-Push Local CDP Test) first:             |
+|  1. Start local dev server                                  |
+|  2. mcp__cdp__launch(name: \"local\", url: \"http://...\")  |
+|  3. Navigate → login → screenshot → verify                  |
+|  4. Check console errors                                    |
+|  5. mcp__cdp__close_instance(name: \"local\")               |
+|                                                             |
+|  For remote URLs (preview, staging) use mcp__browserbase__* |
+|  Or push manually from your terminal:                       |
+|  -> git push origin <branch>                                |
++=============================================================+"
         .to_string();
 
     HookOutput::block(super::block_context::append_block_context(message, input))
@@ -511,7 +533,7 @@ mod tests {
     fn test_allows_push_when_no_steel_config() {
         // Use an empty temp dir — no project config files with steel settings
         let tmpdir = tempfile::tempdir().unwrap();
-        let result = repo_has_steel_config_in(
+        let result = repo_has_browser_test_config_in(
             &RealFsTest,
             Some("/fake/path/some-repo"),
             Some(tmpdir.path()),
@@ -529,7 +551,7 @@ mod tests {
         )
         .unwrap();
         // Repo name "firefly-pro-crm" contains alias "crm" → match
-        let result = repo_has_steel_config_in(
+        let result = repo_has_browser_test_config_in(
             &RealFsTest,
             Some("/fake/path/firefly-pro-crm"),
             Some(tmpdir.path()),
@@ -550,7 +572,7 @@ mod tests {
         )
         .unwrap();
         // Repo name "sentinel" doesn't match any alias → no block
-        let result = repo_has_steel_config_in(
+        let result = repo_has_browser_test_config_in(
             &RealFsTest,
             Some("/fake/path/sentinel"),
             Some(tmpdir.path()),
@@ -571,7 +593,7 @@ mod tests {
             "name: myproject\naliases: [\"myapp\"]\nstaging_url: https://staging.example.com",
         )
         .unwrap();
-        let result = repo_has_steel_config_in(
+        let result = repo_has_browser_test_config_in(
             &RealFsTest,
             Some("/fake/path/myproject"),
             Some(tmpdir.path()),

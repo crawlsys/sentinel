@@ -5,7 +5,7 @@
 //!
 //! ## How it works
 //!
-//! - **PostToolUse (Bash)**: scan tool output for compile warnings, dead-code
+//! - **`PostToolUse` (Bash)**: scan tool output for compile warnings, dead-code
 //!   diagnostics, lint findings, test failures, and inline TODO/FIXME/HACK
 //!   markers near edited lines. Append a one-line summary to a per-session
 //!   state file at
@@ -39,8 +39,14 @@ use std::path::{Path, PathBuf};
 /// reminder can group findings cleanly.
 const OBSERVATION_PATTERNS: &[(&str, &str)] = &[
     // Rust compiler / clippy
-    (r"warning:\s+function\s+`[^`]+`\s+is\s+never\s+used", "dead code"),
-    (r"warning:\s+unused\s+(variable|import|imports|field|method)", "unused symbol"),
+    (
+        r"warning:\s+function\s+`[^`]+`\s+is\s+never\s+used",
+        "dead code",
+    ),
+    (
+        r"warning:\s+unused\s+(variable|import|imports|field|method)",
+        "unused symbol",
+    ),
     (r"warning:\s+\S+\s+is\s+deprecated", "deprecated API"),
     (r"\bdead_code\b", "dead code"),
     // Generic linters / typecheckers
@@ -76,7 +82,7 @@ fn observation_path(home: &Path, session_id: &str) -> PathBuf {
         .join(format!("{session_id}.jsonl"))
 }
 
-/// PostToolUse: scan Bash tool result for known issue patterns and
+/// `PostToolUse`: scan Bash tool result for known issue patterns and
 /// append any matches to the session log. Best-effort: any IO failure
 /// is silently swallowed.
 pub fn process_post_tool(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
@@ -212,7 +218,7 @@ pub fn process_stop(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutp
     }
 
     let envelope = HookEnvelope::new("Good Citizen", HookTier::Warn, lines.join("\n"));
-    HookOutput::inject_envelope(HookEvent::Stop, envelope)
+    HookOutput::inject_envelope(HookEvent::Stop, &envelope)
 }
 
 // ---------------------------------------------------------------------------
@@ -229,8 +235,7 @@ fn compile_observation_patterns() -> Vec<(regex::Regex, &'static str)> {
 fn now_ms() -> u128 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0)
+        .map_or(0, |d| d.as_millis())
 }
 
 /// Pull plain text out of the Claude Code `tool_result` value. The shape

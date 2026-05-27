@@ -76,8 +76,8 @@ pub fn report_result_fire_and_forget(
 /// one id per line.
 ///
 /// File ops are deliberately simple: append-on-drain, read-and-
-/// remove on Stop. Race window between consul_inbox appending
-/// and execution_log clearing is small (hooks for the same
+/// remove on Stop. Race window between `consul_inbox` appending
+/// and `execution_log` clearing is small (hooks for the same
 /// session don't usually overlap) and the failure mode is
 /// "operator misses one Result ping" — non-fatal.
 fn pending_file_path(session_id: &str) -> Option<PathBuf> {
@@ -97,6 +97,7 @@ fn pending_file_path(session_id: &str) -> Option<PathBuf> {
 }
 
 /// Append `instruction_id` to the per-session pending file.
+///
 /// Creates the parent dir + file if needed. Errors logged at
 /// debug; never propagated (the operator still got an Ack via
 /// the WS; only the Stop hook's per-instruction Result depends
@@ -117,7 +118,10 @@ pub fn note_pending_instruction(session_id: &str, instruction_id: InstructionId)
         use std::io::Write;
         let _ = file.write_all(line.as_bytes());
     } else {
-        tracing::debug!(?path, "legatus_client: failed to record pending instruction");
+        tracing::debug!(
+            ?path,
+            "legatus_client: failed to record pending instruction"
+        );
     }
 }
 
@@ -136,7 +140,7 @@ pub fn take_pending_instructions(session_id: &str) -> Vec<InstructionId> {
         Err(err) => {
             tracing::debug!(?err, ?path, "legatus_client: pending file read failed");
             return Vec::new();
-        },
+        }
     };
     // Remove the file before parsing so concurrent appends start
     // a fresh file. (Race window: an append after the read but
@@ -226,7 +230,7 @@ pub fn take_tool_calls(session_id: &str) -> Vec<String> {
         Err(err) => {
             tracing::debug!(?err, ?path, "legatus_client: tool-calls read failed");
             return Vec::new();
-        },
+        }
     };
     let _ = std::fs::remove_file(&path);
     content
@@ -316,7 +320,7 @@ pub fn take_turn_signals(session_id: &str) -> Vec<TurnSignal> {
         Err(err) => {
             tracing::debug!(?err, ?path, "legatus_client: turn signals read failed");
             return Vec::new();
-        },
+        }
     };
     let _ = std::fs::remove_file(&path);
     content
@@ -335,7 +339,7 @@ pub fn take_turn_signals(session_id: &str) -> Vec<TurnSignal> {
 ///
 /// Rules (MVP — coarse classification, the ~90-95% reliability target
 /// per the project's reliability philosophy):
-/// 1. If the caller supplies an `api_error` (StopFailure path), all
+/// 1. If the caller supplies an `api_error` (`StopFailure` path), all
 ///    pending instructions are `Failure { error }`.
 /// 2. Otherwise, if any [`TurnSignal::PermissionDenied`] was observed
 ///    this turn, all pending instructions are `Declined { reason }`
@@ -363,8 +367,8 @@ pub fn classify_outcome(
     }
     let denied_tools: Vec<&str> = signals
         .iter()
-        .filter_map(|s| match s {
-            TurnSignal::PermissionDenied { tool } => Some(tool.as_str()),
+        .map(|s| match s {
+            TurnSignal::PermissionDenied { tool } => tool.as_str(),
         })
         .collect();
     if !denied_tools.is_empty() {
@@ -433,6 +437,72 @@ pub fn escalate_fire_and_forget(event: EscalationKind) {
     });
 }
 
+/// Synchronously check the daemon's catastrophic approval cache
+/// for `(session_id, action_class)`. Returns `true` when an
+/// unspent approval is present (and consumes it -- single-use).
+/// Returns `false` when no approval is present, the daemon is
+/// unreachable, or the HTTP call fails.
+///
+/// Called from the `catastrophic_escalation` `PreToolUse` hook
+/// before classifying the tool call. The cache lookup is the
+/// retry-allow path: an approval recorded by the legatus's
+/// inbound `CatastrophicAck` handler authorizes exactly one
+/// retry of the same `action_class` in the same session.
+///
+/// Fails-closed: a daemon outage returns `false`, the hook
+/// proceeds to classify + emit + deny as usual.
+#[must_use]
+pub fn consume_catastrophic_approval(session_id: &str, action_class: &str) -> bool {
+    let Some((port, token)) = read_daemon_token() else {
+        return false;
+    };
+    // URL-encode minimal: session_id is a UUID (URL-safe) and
+    // action_class comes from a tool name (alnum + _ in practice).
+    // Conservative percent-encode of any non-alnum chars to avoid
+    // surprises if a tool name ever includes punctuation.
+    let encoded_class = percent_encode_path(action_class);
+    let url = format!(
+        "http://127.0.0.1:{port}/legatus/catastrophic-acks/{session_id}/{encoded_class}"
+    );
+    let client = match reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(2))
+        .build()
+    {
+        Ok(c) => c,
+        Err(err) => {
+            tracing::debug!(?err, "legatus_client: cannot build reqwest client");
+            return false;
+        }
+    };
+    match client
+        .get(&url)
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+    {
+        Ok(resp) => resp.status().is_success(),
+        Err(err) => {
+            tracing::debug!(?err, "legatus_client: consume_catastrophic_approval failed");
+            false
+        }
+    }
+}
+
+/// Minimal percent-encoder for path segments. Encodes any byte
+/// that isn't an unreserved character per RFC 3986 §2.3.
+fn percent_encode_path(s: &str) -> String {
+    use std::fmt::Write as _;
+    const UNRESERVED: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~";
+    let mut out = String::with_capacity(s.len());
+    for &b in s.as_bytes() {
+        if UNRESERVED.contains(&b) {
+            out.push(b as char);
+        } else {
+            let _ = write!(out, "%{b:02X}");
+        }
+    }
+    out
+}
+
 #[derive(Debug, thiserror::Error)]
 enum LegatusClientError {
     #[error("daemon token file not present (daemon not running?)")]
@@ -445,7 +515,7 @@ enum LegatusClientError {
     Serialize(serde_json::Error),
 }
 
-/// Synchronously drain the daemon's inbox by repeatedly GETting
+/// Synchronously drain the daemon's inbox by repeatedly `GETting`
 /// `/legatus/inbox/next` until the daemon returns 204 No Content
 /// (queue empty). Returns whatever instructions were buffered
 /// (possibly empty). Used by the `UserPromptSubmit` hook to pull
@@ -469,7 +539,7 @@ pub fn drain_inbox() -> Vec<RelayInstruction> {
         Err(err) => {
             tracing::debug!(?err, "legatus_client: cannot build reqwest client");
             return out;
-        },
+        }
     };
     while out.len() < HARD_CAP {
         let resp = match client
@@ -481,7 +551,7 @@ pub fn drain_inbox() -> Vec<RelayInstruction> {
             Err(err) => {
                 tracing::debug!(?err, "legatus_client: inbox GET failed");
                 break;
-            },
+            }
         };
         let status = resp.status();
         if status == reqwest::StatusCode::NO_CONTENT {
@@ -496,7 +566,7 @@ pub fn drain_inbox() -> Vec<RelayInstruction> {
             Err(err) => {
                 tracing::debug!(?err, "legatus_client: inbox payload decode failed");
                 break;
-            },
+            }
         }
     }
     out
@@ -656,7 +726,10 @@ mod tests {
         let outcome = classify_outcome(&signals, None, None);
         match outcome {
             sentinel_legatus::InstructionOutcome::Declined { reason } => {
-                assert!(reason.contains("Bash"), "reason should name the tool: {reason}");
+                assert!(
+                    reason.contains("Bash"),
+                    "reason should name the tool: {reason}"
+                );
                 assert!(reason.contains("permission denied"), "reason: {reason}");
             }
             other => panic!("expected Declined, got {other:?}"),
@@ -686,7 +759,10 @@ mod tests {
     #[test]
     fn classify_outcome_no_signals_yields_success() {
         let outcome = classify_outcome(&[], None, None);
-        assert!(matches!(outcome, sentinel_legatus::InstructionOutcome::Success));
+        assert!(matches!(
+            outcome,
+            sentinel_legatus::InstructionOutcome::Success
+        ));
     }
 
     #[test]
@@ -704,7 +780,7 @@ mod tests {
         match outcome {
             sentinel_legatus::InstructionOutcome::Deferred { waiting_on } => {
                 assert_eq!(waiting_on, "i'll get to");
-            },
+            }
             other => panic!("expected Deferred, got {other:?}"),
         }
     }
@@ -729,19 +805,18 @@ mod tests {
         match outcome {
             sentinel_legatus::InstructionOutcome::Deferred { waiting_on } => {
                 assert_eq!(waiting_on, "queued for later");
-            },
+            }
             other => panic!("expected Deferred, got {other:?}"),
         }
     }
 
     #[test]
     fn classify_outcome_skipping_for_now_yields_deferred() {
-        let outcome =
-            classify_outcome(&[], None, Some("Skipping for now — will revisit."));
+        let outcome = classify_outcome(&[], None, Some("Skipping for now — will revisit."));
         match outcome {
             sentinel_legatus::InstructionOutcome::Deferred { waiting_on } => {
                 assert_eq!(waiting_on, "skipping for now");
-            },
+            }
             other => panic!("expected Deferred, got {other:?}"),
         }
     }
@@ -767,11 +842,7 @@ mod tests {
     fn classify_outcome_api_error_beats_deferral_phrase() {
         // StopFailure path takes precedence even when the assistant
         // text would otherwise look like a deferral.
-        let outcome = classify_outcome(
-            &[],
-            Some("rate_limit"),
-            Some("I'll get to that later."),
-        );
+        let outcome = classify_outcome(&[], Some("rate_limit"), Some("I'll get to that later."));
         assert!(matches!(
             outcome,
             sentinel_legatus::InstructionOutcome::Failure { .. }
@@ -786,8 +857,7 @@ mod tests {
         let signals = vec![TurnSignal::PermissionDenied {
             tool: "Bash".into(),
         }];
-        let outcome =
-            classify_outcome(&signals, None, Some("I'll get to that later."));
+        let outcome = classify_outcome(&signals, None, Some("I'll get to that later."));
         assert!(matches!(
             outcome,
             sentinel_legatus::InstructionOutcome::Declined { .. }
@@ -797,6 +867,9 @@ mod tests {
     #[test]
     fn classify_outcome_empty_reply_text_yields_success() {
         let outcome = classify_outcome(&[], None, Some(""));
-        assert!(matches!(outcome, sentinel_legatus::InstructionOutcome::Success));
+        assert!(matches!(
+            outcome,
+            sentinel_legatus::InstructionOutcome::Success
+        ));
     }
 }

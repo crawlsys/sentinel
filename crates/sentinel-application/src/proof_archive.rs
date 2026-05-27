@@ -41,10 +41,10 @@
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
 use sentinel_domain::ports::FileSystemPort;
 use sentinel_domain::proof::{ProofChain, ProofEntry};
 use sentinel_domain::state::SessionState;
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 /// Current schema version for archived chain JSONs and index entries.
@@ -63,13 +63,13 @@ pub struct ArchivedChainRecord {
     pub schema_version: u32,
     /// When the archive was written (RFC3339 UTC).
     pub archived_at: DateTime<Utc>,
-    /// The chain as it stood at archive time. Carries skill, session_id,
-    /// entries, head_hash — everything `query_proof_corpus` needs.
+    /// The chain as it stood at archive time. Carries skill, `session_id`,
+    /// entries, `head_hash` — everything `query_proof_corpus` needs.
     pub chain: ProofChain,
 }
 
 /// One line in `index.jsonl`. Compact summary used by router queries
-/// without dragging full StepProof payloads across the MCP boundary.
+/// without dragging full `StepProof` payloads across the MCP boundary.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArchivedChainSummary {
     /// Schema version of this index entry. See [`SCHEMA_VERSION`].
@@ -110,6 +110,45 @@ fn index_path(home: &Path) -> PathBuf {
     proofs_dir(home).join("index.jsonl")
 }
 
+/// Load every archived [`ProofChain`] for `skill` across all prior sessions.
+///
+/// Reads the full `<session>__<skill>.json` records (not the index summaries),
+/// so callers get the complete `entries` — e.g. `step_anomaly` comparing the
+/// current run against the historical distribution of prior runs of a step.
+/// Missing dir / unreadable / wrong-schema / wrong-skill files are skipped;
+/// the result is best-effort (an empty Vec on a cold machine is correct, not
+/// an error). Chains are returned in filesystem-listing order.
+#[must_use]
+pub fn read_chains_for_skill(fs: &dyn FileSystemPort, home: &Path, skill: &str) -> Vec<ProofChain> {
+    let safe_skill = skill.replace(['/', '\\', ':'], "_");
+    let suffix = format!("__{safe_skill}.json");
+    let Ok(entries) = fs.read_dir(&proofs_dir(home)) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for path in entries {
+        let is_match = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.ends_with(&suffix));
+        if !is_match {
+            continue;
+        }
+        let Ok(content) = fs.read_to_string(&path) else {
+            continue;
+        };
+        if let Ok(record) = serde_json::from_str::<ArchivedChainRecord>(&content) {
+            // Only honor schemas we understand (today: v1). Belt-and-braces
+            // double-check the chain's own skill matches, in case of a
+            // filename collision after sanitisation.
+            if record.schema_version <= SCHEMA_VERSION && record.chain.skill == skill {
+                out.push(record.chain);
+            }
+        }
+    }
+    out
+}
+
 /// Build the summary line for a chain at archive time.
 fn summarize(chain: &ProofChain) -> ArchivedChainSummary {
     let step_entries: Vec<&sentinel_domain::step_proof::StepProof> = chain
@@ -132,9 +171,7 @@ fn summarize(chain: &ProofChain) -> ArchivedChainSummary {
             .filter(|e| matches!(e, ProofEntry::Phase(_)))
             .count();
 
-    let all_sufficient = step_entries
-        .iter()
-        .all(|s| s.judge_verdict.sufficient)
+    let all_sufficient = step_entries.iter().all(|s| s.judge_verdict.sufficient)
         && chain.proofs.iter().all(|p| p.judge_verdict.sufficient);
 
     let step_sequence: Vec<String> = step_entries
@@ -220,17 +257,14 @@ fn archive_one_chain(
         chain: chain.clone(),
     };
 
-    let json_bytes = serde_json::to_vec_pretty(&record)
-        .context("serialize archived chain")?;
+    let json_bytes = serde_json::to_vec_pretty(&record).context("serialize archived chain")?;
 
     // Atomic write via tmp + rename. The fs.write impl handles parent dir
     // creation, but for atomicity we go through the .tmp dance ourselves so
     // a crashed Stop can't leave half-written JSON in the bucket.
     let tmp_path = path.with_file_name(format!(
         ".{}.tmp",
-        path.file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "chain".to_string())
+        path.file_name().map_or_else(|| "chain".to_string(), |n| n.to_string_lossy().into_owned())
     ));
     fs.write(&tmp_path, &json_bytes)
         .context("write archived chain tmp file")?;
@@ -369,6 +403,7 @@ mod tests {
             started_at: now,
             completed_at: now,
             duration_ms: 1,
+            actor: None,
         }
     }
 
@@ -428,6 +463,34 @@ mod tests {
         assert_eq!(summary.phase_count, 1);
         assert!(summary.all_sufficient);
         assert!(summary.step_sequence.is_empty());
+    }
+
+    #[test]
+    fn read_chains_for_skill_round_trips_archived_chains() {
+        let _g = ENV_LOCK.lock();
+        let tmp = tempfile::tempdir().unwrap();
+        let fs = ScopedHomeFs {
+            home: tmp.path().to_path_buf(),
+        };
+        // Two prior sessions of `linear`, one of `git`.
+        archive_chains(&build_state("sess-a", "linear"), &fs, tmp.path()).unwrap();
+        archive_chains(&build_state("sess-b", "linear"), &fs, tmp.path()).unwrap();
+        archive_chains(&build_state("sess-c", "git"), &fs, tmp.path()).unwrap();
+
+        let linear = read_chains_for_skill(&fs, tmp.path(), "linear");
+        assert_eq!(linear.len(), 2, "two archived linear chains expected");
+        assert!(linear.iter().all(|c| c.skill == "linear"));
+
+        let git = read_chains_for_skill(&fs, tmp.path(), "git");
+        assert_eq!(git.len(), 1);
+
+        // Unknown skill / cold machine → empty, not an error.
+        assert!(read_chains_for_skill(&fs, tmp.path(), "deploy").is_empty());
+        let cold = tempfile::tempdir().unwrap();
+        let cold_fs = ScopedHomeFs {
+            home: cold.path().to_path_buf(),
+        };
+        assert!(read_chains_for_skill(&cold_fs, cold.path(), "linear").is_empty());
     }
 
     #[test]

@@ -58,7 +58,7 @@ pub enum Outcome {
     Allow,
     /// `HookOutput::block` — internal block flag set.
     Block,
-    /// `HookOutput::deny` — `permissionDecision: deny` set on PreToolUse.
+    /// `HookOutput::deny` — `permissionDecision: deny` set on `PreToolUse`.
     Deny,
     /// `inject_context` / `inject_envelope` fired but no block.
     Inject,

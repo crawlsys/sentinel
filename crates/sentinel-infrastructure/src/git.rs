@@ -231,7 +231,7 @@ pub fn merged_remote_branches(repo_path: &str, base_ref: &str) -> Vec<String> {
 
     let text = String::from_utf8_lossy(&output.stdout);
     text.lines()
-        .map(|l| l.trim())
+        .map(str::trim)
         .filter_map(|l| l.strip_prefix("origin/"))
         .map(str::trim)
         .filter(|b| {

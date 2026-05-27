@@ -1,6 +1,6 @@
-//! Session Index Hook — index session transcript to Qdrant on PreCompact
+//! Session Index Hook — index session transcript to Qdrant on `PreCompact`
 //!
-//! Fires on PreCompact. Reads the session transcript JSONL, chunks it into
+//! Fires on `PreCompact`. Reads the session transcript JSONL, chunks it into
 //! user+assistant exchanges, and upserts each chunk to the Qdrant
 //! `claude-sessions` collection. This makes full conversation history
 //! semantically searchable across sessions.
@@ -34,9 +34,7 @@ fn project_hash(cwd: &str) -> String {
 /// Derive project name from cwd (last path component)
 fn project_name(cwd: &str) -> String {
     std::path::Path::new(cwd)
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| "unknown".to_string())
+        .file_name().map_or_else(|| "unknown".to_string(), |n| n.to_string_lossy().to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -146,7 +144,7 @@ fn extract_text(content: &serde_json::Value) -> String {
     }
 }
 
-/// Extract tool names from tool_use blocks in content
+/// Extract tool names from `tool_use` blocks in content
 fn extract_tool_names(content: &serde_json::Value) -> Vec<String> {
     let mut tools = Vec::new();
     if let Some(arr) = content.as_array() {
@@ -165,7 +163,7 @@ fn extract_tool_names(content: &serde_json::Value) -> Vec<String> {
     tools
 }
 
-/// Extract file paths from tool_use inputs (Read, Write, Edit tools)
+/// Extract file paths from `tool_use` inputs (Read, Write, Edit tools)
 fn extract_files(content: &serde_json::Value) -> Vec<String> {
     let mut files = Vec::new();
     if let Some(arr) = content.as_array() {
@@ -339,7 +337,7 @@ fn build_points(
 // Hook entry point
 // ---------------------------------------------------------------------------
 
-/// Process PreCompact — read transcript, chunk into exchanges, upsert to Qdrant.
+/// Process `PreCompact` — read transcript, chunk into exchanges, upsert to Qdrant.
 pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     let session_id = match input.session_id.as_deref() {
         Some(id) if !id.is_empty() => id,
@@ -364,12 +362,9 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     }
 
     // Require vector store to be configured
-    let vector_store = match ctx.vector_store {
-        Some(vs) => vs,
-        None => {
-            debug!("No Qdrant vector store configured — skipping session index");
-            return HookOutput::allow();
-        }
+    let vector_store = if let Some(vs) = ctx.vector_store { vs } else {
+        debug!("No Qdrant vector store configured — skipping session index");
+        return HookOutput::allow();
     };
 
     let cwd = input.cwd.as_deref().unwrap_or(".");

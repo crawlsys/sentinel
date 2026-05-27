@@ -1,4 +1,4 @@
-//! Build & Deploy Notification — PostToolUse hook
+//! Build & Deploy Notification — `PostToolUse` hook
 //!
 //! Detects when Bash tool calls complete cargo builds, test suites,
 //! or git pushes, and emits channel events for real-time notification.
@@ -25,7 +25,7 @@ const DEPLOY_PATTERNS: &[&str] = &[
     "railway up",
 ];
 
-/// Process PostToolUse — emit channel events for builds and deploys.
+/// Process `PostToolUse` — emit channel events for builds and deploys.
 pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
     // Only care about Bash tool completions
     if input.tool_name.as_deref() != Some("Bash") {
@@ -127,7 +127,6 @@ pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
             input.cwd.as_deref(),
             Some("build_notify"),
         );
-
     }
 
     HookOutput::allow()

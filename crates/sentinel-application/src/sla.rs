@@ -155,12 +155,13 @@ pub fn load_config(path: &Path) -> Result<SlaConfig> {
     if !path.exists() {
         return Ok(SlaConfig::default());
     }
-    let content = fs::read_to_string(path)
-        .with_context(|| format!("read sla config {}", path.display()))?;
+    let content =
+        fs::read_to_string(path).with_context(|| format!("read sla config {}", path.display()))?;
     parse_config(&content)
 }
 
 /// Check a single [`SlaRule`] against a single [`Subject`] at time `now`.
+///
 /// Returns `Some(BreachRecord)` when the subject matches every filter AND
 /// has aged past the rule's target. Returns `None` otherwise — including
 /// for unparseable `created_at` timestamps (logged via `tracing::warn`).
@@ -343,9 +344,7 @@ pub fn aggregate_at(
             Ok(t) => t.with_timezone(&Utc),
             Err(_) => continue,
         };
-        let entry = buckets
-            .entry(rec.sla.clone())
-            .or_insert((0, 0, 0, None));
+        let entry = buckets.entry(rec.sla.clone()).or_insert((0, 0, 0, None));
         if detected >= cutoff_30d {
             entry.2 += 1;
             entry.3 = Some(match entry.3 {
@@ -379,8 +378,8 @@ pub fn aggregate_at(
     };
 
     ensure_parent(summary_path)?;
-    let mut f = File::create(summary_path)
-        .with_context(|| format!("create {}", summary_path.display()))?;
+    let mut f =
+        File::create(summary_path).with_context(|| format!("create {}", summary_path.display()))?;
     f.write_all(serde_json::to_string_pretty(&summary)?.as_bytes())?;
     f.flush()?;
 

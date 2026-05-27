@@ -178,7 +178,7 @@ impl LayeredReversibilityClassifier {
             .bash
             .pattern
             .into_iter()
-            .chain(overrides_config.bash.pattern.into_iter())
+            .chain(overrides_config.bash.pattern)
         {
             let regex = Regex::new(&rule.pattern).with_context(|| {
                 format!("failed to compile bash pattern regex `{}`", rule.pattern)
@@ -234,14 +234,95 @@ impl LayeredReversibilityClassifier {
 /// Returns `None` when the tool name should be handled by a deeper
 /// layer (MCP via Layer 2, Bash via Layer 3) or by the unknown-tool
 /// fallback.
+///
+/// Coverage is exhaustive for the harness tools shipped by Claude Code
+/// and the Vulcan/FleetView runtime — anything not listed here falls
+/// through to the conservative Irreversible default, which strands the
+/// agent at A3 because `dry_run_then_commit` demands
+/// `_intent`/`_reasoning`/`_expected_effect` on tool calls that
+/// pure-read or only mutate in-conversation state. Observed deadlock
+/// pre-fix: `skill_gate` requires `Skill(...)` before `Bash`, but
+/// `dry_run_then_commit` refused `Skill(...)` (and `ToolSearch`,
+/// `AskUserQuestion`) as Irreversible, blocking the agent from
+/// loading the skill the gate demanded. Keep this list comprehensive;
+/// mirror new entries in
+/// `crates/sentinel-application/src/hooks/skill_gate.rs` if they
+/// should also bypass that gate's load requirement.
 fn builtin_class(tool_name: &str) -> Option<ReversibilityClass> {
     match tool_name {
-        "Read" | "Glob" | "Grep" | "TaskList" | "WebFetch" | "WebSearch" => {
-            Some(ReversibilityClass::TriviallyReversible)
-        }
-        "Edit" | "Write" | "TaskCreate" | "TaskUpdate" => {
-            Some(ReversibilityClass::ReversibleWithEffort)
-        }
+        // --- TriviallyReversible: pure reads, UI prompts, schema
+        // lookups, idempotent harness queries. Zero state change
+        // observable outside the agent's own conversation buffer. ---
+        "Read"
+        | "Glob"
+        | "Grep"
+        | "WebFetch"
+        | "WebSearch"
+        // Task introspection (writes covered below)
+        | "TaskList"
+        | "TaskGet"
+        | "TaskOutput"
+        // UI-only prompts — the agent asks the operator a question;
+        // no tool action commits until the operator answers.
+        | "AskUserQuestion"
+        // Skill / tool-schema loaders — load markdown / JSON Schema
+        // into the agent's context, no external side effect.
+        | "Skill"
+        | "ToolSearch"
+        // Onboarding share-link check — read-only in `check` mode
+        // (the default); operator-initiated create/update/delete
+        // modes re-classify at the explicit call site if needed.
+        | "ShareOnboardingGuide"
+        // Process introspection — Monitor streams stdout lines from
+        // an already-spawned background command, doesn't start work.
+        | "Monitor"
+        // Cron introspection (writes covered below)
+        | "CronList"
+        // LSP query surface — reads symbol tables / hovers /
+        // definitions. LSP-driven edits go through Edit/Write.
+        | "LSP" => Some(ReversibilityClass::TriviallyReversible),
+
+        // --- ReversibleWithEffort: in-conversation or local-tree
+        // mutations the operator can undo with a known recovery path
+        // (delete the task, kill the agent, delete the worktree, etc.).
+        // None of these reach external services or shared infrastructure. ---
+        "Edit"
+        | "Write"
+        | "NotebookEdit"
+        // Task lifecycle writes — confined to the harness task store.
+        | "TaskCreate"
+        | "TaskUpdate"
+        | "TaskStop"
+        // Mode transitions — change the agent's permission state for
+        // the rest of the session. Revertible by entering/exiting the
+        // opposite mode.
+        | "EnterPlanMode"
+        | "ExitPlanMode"
+        // Worktree lifecycle — local-disk only; ExitWorktree(remove)
+        // is the recovery for EnterWorktree.
+        | "EnterWorktree"
+        | "ExitWorktree"
+        // Agent / team orchestration — spawned work lives in the
+        // local task graph; recovery is TaskStop / TeamDelete.
+        | "Agent"
+        | "TeamCreate"
+        | "TeamDelete"
+        // Inter-agent messaging — stays inside the FleetView fleet;
+        // recovery is "agent ignores it" or restart the recipient.
+        | "SendMessage"
+        // Cron management — adding/removing scheduled work. Side
+        // effects of FIRING a cron go through their own tool calls
+        // and re-classify at that point.
+        | "CronCreate"
+        | "CronDelete"
+        // Wake-up scheduler (Loop dynamic mode) — schedules the next
+        // re-entry, doesn't act externally.
+        | "ScheduleWakeup"
+        // Local notification surfaces — push to the operator's own
+        // device / channel. No external commitment to anyone else.
+        | "PushNotification"
+        | "RemoteTrigger" => Some(ReversibilityClass::ReversibleWithEffort),
+
         _ => None,
     }
 }
@@ -253,9 +334,18 @@ impl ReversibilityClassifierPort for LayeredReversibilityClassifier {
             return *class;
         }
 
-        // Layer 3 (Bash) and Layer 2 (MCP) are dispatched from Layer 1.
+        // Layer 3 (command patterns) and Layer 2 (MCP) are dispatched from
+        // Layer 1. `PowerShell` is the Windows-native sibling of `Bash` â its
+        // tool_input carries the same `command` field, so it shares the exact
+        // same Layer-3 pattern list. Without this arm PowerShell falls through
+        // to the conservative Irreversible default, which strands every
+        // PowerShell call at the A3 dry-run gate: `dry_run_then_commit`
+        // demands `_intent`/`_reasoning`/`_expected_effect` keys, but the
+        // PowerShell tool schema rejects unknown params (`additionalProperties:
+        // false`) â an unbreakable deadlock. Same failure class the
+        // `builtin_class` doc comment describes for Skill/ToolSearch/AskUserQuestion.
         match tool_name {
-            "Bash" => self.classify_bash(tool_input),
+            "Bash" | "PowerShell" => self.classify_bash(tool_input),
             t if t.starts_with("mcp__") => self.classify_mcp(t),
             other => builtin_class(other).unwrap_or(ReversibilityClass::Irreversible),
         }
@@ -879,6 +969,114 @@ mod tests {
     }
 
     #[test]
+    fn shipped_defaults_bash_force_push_to_release_or_prod_branch_is_catastrophic() {
+        let c = shipped();
+        for cmd in [
+            "git push --force origin release",
+            "git push -f origin prod",
+            "git push --force origin production",
+        ] {
+            assert_eq!(
+                c.classify("Bash", &bash_cmd(cmd)),
+                ReversibilityClass::Catastrophic,
+                "expected Catastrophic for: {cmd}"
+            );
+        }
+    }
+
+    #[test]
+    fn shipped_defaults_bash_aws_destructive_patterns_are_catastrophic() {
+        let c = shipped();
+        for cmd in [
+            "aws s3 rb s3://prod-uploads --force",
+            "aws rds delete-db-instance --db-instance-identifier prod-db --skip-final-snapshot",
+            "aws iam delete-user --user-name svc-account",
+            "aws iam delete-role --role-name prod-deploy",
+            "aws iam delete-policy --policy-arn arn:aws:iam::123:policy/x",
+        ] {
+            assert_eq!(
+                c.classify("Bash", &bash_cmd(cmd)),
+                ReversibilityClass::Catastrophic,
+                "expected Catastrophic for: {cmd}"
+            );
+        }
+    }
+
+    #[test]
+    fn shipped_defaults_bash_gcloud_project_delete_is_catastrophic() {
+        let c = shipped();
+        assert_eq!(
+            c.classify("Bash", &bash_cmd("gcloud projects delete my-prod-proj")),
+            ReversibilityClass::Catastrophic
+        );
+    }
+
+    #[test]
+    fn shipped_defaults_bash_kubectl_namespace_delete_is_catastrophic() {
+        let c = shipped();
+        for cmd in [
+            "kubectl delete namespace billing",
+            "kubectl delete ns experiments",
+        ] {
+            assert_eq!(
+                c.classify("Bash", &bash_cmd(cmd)),
+                ReversibilityClass::Catastrophic,
+                "expected Catastrophic for: {cmd}"
+            );
+        }
+    }
+
+    #[test]
+    fn shipped_defaults_bash_helm_uninstall_prod_is_catastrophic() {
+        let c = shipped();
+        assert_eq!(
+            c.classify(
+                "Bash",
+                &bash_cmd("helm uninstall my-app --namespace production")
+            ),
+            ReversibilityClass::Catastrophic
+        );
+        assert_eq!(
+            c.classify("Bash", &bash_cmd("helm delete my-app -n prod")),
+            ReversibilityClass::Catastrophic
+        );
+    }
+
+    #[test]
+    fn shipped_defaults_bash_gh_repo_delete_is_catastrophic() {
+        let c = shipped();
+        assert_eq!(
+            c.classify("Bash", &bash_cmd("gh repo delete acme/internal-tools")),
+            ReversibilityClass::Catastrophic
+        );
+    }
+
+    #[test]
+    fn shipped_defaults_bash_dropdb_cli_is_catastrophic() {
+        let c = shipped();
+        assert_eq!(
+            c.classify("Bash", &bash_cmd("dropdb prod_archive")),
+            ReversibilityClass::Catastrophic
+        );
+    }
+
+    #[test]
+    fn shipped_defaults_bash_chmod_777_on_system_dirs_is_catastrophic() {
+        let c = shipped();
+        for cmd in [
+            "chmod 777 /etc/passwd",
+            "chmod -R 777 /usr/local/bin",
+            "chmod -R 777 /var/log",
+        ] {
+            assert_eq!(
+                c.classify("Bash", &bash_cmd(cmd)),
+                ReversibilityClass::Catastrophic,
+                "expected Catastrophic for: {cmd}"
+            );
+        }
+    }
+
+    #[test]
     fn shipped_defaults_bash_force_with_lease_is_demoted() {
         let c = shipped();
         // --force-with-lease is matched by its specific rule BEFORE the
@@ -976,6 +1174,188 @@ mod tests {
                 .unwrap();
         assert_eq!(
             c.classify("mcp__linear__list_issues", &no_input()),
+            ReversibilityClass::Catastrophic
+        );
+    }
+
+    // ---- PowerShell dispatch (Windows sibling of Bash) ----
+
+    fn ps_cmd(s: &str) -> Value {
+        json!({ "command": s })
+    }
+
+    #[test]
+    fn powershell_unmatched_command_is_reversible_with_effort_not_irreversible() {
+        // THE deadlock-fix regression: before the dispatch arm existed,
+        // PowerShell fell through builtin_class to Irreversible, stranding
+        // every PowerShell call at the A3 dry-run gate. It must now share
+        // Bash's ReversibleWithEffort default for unrecognized commands.
+        let c = shipped();
+        assert_eq!(
+            c.classify("PowerShell", &ps_cmd("Get-Process | Select-Object -First 5")),
+            ReversibilityClass::ReversibleWithEffort,
+            "unmatched PowerShell must NOT be Irreversible"
+        );
+    }
+
+    #[test]
+    fn powershell_read_only_invoke_restmethod_is_not_irreversible() {
+        let c = shipped();
+        let class = c.classify("PowerShell", &ps_cmd("Invoke-RestMethod -Uri https://openrouter.ai/api/v1/models"));
+        assert_ne!(
+            class,
+            ReversibilityClass::Irreversible,
+            "read-only PowerShell GET must not strand at the dry-run gate"
+        );
+    }
+
+    #[test]
+    fn powershell_remove_item_recurse_force_is_catastrophic() {
+        let c = shipped();
+        for cmd in [
+            concat!("Remove-Item ", "-Recurse ", "-Force C:/data"),
+            concat!("Remove-Item ", "-Force ", "-Recurse C:/data"),
+        ] {
+            assert_eq!(
+                c.classify("PowerShell", &ps_cmd(cmd)),
+                ReversibilityClass::Catastrophic,
+                "expected Catastrophic for: {cmd}"
+            );
+        }
+    }
+
+    #[test]
+    fn powershell_disk_cmdlets_are_catastrophic() {
+        let c = shipped();
+        for cmd in ["Format-Volume -DriveLetter D", "Clear-Disk -Number 1 -RemoveData"] {
+            assert_eq!(
+                c.classify("PowerShell", &ps_cmd(cmd)),
+                ReversibilityClass::Catastrophic,
+                "expected Catastrophic for: {cmd}"
+            );
+        }
+    }
+
+    #[test]
+    fn powershell_shares_bash_catastrophic_patterns() {
+        let c = shipped();
+        assert_eq!(
+            c.classify("PowerShell", &ps_cmd("git push --force origin main")),
+            ReversibilityClass::Catastrophic
+        );
+    }
+
+    #[test]
+    fn powershell_registry_delete_is_catastrophic() {
+        let c = shipped();
+        assert_eq!(
+            c.classify("PowerShell", &ps_cmd("Remove-Item -Path HKLM:\\SOFTWARE\\Foo -Recurse")),
+            ReversibilityClass::Catastrophic
+        );
+    }
+
+    #[test]
+    fn sequential_thinking_mcp_is_trivially_reversible() {
+        let c = shipped();
+        assert_eq!(
+            c.classify("mcp__sequential-thinking__sequentialthinking", &no_input()),
+            ReversibilityClass::TriviallyReversible
+        );
+    }
+
+    // ---- Regression: previously-unmapped MCP servers stranded read-only
+    // calls at the A3 dry-run gate (unknown-MCP default = Irreversible).
+    // These assert the five servers added in fix/reversibility-mcp-servers
+    // classify reads as Trivial (out of A3 scope) while keeping destructive
+    // tools gated. ----
+
+    #[test]
+    fn shipped_defaults_cdp_reads_are_trivial_interactions_rwe() {
+        let c = shipped();
+        for t in ["navigate", "get_tabs", "evaluate", "screenshot", "get_text"] {
+            assert_eq!(
+                c.classify(&format!("mcp__cdp__{t}"), &no_input()),
+                ReversibilityClass::TriviallyReversible,
+                "cdp {t} should be TriviallyReversible (read/observe)"
+            );
+        }
+        // Page interactions are recoverable → RWE (and thus out of A3 scope).
+        assert_eq!(
+            c.classify("mcp__cdp__click", &no_input()),
+            ReversibilityClass::ReversibleWithEffort
+        );
+    }
+
+    #[test]
+    fn shipped_defaults_browserbase_reads_trivial_delete_irreversible() {
+        let c = shipped();
+        assert_eq!(
+            c.classify("mcp__browserbase__screenshot", &no_input()),
+            ReversibilityClass::TriviallyReversible
+        );
+        assert_eq!(
+            c.classify("mcp__browserbase__create_session", &no_input()),
+            ReversibilityClass::TriviallyReversible
+        );
+        assert_eq!(
+            c.classify("mcp__browserbase__delete_context", &no_input()),
+            ReversibilityClass::Irreversible
+        );
+    }
+
+    #[test]
+    fn shipped_defaults_doppler_get_secret_is_trivial_delete_irreversible() {
+        let c = shipped();
+        // Reading a secret value is observation, not a state change.
+        assert_eq!(
+            c.classify("mcp__doppler__get_secret", &no_input()),
+            ReversibilityClass::TriviallyReversible
+        );
+        assert_eq!(
+            c.classify("mcp__doppler__set_secret", &no_input()),
+            ReversibilityClass::ReversibleWithEffort
+        );
+        assert_eq!(
+            c.classify("mcp__doppler__delete_project", &no_input()),
+            ReversibilityClass::Irreversible
+        );
+    }
+
+    #[test]
+    fn shipped_defaults_auth0_reads_trivial_delete_irreversible() {
+        let c = shipped();
+        assert_eq!(
+            c.classify("mcp__auth0__list_connections", &no_input()),
+            ReversibilityClass::TriviallyReversible
+        );
+        assert_eq!(
+            c.classify("mcp__auth0__update_connection", &no_input()),
+            ReversibilityClass::ReversibleWithEffort
+        );
+        assert_eq!(
+            c.classify("mcp__auth0__delete_connection", &no_input()),
+            ReversibilityClass::Irreversible
+        );
+    }
+
+    #[test]
+    fn shipped_defaults_neon_delete_project_is_catastrophic() {
+        let c = shipped();
+        assert_eq!(
+            c.classify("mcp__neon__list_projects", &no_input()),
+            ReversibilityClass::TriviallyReversible
+        );
+        assert_eq!(
+            c.classify("mcp__neon__create_branch", &no_input()),
+            ReversibilityClass::ReversibleWithEffort
+        );
+        assert_eq!(
+            c.classify("mcp__neon__delete_database", &no_input()),
+            ReversibilityClass::Irreversible
+        );
+        // Dropping the whole Postgres project is high-blast + data loss.
+        assert_eq!(
+            c.classify("mcp__neon__delete_project", &no_input()),
             ReversibilityClass::Catastrophic
         );
     }

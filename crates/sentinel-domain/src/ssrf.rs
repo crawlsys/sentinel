@@ -1,5 +1,5 @@
 //! SSRF protection — default-block private network ranges (M4.7,
-//! task #25, ContextForge pattern).
+//! task #25, `ContextForge` pattern).
 //!
 //! Pure-domain classification: take a hostname (or literal IP) and a
 //! policy, return Ok if the target is allowed or `SsrfError` if not.
@@ -17,9 +17,9 @@
 //!   endpoints at 169.254.169.254), 0.0.0.0/8 (current network),
 //!   100.64/10 (CGN / Tailscale ULA), 224.0/4 (multicast),
 //!   240.0/4 (reserved/future).
-//! - **IPv6**: ::1/128 (loopback), fc00::/7 (ULA), fe80::/10
-//!   (link-local), ::ffff:0:0/96 (IPv4-mapped, classified by the
-//!   embedded v4 address), ::/128 (unspecified).
+//! - **IPv6**: `::1/128` (loopback), `fc00::/7` (ULA), `fe80::/10`
+//!   (link-local), `::ffff:0:0/96` (IPv4-mapped, classified by the
+//!   embedded v4 address), `::/128` (unspecified).
 //! - **Hostname literals**: "localhost", and the cloud-metadata
 //!   hostnames `metadata.google.internal`, `metadata.aws.internal`,
 //!   `metadata.gke.internal` (these resolve to private IPs in their
@@ -124,7 +124,10 @@ impl std::fmt::Display for SsrfError {
                 write!(f, "SSRF guard: host '{host}' resolves to {reason}")
             }
             Self::Reserved { host, reason } => {
-                write!(f, "SSRF guard: host '{host}' is in reserved range — {reason}")
+                write!(
+                    f,
+                    "SSRF guard: host '{host}' is in reserved range — {reason}"
+                )
             }
         }
     }
@@ -193,9 +196,7 @@ pub fn check_host(host: &str, policy: &SsrfPolicy) -> Result<(), SsrfError> {
             // wrapper by its embedded v4 — the user thinks of these
             // as private addresses, not "obscure IPv6 thing".
             let effective = match ip {
-                IpAddr::V6(v6) => v6
-                    .to_ipv4_mapped()
-                    .map_or(ip, IpAddr::V4),
+                IpAddr::V6(v6) => v6.to_ipv4_mapped().map_or(ip, IpAddr::V4),
                 IpAddr::V4(_) => ip,
             };
             let is_private_ip = match effective {
@@ -266,8 +267,8 @@ fn blocked_ip_reason(ip: IpAddr) -> Option<&'static str> {
 }
 
 /// `Ipv6Addr::is_unique_local` is unstable as of Rust 1.83 — check
-/// the high 7 bits manually. fc00::/7 covers fc00:: through fdff::.
-fn is_unique_local_v6(v6: std::net::Ipv6Addr) -> bool {
+/// the high 7 bits manually. `fc00::/7` covers `fc00::` through `fdff::`.
+const fn is_unique_local_v6(v6: std::net::Ipv6Addr) -> bool {
     let segments = v6.segments();
     (segments[0] & 0xfe00) == 0xfc00
 }
@@ -294,10 +295,7 @@ mod tests {
 
     #[test]
     fn empty_host_rejected() {
-        assert!(matches!(
-            check_host("", &pol()),
-            Err(SsrfError::EmptyHost)
-        ));
+        assert!(matches!(check_host("", &pol()), Err(SsrfError::EmptyHost)));
         assert!(matches!(
             check_host("   ", &pol()),
             Err(SsrfError::EmptyHost)

@@ -232,7 +232,7 @@ impl HookTier {
 /// across the 54 hooks that inject context.
 ///
 /// `name` is the short hook identifier shown in brackets (e.g. `Skill Router`,
-/// `Worktree Reminder`). Use Title Case with spaces, not the snake_case file
+/// `Worktree Reminder`). Use Title Case with spaces, not the `snake_case` file
 /// name — it's user-facing.
 #[derive(Debug, Clone)]
 pub struct HookEnvelope {
@@ -375,6 +375,11 @@ pub struct HookSpecificOutput {
     pub worktree_path: Option<String>,
 }
 
+/// Cap on merged `additionalContext` (32 KB). Prevents unbounded growth when
+/// multiple hooks each inject context that gets concatenated in `HookOutput::merge`.
+/// See Attack #136 fix in `merge()`.
+const MAX_ADDITIONAL_CONTEXT_LEN: usize = 32_768;
+
 impl HookOutput {
     /// Empty response — allow everything
     #[must_use]
@@ -481,7 +486,7 @@ impl HookOutput {
     /// consistent prefix across all 54 hooks instead of the ad-hoc mix of
     /// brackets / emoji / box-drawing currently in use.
     #[must_use]
-    pub fn inject_envelope(event: HookEvent, envelope: HookEnvelope) -> Self {
+    pub fn inject_envelope(event: HookEvent, envelope: &HookEnvelope) -> Self {
         Self::inject_context(event, envelope.render())
     }
 
@@ -557,6 +562,10 @@ impl HookOutput {
 
     /// Merge another output into this one. Blocked wins over allowed.
     /// Permission decision priority: deny > ask > allow.
+    // Each section encodes a distinct merge-priority policy rule (blocked, HSO,
+    // systemMessage, continue_, suppress_output, stop_reason, decision). Splitting
+    // into sub-methods would scatter tightly coupled policy logic without gaining clarity.
+    #[allow(clippy::too_many_lines)]
     pub fn merge(&mut self, other: &Self) {
         // Legacy blocked field merge (internal — transformed on output)
         if other.blocked == Some(true) {
@@ -588,8 +597,8 @@ impl HookOutput {
                         };
                         if dominated {
                             self_hso.permission_decision = Some(other_pd);
-                            self_hso.permission_decision_reason =
-                                other_hso.permission_decision_reason.clone();
+                            self_hso.permission_decision_reason
+                                .clone_from(&other_hso.permission_decision_reason);
                         }
                     }
 
@@ -600,28 +609,25 @@ impl HookOutput {
                     if self_hso.permission_decision == Some(PermissionDecision::Deny) {
                         self_hso.updated_input = None;
                     } else if other_hso.updated_input.is_some() {
-                        self_hso.updated_input = other_hso.updated_input.clone();
+                        self_hso.updated_input.clone_from(&other_hso.updated_input);
                     }
 
-                    // additionalContext: concatenate
-                    // **Attack #136 fix**: Cap total additionalContext to 32KB.
-                    // Without a limit, merged hook outputs could grow unbounded.
-                    // 32KB is generous for all legitimate hook context combined.
-                    const MAX_CONTEXT_LEN: usize = 32_768;
+                    // additionalContext: concatenate (capped at MAX_ADDITIONAL_CONTEXT_LEN)
+                    // **Attack #136 fix**: see module-level constant for rationale.
                     match (&self_hso.additional_context, &other_hso.additional_context) {
                         (Some(a), Some(b)) => {
                             let merged = format!("{a}\n\n{b}");
-                            if merged.len() > MAX_CONTEXT_LEN {
+                            if merged.len() > MAX_ADDITIONAL_CONTEXT_LEN {
                                 self_hso.additional_context =
-                                    Some(merged[..MAX_CONTEXT_LEN].to_string());
+                                    Some(merged[..MAX_ADDITIONAL_CONTEXT_LEN].to_string());
                             } else {
                                 self_hso.additional_context = Some(merged);
                             }
                         }
                         (None, Some(b)) => {
-                            if b.len() > MAX_CONTEXT_LEN {
+                            if b.len() > MAX_ADDITIONAL_CONTEXT_LEN {
                                 self_hso.additional_context =
-                                    Some(b[..MAX_CONTEXT_LEN].to_string());
+                                    Some(b[..MAX_ADDITIONAL_CONTEXT_LEN].to_string());
                             } else {
                                 self_hso.additional_context = Some(b.clone());
                             }
@@ -872,7 +878,7 @@ mod tests {
     #[test]
     fn test_inject_envelope_round_trips_through_inject_context() {
         let env = HookEnvelope::block("Phase Gate", "load phase file before tools");
-        let out = HookOutput::inject_envelope(HookEvent::PreToolUse, env);
+        let out = HookOutput::inject_envelope(HookEvent::PreToolUse, &env);
         let ctx = out
             .hook_specific_output
             .and_then(|h| h.additional_context)

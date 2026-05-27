@@ -126,7 +126,7 @@ pub fn run_aggregate() -> Result<()> {
         "SLA", "24h", "7d", "30d"
     );
     let mut sorted = s.aggregates;
-    sorted.sort_by(|a, b| b.breaches_30d.cmp(&a.breaches_30d));
+    sorted.sort_by_key(|b| std::cmp::Reverse(b.breaches_30d));
     for a in &sorted {
         let label = if a.sla.len() > 40 {
             format!("{}…", &a.sla[..39])
@@ -173,4 +173,4 @@ fn colorize_count(n: u64) -> colored::ColoredString {
 }
 
 #[allow(dead_code)]
-fn _ensure_record_in_scope(_b: &BreachRecord) {}
+const fn _ensure_record_in_scope(_b: &BreachRecord) {}

@@ -174,7 +174,7 @@ mod tests {
     /// test holding the lock leaves it poisoned, but the env state itself
     /// is still recoverable from the saved `prev`).
     fn lock_env() -> std::sync::MutexGuard<'static, ()> {
-        ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+        ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     #[test]
@@ -210,6 +210,13 @@ mod tests {
     }
 
     #[tokio::test]
+    // ENV_LOCK must be held ACROSS the await: it serialises env-var mutation
+    // between concurrent #[tokio::test]s, and the env is mutated around the
+    // awaited call. Dropping the guard before the await would defeat the
+    // serialisation. The lint's concern (blocking other async tasks while
+    // holding a sync lock) is moot here — this is a single-purpose test mutex,
+    // not a runtime lock.
+    #[allow(clippy::await_holding_lock)]
     async fn daemon_unreachable_returns_503() {
         // Point at a port that is almost certainly closed. reqwest will
         // fail fast with ConnectionRefused, so we get the 503 without

@@ -13,8 +13,8 @@ pub enum LegatusError {
     #[error("transport: {0}")]
     Transport(String),
 
-    /// The handshake (Hello → Capabilities → RegisterSession →
-    /// SessionRegistered) didn't complete as expected.
+    /// The handshake (Hello → Capabilities → `RegisterSession` →
+    /// `SessionRegistered`) didn't complete as expected.
     #[error("handshake: {0}")]
     Handshake(String),
 
