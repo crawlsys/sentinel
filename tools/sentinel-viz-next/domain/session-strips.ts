@@ -56,6 +56,61 @@ export interface SessionStripData {
 /// the meaningful categories.
 const CATEGORY_ORDER: NodeCategory[] = ["tc", "planning", "communication", "prompt", "other"];
 
+/// Human-readable label per category for the short-description
+/// fallback. Kept separate from `categoryLabel()` (used in the
+/// graph legend) so the strip header reads naturally even when
+/// the formal label is long.
+const CATEGORY_SHORT: Record<NodeCategory, string> = {
+  tc: "tool-calls",
+  planning: "planning",
+  communication: "comms",
+  prompt: "prompts",
+  other: "activity",
+};
+
+/// Status → human phrase for the stuck-only fallback path. Empty
+/// for active statuses we don't want to flag inline.
+const STATUS_SHORT: Record<string, string> = {
+  awaiting_user: "stuck",
+  dormant: "dormant",
+  dead: "dead",
+};
+
+/// Compose a short description when the LLM name isn't available
+/// yet (or never resolves — codex sessions without a transcript,
+/// the naming model being disabled, rate-limited fetches, etc.).
+/// Goal: replace bare `s:fafafafa` placeholders with something
+/// operators can actually read at a glance — "codex · tool-calls
+/// 18/min · s:fafafafa" beats the raw shortSid every time.
+///
+/// Exported for unit tests; the strip builder + the stuck-only
+/// backfill both use it so the two paths can't drift.
+export function deriveShortDescription(opts: {
+  harness: string | null;
+  status: string | null;
+  topCategory: NodeCategory | null;
+  totalEvents: number;
+  peakPerMin: number;
+  stuckKind: string | null;
+  shortSid: string;
+}): string {
+  const parts: string[] = [];
+  if (opts.harness) parts.push(opts.harness);
+  // Stuck/dormant/dead status outranks the activity blurb — the
+  // operator needs to know the session isn't moving, not what its
+  // last-known activity flavour was.
+  const statusPhrase = opts.status ? STATUS_SHORT[opts.status] : null;
+  if (statusPhrase) {
+    parts.push(opts.stuckKind ? `${statusPhrase} ${opts.stuckKind}` : statusPhrase);
+  } else if (opts.topCategory && opts.peakPerMin > 0) {
+    parts.push(`${CATEGORY_SHORT[opts.topCategory]} ${opts.peakPerMin}/min`);
+  } else if (opts.topCategory && opts.totalEvents > 0) {
+    parts.push(`${CATEGORY_SHORT[opts.topCategory]} ×${opts.totalEvents}`);
+  }
+  parts.push(`s:${opts.shortSid}`);
+  return parts.join(" · ");
+}
+
 export interface BuildOptions {
   /** Time window in minutes. Default 60. Used to size the
    *  bucket array (one entry per minute). */
@@ -174,13 +229,29 @@ export function buildSessionStrips(
     const color = opts.colors.get(sid) ?? "#6e7681";
     const name = opts.names?.get(sid) ?? null;
     const shortSid = sid.slice(0, 8);
-    const displayName = name && name.length > 0 ? `${name} · s:${shortSid}` : `s:${shortSid}`;
     // Prefer node-level tag (authoritative) but fall back to the
     // event-derived value when the node isn't in this window.
     const sourceHarness =
       (node?.data?.source_harness as string | undefined) ??
       harnessBySid.get(sid) ??
       null;
+    // Display-name preference order:
+    //   1. LLM-assigned name (best — captures activity flavour in plain English)
+    //   2. Derived short description from harness + status + dominant category
+    //   3. Bare s:<shortSid> as the final fallback (deriveShortDescription
+    //      always includes the sid suffix anyway, so this only fires when
+    //      we have literally nothing else — should be ~never).
+    const displayName = name && name.length > 0
+      ? `${name} · s:${shortSid}`
+      : deriveShortDescription({
+          harness: sourceHarness,
+          status,
+          topCategory: rows[0]?.category ?? null,
+          totalEvents,
+          peakPerMin,
+          stuckKind: stuck?.kind ?? null,
+          shortSid,
+        });
 
     out.push({
       sessionId: sid,
@@ -205,20 +276,34 @@ export function buildSessionStrips(
     for (const [sid, _meta] of opts.stuck) {
       if (seenSids.has(sid)) continue;
       const node = sessionNodes.get(sid);
+      const shortSid = sid.slice(0, 8);
+      const name = opts.names?.get(sid) ?? null;
+      const sourceHarness =
+        (node?.data?.source_harness as string | undefined) ??
+        harnessBySid.get(sid) ??
+        null;
+      const status = node?.session_status ?? "awaiting_user";
+      const stuckMeta = opts.stuck.get(sid) ?? null;
+      const displayName = name && name.length > 0
+        ? `${name} · s:${shortSid}`
+        : deriveShortDescription({
+            harness: sourceHarness,
+            status,
+            topCategory: null,
+            totalEvents: 0,
+            peakPerMin: 0,
+            stuckKind: stuckMeta?.kind ?? null,
+            shortSid,
+          });
       out.push({
         sessionId: sid,
-        displayName: opts.names?.get(sid)
-          ? `${opts.names.get(sid)} · s:${sid.slice(0, 8)}`
-          : `s:${sid.slice(0, 8)}`,
-        shortSid: sid.slice(0, 8),
+        displayName,
+        shortSid,
         color: opts.colors.get(sid) ?? "#6e7681",
-        status: node?.session_status ?? "awaiting_user",
-        sourceHarness:
-          (node?.data?.source_harness as string | undefined) ??
-          harnessBySid.get(sid) ??
-          null,
+        status,
+        sourceHarness,
         lastActivityAgeS: node?.last_activity_age_s ?? null,
-        stuck: opts.stuck.get(sid) ?? null,
+        stuck: stuckMeta,
         rows: [],
         totalEvents: 0,
         peakPerMin: 0,

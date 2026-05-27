@@ -547,15 +547,17 @@ describe("EventTicker — P3-24 smarter rollup", () => {
     expect(previewText).toContain("cargo test");
   });
 
-  it("strict-collapsed single-tool rows DON'T render an inline preview (P3-27 consistency)", () => {
-    // 5 identical Bash events strict-collapse to ONE row with
-    // tools=[Bash] (length 1). The augment cache already gives
-    // this row inline context via its label (Bash · git status).
-    // Rendering a separate RolledPreview list below would just
-    // duplicate that text and break consistency with other
-    // single-tool rows. Operator screenshot: "the single 'Bash'
-    // (or Edit, whatever) event cards should just have the 1-line
-    // rendered like the other event cards."
+  it("strict-collapsed single-tool rows DO render an inline preview (reversed from P3-27)", () => {
+    // 3 identical Bash events strict-collapse to ONE row with
+    // tools=[Bash] (length 1) BUT members.length === 3. The earlier
+    // rule "single-tool rolls skip the preview, the label augment
+    // carries it" turned out to be wrong: the singleton-augment
+    // block is gated on members.length === 1, so an ×3 Bash row
+    // had no payload at all. Operator screenshot showed a column
+    // of bare `×9 ▶ Bash` rows with no indication of what was run.
+    // RolledPreview now fires whenever members.length > 1 — the
+    // dedupe-by-(tool, summary) inside it handles the "all calls
+    // identical" case gracefully (one line, not nine copies).
     _resetActivityCache();
     const sessionId = "sess-strict-1tool";
     const fakeActivity: ActivityResponse = {
@@ -586,7 +588,13 @@ describe("EventTicker — P3-24 smarter rollup", () => {
       <EventTicker events={events} onSelectNode={() => {}} />,
     );
     const preview = container.querySelector('[data-testid="rolled-preview"]');
-    expect(preview).toBeNull();
+    expect(preview).not.toBeNull();
+    // All three members map to the same activity-cache entry — the
+    // dedupe inside RolledPreview should collapse them to a single
+    // preview line, not three.
+    const lines = preview!.querySelectorAll("li");
+    expect(lines.length).toBe(1);
+    expect(preview!.textContent ?? "").toContain("git status --short");
   });
 
   it("rolled-preview shows '(loading…)' placeholder when cache hasn't warmed yet (P3-26)", () => {

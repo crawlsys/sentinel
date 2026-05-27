@@ -1,44 +1,58 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { fireEvent, render, screen } from "@testing-library/react";
 
 import { EventTicker } from "../../components/EventTicker";
 import type { RecentEvent } from "../../types/api";
 
+// Freeze wall-clock just after the sample fixtures' timestamps so
+// the pin-TTL gate (PIN_TTL_MS = 30 min) treats them as fresh. The
+// real `Date.now()` would put these 1+ days in the past and the
+// TTL would correctly drop them — fine for production, wrong for
+// tests of pin behaviour that assume the events are "current".
+const FROZEN_NOW = new Date("2026-05-26T00:01:00Z");
+beforeEach(() => {
+  vi.useFakeTimers({ shouldAdvanceTime: false });
+  vi.setSystemTime(FROZEN_NOW);
+});
+afterEach(() => {
+  vi.useRealTimers();
+});
+
 const sampleEvents: RecentEvent[] = [
   {
     seq: 1,
     type: "sentinel.tool_call_observed",
-    ts: "2026-05-25T00:00:00Z",
+    ts: "2026-05-26T00:00:00Z",
     payload: {
       session_id: "sess-a",
       sentinel_event: "PreToolUse",
       tool: "Bash",
       tool_call_id: "SentinelToolCall#tc1",
-      ts_sec: "2026-05-25T00:00:00",
+      ts_sec: "2026-05-26T00:00:00",
     },
   },
   {
     seq: 2,
     type: "sentinel.tool_call_observed",
-    ts: "2026-05-25T00:00:01Z",
+    ts: "2026-05-26T00:00:01Z",
     payload: {
       session_id: "sess-a",
       sentinel_event: "PreToolUse",
       tool: "Bash",
       tool_call_id: "SentinelToolCall#tc1",
-      ts_sec: "2026-05-25T00:00:01",
+      ts_sec: "2026-05-26T00:00:01",
     },
   },
   {
     seq: 3,
     type: "sentinel.hook_ingested",
-    ts: "2026-05-25T00:00:02Z",
+    ts: "2026-05-26T00:00:02Z",
     payload: {
       session_id: "sess-a",
       sentinel_event: "PreToolUse",
       hook: "tool_usage_gate",
       outcome: "deny",
-      ts: "2026-05-25T00:00:02",
+      ts: "2026-05-26T00:00:02",
     },
   },
   {
@@ -50,7 +64,7 @@ const sampleEvents: RecentEvent[] = [
       sentinel_event: "UserPromptSubmit",
       tool: "",
       tool_call_id: "SentinelToolCall#tc2",
-      ts_sec: "2026-05-25T00:00:03",
+      ts_sec: "2026-05-26T00:00:03",
     },
   },
 ];
@@ -313,6 +327,68 @@ describe("EventTicker", () => {
       render(<EventTicker events={sampleEvents} onSelectNode={() => {}} stuckMeta={stuckMeta} />);
       const pinnedRows = screen.getByTestId("ticker-rows").querySelectorAll("li.stuck-row");
       expect(pinnedRows.length).toBe(1);
+    });
+
+    it("pin TTL drops intervention rows older than the freshness window", () => {
+      // Operator screenshot: a 12:59 user-prompt was pinned hours
+      // later because pinning had no recency gate. With PIN_TTL_MS
+      // = 30 min, an event timestamped 31 min before "now" must
+      // fall back into the normal stream rather than squat the top.
+      vi.setSystemTime(new Date("2026-05-26T00:35:00Z")); // 35 min after fixtures
+      const staleDeny: RecentEvent[] = [
+        {
+          seq: 1,
+          type: "sentinel.hook_ingested",
+          ts: "2026-05-26T00:00:00Z", // 35 min old → past TTL
+          payload: {
+            session_id: "sess-old",
+            sentinel_event: "PreToolUse",
+            hook: "tool_usage_gate",
+            outcome: "deny",
+            ts: "2026-05-26T00:00:00",
+          },
+        },
+        {
+          seq: 2,
+          type: "sentinel.tool_call_observed",
+          ts: "2026-05-26T00:34:30Z", // 30s old → fresh
+          payload: {
+            session_id: "sess-fresh",
+            sentinel_event: "PreToolUse",
+            tool: "Read",
+            tool_call_id: "SentinelToolCall#tc-r",
+            ts_sec: "2026-05-26T00:34:30",
+          },
+        },
+      ];
+      render(<EventTicker events={staleDeny} onSelectNode={() => {}} />);
+      const rows = screen.getByTestId("ticker-rows").querySelectorAll("li");
+      // The stale deny exists but no longer has the intervention-row class.
+      const interventionRows = screen.getByTestId("ticker-rows").querySelectorAll("li.intervention-row");
+      expect(interventionRows.length).toBe(0);
+      // Both events still render, just no pin class.
+      expect(rows.length).toBe(2);
+    });
+
+    it("pin cap (PIN_MAX_PER_CLASS) bounds intervention pins to N per render", () => {
+      // Three distinct sessions each fire one intervention. The cap
+      // is 2 per class, so only the first two encountered get the
+      // intervention-row class. The third stays in the normal stream.
+      const denies: RecentEvent[] = ["sess-i1", "sess-i2", "sess-i3"].map((sid, i) => ({
+        seq: i + 1,
+        type: "sentinel.hook_ingested",
+        ts: `2026-05-26T00:00:${String(i).padStart(2, "0")}Z`,
+        payload: {
+          session_id: sid,
+          sentinel_event: "PreToolUse",
+          hook: "tool_usage_gate",
+          outcome: "deny",
+          ts: `2026-05-26T00:00:${String(i).padStart(2, "0")}`,
+        },
+      }));
+      render(<EventTicker events={denies} onSelectNode={() => {}} />);
+      const interventionRows = screen.getByTestId("ticker-rows").querySelectorAll("li.intervention-row");
+      expect(interventionRows.length).toBe(2);
     });
   });
 });

@@ -119,6 +119,24 @@ interface TickerRow {
 
 const MAX_TOOLS_IN_LABEL = 4;
 
+/// Pin freshness bounds. Stuck + intervention pins used to be
+/// unbounded — one pin per session per class, forever. Operator
+/// screenshot showed a 12:59 user-prompt still pinned hours later
+/// even though the session had moved on. Two gates now apply:
+///
+///   1. PIN_TTL_MS — a pin older than this falls back into the
+///      normal stream regardless of class. 30 min is the window
+///      where "still current context" is plausibly true; past it,
+///      pinning is just clutter.
+///   2. PIN_MAX_PER_CLASS — at most N pins per class (stuck OR
+///      intervention). Since `augmentedRows` arrives newest-first,
+///      this is a top-N-by-recency cap that bounds the highlighted
+///      region of the ticker to ≤ 4 rows (2 stuck + 2 intervention).
+///
+/// Exported so unit tests can assert behaviour without timer hacks.
+export const PIN_TTL_MS = 30 * 60 * 1000;
+export const PIN_MAX_PER_CLASS = 2;
+
 /// Render the label for a rolled-up row. Single-tool rows render
 /// the tool name directly; multi-tool rows render up to N distinct
 /// tools comma-separated, then "+M more". The label still fits in
@@ -286,10 +304,29 @@ export function EventTicker({ events, onSelectNode, sessionColors, stuckMeta, do
     const rest: typeof augmentedRows = [];
     const pinnedKeys = new Set<string>();
     const interventionKeys = new Set<string>();
+    // Pin freshness gate. A row only qualifies for either pin tier
+    // when its timestamp is inside PIN_TTL_MS. Parse-failed timestamps
+    // are treated as stale (fail closed — better to miss a pin than
+    // strand an undated row at the top forever).
+    //
+    // react-hooks/purity flags Date.now() in render-path code as
+    // impure. Inside this useMemo it's exactly what we want: the
+    // memo re-runs only when `augmentedRows` or `stuckMeta` change
+    // — i.e. when there's new event flow that warrants re-checking
+    // TTLs against current wall-clock. A captured "now" via useRef
+    // would freeze the TTL boundary to mount-time and pins past
+    // 30m would stop ageing off correctly.
+    // eslint-disable-next-line react-hooks/purity
+    const now = Date.now();
+    const isFresh = (ts: string) => {
+      const t = new Date(ts).getTime();
+      return Number.isFinite(t) && now - t < PIN_TTL_MS;
+    };
 
     for (const r of augmentedRows) {
+      const fresh = isFresh(r.ts);
       const isStuck = !!(stuckSet && r.sessionId && stuckSet.has(r.sessionId) && !seenStuckSid.has(r.sessionId));
-      if (isStuck && r.sessionId) {
+      if (isStuck && r.sessionId && fresh && stuckPin.length < PIN_MAX_PER_CLASS) {
         seenStuckSid.add(r.sessionId);
         pinnedKeys.add(r.key);
         stuckPin.push(r);
@@ -298,8 +335,16 @@ export function EventTicker({ events, onSelectNode, sessionColors, stuckMeta, do
       // Intervention rows: pin one per session per intervention-batch
       // (de-dup by sid to keep the head of the ticker tight when one
       // session generates many denies in a row — the freshest one is
-      // still informative). Skip if already stuck-pinned above.
-      if (r.isIntervention && r.sessionId && !seenInterventionSid.has(r.sessionId)) {
+      // still informative). Skip if already stuck-pinned above. Also
+      // gated by TTL + per-class cap so a single hours-old intervention
+      // can't squat on the top of the ticker.
+      if (
+        r.isIntervention &&
+        r.sessionId &&
+        !seenInterventionSid.has(r.sessionId) &&
+        fresh &&
+        intervPin.length < PIN_MAX_PER_CLASS
+      ) {
         seenInterventionSid.add(r.sessionId);
         interventionKeys.add(r.key);
         intervPin.push(r);
@@ -510,13 +555,17 @@ export function EventTicker({ events, onSelectNode, sessionColors, stuckMeta, do
               ) : null}
               {/* Rolled rows: render 2-3 inline preview lines so the
                   operator sees WHAT was rolled up without expanding
-                  the flyout. Guarded on tools.length > 1 (MULTI-tool
-                  soft-rolled rows ONLY) so single-tool strict-sig
-                  collapsed rows like `×5 Bash` keep the 1-line
-                  rendering — the augment cache already gives them
-                  inline context via the label, an inline preview
-                  list would just duplicate that. */}
-              {row.tools.length > 1 && row.sessionId && !isOpen ? (
+                  the flyout. Guarded on members.length > 1 — covers
+                  both MULTI-tool soft-rolls (Bash, Read, Edit ×15)
+                  and SINGLE-tool strict-sig rolls (×9 Bash). The
+                  earlier "label augment carries it for single-tool"
+                  assumption was wrong: the singleton-augment block
+                  above is gated to members.length === 1, so a 9-call
+                  Bash cluster used to render bare with no payload.
+                  RolledPreview dedupes by (tool, summary) so the
+                  three lines show distinct calls, not nine copies
+                  of the same git command. */}
+              {row.members.length > 1 && row.sessionId && !isOpen ? (
                 <RolledPreview row={row} />
               ) : null}
               </div>{/* /click-target */}

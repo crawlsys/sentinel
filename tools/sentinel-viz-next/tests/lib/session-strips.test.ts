@@ -1,6 +1,10 @@
 import { describe, it, expect } from "vitest";
 
-import { buildSessionStrips, bucketsToSparkline } from "../../domain/session-strips";
+import {
+  buildSessionStrips,
+  bucketsToSparkline,
+  deriveShortDescription,
+} from "../../domain/session-strips";
 import type { GraphResponse, RecentEvent } from "../../types/api";
 
 /// Reference time well inside the past so events stamped relative
@@ -199,15 +203,88 @@ describe("buildSessionStrips", () => {
     expect(categories).toEqual(["tc", "planning", "communication", "prompt"]);
   });
 
-  it("uses the LLM name when provided, else falls back to short sid", () => {
+  it("uses the LLM name when provided, else falls back to a derived short description", () => {
     const events: RecentEvent[] = [tcEvent(1, "sess-a", "Bash", 1)];
-    const strips = buildSessionStrips(graphOf(events), {
+    // With LLM name → "name · s:<shortSid>"
+    const namedStrips = buildSessionStrips(graphOf(events), {
       windowMinutes: 60,
       colors: COLOR_MAP,
       names: new Map([["sess-a", "warm-otter"]]),
       now: NOW,
     });
-    expect(strips[0].displayName).toBe("warm-otter · s:sess-a");
+    expect(namedStrips[0].displayName).toBe("warm-otter · s:sess-a");
+
+    // Without LLM name → derived description (no bare `s:xxx`-only output).
+    // Operator screenshot: the bare `s:fafafafa` rows are useless; the
+    // fallback must surface at least one piece of meta beyond the sid.
+    const unnamedStrips = buildSessionStrips(graphOf(events), {
+      windowMinutes: 60,
+      colors: COLOR_MAP,
+      now: NOW,
+    });
+    // Should still end with "· s:sess-a" but include category info too.
+    expect(unnamedStrips[0].displayName).toMatch(/tool-calls.*s:sess-a$/);
+    // Must NOT be just the bare sid placeholder.
+    expect(unnamedStrips[0].displayName).not.toBe("s:sess-a");
+  });
+});
+
+describe("deriveShortDescription", () => {
+  it("includes harness, dominant category with peak/min, and sid suffix when active", () => {
+    const out = deriveShortDescription({
+      harness: "codex",
+      status: "active",
+      topCategory: "tc",
+      totalEvents: 42,
+      peakPerMin: 18,
+      stuckKind: null,
+      shortSid: "fafafafa",
+    });
+    expect(out).toBe("codex · tool-calls 18/min · s:fafafafa");
+  });
+
+  it("prefers status phrase over activity when stuck", () => {
+    // Operator should see "stuck" not the trailing activity rate
+    // — the session isn't moving and that's the load-bearing fact.
+    const out = deriveShortDescription({
+      harness: "claude",
+      status: "awaiting_user",
+      topCategory: "tc",
+      totalEvents: 5,
+      peakPerMin: 2,
+      stuckKind: "AskUserQuestion",
+      shortSid: "abcdef12",
+    });
+    expect(out).toBe("claude · stuck AskUserQuestion · s:abcdef12");
+  });
+
+  it("falls back gracefully when nothing but the sid is known", () => {
+    // No harness, no status, no category, zero events. The output
+    // still beats `s:abc` because the dot separator + leading shape
+    // signals to the reader that more data was looked for.
+    const out = deriveShortDescription({
+      harness: null,
+      status: null,
+      topCategory: null,
+      totalEvents: 0,
+      peakPerMin: 0,
+      stuckKind: null,
+      shortSid: "deadbeef",
+    });
+    expect(out).toBe("s:deadbeef");
+  });
+
+  it("uses totalEvents when peakPerMin is zero (very-low-frequency sessions)", () => {
+    const out = deriveShortDescription({
+      harness: "claude",
+      status: null,
+      topCategory: "planning",
+      totalEvents: 3,
+      peakPerMin: 0,
+      stuckKind: null,
+      shortSid: "12345678",
+    });
+    expect(out).toBe("claude · planning ×3 · s:12345678");
   });
 });
 
