@@ -181,6 +181,15 @@ pub async fn run_connect_hosted(
             working_dir: config.working_dir.clone(),
             branch: config.branch.clone(),
             task_description: config.task_description.clone(),
+            // consul-protocol 89e6862 added an optional operator
+            // binding (Phase C3 voice-attested gate). We don't
+            // self-assert one from the legatus side today; consulate
+            // falls back to OperatorId::ROOT when absent. The field
+            // has #[serde(default)] so wire-format-old peers are
+            // unaffected — this just satisfies the Rust struct
+            // literal so the workspace compiles against current
+            // legatus-consul-agent.
+            operator_id: None,
         }),
     )
     .await?;
