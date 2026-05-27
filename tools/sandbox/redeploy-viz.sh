@@ -61,7 +61,12 @@ say "ai:       SENTINEL_LLM_PREFER=$SENTINEL_LLM_PREFER OLLAMA_HOST=$OLLAMA_HOST
 # --- 1. Build viz-api ----------------------------------------------------------
 
 say "[1/4] building viz-api (release)"
-cargo build --release -p sentinel-viz-api 2>&1 | tail -20 || die "cargo build failed"
+# sentinel-viz-api is a STANDALONE workspace (tools/sentinel-viz-api
+# has its own [workspace] in Cargo.toml; the parent's workspace
+# excludes it). Build from inside the sub-workspace so cargo can
+# find the package.
+(cd "$WORKTREE/tools/sentinel-viz-api" && cargo build --release) 2>&1 | tail -20 \
+    || die "cargo build failed"
 
 # Locate the built binary. Cargo workspaces may put it at the
 # workspace target dir; sentinel-viz-api uses its own workspace.

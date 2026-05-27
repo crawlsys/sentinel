@@ -461,6 +461,59 @@ describe("EventTicker", () => {
       expect(topLevelRows.length).toBe(3);
     });
 
+    it("decay treats unsuffixed (naked) timestamps as UTC, not local — regression", () => {
+      // Bug shipped in 12cb10a7: the decay code used `new Date(r.ts)`
+      // directly, but the bridge writes `ts_sec` without a timezone
+      // marker. JS parses naked strings as LOCAL time. An operator
+      // in UTC-7 reading a "15:04" event would see `t` come back as
+      // 22:04 UTC, putting the row 7 hours in the FUTURE. `now - t`
+      // then went negative and `now - t > DECAY_TTL_MS` returned
+      // false — so 3+ hour old denies never aged out.
+      //
+      // This test simulates the failure mode: an old deny with a
+      // naked-UTC ts_sec, viewed from a wall-clock "now" that's
+      // hours later. With the fix (parseTsMs appends Z), the row
+      // decays correctly. Without it, the row survives and this
+      // assertion fails.
+      vi.setSystemTime(new Date("2026-05-27T21:30:00Z"));
+      const oldDeny: RecentEvent[] = [
+        {
+          seq: 1,
+          type: "sentinel.hook_ingested",
+          ts: "2026-05-27T15:04:00", // ~6.5h old, NO Z suffix
+          payload: {
+            session_id: "sess-flight",
+            sentinel_event: "PreToolUse",
+            hook: "tool_usage_gate",
+            outcome: "deny",
+            ts_sec: "2026-05-27T15:04:00", // bridge format
+          },
+        },
+        // A fresh tool-call so the ticker doesn't render skeletons
+        // (which would make `rows.length` checks ambiguous).
+        {
+          seq: 2,
+          type: "sentinel.tool_call_observed",
+          ts: "2026-05-27T21:29:30Z",
+          payload: {
+            session_id: "sess-active",
+            sentinel_event: "PreToolUse",
+            tool: "Read",
+            tool_call_id: "SentinelToolCall#tc-r",
+            ts_sec: "2026-05-27T21:29:30",
+          },
+        },
+      ];
+      render(<EventTicker events={oldDeny} onSelectNode={() => {}} />);
+      // Old deny must NOT survive. Without the UTC fix it would,
+      // because the local-parsed "future" timestamp dodges every
+      // age check.
+      const interventionRows = screen.getByTestId("ticker-rows").querySelectorAll("li.intervention-row");
+      expect(interventionRows.length).toBe(0);
+      const topLevelRows = screen.getByTestId("ticker-rows").children;
+      expect(topLevelRows.length).toBe(1); // only the fresh tc-r row
+    });
+
     it("pin cap (PIN_MAX_PER_CLASS) bounds intervention pins to N per render", () => {
       // Three distinct sessions each fire one intervention. The cap
       // is 2 per class, so only the first two encountered get the

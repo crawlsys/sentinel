@@ -137,6 +137,32 @@ const MAX_TOOLS_IN_LABEL = 4;
 export const PIN_TTL_MS = 30 * 60 * 1000;
 export const PIN_MAX_PER_CLASS = 2;
 
+/// Parse a bridge-written timestamp into epoch milliseconds.
+///
+/// The bridge writes `ts_sec` (and most `ts` fields) WITHOUT a
+/// timezone marker — they're UTC but unsuffixed. `new Date(s)` on
+/// such a string in JS parses it as LOCAL time, not UTC, so an
+/// operator in UTC-7 reading a "15:04" event sees `t` come back
+/// as 22:04 UTC, putting the row 7 hours in the future. Every
+/// TTL/decay check that depends on `now - t > THRESHOLD` then
+/// fails silently because the diff is negative.
+///
+/// This helper mirrors `tickerTime`'s parsing: appends `Z` when
+/// the string looks like a naked `YYYY-MM-DDTHH:MM:SS[.fff]` —
+/// the same regex used in `domain/format.ts` so the two paths
+/// can't drift. ISO strings that already carry `Z` / `+HH:MM` /
+/// `-HH:MM` pass through unchanged.
+///
+/// Returns `NaN` for unparseable input — callers that care
+/// (decay, pin TTL) check `Number.isFinite` and treat NaN as
+/// stale (fail closed: an undated row shouldn't squat the top
+/// of the ticker).
+export function parseTsMs(ts: string): number {
+  if (!ts) return NaN;
+  const normalized = /T\d{2}:\d{2}:\d{2}(\.\d+)?$/.test(ts) ? `${ts}Z` : ts;
+  return Date.parse(normalized);
+}
+
 /// Intervention-row decay. Once a deny/inject/block/force_stop row
 /// has aged out of the pin region, it normally falls back into the
 /// stream and persists forever like any other event. Operator
@@ -336,7 +362,7 @@ export function EventTicker({ events, onSelectNode, sessionColors, stuckMeta, do
     // eslint-disable-next-line react-hooks/purity
     const now = Date.now();
     const isFresh = (ts: string) => {
-      const t = new Date(ts).getTime();
+      const t = parseTsMs(ts);
       return Number.isFinite(t) && now - t < PIN_TTL_MS;
     };
     // Precompute per-session timestamp arrays so the decay check
@@ -359,7 +385,7 @@ export function EventTicker({ events, onSelectNode, sessionColors, stuckMeta, do
         tsBySession.set(r.sessionId, arr);
       }
       for (const m of r.members) {
-        const t = new Date(m.ts).getTime();
+        const t = parseTsMs(m.ts);
         if (Number.isFinite(t)) arr.push(t);
       }
     }
@@ -383,7 +409,7 @@ export function EventTicker({ events, onSelectNode, sessionColors, stuckMeta, do
     // pins are NOT decayed: a stuck session is signal even when old.
     const isDecayedIntervention = (r: typeof augmentedRows[number]): boolean => {
       if (!r.isIntervention || !r.sessionId) return false;
-      const t = new Date(r.ts).getTime();
+      const t = parseTsMs(r.ts);
       if (!Number.isFinite(t)) return true; // undated intervention — drop
       if (now - t > DECAY_TTL_MS) return true;
       if (newerCount(r.sessionId, t) >= DECAY_NEWER_EVENT_COUNT) return true;
