@@ -30,8 +30,12 @@ yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
 
-# env files (can opt-in for committing if needed)
+# env files (can opt-in for committing if needed). `.env.example`
+# is committed as the documented contract; everything else
+# (.env, .env.local, .env.production) is operator-supplied and
+# may contain secrets — keep ignored.
 .env*
+!.env.example
 
 # vercel
 .vercel
