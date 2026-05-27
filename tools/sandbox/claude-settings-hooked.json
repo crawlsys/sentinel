@@ -1,0 +1,154 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "$comment": "Hooked settings.json for the sentinel sandbox containers (legatus-docker-dev / sentinel-grind-*). Bind-mount this file at $SENTINEL_CLAUDE_DIR/settings.json so the container's Claude Code session fires sentinel hooks. Hook events land in $SENTINEL_CLAUDE_DIR/sentinel/metrics/hook-invocations.jsonl, which the launcher script bind-mounts from the host's ~/.claude/sentinel/metrics/ so the host's sentinel_bridge.py picks them up and they show in the viz dashboard. Opt out by setting SENTINEL_HOOKS=off in the launcher env — the hookless tools/sandbox/claude-settings-hookless.json is the no-hook counterpart.",
+  "theme": "dark",
+  "verbose": false,
+  "alwaysThinkingEnabled": false,
+  "skipDangerousModePermissionPrompt": false,
+  "permissions": {
+    "allow": [],
+    "deny": []
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sentinel hook --event SessionStart",
+            "statusMessage": "sandbox · sentinel hooks active"
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sentinel hook --event SessionEnd",
+            "async": true
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sentinel hook --event UserPromptSubmit"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sentinel hook --event PreToolUse"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sentinel hook --event PostToolUse"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sentinel hook --event Stop",
+            "async": true
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sentinel hook --event SubagentStop"
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sentinel hook --event PreCompact"
+          }
+        ]
+      }
+    ],
+    "PostCompact": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sentinel hook --event PostCompact",
+            "async": true
+          }
+        ]
+      }
+    ],
+    "TaskCreated": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sentinel hook --event TaskCreated"
+          }
+        ]
+      }
+    ],
+    "TaskCompleted": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sentinel hook --event TaskCompleted"
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sentinel hook --event Notification",
+            "async": true
+          }
+        ]
+      }
+    ]
+  },
+  "mcpServers": {},
+  "preferredNotifChannel": "terminal",
+  "agentPushNotifEnabled": false
+}
