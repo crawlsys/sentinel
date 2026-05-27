@@ -1,0 +1,30 @@
+# Build the sentinel-bridge Rust binary, then run `bridge tail` to
+# continuously ingest hook-invocation JSONLs into the activegraph
+# SQLite store viz-api reads.
+#
+# Build context (set by docker-compose.yml): sentinel repo root.
+# Path to this Dockerfile from that context: tools/sandbox/Dockerfile.bridge.
+
+FROM rust:1.83-bookworm AS builder
+
+WORKDIR /build
+
+COPY tools/sentinel-bridge ./bridge
+
+WORKDIR /build/bridge
+RUN cargo build --release --bin sentinel-bridge
+
+# ---
+
+FROM debian:bookworm-slim AS runtime
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /build/bridge/target/release/sentinel-bridge /usr/local/bin/sentinel-bridge
+
+ENV RUST_LOG=info,sentinel_bridge=info
+
+ENTRYPOINT ["/usr/local/bin/sentinel-bridge"]
+CMD ["tail"]

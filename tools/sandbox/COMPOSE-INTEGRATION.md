@@ -1,17 +1,31 @@
 # sentinel-viz × sentinel-sandbox compose integration
 
 The single-file compose stack at `tools/sandbox/docker-compose.yml`
-brings up sentinel-viz × sentinel-sandbox in one shot:
+brings up the whole sentinel observability mesh in one shot:
 
 - `qdrant` + `neo4j` + `memory-server` — sentinel's memory stores
+- `sentinel-bridge` — tails hook-invocation JSONLs into the
+  activegraph SQLite store
+- `viz-api` — Rust HTTP API on port 8082 (host-forwarded)
+- `viz-next` — Next.js dashboard on port 8083 (**browse from your
+  host at <http://localhost:8083>**)
 - `sandbox-dev` — long-running dev container with Claude Code CLI,
-  wired to the host sentinel-viz bridge via a metrics bind-mount
-  and the canonical hooked Claude settings profile
+  wired to the bridge via a metrics bind-mount and the canonical
+  hooked Claude settings profile. Also forwards the agent-workload
+  port range `18000-18099` so the in-container Claude can spin up
+  ad-hoc preview services the host can browse.
 
 Bring it up:
 
 ```
 docker compose -f tools/sandbox/docker-compose.yml up -d
+# wait ~30s for viz-next's first build, then:
+open http://localhost:8083
+```
+
+Exec into the dev container:
+
+```
 docker compose -f tools/sandbox/docker-compose.yml exec sandbox-dev bash
 ```
 
@@ -20,6 +34,44 @@ Tear it down:
 ```
 docker compose -f tools/sandbox/docker-compose.yml down
 ```
+
+## Important: only ONE bridge can run
+
+The `sentinel-bridge` service writes the activegraph SQLite, and
+`viz-api` reads it. If your host already has a `sentinel-bridge tail`
+process running against the same metrics dir, **stop it before `up`**.
+Two bridges tailing the same metrics would race on the SQLite writes
+and corrupt the store. The container's bridge is the new authority;
+the host bridge becomes redundant.
+
+## The agent workload port range
+
+`sandbox-dev` forwards `127.0.0.1:18000-18099` host→container. The
+in-container claude can bind any port in that range on `0.0.0.0` and
+the operator can browse the result from the host at
+`http://localhost:<port>`. Convention:
+
+- Pick a free port from `$SENTINEL_SANDBOX_PORT_RANGE` (set by the
+  compose to `18000-18099`).
+- Bind your service on `0.0.0.0:<port>` (not `127.0.0.1:<port>` —
+  loopback inside the container isn't reachable from the host).
+- Surface the URL: "running at <http://localhost:18002>".
+
+The range is sized at 100 ports for headroom; pick anything in it.
+
+## Browser ↔ viz-api routing
+
+The viz-next image bakes `NEXT_PUBLIC_VIZ_API` at build time. The
+default is `http://localhost:8082`, which works because the compose
+forwards `viz-api:8082` to `127.0.0.1:8082` on the host. If your host
+already has something on port 8082, override at build time:
+
+```
+VIZ_API_PUBLIC_URL=http://localhost:8092 \
+  docker compose -f tools/sandbox/docker-compose.yml build viz-next
+```
+
+and forward 8092 instead (edit the compose).
 
 ## What the sandbox-dev service does at boot
 

@@ -3,16 +3,26 @@
 #   qdrant         — vector database, holds embedded memories
 #   neo4j          — graph database, holds tenancy + provenance + KG
 #   memory-server  — Rust HTTP API in front of both stores (JWT-scoped tenancy)
+#   sentinel-bridge — tails hook-invocation JSONLs into the activegraph SQLite store
+#   viz-api        — Rust HTTP API serving the sentinel activity graph (port 8082)
+#   viz-next       — Next.js dashboard on top of viz-api (port 8083, browse from host)
 #   sandbox-dev    — dev container with Claude Code CLI for working on sentinel,
-#                    wired to the host sentinel-viz bridge via metrics bind-mount
-#                    and the canonical hooked Claude settings profile.
+#                    wired to the bridge via metrics bind-mount and the canonical
+#                    hooked Claude settings profile.
 #
 # Usage:
 #   docker compose -f tools/sandbox/docker-compose.yml up -d
 #   docker compose -f tools/sandbox/docker-compose.yml down
 #
-# A launch.sh script may sit alongside this file once the
-# feat-memory-server-vertical-slice stack lands on main.
+# Browse the dashboard at http://localhost:8083 once `up` reports
+# viz-next as healthy. The browser talks to viz-api over the
+# host-forwarded port 8082 (baked into the NEXT_PUBLIC_VIZ_API
+# build arg in Dockerfile.viz-next).
+#
+# IMPORTANT: don't run another sentinel-bridge on the host at the
+# same time. The container's bridge writes to the bridge-state
+# volume and is the sole authority — host-side bridges racing
+# against it would corrupt the SQLite store.
 
 name: sentinel-sandbox
 
@@ -74,6 +84,69 @@ services:
       - "127.0.0.1:8080:8080"
     restart: unless-stopped
 
+  # Bridge tails the hook-invocation JSONLs the sandbox-dev container
+  # writes (via `sentinel hook`) and ingests them into the activegraph
+  # SQLite store. viz-api reads that same store. There is exactly ONE
+  # bridge per stack — running another on the host concurrently would
+  # race on the SQLite writes.
+  sentinel-bridge:
+    build:
+      context: ../..
+      dockerfile: tools/sandbox/Dockerfile.bridge
+    container_name: sentinel-bridge
+    environment:
+      # Bridge writes to $HOME/.agents/scratch/activegraph-bridge/
+      # by convention. We point $HOME at the bridge-state volume so
+      # the SQLite + offset state live somewhere viz-api can read.
+      HOME: /workspace/.bridge-state
+    volumes:
+      - bridge-state:/workspace/.bridge-state
+      # Same metrics dir the sandbox-dev container writes to. The
+      # bridge's METRICS_DIRS scan picks it up.
+      - ${HOME}/.claude/sentinel/metrics:/home/dev/.claude/sentinel/metrics
+    restart: unless-stopped
+
+  viz-api:
+    build:
+      context: ../..
+      dockerfile: tools/sandbox/Dockerfile.viz-api
+    container_name: sentinel-viz-api
+    depends_on:
+      sentinel-bridge: { condition: service_started }
+    environment:
+      RUST_LOG: "info,sentinel_viz_api=info"
+      SENTINEL_VIZ_DB: /workspace/.bridge-state/.agents/scratch/activegraph-bridge/sentinel.db
+      # NAMING_MODEL etc. left to defaults; operator can override at
+      # `docker compose run` time or set them via /api/config at runtime.
+    volumes:
+      # Read-only mount of the bridge's SQLite. The bridge owns writes.
+      - bridge-state:/workspace/.bridge-state:ro
+    ports:
+      - "127.0.0.1:8082:8082"
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/127.0.0.1/8082' >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  viz-next:
+    build:
+      context: ../..
+      dockerfile: tools/sandbox/Dockerfile.viz-next
+      args:
+        # Browser-facing URL: when you open http://localhost:8083 in
+        # your host browser, the JS bundle makes API calls to
+        # http://localhost:8082 (which docker forwards to viz-api).
+        # Override at build time if your host port mapping differs.
+        NEXT_PUBLIC_VIZ_API: ${VIZ_API_PUBLIC_URL:-http://localhost:8082}
+    container_name: sentinel-viz-next
+    depends_on:
+      viz-api: { condition: service_started }
+    ports:
+      - "127.0.0.1:8083:8083"
+    restart: unless-stopped
+
   sandbox-dev:
     build:
       context: .
@@ -91,11 +164,22 @@ services:
     # the host-gateway alias explicit.
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    # Forward the agent workload port range so claude-in-container can
+    # spin up ad-hoc preview services on any port in this window and
+    # the operator can browse them from the host without changing the
+    # compose. Convention: agents bind 0.0.0.0:<port> on a free port
+    # in this range and surface the URL.
+    ports:
+      - "127.0.0.1:18000-18099:18000-18099"
     environment:
       SENTINEL_CLAUDE_DIR: /workspace/.container-state/claude
       MEMORY_SERVER_URL: http://memory-server:8080
       QDRANT_URL: http://qdrant:6333
       NEO4J_URL: bolt://neo4j:7687
+      # The agent-workload port range the in-container claude is
+      # allowed to bind on. Helper code can pick a free port via
+      # `ss -tln | awk` over this range.
+      SENTINEL_SANDBOX_PORT_RANGE: 18000-18099
     volumes:
       - ${SENTINEL_REPO:-../..}:/workspace/sentinel:rw
       - sandbox-cache:/workspace/.container-cache
@@ -152,3 +236,8 @@ volumes:
   neo4j-logs:
   sandbox-cache:
   sandbox-state:
+  # Shared between sentinel-bridge (writer) and viz-api (reader).
+  # Holds the activegraph SQLite store + the bridge's byte-offset
+  # tail state. Survives container restarts so backfill on `up` is
+  # cheap.
+  bridge-state:
