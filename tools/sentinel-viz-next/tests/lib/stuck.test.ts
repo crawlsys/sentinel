@@ -65,6 +65,18 @@ describe("isStuck", () => {
     n.type = "SentinelToolCall";
     expect(isStuck(n)).toBe(false);
   });
+
+  it("returns false for awaiting_kind 'reply' (walked-away chat, not a real ask)", () => {
+    const n = sessionNode("a", "awaiting_user", STUCK_THRESHOLD_SECS + 1);
+    n.awaiting_kind = "reply";
+    expect(isStuck(n)).toBe(false);
+  });
+
+  it("still returns true for awaiting_kind 'question'", () => {
+    const n = sessionNode("a", "awaiting_user", STUCK_THRESHOLD_SECS + 1);
+    n.awaiting_kind = "question";
+    expect(isStuck(n)).toBe(true);
+  });
 });
 
 describe("stuckSessions", () => {

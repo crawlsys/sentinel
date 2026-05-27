@@ -18,6 +18,11 @@ export const STUCK_ALERT_SUPPRESS_MS = 5 * 60 * 1000;
 export function isStuck(node: Node): boolean {
   if (node.type !== "SentinelSession") return false;
   if (node.session_status !== "awaiting_user") return false;
+  // The API classifies any session ending in assistant text as
+  // awaiting_user kind "reply". Those are walked-away-from chats,
+  // not real asks — don't pin them. Genuine questions surface as
+  // kind "question" / "AskUserQuestion".
+  if (node.awaiting_kind === "reply") return false;
   const age = node.last_activity_age_s ?? 0;
   return age > STUCK_THRESHOLD_SECS;
 }

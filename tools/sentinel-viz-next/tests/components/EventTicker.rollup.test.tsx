@@ -100,7 +100,7 @@ describe("EventTicker — P3-22 sub-line noise gating", () => {
     expect(ticker).not.toContain("you submitted");
   });
 
-  it("shouldShowSubLine — outcome present → true", () => {
+  it("shouldShowSubLine — intervention outcome → true", () => {
     expect(
       shouldShowSubLine({
         outcome: "deny",
@@ -108,6 +108,16 @@ describe("EventTicker — P3-22 sub-line noise gating", () => {
         actor: "sentinel",
       }),
     ).toBe(true);
+  });
+
+  it("shouldShowSubLine — routine 'allow' outcome → false (no 'about to run · allow' spam)", () => {
+    expect(
+      shouldShowSubLine({
+        outcome: "allow",
+        sentinelEvent: "PreToolUse",
+        actor: "claude",
+      }),
+    ).toBe(false);
   });
 
   it("shouldShowSubLine — known sentinel event with no outcome → false", () => {

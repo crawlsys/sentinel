@@ -708,8 +708,10 @@ export function shouldShowSubLine(row: {
   sentinelEvent: string;
   actor: RowActor;
 }): boolean {
-  // Real signal: any outcome the operator should see.
-  if (row.outcome && row.outcome.length > 0) return true;
+  // Real signal: an intervention outcome the operator should see.
+  // Routine "allow" outcomes are skipped — they'd render as
+  // "about to run · allow", duplicating the row label.
+  if (isInterventionOutcome(row.outcome)) return true;
   // Unknown sentinel events — sentinelEventPhrase falls through so
   // the operator sees the raw event name (better than hiding it).
   if (row.sentinelEvent && !KNOWN_SENTINEL_EVENTS.has(row.sentinelEvent)) return true;
