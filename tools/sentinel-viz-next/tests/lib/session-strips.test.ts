@@ -3,6 +3,7 @@ import { describe, it, expect } from "vitest";
 import {
   buildSessionStrips,
   bucketsToSparkline,
+  deriveProseBlurb,
   deriveShortDescription,
 } from "../../domain/session-strips";
 import type { GraphResponse, RecentEvent } from "../../types/api";
@@ -203,7 +204,7 @@ describe("buildSessionStrips", () => {
     expect(categories).toEqual(["tc", "planning", "communication", "prompt"]);
   });
 
-  it("uses the LLM name when provided, else falls back to a derived short description", () => {
+  it("uses the LLM name when provided, else a prose blurb derived from recent activity", () => {
     const events: RecentEvent[] = [tcEvent(1, "sess-a", "Bash", 1)];
     // With LLM name → "name · s:<shortSid>"
     const namedStrips = buildSessionStrips(graphOf(events), {
@@ -214,16 +215,17 @@ describe("buildSessionStrips", () => {
     });
     expect(namedStrips[0].displayName).toBe("warm-otter · s:sess-a");
 
-    // Without LLM name → derived description (no bare `s:xxx`-only output).
-    // Operator screenshot: the bare `s:fafafafa` rows are useless; the
-    // fallback must surface at least one piece of meta beyond the sid.
+    // Without LLM name → prose blurb wins over the stat-style
+    // fallback. A single Bash event with no command payload still
+    // yields a verb ("running") which is more readable than a bare
+    // sid. The blurb always ends with "· s:<shortSid>" for
+    // disambiguation.
     const unnamedStrips = buildSessionStrips(graphOf(events), {
       windowMinutes: 60,
       colors: COLOR_MAP,
       now: NOW,
     });
-    // Should still end with "· s:sess-a" but include category info too.
-    expect(unnamedStrips[0].displayName).toMatch(/tool-calls.*s:sess-a$/);
+    expect(unnamedStrips[0].displayName).toBe("running · s:sess-a");
     // Must NOT be just the bare sid placeholder.
     expect(unnamedStrips[0].displayName).not.toBe("s:sess-a");
   });
@@ -285,6 +287,68 @@ describe("deriveShortDescription", () => {
       shortSid: "12345678",
     });
     expect(out).toBe("claude · planning ×3 · s:12345678");
+  });
+});
+
+describe("deriveProseBlurb", () => {
+  it("composes <verb> <basename> for a cluster of edits to the same file", () => {
+    const events = [
+      { tool: "Edit", payload: { tool_input: { file_path: "/workspace/x/EventTicker.tsx" } } },
+      { tool: "Edit", payload: { tool_input: { file_path: "/workspace/x/EventTicker.tsx" } } },
+      { tool: "Edit", payload: { tool_input: { file_path: "/workspace/x/EventTicker.tsx" } } },
+    ];
+    expect(deriveProseBlurb(events)).toBe("editing EventTicker.tsx");
+  });
+
+  it("picks the dominant verb when tools mix", () => {
+    // 4 edits + 2 reads + 1 bash → editing wins.
+    const events = [
+      { tool: "Edit", payload: { tool_input: { file_path: "a.ts" } } },
+      { tool: "Edit", payload: { tool_input: { file_path: "a.ts" } } },
+      { tool: "Edit", payload: { tool_input: { file_path: "b.ts" } } },
+      { tool: "Edit", payload: { tool_input: { file_path: "a.ts" } } },
+      { tool: "Read", payload: { tool_input: { file_path: "c.ts" } } },
+      { tool: "Read", payload: { tool_input: { file_path: "d.ts" } } },
+      { tool: "Bash", payload: { tool_input: { command: "ls" } } },
+    ];
+    // Dominant verb = editing (4). Dominant object within editing = a.ts (3).
+    expect(deriveProseBlurb(events)).toBe("editing a.ts");
+  });
+
+  it("extracts the command verb from Bash, not the full chain", () => {
+    const events = [
+      { tool: "Bash", payload: { tool_input: { command: "cd /tmp; cargo test --workspace" } } },
+      { tool: "Bash", payload: { tool_input: { command: "cargo test -p sentinel-cli" } } },
+    ];
+    expect(deriveProseBlurb(events)).toBe("running cargo test");
+  });
+
+  it("uses Grep pattern wrapped in slashes", () => {
+    const events = [
+      { tool: "Grep", payload: { tool_input: { pattern: "TaskCreate" } } },
+    ];
+    expect(deriveProseBlurb(events)).toBe("searching /TaskCreate/");
+  });
+
+  it("returns null when no event maps to a known verb", () => {
+    const events = [
+      { tool: "UnknownTool", payload: {} },
+      { tool: "AnotherUnknown", payload: {} },
+    ];
+    expect(deriveProseBlurb(events)).toBeNull();
+  });
+
+  it("returns null on empty input", () => {
+    expect(deriveProseBlurb([])).toBeNull();
+  });
+
+  it("returns just the verb when no object can be extracted", () => {
+    // Edit events with no file_path → verb survives, object is missing.
+    const events = [
+      { tool: "Edit", payload: {} },
+      { tool: "Edit", payload: {} },
+    ];
+    expect(deriveProseBlurb(events)).toBe("editing");
   });
 });
 

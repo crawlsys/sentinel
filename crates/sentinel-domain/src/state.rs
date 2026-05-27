@@ -634,7 +634,7 @@ impl SessionState {
             Some(_) => Ok(()), // Same hash — no change
             None => {
                 self.phase_file_hashes
-                    .insert(canonical_path.clone(), content_hash.to_string());
+                    .insert(canonical_path.to_string(), content_hash.to_string());
                 Ok(())
             }
         }

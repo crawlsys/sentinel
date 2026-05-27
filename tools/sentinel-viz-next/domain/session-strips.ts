@@ -76,6 +76,132 @@ const STATUS_SHORT: Record<string, string> = {
   dead: "dead",
 };
 
+/// Map tool name → verb phrase for prose blurbs. Categorised by
+/// what the tool is doing semantically, not by the tool's literal
+/// name — "running" reads better than "Bash-ing", and operators
+/// already see the harness chip elsewhere.
+const TOOL_VERB: Record<string, string> = {
+  Edit: "editing",
+  Write: "editing",
+  MultiEdit: "editing",
+  NotebookEdit: "editing",
+  Read: "reading",
+  Glob: "searching",
+  Grep: "searching",
+  Bash: "running",
+  TaskCreate: "tracking",
+  TaskUpdate: "tracking",
+  TaskList: "tracking",
+  TodoWrite: "tracking",
+  WebFetch: "researching",
+  WebSearch: "researching",
+  Agent: "delegating",
+  Skill: "running",
+};
+
+/// Fields where a tool's "object" lives on the payload — what file
+/// it's editing, what command it's running, etc. Walked in order;
+/// first non-empty value wins.
+const TOOL_OBJECT_FIELDS = ["file_path", "path", "command", "pattern", "subject", "query"];
+
+/// Extract the "object" string from an event payload. For Bash
+/// commands, we take the first whitespace token (the actual
+/// command verb — `cargo`, `git`, `pnpm` — not the full chain).
+/// For paths, we strip the directory to just the basename so the
+/// header doesn't wrap the strip width.
+function extractObject(tool: string, payload: Record<string, unknown>): string | null {
+  // tool_input may be the carrier instead of the top-level payload.
+  const ti = (payload.tool_input as Record<string, unknown> | undefined) ?? payload;
+  for (const key of TOOL_OBJECT_FIELDS) {
+    const v = ti[key];
+    if (typeof v !== "string" || v.length === 0) continue;
+    if (key === "command" || tool === "Bash") {
+      // Pull the command verb: first non-empty token of the (possibly
+      // `cd …;`-prefixed) chain. Operators care about "cargo test"
+      // or "git status", not "/home/dev/...; cd …;".
+      const cmd = v.replace(/^(?:cd\s+\S+\s*;\s*)+/, "").trim();
+      const first = cmd.split(/\s+/)[0] ?? "";
+      const second = cmd.split(/\s+/)[1] ?? "";
+      // `cargo test`, `git status`, `pnpm build` — two tokens reads
+      // better than one for these. Single-token fallback for `ls`,
+      // `pwd`, etc.
+      return second.length > 0 ? `${first} ${second}` : first;
+    }
+    if (key === "file_path" || key === "path") {
+      const slash = v.lastIndexOf("/");
+      return slash >= 0 ? v.slice(slash + 1) : v;
+    }
+    if (key === "pattern") return `/${v}/`;
+    return v;
+  }
+  return null;
+}
+
+export interface ProseBlurbInput {
+  tool: string;
+  payload: Record<string, unknown>;
+}
+
+/// Compose a short prose blurb from recent tool activity. The
+/// goal is something readable like "editing EventTicker.tsx" or
+/// "running cargo test" — replacing the bare `s:fafafafa`
+/// placeholder when no LLM name is available.
+///
+/// Strategy:
+///   1. Bucket events by verb (TOOL_VERB lookup), pick the most-
+///      common bucket.
+///   2. Within that bucket, bucket again by object (file basename,
+///      command first-word, etc.) and pick the most common object.
+///   3. Compose "<verb> <object>". If no object survives (e.g.
+///      all the events were verb-only like a Skill invocation),
+///      return just "<verb>".
+///
+/// Returns null when:
+///   - The events list is empty
+///   - No event maps to a known verb (TOOL_VERB miss)
+///
+/// Exported for unit tests.
+export function deriveProseBlurb(events: ProseBlurbInput[]): string | null {
+  if (events.length === 0) return null;
+  const verbCounts = new Map<string, number>();
+  const objectsByVerb = new Map<string, Map<string, number>>();
+  for (const e of events) {
+    const verb = TOOL_VERB[e.tool];
+    if (!verb) continue;
+    verbCounts.set(verb, (verbCounts.get(verb) ?? 0) + 1);
+    const obj = extractObject(e.tool, e.payload);
+    if (!obj) continue;
+    let byObj = objectsByVerb.get(verb);
+    if (!byObj) {
+      byObj = new Map();
+      objectsByVerb.set(verb, byObj);
+    }
+    byObj.set(obj, (byObj.get(obj) ?? 0) + 1);
+  }
+  if (verbCounts.size === 0) return null;
+  // Pick the dominant verb (highest count; ties broken by insertion
+  // order, which matches event arrival order — newest first).
+  let topVerb = "";
+  let topVerbCount = 0;
+  for (const [v, n] of verbCounts) {
+    if (n > topVerbCount) {
+      topVerb = v;
+      topVerbCount = n;
+    }
+  }
+  const byObj = objectsByVerb.get(topVerb);
+  if (!byObj || byObj.size === 0) return topVerb;
+  let topObj = "";
+  let topObjCount = 0;
+  for (const [o, n] of byObj) {
+    if (n > topObjCount) {
+      topObj = o;
+      topObjCount = n;
+    }
+  }
+  return `${topVerb} ${topObj}`;
+}
+
 /// Compose a short description when the LLM name isn't available
 /// yet (or never resolves — codex sessions without a transcript,
 /// the naming model being disabled, rate-limited fetches, etc.).
@@ -153,6 +279,14 @@ export function buildSessionStrips(
   // lets every visible strip carry its tag — not just the few with
   // a node in the response.
   const harnessBySid = new Map<string, string>();
+  // sid → most-recent N events with a tool field. Used by
+  // deriveProseBlurb to compose "<verb> <object>" labels for the
+  // strip header when no LLM name is available. Bounded so a
+  // long session doesn't carry hundreds of events into the
+  // bucketing function — only recent flavour matters for the
+  // header text.
+  const PROSE_EVENT_BUDGET = 15;
+  const proseEventsBySid = new Map<string, ProseBlurbInput[]>();
   for (const e of graph.events) {
     const sid = typeof e.payload?.session_id === "string" ? (e.payload.session_id as string) : null;
     if (!sid) continue;
@@ -191,6 +325,20 @@ export function buildSessionStrips(
       bySid.set(category, counts);
     }
     counts[bucketIdx] += 1;
+
+    // Collect for prose blurb. Only tool-bearing events count;
+    // user-prompt rows would skew the verb dominance toward
+    // "tracking" / "researching" misleadingly.
+    if (tool) {
+      let arr = proseEventsBySid.get(sid);
+      if (!arr) {
+        arr = [];
+        proseEventsBySid.set(sid, arr);
+      }
+      if (arr.length < PROSE_EVENT_BUDGET) {
+        arr.push({ tool, payload: e.payload as Record<string, unknown> });
+      }
+    }
   }
 
   // Build the SessionStripData[] sorted by recency (last activity
@@ -237,21 +385,28 @@ export function buildSessionStrips(
       null;
     // Display-name preference order:
     //   1. LLM-assigned name (best — captures activity flavour in plain English)
-    //   2. Derived short description from harness + status + dominant category
-    //   3. Bare s:<shortSid> as the final fallback (deriveShortDescription
-    //      always includes the sid suffix anyway, so this only fires when
-    //      we have literally nothing else — should be ~never).
-    const displayName = name && name.length > 0
-      ? `${name} · s:${shortSid}`
-      : deriveShortDescription({
-          harness: sourceHarness,
-          status,
-          topCategory: rows[0]?.category ?? null,
-          totalEvents,
-          peakPerMin,
-          stuckKind: stuck?.kind ?? null,
-          shortSid,
-        });
+    //   2. Prose blurb derived from recent tool activity ("editing
+    //      EventTicker.tsx", "running cargo test", "searching for hook").
+    //      Operator-readable, deterministic, LLM-free.
+    //   3. Stat-style short description (harness + dominant category + rate).
+    //   4. Bare s:<shortSid> as the final fallback.
+    const prose = deriveProseBlurb(proseEventsBySid.get(sid) ?? []);
+    let displayName: string;
+    if (name && name.length > 0) {
+      displayName = `${name} · s:${shortSid}`;
+    } else if (prose) {
+      displayName = `${prose} · s:${shortSid}`;
+    } else {
+      displayName = deriveShortDescription({
+        harness: sourceHarness,
+        status,
+        topCategory: rows[0]?.category ?? null,
+        totalEvents,
+        peakPerMin,
+        stuckKind: stuck?.kind ?? null,
+        shortSid,
+      });
+    }
 
     out.push({
       sessionId: sid,

@@ -2062,7 +2062,7 @@ mod tests {
         };
         let fs = RealTestFs;
         let classifier = crate::reversibility_classifier::StaticReversibilityClassifier::empty()
-            .with("Write", ReversibilityClass::Reversible);
+            .with("Write", ReversibilityClass::ReversibleWithEffort);
         let output = process(
             &input,
             &fs,
@@ -2100,7 +2100,7 @@ mod tests {
         };
         let fs = RealTestFs;
         let classifier = crate::reversibility_classifier::StaticReversibilityClassifier::empty()
-            .with("Write", ReversibilityClass::Reversible);
+            .with("Write", ReversibilityClass::ReversibleWithEffort);
         let output = process(
             &input,
             &fs,
