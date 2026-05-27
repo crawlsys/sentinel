@@ -33,12 +33,11 @@ export function SessionStrip({ data, selected, onSelect }: Props) {
   // waiting on" in that case, which is the higher-signal copy.
   const summaryKind = isStuck || data.status === "awaiting_user" ? "wait" : "narrative";
   // AI summary endpoint reads claude transcript JSONLs from
-  // ~/.claude/projects/. Non-claude harnesses (codex / opencode /
-  // qwen / gemini) don't have those files, so the request would
-  // 404 or return text=null forever and the strip would render a
-  // stuck "ai · generating summary…" placeholder. Gate the query
-  // by harness so we never hit the endpoint when there's nothing
-  // to fetch.
+  // ~/.claude/projects/. The codex harness doesn't write those
+  // files, so the request would 404 or return text=null forever
+  // and the strip would render a stuck "ai · generating summary…"
+  // placeholder. Gate the query by harness so we never hit the
+  // endpoint when there's nothing to fetch.
   const harnessSupportsSummary =
     !data.sourceHarness || data.sourceHarness === "claude";
   const summaryQ = useQuery({
@@ -175,7 +174,7 @@ export function SessionStrip({ data, selected, onSelect }: Props) {
             for non-claude harnesses where the query is disabled by
             design (TanStack Query reports pending=true forever when
             `enabled: false`, otherwise we'd render this placeholder
-            permanently on every codex/opencode/qwen/gemini strip). */}
+            permanently on every codex strip). */}
         {harnessSupportsSummary &&
           !summaryAvailable &&
           !summaryDisabled &&
@@ -284,15 +283,14 @@ function formatStuckAge(secs: number): string {
 /// Per-harness identity color. Distinct from session palette so the
 /// operator can scan-filter by harness independent of session colour.
 /// claude=info-blue (the canonical home harness), codex=warning-amber
-/// (OpenAI), opencode=purple, qwen=teal (Alibaba), gemini=success-green
-/// (Google). Unknown harnesses fall through to text-secondary.
+/// (OpenAI). Unknown harnesses fall through to text-secondary —
+/// opencode/qwen/gemini are dormant per the bridge's allowlist but
+/// could still surface here if a stale record sits in the SQLite
+/// store from before the allowlist landed.
 function harnessColor(h: string): string {
   switch (h) {
     case "claude":   return "#5B9BF6";
     case "codex":    return "#D4A843";
-    case "opencode": return "#bc8cff";
-    case "qwen":     return "#4FB3B3";
-    case "gemini":   return "#4A9E5C";
     default:         return "#999999";
   }
 }

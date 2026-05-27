@@ -70,10 +70,9 @@ export function SessionConsole({
     const out: string[] = [];
     // Build a session_id → harness lookup so we can skip non-claude
     // sessions below — /api/activity reads claude transcript JSONLs
-    // and 404s for codex/opencode/qwen/gemini. Firing it for every
-    // visible non-claude session on every 8s tick spiked load times
-    // measurably (5+ codex grinds running ≈ 5+ parallel doomed
-    // requests every tick).
+    // and 404s for codex. Firing it for every visible non-claude
+    // session on every 8s tick spiked load times measurably (5+
+    // codex grinds running ≈ 5+ parallel doomed requests every tick).
     const harnessBySid = new Map<string, string>();
     for (const n of graph.nodes) {
       if (n.type !== "SentinelSession") continue;

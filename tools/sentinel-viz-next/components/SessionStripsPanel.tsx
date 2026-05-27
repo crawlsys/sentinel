@@ -10,15 +10,15 @@ import { fetchSessionName } from "../adapters/http";
 import { SessionStrip } from "./SessionStrip";
 
 const HARNESS_FILTER_KEY = "sentinel-viz-harness-filter";
-const HARNESSES = ["claude", "codex", "opencode", "qwen", "gemini"] as const;
+// Allowlist: only claude + codex sessions are tracked. The bridge's
+// opencode/qwen/gemini shims are gated dormant behind a non-default
+// cargo feature; this list mirrors that.
+const HARNESSES = ["claude", "codex"] as const;
 type HarnessId = (typeof HARNESSES)[number];
 function harnessColor(h: string): string {
   switch (h) {
     case "claude":   return "#5B9BF6";
     case "codex":    return "#D4A843";
-    case "opencode": return "#bc8cff";
-    case "qwen":     return "#4FB3B3";
-    case "gemini":   return "#4A9E5C";
     default:         return "#999999";
   }
 }

@@ -25,9 +25,11 @@ export interface SessionStripData {
   /** Hex colour from the session palette. */
   color: string;
   status: string | null;
-  /** Which harness produced this session — claude / codex / opencode
-   *  / qwen / gemini. Sourced from SentinelSession.data.source_harness
-   *  set by sentinel_bridge.py during ingestion. Null = unknown. */
+  /** Which harness produced this session — claude or codex.
+   *  Sourced from SentinelSession.data.source_harness set by
+   *  sentinel-bridge during ingestion. Null = unknown.
+   *  opencode/qwen/gemini are dormant per the bridge allowlist
+   *  but legacy records in the store may still carry those values. */
   sourceHarness: string | null;
   /** Seconds since the session's last activity. Null when unknown. */
   lastActivityAgeS: number | null;

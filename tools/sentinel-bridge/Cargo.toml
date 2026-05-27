@@ -6,7 +6,15 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.83"
 license = "MIT"
-description = "Rust port of sentinel_bridge.py — tails hook-invocations JSONLs from Claude Code + harness shims (codex / opencode / qwen / gemini) and persists into the activegraph-compatible SQLite store the viz dashboard reads."
+description = "Rust port of sentinel_bridge.py — tails hook-invocations JSONLs from Claude Code + the codex harness shim and persists into the activegraph-compatible SQLite store the viz dashboard reads. opencode/qwen/gemini shims are dormant behind the extra-harnesses feature."
+
+[features]
+# Default: only claude + codex sessions are tracked. Opt into
+# extra-harnesses to compile the dormant opencode/qwen/gemini
+# shim modules — note the bridge CLI does NOT expose them either
+# way, so revival also requires editing main.rs's Shim enum.
+default = []
+extra-harnesses = []
 
 [[bin]]
 name = "sentinel-bridge"

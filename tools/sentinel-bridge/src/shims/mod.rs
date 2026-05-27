@@ -6,10 +6,20 @@
 //! Ports of the retired Python shims at
 //! tools/sentinel-viz/harness-shims/*.py — same semantics, same
 //! output format, same state-file schema.
+//!
+//! Active: codex only. opencode/qwen/gemini are gated dormant via
+//! `feature = "extra-harnesses"` (the workspace doesn't enable it) —
+//! the files stay compilable on their own for the option to revive
+//! them, but the bridge CLI no longer exposes them. See main.rs's
+//! Shim enum for the allowlist rationale.
 
 pub mod codex;
+
+#[cfg(feature = "extra-harnesses")]
 pub mod gemini;
+#[cfg(feature = "extra-harnesses")]
 pub mod opencode;
+#[cfg(feature = "extra-harnesses")]
 pub mod qwen;
 
 use anyhow::Result;

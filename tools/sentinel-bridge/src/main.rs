@@ -1,10 +1,11 @@
 //! sentinel-bridge — Rust port of tools/sentinel-viz/sentinel_bridge.py
-//! + the four harness-shims/*.py scripts.
+//! + the harness-shims/*.py scripts.
 //!
 //! Two responsibilities:
 //!   1. Run per-harness shims that translate non-Claude session output
-//!      (codex, opencode, qwen, gemini) into the bridge's hook-
-//!      invocation JSONL format.
+//!      (codex only — opencode/qwen/gemini shims still live under
+//!      shims/ but are dormant; see the Shim enum below) into the
+//!      bridge's hook-invocation JSONL format.
 //!   2. Tail every metrics dir's hook-invocations.jsonl + sessions.jsonl
 //!      and persist into the activegraph-compatible SQLite store that
 //!      sentinel-viz-api serves.
@@ -51,41 +52,22 @@ enum Cmd {
     },
 }
 
+// Allowlist: only claude + codex are tracked. opencode/qwen/gemini
+// shims still live under shims/ for the option of revival, but the
+// CLI no longer accepts them as values and `Shim::All` only fires
+// codex. The viz frontend's HARNESSES list mirrors this.
 #[derive(Clone, Debug, clap::ValueEnum)]
 enum Shim {
     Codex,
-    Opencode,
-    Qwen,
-    Gemini,
     All,
 }
 
 fn run_shim(name: &Shim) -> Result<usize> {
     match name {
-        Shim::Codex => shims::codex::run_once(),
-        Shim::Opencode => shims::opencode::run_once(),
-        Shim::Qwen => shims::qwen::run_once(),
-        Shim::Gemini => shims::gemini::run_once(),
-        Shim::All => {
-            let mut n = 0;
-            n += shims::codex::run_once().unwrap_or_else(|e| {
-                warn!("codex shim failed: {e}");
-                0
-            });
-            n += shims::opencode::run_once().unwrap_or_else(|e| {
-                warn!("opencode shim failed: {e}");
-                0
-            });
-            n += shims::qwen::run_once().unwrap_or_else(|e| {
-                warn!("qwen shim failed: {e}");
-                0
-            });
-            n += shims::gemini::run_once().unwrap_or_else(|e| {
-                warn!("gemini shim failed: {e}");
-                0
-            });
-            Ok(n)
-        }
+        Shim::Codex | Shim::All => shims::codex::run_once().or_else(|e| {
+            warn!("codex shim failed: {e}");
+            Ok(0)
+        }),
     }
 }
 
