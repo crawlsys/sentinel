@@ -52,6 +52,7 @@ pub mod pr_auto_monitor;
 pub mod pr_merge_gate;
 pub mod pre_commit_verification;
 pub mod pre_compact;
+pub mod production_action_notice;
 pub mod production_override;
 pub mod pre_push_browser_test;
 pub mod prompt_injection_nudge;
@@ -294,6 +295,7 @@ pub const HOOK_NAMES: &[&str] = &[
     "pre_commit_verification",
     "pre_compact",
     "pre_push_browser_test",
+    "production_action_notice",
     "production_override",
     "prompt_injection_nudge",
     "provenance_validate",

@@ -1459,6 +1459,15 @@ fn handle_pre_tool_use(
     });
     output.merge(&doppler_output);
 
+    // Production-action notice — when the session-wide production override
+    // is armed (see production_override), surface a non-blocking dual-display
+    // notice on any prod-touching mutating tool call so the operator sees each
+    // prod action as it happens. No-op when not armed or on reads/non-prod.
+    let prod_action_output = time_and_record(ctx.fs, &mk_ctx("production_action_notice"), || {
+        hooks::production_action_notice::process(input, state)
+    });
+    output.merge(&prod_action_output);
+
     // Catastrophic escalation — for any tool call classified as
     // Catastrophic, deny locally AND emit SessionBlocked
     // upstream so the consul-side voice gate can run. On retry
