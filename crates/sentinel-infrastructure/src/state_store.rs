@@ -1012,6 +1012,47 @@ mod tests {
         cleanup_session(&sid);
     }
 
+    #[test]
+    fn production_override_survives_save_load_roundtrip() {
+        // The production-override grant is session-wide: it MUST persist across
+        // turns (each UserPromptSubmit save+load), or "armed until lock" would
+        // silently reset every turn. Proves the field round-trips through the
+        // encrypted store + serde, not just in-memory.
+        let sid = test_session_id("prodoverride");
+        cleanup_session(&sid);
+
+        let mut state = SessionState::new(sid.clone());
+        assert!(!state.production_override_armed());
+        state.arm_production_override(Some("production override — hotfix".to_string()));
+        save(&mut state).expect("save armed");
+
+        let loaded = load(&sid).expect("load").expect("should be Some");
+        assert!(
+            loaded.production_override_armed(),
+            "armed grant must survive save/load"
+        );
+        assert_eq!(
+            loaded
+                .production_override
+                .as_ref()
+                .and_then(|o| o.note.as_deref()),
+            Some("production override — hotfix"),
+            "the note must round-trip too"
+        );
+
+        // And a lock must persist as cleared.
+        let mut state2 = loaded;
+        state2.revoke_production_override();
+        save(&mut state2).expect("save locked");
+        let reloaded = load(&sid).expect("load").expect("should be Some");
+        assert!(
+            !reloaded.production_override_armed(),
+            "lock (revoke) must survive save/load"
+        );
+
+        cleanup_session(&sid);
+    }
+
     /// Regression: `save()` must not deadlock when session lock is already held.
     /// The bug: `save()` acquired its own exclusive lock on the same file that
     /// `acquire_session_lock()` already held. On Windows (per-handle, non-reentrant
