@@ -97,7 +97,8 @@ async fn summary_endpoint(
 
 #[derive(serde::Serialize)]
 pub struct ConfigResponse {
-    /// Active model label e.g. "openai:gpt-4o-mini", "local:qwen2.5:1.5b", or "none".
+    /// Active model label e.g. "openai:gpt-4o-mini", "local:qwen2.5:1.5b",
+    /// "vllm:meta-llama/Llama-3.1-405B-Instruct-FP8", or "none".
     pub model: String,
     /// Whether an API key (for OpenAI) is bound. We never echo the key.
     pub has_key: bool,
@@ -116,13 +117,18 @@ async fn get_config(State(state): State<Arc<AppState>>) -> axum::Json<ConfigResp
         Some(crate::llm::ModelConfig::LocalOllama { model, .. }) => {
             (format!("local:{model}"), true)
         }
+        Some(crate::llm::ModelConfig::Vllm { model, .. }) => {
+            // has_key is true for self-hosted vLLM by convention —
+            // we always send a Bearer (placeholder or VLLM_API_KEY).
+            (format!("vllm:{model}"), true)
+        }
     };
     axum::Json(ConfigResponse { model, has_key })
 }
 
 #[derive(serde::Deserialize)]
 pub struct SetConfigBody {
-    /// "none" | "openai:<model>" | "openrouter:<model>" | "local:<model>".
+    /// "none" | "openai:<model>" | "openrouter:<model>" | "local:<model>" | "vllm:<model>".
     pub model: String,
     /// OpenAI API key, only used when model is "openai:*".
     pub openai_api_key: Option<String>,
@@ -132,6 +138,12 @@ pub struct SetConfigBody {
     pub openrouter_api_key: Option<String>,
     /// Optional Ollama URL override (defaults to existing or http://127.0.0.1:11434).
     pub ollama_url: Option<String>,
+    /// Optional vLLM base URL override (defaults to VLLM_BASE_URL
+    /// env or http://127.0.0.1:8000/v1).
+    pub vllm_base_url: Option<String>,
+    /// Optional vLLM bearer override (defaults to VLLM_API_KEY env
+    /// or a placeholder — self-hosted vLLM typically doesn't auth).
+    pub vllm_api_key: Option<String>,
 }
 
 async fn kpis_endpoint(
@@ -201,11 +213,25 @@ async fn set_config(
                 .unwrap_or_else(|| std::env::var("OLLAMA_URL").unwrap_or_else(|_| "http://127.0.0.1:11434".into()));
             Some(ModelConfig::LocalOllama { model, base_url: base })
         }
+        s if s.starts_with("vllm:") => {
+            let model = s.trim_start_matches("vllm:").to_string();
+            let base = body.vllm_base_url
+                .filter(|u| !u.is_empty())
+                .unwrap_or_else(|| {
+                    std::env::var("VLLM_BASE_URL")
+                        .unwrap_or_else(|_| "http://127.0.0.1:8000/v1".into())
+                });
+            let api_key = body.vllm_api_key
+                .filter(|k| !k.is_empty())
+                .or_else(|| std::env::var("VLLM_API_KEY").ok().filter(|k| !k.is_empty()))
+                .unwrap_or_else(|| "sentinel-viz".to_string());
+            Some(ModelConfig::Vllm { model, base_url: base, api_key })
+        }
         other => {
             return Err((
                 StatusCode::BAD_REQUEST,
                 format!(
-                    "model must be 'none', 'openai:*', 'openrouter:*', or 'local:*' — got '{other}'"
+                    "model must be 'none', 'openai:*', 'openrouter:*', 'local:*', or 'vllm:*' — got '{other}'"
                 ),
             ));
         }

@@ -22,7 +22,19 @@ pub enum ModelConfig {
     /// OPENROUTER_API_KEY is set and no other model is named.
     OpenRouter { model: String, api_key: String },
     LocalOllama { model: String, base_url: String },
+    /// Self-hosted vLLM (OpenAI-compatible /v1/chat/completions).
+    /// Used for high-param local summarization models (e.g.
+    /// Llama-3.1-405B-FP8 / Qwen2.5-72B-AWQ on the nighttime box).
+    /// VLLM_BASE_URL points at the host serving /v1; API key is
+    /// optional and defaults to a sentinel placeholder since most
+    /// self-hosted vLLM instances run with auth disabled.
+    Vllm { model: String, base_url: String, api_key: String },
 }
+
+/// Default base URL when SENTINEL_VIZ_NAMING_MODEL=vllm:<model> is
+/// set but no VLLM_BASE_URL is. The operator's own host is the
+/// most likely target so we don't fabricate a public default.
+const DEFAULT_VLLM_BASE_URL: &str = "http://127.0.0.1:8000/v1";
 
 /// Default model when OPENROUTER_API_KEY is set but no
 /// SENTINEL_VIZ_NAMING_MODEL is. Cheap + good at summaries —
@@ -84,6 +96,19 @@ impl ModelConfig {
                     .unwrap_or_else(|_| "http://127.0.0.1:11434".to_string());
                 Some(Self::LocalOllama { model: m, base_url: base })
             }
+            Some(s) if s.starts_with("vllm:") => {
+                let m = s.trim_start_matches("vllm:").to_string();
+                let base = std::env::var("VLLM_BASE_URL")
+                    .unwrap_or_else(|_| DEFAULT_VLLM_BASE_URL.to_string());
+                // vLLM accepts any non-empty Bearer when --api-key
+                // isn't set on the server. Use VLLM_API_KEY if the
+                // operator pinned one, else a placeholder.
+                let key = std::env::var("VLLM_API_KEY")
+                    .ok()
+                    .filter(|k| !k.is_empty())
+                    .unwrap_or_else(|| "sentinel-viz".to_string());
+                Some(Self::Vllm { model: m, base_url: base, api_key: key })
+            }
             Some(other) => {
                 tracing::warn!("unknown SENTINEL_VIZ_NAMING_MODEL '{other}'; disabling LLM features");
                 return None;
@@ -120,6 +145,7 @@ impl ModelConfig {
             Self::OpenAi { model, .. } => format!("openai:{model}"),
             Self::OpenRouter { model, .. } => format!("openrouter:{model}"),
             Self::LocalOllama { model, .. } => format!("local:{model}"),
+            Self::Vllm { model, .. } => format!("vllm:{model}"),
         }
     }
 }
@@ -156,6 +182,13 @@ pub async fn chat(model: &ModelConfig, req: ChatRequest<'_>) -> Result<String> {
             .await
         }
         ModelConfig::LocalOllama { model, base_url } => ollama(model, base_url, &req).await,
+        ModelConfig::Vllm { model, base_url, api_key } => {
+            // vLLM speaks OpenAI's chat/completions wire format
+            // verbatim. No attribution headers needed (self-hosted).
+            // base_url already includes /v1 by operator convention.
+            let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
+            openai_compatible(&url, model, api_key, &req, None).await
+        }
     }
 }
 
