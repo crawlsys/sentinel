@@ -105,14 +105,26 @@ impl LlmEvalScorer {
     where
         F: Fn(&str) -> Option<String>,
     {
+        // Provider selection precedence — mirrors spec_challenge_scorer.
+        // Per-scorer var wins; global SENTINEL_LLM_PREFER acts as the
+        // universal default for operators who want one switch.
         let provider = env("SENTINEL_EVAL_SCORER_PROVIDER")
+            .or_else(|| {
+                env("SENTINEL_LLM_PREFER").and_then(|v| match v.to_lowercase().as_str() {
+                    "local" => Some("ollama".to_string()),
+                    "cloud" => Some("openrouter".to_string()),
+                    _ => None,
+                })
+            })
             .unwrap_or_else(|| DEFAULT_SCORER_PROVIDER.to_string())
             .to_lowercase();
         match provider.as_str() {
             "openrouter" => Self::openrouter_from_env_with(env),
             "ollama" => Self::ollama_from_env_with(env),
             other => Err(anyhow::anyhow!(
-                "unknown SENTINEL_EVAL_SCORER_PROVIDER={other:?}; expected one of: openrouter, ollama"
+                "unknown eval scorer provider {other:?}; expected one of: \
+                 openrouter, ollama. Set SENTINEL_EVAL_SCORER_PROVIDER or \
+                 SENTINEL_LLM_PREFER (=local|cloud)."
             )),
         }
     }
@@ -524,7 +536,7 @@ mod tests {
             _ => None,
         });
         let err = result.unwrap_err();
-        assert!(err.to_string().contains("unknown SENTINEL_EVAL_SCORER_PROVIDER"));
+        assert!(err.to_string().contains("unknown eval scorer provider"));
     }
 
     #[test]

@@ -161,13 +161,17 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
     let real_process = sentinel_infrastructure::process::RealProcess;
     let real_env = sentinel_infrastructure::env::RealEnv;
 
-    // Construct LLM adapter. STANDARDIZED on Rig + OpenRouter
-    // (`OPENROUTER_API_KEY`) — the same gateway the adversarial judge uses.
-    // No direct-vendor SDK path. `None` if the key is unset.
+    // Construct LLM adapter via the unified router. The router
+    // probes `OLLAMA_HOST` (defaults to localhost:11434) on
+    // startup; if it returns a non-empty `/v1/models` list within
+    // `PROBE_TIMEOUT`, all hook LLM traffic routes there.
+    // Otherwise falls back to OpenRouter (`OPENROUTER_API_KEY`).
+    // `None` only when both are unavailable.
+    //
+    // `SENTINEL_LLM_PREFER={local,cloud,auto}` forces a specific
+    // backend; default is `auto`.
     let llm: Option<Arc<dyn LlmPort>> =
-        sentinel_infrastructure::openrouter_llm::OpenRouterLlm::from_env()
-            .ok()
-            .map(|c| Arc::new(c) as Arc<dyn LlmPort>);
+        sentinel_infrastructure::llm_router::LlmRouter::default_port().await;
 
     // Construct memory-mcp client (always present; reads MEMORY_MCP_CMD /
     // MEMORY_MCP_TIMEOUT_SECS from env, defaults handled by from_env).

@@ -193,14 +193,27 @@ impl RigAuditor {
     where
         F: Fn(&str) -> Option<String>,
     {
+        // Provider precedence: per-auditor var → global
+        // SENTINEL_LLM_PREFER → default. Matches the
+        // spec_challenge / eval_scorer pattern so operators only
+        // need ONE env knob to flip all three.
         let provider = env("SENTINEL_AUDITOR_PROVIDER")
+            .or_else(|| {
+                env("SENTINEL_LLM_PREFER").and_then(|v| match v.to_lowercase().as_str() {
+                    "local" => Some("ollama".to_string()),
+                    "cloud" => Some("openrouter".to_string()),
+                    _ => None,
+                })
+            })
             .unwrap_or_else(|| DEFAULT_AUDITOR_PROVIDER.to_string())
             .to_lowercase();
         match provider.as_str() {
             "openrouter" => Self::openrouter_from_env_with(env),
             "ollama" => Self::ollama_from_env_with(env),
             other => Err(anyhow::anyhow!(
-                "unknown SENTINEL_AUDITOR_PROVIDER={other:?}; expected one of: openrouter, ollama"
+                "unknown auditor provider {other:?}; expected one of: \
+                 openrouter, ollama. Set SENTINEL_AUDITOR_PROVIDER or \
+                 SENTINEL_LLM_PREFER (=local|cloud)."
             )),
         }
     }

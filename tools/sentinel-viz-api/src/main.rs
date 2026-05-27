@@ -30,14 +30,21 @@ async fn main() -> Result<()> {
         // the visible row count tight even at this size.
         .unwrap_or(750);
 
+    // Build LLM state up-front: NamingState/SummaryState now probe
+    // the local backend (`OLLAMA_HOST`) before deciding whether to
+    // route to local Ollama or fall through to OpenRouter. The
+    // probe is async + bounded by PROBE_TIMEOUT_MS (1.5s) so total
+    // startup cost is at most ~3s when both probes time out.
+    let naming = sentinel_viz_api::naming::NamingState::from_env().await;
+    let summary = sentinel_viz_api::summary::SummaryState::from_env().await;
     let state = Arc::new(AppState {
         db_path: db_path.clone(),
         window_limit,
         started_at: Instant::now(),
         cache: std::sync::RwLock::new(Vec::new()),
         activity_cache: std::sync::RwLock::new(Vec::new()),
-        naming: sentinel_viz_api::naming::NamingState::from_env(),
-        summary: sentinel_viz_api::summary::SummaryState::from_env(),
+        naming,
+        summary,
     });
 
     let app = sentinel_viz_api::server::router(state);

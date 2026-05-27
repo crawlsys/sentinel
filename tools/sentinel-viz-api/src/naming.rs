@@ -59,11 +59,11 @@ pub struct NamingState {
 }
 
 impl NamingState {
-    pub fn from_env() -> Self {
+    pub async fn from_env() -> Self {
         Self {
             cache: RwLock::new(HashMap::new()),
             recent_calls: RwLock::new(Vec::new()),
-            model: RwLock::new(ModelConfig::from_env()),
+            model: RwLock::new(ModelConfig::from_env().await),
         }
     }
 
@@ -527,14 +527,23 @@ mod tests {
         assert_ne!(fingerprint("a"), fingerprint("b"));
     }
 
-    #[test]
-    fn from_env_none_means_no_naming() {
+    #[tokio::test]
+    async fn from_env_none_means_no_naming() {
         // SAFETY: tests in this file are not parallelised; this is fine.
         unsafe {
             std::env::remove_var("SENTINEL_VIZ_NAMING_MODEL");
+            // Force cloud mode so we don't accidentally probe a
+            // local Ollama that might be running on the test host.
+            std::env::set_var("SENTINEL_LLM_PREFER", "cloud");
+            std::env::remove_var("OPENROUTER_API_KEY");
+            std::env::set_var("HOME", "/nonexistent-test-home");
         }
-        let s = NamingState::from_env();
+        let s = NamingState::from_env().await;
         assert!(s.model.read().unwrap().is_none());
+        unsafe {
+            std::env::remove_var("SENTINEL_LLM_PREFER");
+            std::env::remove_var("HOME");
+        }
     }
 
     #[test]

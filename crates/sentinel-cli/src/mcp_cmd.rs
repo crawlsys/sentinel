@@ -1001,15 +1001,21 @@ async fn handle_delegate(
         .filter(|&n| n > 0)
         .unwrap_or(DEFAULT_MAX_TOKENS);
 
-    let llm = match sentinel_infrastructure::openrouter_llm::OpenRouterLlm::from_env() {
-        Ok(l) => l,
-        Err(e) => {
+    // Route through the unified LlmRouter. Falls through local →
+    // OpenRouter per `SENTINEL_LLM_PREFER` (default `auto`).
+    // Surfaces an actionable error including the router decision
+    // (`backend=None`, `reason=...`) when neither backend is up.
+    let router = sentinel_infrastructure::llm_router::LlmRouter::from_env().await;
+    let llm = match router.port() {
+        Some(p) => p,
+        None => {
+            let reason = router.decision().reason.clone();
             return JsonRpcResponse::success(
                 request.id.clone(),
                 mcp_tool_result(
                     false,
                     serde_json::json!({
-                        "error": format!("worker delegation unavailable: {e} (set OPENROUTER_API_KEY)")
+                        "error": format!("worker delegation unavailable: {reason} (set OLLAMA_HOST for local, OPENROUTER_API_KEY for cloud)")
                     }),
                 ),
             );
@@ -1022,7 +1028,7 @@ async fn handle_delegate(
         context: context.to_string(),
         max_tokens,
     };
-    match delegate(&llm, &req).await {
+    match delegate(&*llm, &req).await {
         Ok(res) => JsonRpcResponse::success(
             request.id.clone(),
             mcp_tool_result(

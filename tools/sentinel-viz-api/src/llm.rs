@@ -65,8 +65,41 @@ fn load_openrouter_key_from_disk() -> Option<String> {
     }
 }
 
+/// Default local-LLM host. Matches the env contract used by the
+/// sentinel router in `crates/sentinel-infrastructure/llm_router.rs`
+/// — same env vars (`OLLAMA_HOST`, `SENTINEL_LLM_PREFER`,
+/// `OLLAMA_MODEL_*`) so flipping ONE knob switches ALL consumers
+/// (hooks, delegates, viz naming/summary) between local and cloud.
+const DEFAULT_OLLAMA_HOST: &str = "http://localhost:11434";
+
+/// Default local model. Mirrors the homelab `ollama-research`
+/// chart's planned model (qwen3-coder:30b on nighttime's RTX 6000
+/// via NodePort 31435). Operators serving a different model
+/// override via `OLLAMA_MODEL` (or the legacy
+/// `SENTINEL_VIZ_NAMING_MODEL=local:<model>` scheme).
+const DEFAULT_LOCAL_MODEL: &str = "qwen3-coder:30b";
+
+/// How long the startup probe waits before giving up on local.
+/// Matches the router's `PROBE_TIMEOUT` constant. Kept inline
+/// (no shared crate dep) because viz-api is its own workspace.
+const PROBE_TIMEOUT_MS: u64 = 1500;
+
 impl ModelConfig {
-    pub fn from_env() -> Option<Self> {
+    /// Construct from env. Selection order:
+    ///
+    ///   1. `SENTINEL_VIZ_NAMING_MODEL=<scheme>:<model>` — explicit
+    ///      legacy override. Still honoured for backwards-compat
+    ///      and per-deployment forcing.
+    ///   2. `SENTINEL_LLM_PREFER=local` — force local; fail rather
+    ///      than fall back (no surprise cloud spend).
+    ///   3. `SENTINEL_LLM_PREFER=cloud` — force OpenRouter,
+    ///      skip the local probe.
+    ///   4. Default `auto`: probe local at `OLLAMA_HOST` (default
+    ///      localhost:11434); if `/api/tags` returns a non-empty
+    ///      list, route there. Else fall through to OpenRouter
+    ///      (env or on-disk key fallback).
+    pub async fn from_env() -> Option<Self> {
+        // Path 1: explicit legacy override always wins.
         let raw = std::env::var("SENTINEL_VIZ_NAMING_MODEL").ok();
         let explicit = match raw.as_deref() {
             None | Some("") | Some("none") => None,
@@ -92,17 +125,13 @@ impl ModelConfig {
             }
             Some(s) if s.starts_with("local:") => {
                 let m = s.trim_start_matches("local:").to_string();
-                let base = std::env::var("OLLAMA_URL")
-                    .unwrap_or_else(|_| "http://127.0.0.1:11434".to_string());
+                let base = local_base_url();
                 Some(Self::LocalOllama { model: m, base_url: base })
             }
             Some(s) if s.starts_with("vllm:") => {
                 let m = s.trim_start_matches("vllm:").to_string();
                 let base = std::env::var("VLLM_BASE_URL")
                     .unwrap_or_else(|_| DEFAULT_VLLM_BASE_URL.to_string());
-                // vLLM accepts any non-empty Bearer when --api-key
-                // isn't set on the server. Use VLLM_API_KEY if the
-                // operator pinned one, else a placeholder.
                 let key = std::env::var("VLLM_API_KEY")
                     .ok()
                     .filter(|k| !k.is_empty())
@@ -116,15 +145,45 @@ impl ModelConfig {
         };
 
         if let Some(cfg) = explicit {
+            tracing::info!(label = %cfg.label(), "viz LLM: using explicit SENTINEL_VIZ_NAMING_MODEL override");
             return Some(cfg);
         }
 
-        // Default for the entire instance: if the operator has set
-        // OPENROUTER_API_KEY OR has the key on disk at
-        // ~/.config/openrouter/api_key (operator convention),
-        // wire up a cheap+good summary model. The on-disk path
-        // means the API picks the right key across reboots /
-        // launch contexts without needing the env to be in scope.
+        // Path 2/3/4: unified router behaviour. Synchronous —
+        // viz-api startup is allowed a short blocking probe.
+        let pref = match std::env::var("SENTINEL_LLM_PREFER").as_deref() {
+            Ok("local" | "Local" | "LOCAL") => LlmPreference::Local,
+            Ok("cloud" | "Cloud" | "CLOUD") => LlmPreference::Cloud,
+            _ => LlmPreference::Auto,
+        };
+
+        if pref != LlmPreference::Cloud {
+            // Try local. Reusing a tokio blocking probe — viz-api's
+            // `from_env()` is called once at startup so the cost is
+            // bounded.
+            let base = local_base_url();
+            if probe_local(&base).await {
+                let model = std::env::var("OLLAMA_MODEL")
+                    .unwrap_or_else(|_| DEFAULT_LOCAL_MODEL.to_string());
+                tracing::info!(
+                    base_url = %base, %model,
+                    "viz LLM: local healthy, routing naming/summary traffic to it"
+                );
+                return Some(Self::LocalOllama { model, base_url: base });
+            }
+            if pref == LlmPreference::Local {
+                tracing::warn!(
+                    "SENTINEL_LLM_PREFER=local but local probe failed at {base}; viz LLM disabled"
+                );
+                return None;
+            }
+            tracing::info!(
+                base_url = %base,
+                "viz LLM: local unreachable, falling back to OpenRouter"
+            );
+        }
+
+        // OpenRouter fallback (path 3 explicit, or path 4 auto-fallthrough).
         let key = std::env::var("OPENROUTER_API_KEY")
             .ok()
             .filter(|k| !k.is_empty())
@@ -132,11 +191,10 @@ impl ModelConfig {
         if let Some(k) = key {
             let m = std::env::var("SENTINEL_VIZ_NAMING_MODEL_DEFAULT")
                 .unwrap_or_else(|_| DEFAULT_OPENROUTER_MODEL.to_string());
-            tracing::info!(
-                "no explicit SENTINEL_VIZ_NAMING_MODEL set; defaulting to openrouter:{m}"
-            );
+            tracing::info!("viz LLM: routing to openrouter:{m}");
             return Some(Self::OpenRouter { model: m, api_key: k });
         }
+        tracing::warn!("viz LLM: no backend available (no local, no OPENROUTER_API_KEY)");
         None
     }
 
@@ -148,6 +206,67 @@ impl ModelConfig {
             Self::Vllm { model, .. } => format!("vllm:{model}"),
         }
     }
+}
+
+/// Operator preference for backend selection. Mirrors the sentinel
+/// router's enum so the env contract is identical across both
+/// codebases.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LlmPreference {
+    Auto,
+    Local,
+    Cloud,
+}
+
+/// Resolve the local-LLM base URL from env. Prefers the new
+/// `OLLAMA_HOST` (matches the sentinel router + homelab chart)
+/// but accepts the legacy `OLLAMA_URL` for backwards-compat with
+/// existing viz-api deployments. Trailing slashes are stripped
+/// so callers can append `/v1` or `/api/tags` without
+/// double-slashing.
+fn local_base_url() -> String {
+    let raw = std::env::var("OLLAMA_HOST")
+        .or_else(|_| std::env::var("OLLAMA_URL"))
+        .unwrap_or_else(|_| DEFAULT_OLLAMA_HOST.to_string());
+    raw.trim_end_matches('/').to_string()
+}
+
+/// Local-LLM health probe. GETs `<base>/api/tags` (Ollama's native
+/// list-loaded-models endpoint — works whether the server is real
+/// Ollama or a vLLM serving the Ollama-compat shim) and returns
+/// true when:
+///   - HTTP 200
+///   - body parses as JSON with a `models` array
+///   - the array is non-empty
+///
+/// Anything else → false (route to cloud or disable).
+///
+/// Pulled out of `from_env` because the probe is async (no
+/// blocking-reqwest feature in viz-api's reqwest config). Callers
+/// drive it from an existing tokio context.
+async fn probe_local(base: &str) -> bool {
+    let url = format!("{base}/api/tags");
+    let client = match reqwest::Client::builder()
+        .timeout(Duration::from_millis(PROBE_TIMEOUT_MS))
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    let resp = match client.get(&url).send().await {
+        Ok(r) => r,
+        Err(_) => return false,
+    };
+    if !resp.status().is_success() {
+        return false;
+    }
+    let body: serde_json::Value = match resp.json().await {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+    body.get("models")
+        .and_then(|v| v.as_array())
+        .is_some_and(|arr| !arr.is_empty())
 }
 
 #[derive(Debug, Clone)]

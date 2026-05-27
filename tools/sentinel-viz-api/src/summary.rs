@@ -92,9 +92,9 @@ struct CacheEntry {
 }
 
 impl SummaryState {
-    pub fn from_env() -> Self {
+    pub async fn from_env() -> Self {
         Self {
-            model: RwLock::new(ModelConfig::from_env()),
+            model: RwLock::new(ModelConfig::from_env().await),
             cache: RwLock::new(HashMap::new()),
             recent_calls: RwLock::new(Vec::new()),
         }

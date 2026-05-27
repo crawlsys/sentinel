@@ -110,15 +110,37 @@ impl LlmSpecChallengeScorer {
     where
         F: Fn(&str) -> Option<String>,
     {
+        // Provider selection precedence:
+        //   1. Scorer-specific `SENTINEL_SPEC_CHALLENGE_SCORER_PROVIDER`
+        //      (explicit, wins).
+        //   2. Global `SENTINEL_LLM_PREFER` (the unified router's
+        //      knob — matches hooks, delegates, viz). `local` →
+        //      ollama, `cloud` → openrouter, `auto` → openrouter
+        //      here (the scorer doesn't carry the router's
+        //      probe-and-fallback logic; if you want auto-probe
+        //      behaviour, set `local` explicitly and the run will
+        //      hard-fail when ollama isn't up — which is the
+        //      correct behaviour for a scorer whose verdict
+        //      gates merges).
+        //   3. `DEFAULT_SCORER_PROVIDER` (today: openrouter).
         let provider = env("SENTINEL_SPEC_CHALLENGE_SCORER_PROVIDER")
+            .or_else(|| {
+                env("SENTINEL_LLM_PREFER").and_then(|v| match v.to_lowercase().as_str() {
+                    "local" => Some("ollama".to_string()),
+                    "cloud" => Some("openrouter".to_string()),
+                    _ => None, // "auto" / unknown → fall through to default
+                })
+            })
             .unwrap_or_else(|| DEFAULT_SCORER_PROVIDER.to_string())
             .to_lowercase();
         match provider.as_str() {
             "openrouter" => Self::openrouter_from_env_with(env),
             "ollama" => Self::ollama_from_env_with(env),
             other => Err(anyhow::anyhow!(
-                "unknown SENTINEL_SPEC_CHALLENGE_SCORER_PROVIDER={other:?}; \
-                 expected one of: openrouter, ollama"
+                "unknown spec-challenge scorer provider {other:?}; \
+                 expected one of: openrouter, ollama. Set either \
+                 SENTINEL_SPEC_CHALLENGE_SCORER_PROVIDER or \
+                 SENTINEL_LLM_PREFER (=local|cloud)."
             )),
         }
     }
@@ -508,7 +530,7 @@ mod tests {
             _ => None,
         });
         let err = result.unwrap_err();
-        assert!(err.to_string().contains("unknown SENTINEL_SPEC_CHALLENGE_SCORER_PROVIDER"));
+        assert!(err.to_string().contains("unknown spec-challenge scorer provider"));
     }
 
     #[test]
