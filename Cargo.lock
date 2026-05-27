@@ -3300,6 +3300,7 @@ dependencies = [
  "reqwest 0.12.28",
  "sentinel-application",
  "sentinel-domain",
+ "sentinel-graph",
  "sentinel-infrastructure",
  "sentinel-legatus",
  "serde",

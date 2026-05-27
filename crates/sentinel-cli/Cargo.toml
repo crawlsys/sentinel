@@ -21,6 +21,7 @@ sentinel-domain = { workspace = true }
 sentinel-application = { workspace = true }
 sentinel-infrastructure = { workspace = true }
 sentinel-legatus = { path = "../sentinel-legatus" }
+sentinel-graph = { path = "../sentinel-graph" }
 uuid = { workspace = true }
 tokio = { workspace = true }
 clap = { workspace = true }

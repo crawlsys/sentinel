@@ -1179,6 +1179,22 @@ async fn handle_submit_phase(
         }
     }
 
+    // Phase-engine shadow: when SENTINEL_GRAPH_ENGINE=1, drive the
+    // langgraph-core phase graph as the authoritative, durable checkpoint
+    // for this verdict. Runs alongside the legacy advance_sequential
+    // (which proof_engine still performs) until step 5 flips authority.
+    // Best-effort: a graph error never blocks the judge result.
+    if std::env::var("SENTINEL_GRAPH_ENGINE").as_deref() == Ok("1") {
+        let passed = proof_result.is_ok();
+        let session_id = { state.read().await.session_id.clone() };
+        if let Err(e) =
+            apply_graph_verdict_shadow(&skill, &session_id, &phase_id, passed).await
+        {
+            warn!(skill = %skill, phase = %phase_id, error = %e,
+                "phase-graph shadow update failed (non-fatal)");
+        }
+    }
+
     match proof_result {
         Ok(_) => {
             // SUCCESS — minimal info, no judge reasoning exposed
@@ -1202,6 +1218,46 @@ async fn handle_submit_phase(
             )
         }
     }
+}
+
+/// Drive the langgraph-core phase graph for a single judge verdict.
+///
+/// Compiles the skill's workflow into a checkpointed graph (sqlite under
+/// `~/.claude/sentinel/state/phase-graphs/{session}.db`) and records the
+/// verdict via `apply_verdict`, which advances on pass / loops back on fail.
+/// This is the durable authority for phase progression that powers
+/// time-travel and streaming; it mirrors the `WorkflowState` transition the
+/// legacy `advance_sequential` produces.
+async fn apply_graph_verdict_shadow(
+    skill: &str,
+    session_id: &str,
+    phase_id: &str,
+    passed: bool,
+) -> anyhow::Result<()> {
+    let workflow_configs = load_workflow_configs();
+    let Some(workflow) = workflow_configs.get(skill) else {
+        // No workflow definition — nothing to drive.
+        return Ok(());
+    };
+
+    let db_dir = sentinel_infrastructure::config::config_dir()
+        .parent()
+        .map(|p| p.join("state").join("phase-graphs"))
+        .ok_or_else(|| anyhow::anyhow!("cannot resolve sentinel state dir"))?;
+    std::fs::create_dir_all(&db_dir)?;
+    let db_path = db_dir.join(format!("{session_id}.db"));
+    let db_path = db_path.to_string_lossy().to_string();
+
+    let saver = sentinel_graph::phase_saver(&db_path)
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let graph = sentinel_graph::compile_skill_graph(workflow, saver)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    graph
+        .apply_verdict(skill, session_id, phase_id, passed)
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    Ok(())
 }
 
 /// Helper: Load skill steps config from the config directory
