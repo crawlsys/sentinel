@@ -11,7 +11,7 @@ import type { RecentEvent } from "../../types/api";
 // tests of pin behaviour that assume the events are "current".
 const FROZEN_NOW = new Date("2026-05-26T00:01:00Z");
 beforeEach(() => {
-  vi.useFakeTimers({ shouldAdvanceTime: false });
+  vi.useFakeTimers({ toFake: ["Date"] });
   vi.setSystemTime(FROZEN_NOW);
 });
 afterEach(() => {
@@ -334,12 +334,16 @@ describe("EventTicker", () => {
       // later because pinning had no recency gate. With PIN_TTL_MS
       // = 30 min, an event timestamped 31 min before "now" must
       // fall back into the normal stream rather than squat the top.
-      vi.setSystemTime(new Date("2026-05-26T00:35:00Z")); // 35 min after fixtures
+      // Now is 45 min after the stale deny — past both PIN_TTL_MS
+      // (30 min) AND DECAY_TTL_MS (5 min). The stale deny therefore
+      // (a) doesn't pin and (b) decays out of the stream. Only the
+      // fresh tc-r row remains.
+      vi.setSystemTime(new Date("2026-05-26T00:45:00Z"));
       const staleDeny: RecentEvent[] = [
         {
           seq: 1,
           type: "sentinel.hook_ingested",
-          ts: "2026-05-26T00:00:00Z", // 35 min old → past TTL
+          ts: "2026-05-26T00:00:00Z", // 45 min old → past both TTLs
           payload: {
             session_id: "sess-old",
             sentinel_event: "PreToolUse",
@@ -351,23 +355,110 @@ describe("EventTicker", () => {
         {
           seq: 2,
           type: "sentinel.tool_call_observed",
-          ts: "2026-05-26T00:34:30Z", // 30s old → fresh
+          ts: "2026-05-26T00:44:30Z", // 30s old → fresh
           payload: {
             session_id: "sess-fresh",
             sentinel_event: "PreToolUse",
             tool: "Read",
             tool_call_id: "SentinelToolCall#tc-r",
-            ts_sec: "2026-05-26T00:34:30",
+            ts_sec: "2026-05-26T00:44:30",
           },
         },
       ];
       render(<EventTicker events={staleDeny} onSelectNode={() => {}} />);
-      const rows = screen.getByTestId("ticker-rows").querySelectorAll("li");
-      // The stale deny exists but no longer has the intervention-row class.
+      // Direct children only — avoids RolledPreview nested <li>s if
+      // they happen to render under any row in this fixture.
+      const rows = screen.getByTestId("ticker-rows").children;
       const interventionRows = screen.getByTestId("ticker-rows").querySelectorAll("li.intervention-row");
       expect(interventionRows.length).toBe(0);
-      // Both events still render, just no pin class.
-      expect(rows.length).toBe(2);
+      // Stale deny is decayed out — only the fresh tc-r row remains.
+      expect(rows.length).toBe(1);
+    });
+
+    it("intervention decay drops an unpinned deny once DECAY_NEWER_EVENT_COUNT same-session newer events arrive", () => {
+      // Three distinct sessions each fire one deny — pin cap is 2,
+      // so the third session's deny is forced into the normal stream.
+      // Then that third session produces 3 newer tool-call events.
+      // Decay should drop the deny entirely; the 3 newer events
+      // collapse to one ×3 Bash row. Operator scenario: a long-
+      // finished teammate process whose deny is no longer current
+      // context but used to sit in the ticker forever.
+      vi.setSystemTime(new Date("2026-05-26T00:02:00Z"));
+      // buildRows iterates events NEWEST → OLDEST (lower index =
+      // older). So the fixture is laid out oldest-first by index so
+      // pin order matches iteration order: sess-decay's deny is the
+      // OLDEST entry (index 0) and arrives at the pin gate LAST,
+      // after sess-pin-1 + sess-pin-2 have filled the cap.
+      const events: RecentEvent[] = [
+        // OLDEST — sess-decay's deny. Gets visited last by the pin
+        // gate, falls through past the cap, then decays because
+        // sess-decay has 3 newer events.
+        {
+          seq: 1,
+          type: "sentinel.hook_ingested",
+          ts: "2026-05-26T00:00:00Z",
+          payload: {
+            session_id: "sess-decay",
+            sentinel_event: "PreToolUse",
+            hook: "tool_usage_gate",
+            outcome: "deny",
+            ts: "2026-05-26T00:00:00",
+          },
+        },
+        // sess-pin-1 deny — pins (visited second-to-last).
+        {
+          seq: 2,
+          type: "sentinel.hook_ingested",
+          ts: "2026-05-26T00:00:30Z",
+          payload: {
+            session_id: "sess-pin-1",
+            sentinel_event: "PreToolUse",
+            hook: "tool_usage_gate",
+            outcome: "deny",
+            ts: "2026-05-26T00:00:30",
+          },
+        },
+        // sess-pin-2 deny — pins (visited third-to-last, before
+        // sess-pin-1 in iteration order since it's newer).
+        {
+          seq: 3,
+          type: "sentinel.hook_ingested",
+          ts: "2026-05-26T00:00:45Z",
+          payload: {
+            session_id: "sess-pin-2",
+            sentinel_event: "PreToolUse",
+            hook: "tool_usage_gate",
+            outcome: "deny",
+            ts: "2026-05-26T00:00:45",
+          },
+        },
+        // 3 newer events on sess-decay — newest, visited first.
+        // These bump the per-session newer-count past the decay
+        // threshold so sess-decay's deny gets dropped.
+        ...[1, 2, 3].map((i): RecentEvent => ({
+          seq: i + 10,
+          type: "sentinel.tool_call_observed",
+          ts: `2026-05-26T00:01:0${i}Z`,
+          payload: {
+            session_id: "sess-decay",
+            sentinel_event: "PreToolUse",
+            tool: "Bash",
+            tool_call_id: `SentinelToolCall#tc-${i}`,
+            ts_sec: `2026-05-26T00:01:0${i}`,
+          },
+        })),
+      ];
+      render(<EventTicker events={events} onSelectNode={() => {}} />);
+      // Only the two pinned denies remain visible as interventions —
+      // the third was decayed out of the stream entirely.
+      const interventionRows = screen.getByTestId("ticker-rows").querySelectorAll("li.intervention-row");
+      expect(interventionRows.length).toBe(2);
+      // Count DIRECT children of ticker-rows only — RolledPreview
+      // nests its own <li>s, and the tc-rollup will render up to 3
+      // preview lines under it. We care about top-level row count.
+      const topLevelRows = screen.getByTestId("ticker-rows").children;
+      // 2 pinned denies + 1 sess-decay tc rollup = 3 top-level rows.
+      expect(topLevelRows.length).toBe(3);
     });
 
     it("pin cap (PIN_MAX_PER_CLASS) bounds intervention pins to N per render", () => {

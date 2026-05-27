@@ -137,6 +137,23 @@ const MAX_TOOLS_IN_LABEL = 4;
 export const PIN_TTL_MS = 30 * 60 * 1000;
 export const PIN_MAX_PER_CLASS = 2;
 
+/// Intervention-row decay. Once a deny/inject/block/force_stop row
+/// has aged out of the pin region, it normally falls back into the
+/// stream and persists forever like any other event. Operator
+/// feedback: 90-min-old denies are legit but unactionable; show
+/// momentarily, then let them fall off on activity OR inactivity.
+///
+/// Two triggers — whichever fires first drops the row entirely:
+///   1. DECAY_TTL_MS — wall-clock age past 5 minutes.
+///   2. DECAY_NEWER_EVENT_COUNT — the same session has produced
+///      this many newer events since the intervention. The session
+///      has demonstrably moved on; the deny isn't current context.
+///
+/// Only applies to non-pinned intervention rows. Pinned rows are
+/// already bounded by PIN_TTL_MS and PIN_MAX_PER_CLASS above.
+export const DECAY_TTL_MS = 5 * 60 * 1000;
+export const DECAY_NEWER_EVENT_COUNT = 3;
+
 /// Render the label for a rolled-up row. Single-tool rows render
 /// the tool name directly; multi-tool rows render up to N distinct
 /// tools comma-separated, then "+M more". The label still fits in
@@ -322,6 +339,56 @@ export function EventTicker({ events, onSelectNode, sessionColors, stuckMeta, do
       const t = new Date(ts).getTime();
       return Number.isFinite(t) && now - t < PIN_TTL_MS;
     };
+    // Precompute per-session timestamp arrays so the decay check
+    // can ask "how many same-session events are newer than this
+    // intervention?" in O(log N) lookup per row. Built once per
+    // memo run.
+    //
+    // Crucially we walk per-row MEMBERS, not rows themselves: an
+    // already-collapsed `×9 Bash` row contributes 9 timestamps, not
+    // 1. Otherwise a sea of soft-rolled tool-call activity would
+    // count as a single newer-event and never trigger the decay
+    // threshold — defeating the whole point of "the session has
+    // moved on".
+    const tsBySession = new Map<string, number[]>();
+    for (const r of augmentedRows) {
+      if (!r.sessionId) continue;
+      let arr = tsBySession.get(r.sessionId);
+      if (!arr) {
+        arr = [];
+        tsBySession.set(r.sessionId, arr);
+      }
+      for (const m of r.members) {
+        const t = new Date(m.ts).getTime();
+        if (Number.isFinite(t)) arr.push(t);
+      }
+    }
+    for (const arr of tsBySession.values()) arr.sort((a, b) => a - b);
+    const newerCount = (sid: string, ts: number): number => {
+      const arr = tsBySession.get(sid);
+      if (!arr) return 0;
+      // Binary search for the first index strictly greater than ts.
+      let lo = 0;
+      let hi = arr.length;
+      while (lo < hi) {
+        const mid = (lo + hi) >>> 1;
+        if (arr[mid] > ts) hi = mid;
+        else lo = mid + 1;
+      }
+      return arr.length - lo;
+    };
+    // Returns true when an intervention row has aged past both the
+    // pin window AND either its decay TTL or the newer-event count
+    // — at which point it stops earning ticker space entirely. Stuck
+    // pins are NOT decayed: a stuck session is signal even when old.
+    const isDecayedIntervention = (r: typeof augmentedRows[number]): boolean => {
+      if (!r.isIntervention || !r.sessionId) return false;
+      const t = new Date(r.ts).getTime();
+      if (!Number.isFinite(t)) return true; // undated intervention — drop
+      if (now - t > DECAY_TTL_MS) return true;
+      if (newerCount(r.sessionId, t) >= DECAY_NEWER_EVENT_COUNT) return true;
+      return false;
+    };
 
     for (const r of augmentedRows) {
       const fresh = isFresh(r.ts);
@@ -350,6 +417,15 @@ export function EventTicker({ events, onSelectNode, sessionColors, stuckMeta, do
         intervPin.push(r);
         continue;
       }
+      // Decay gate. An intervention row that wasn't pinned (past
+      // TTL, past per-class cap, or already had a fresher pin from
+      // this session) is dropped entirely once it's aged past
+      // DECAY_TTL_MS OR the session has fired DECAY_NEWER_EVENT_COUNT
+      // newer events. The operator screenshot showed three 1h-20m-old
+      // `Write · about to run · deny` rows from a long-finished
+      // teammate process; under this rule those drop the moment the
+      // session's next 3 events land (or 5 min after, whichever first).
+      if (isDecayedIntervention(r)) continue;
       rest.push(r);
     }
     return {

@@ -1,9 +1,26 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { fireEvent, render, screen } from "@testing-library/react";
 
 import { EventTicker, shouldShowSubLine, compactSummaryFor } from "../../components/EventTicker";
 import { indexActivity, _resetActivityCache } from "../../adapters/activity-cache";
 import type { ActivityResponse, RecentEvent } from "../../types/api";
+
+// Match EventTicker.test.tsx: freeze wall-clock just after the
+// fixture timestamps so pin TTL + intervention decay treat them
+// as fresh. Real `Date.now()` would put fixtures 1+ days in the
+// past — fine for production but breaks tests that assume the
+// events are "current".
+const FROZEN_NOW = new Date("2026-05-26T00:01:00Z");
+beforeEach(() => {
+  // Fake only Date so pin TTL / decay gates see the frozen "now",
+  // without freezing setTimeout/setInterval — RTL's findBy* helpers
+  // rely on real timers to poll.
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(FROZEN_NOW);
+});
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 /// P3-24: smarter rollup. Adjacent ROUTINE claude tool-call events
 /// in the same session+category collapse into a single row whose
