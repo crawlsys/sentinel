@@ -8,6 +8,7 @@ members = [
     "crates/sentinel-git-interceptor",
     "crates/sentinel-npx-interceptor",
     "crates/sentinel-legatus",
+    "crates/sentinel-graph",
 ]
 
 [workspace.package]
