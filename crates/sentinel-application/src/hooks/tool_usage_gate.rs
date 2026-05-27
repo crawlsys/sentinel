@@ -111,6 +111,39 @@ pub fn detect_plan_mode_from_transcript(fs: &dyn FileSystemPort, transcript_path
     false
 }
 
+/// Detect whether the session was spawned via Claude Code SDK (vs the
+/// interactive host). SDK transcripts carry `entrypoint: "sdk-cli"` on
+/// their event lines — set by the harness when constructing each
+/// JSONL entry. The check scans up to `SDK_DETECT_LINE_BUDGET` lines
+/// (a constant cap so a multi-MB transcript doesn't slow the hook);
+/// SDK origin is part of the session's identity from the very first
+/// event, so we don't need to walk the whole file.
+///
+/// Public for tests; the production caller threads through
+/// `input.transcript_path`.
+const SDK_DETECT_LINE_BUDGET: usize = 64;
+
+pub fn is_sdk_session_transcript(fs: &dyn FileSystemPort, transcript_path: &Path) -> bool {
+    let content = match fs.read_to_string(transcript_path) {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    for line in content.lines().take(SDK_DETECT_LINE_BUDGET) {
+        // Fast string sniff first — most lines don't contain
+        // `entrypoint` and JSON parsing per line is expensive.
+        if !line.contains("\"entrypoint\"") {
+            continue;
+        }
+        let Ok(entry) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if entry.get("entrypoint").and_then(|v| v.as_str()) == Some("sdk-cli") {
+            return true;
+        }
+    }
+    false
+}
+
 /// How recent a plan file must be to count as "approved this session".
 /// Owned by the domain layer so the freshness policy lives next to other
 /// time-window constants (`STALE_SESSION_EVENTS_AGE`, `DEP_CHECK_CACHE_TTL`).
@@ -419,6 +452,34 @@ pub fn process(
         session_id,
     ) {
         eprintln!("[sentinel] tool_usage_gate: allowed via active 'override verification'");
+        return HookOutput::allow();
+    }
+
+    // SDK sub-session bypass. Claude Code SDK sessions (spawned via
+    // `claude --print`, agent-team teammates, automated harness runs)
+    // run with `entrypoint: "sdk-cli"` in the transcript header. They
+    // do NOT have the `TaskCreate` MCP tool registered — only the
+    // host session sees that surface — so the four-check stack below
+    // is unachievable in principle, not just unmet. Without this
+    // bypass an SDK teammate hits Check 2 on every Write, falls back
+    // to TodoWrite (which is explicitly rejected), and burns its
+    // turn budget retrying. Operator screenshot showed three 1h+ old
+    // `Write · about to run · deny` rows from a finished flight
+    // teammate that had been stuck in this loop.
+    //
+    // The bypass is narrow: it only fires when the transcript header
+    // explicitly says `entrypoint: "sdk-cli"`. Host sessions never
+    // carry that value (they're "claude-code" or absent), so this
+    // can't be tripped by a malicious payload that just spoofs a
+    // field — the marker is set by the harness itself, not the
+    // session's own messages.
+    if input
+        .transcript_path
+        .as_deref()
+        .filter(|p| !p.is_empty())
+        .is_some_and(|p| is_sdk_session_transcript(fs, Path::new(p)))
+    {
+        eprintln!("[sentinel] tool_usage_gate: allowed for sdk-cli sub-session");
         return HookOutput::allow();
     }
 
@@ -1972,5 +2033,119 @@ mod tests {
             false,
         );
         assert!(output.blocked.is_none());
+    }
+
+    /// SDK sub-session bypass — a Write call whose transcript shows
+    /// `entrypoint: "sdk-cli"` must NOT be denied even when none of
+    /// the four preconditions (sequential thinking, task created,
+    /// plan mode, active task) are met. The host-session policy
+    /// doesn't apply because the SDK surface doesn't expose
+    /// TaskCreate; agents stuck in retry would otherwise deny-storm
+    /// the ticker.
+    #[test]
+    fn test_allows_sdk_sub_session_write_with_no_markers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let transcript_path = tmp.path().join("flight-delta.jsonl");
+        std::fs::write(
+            &transcript_path,
+            r#"{"type":"summary","summary":"Flight delta","leafUuid":"x"}
+{"type":"user","sessionId":"abc","entrypoint":"sdk-cli","cwd":"/workspace"}
+"#,
+        )
+        .unwrap();
+        let input = HookInput {
+            session_id: Some("sdk-session-1".to_string()),
+            tool_name: Some("Write".to_string()),
+            tool_input: Some(serde_json::json!({"file_path": "/tmp/x", "content": "y"})),
+            transcript_path: Some(transcript_path.to_string_lossy().to_string()),
+            ..Default::default()
+        };
+        let fs = RealTestFs;
+        let classifier = crate::reversibility_classifier::StaticReversibilityClassifier::empty()
+            .with("Write", ReversibilityClass::Reversible);
+        let output = process(
+            &input,
+            &fs,
+            &crate::hooks::test_support::StubEnv::new(),
+            &classifier,
+            false,
+        );
+        assert!(
+            output.blocked.is_none(),
+            "SDK sub-session must not be blocked by the four-check stack; got: {:?}",
+            output.blocked,
+        );
+    }
+
+    /// Negative case: an absent `entrypoint` field (host session) must
+    /// still fall through to the normal four-check stack. The bypass
+    /// is keyed to the explicit `sdk-cli` value, not just "has a
+    /// transcript".
+    #[test]
+    fn test_host_session_with_no_markers_still_blocks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let transcript_path = tmp.path().join("host.jsonl");
+        std::fs::write(
+            &transcript_path,
+            r#"{"type":"user","sessionId":"abc","cwd":"/workspace"}
+"#,
+        )
+        .unwrap();
+        let input = HookInput {
+            session_id: Some("host-session-1".to_string()),
+            tool_name: Some("Write".to_string()),
+            tool_input: Some(serde_json::json!({"file_path": "/tmp/x", "content": "y"})),
+            transcript_path: Some(transcript_path.to_string_lossy().to_string()),
+            ..Default::default()
+        };
+        let fs = RealTestFs;
+        let classifier = crate::reversibility_classifier::StaticReversibilityClassifier::empty()
+            .with("Write", ReversibilityClass::Reversible);
+        let output = process(
+            &input,
+            &fs,
+            &crate::hooks::test_support::StubEnv::new(),
+            &classifier,
+            false,
+        );
+        assert!(
+            output.blocked.is_some(),
+            "host session without markers must still be blocked",
+        );
+    }
+
+    /// `is_sdk_session_transcript` returns true on the bare detect
+    /// API — exercised independently so the helper's contract is
+    /// nailed down separately from the gate's policy wiring.
+    #[test]
+    fn test_is_sdk_session_transcript_positive() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("t.jsonl");
+        std::fs::write(
+            &p,
+            r#"{"type":"user","entrypoint":"sdk-cli","sessionId":"x"}
+"#,
+        )
+        .unwrap();
+        assert!(is_sdk_session_transcript(&RealTestFs, &p));
+    }
+
+    /// And returns false when the header lacks the marker — note
+    /// that a non-existent file is also a "false", since we treat
+    /// "no transcript" as "host session" by default.
+    #[test]
+    fn test_is_sdk_session_transcript_negative() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("t.jsonl");
+        std::fs::write(
+            &p,
+            r#"{"type":"user","entrypoint":"claude-code","sessionId":"x"}
+"#,
+        )
+        .unwrap();
+        assert!(!is_sdk_session_transcript(&RealTestFs, &p));
+        // Missing file must also be false.
+        let missing = tmp.path().join("nope.jsonl");
+        assert!(!is_sdk_session_transcript(&RealTestFs, &missing));
     }
 }
