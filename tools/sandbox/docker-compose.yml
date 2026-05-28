@@ -65,8 +65,12 @@ services:
       - sandbox-state:/workspace/.container-state
 
       # Share host Claude Max OAuth token RO so the in-container
-      # Claude inherits the subscription.
-      - ${HOME}/.claude/.credentials.json:/workspace/.container-state/claude/.credentials.json:ro
+      # Claude inherits the subscription. Source defaults to the
+      # operator's personal token but can be redirected to a
+      # dedicated/throwaway credential via SENTINEL_CRED_FILE — see
+      # the read-vs-write caveat in SANDBOX.md (RO blocks tampering,
+      # not reads, so a compromised grind can exfiltrate this token).
+      - ${SENTINEL_CRED_FILE:-${HOME}/.claude/.credentials.json}:/workspace/.container-state/claude/.credentials.json:ro
 
       # Sentinel hook output crosses up to the host. The container
       # writes to $SENTINEL_CLAUDE_DIR/sentinel/metrics/ (set

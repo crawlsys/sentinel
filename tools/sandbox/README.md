@@ -53,6 +53,11 @@ bash tools/sandbox/sandbox-down.sh --purge
 - **Node 22 + pnpm** for any JS-side tooling.
 - **Claude Code CLI** installed globally — inherits the host's
   Claude Max OAuth token via a RO bind of `.credentials.json`.
+  RO blocks tampering, not reads: the token is plaintext-readable
+  in the container, so treat a sandbox compromise as a token
+  compromise. Set `SENTINEL_CRED_FILE` to a dedicated/throwaway
+  token for untrusted plans or fleet runs. See the read-vs-write
+  caveat in `SANDBOX.md`.
 - **gh CLI** for any `gh pr …` workflows.
 - **Container-local `$HOME/.claude`** (symlinked into a named
   volume) so claude state doesn't leak into the host.
@@ -89,6 +94,7 @@ launcher that picks the corresponding file.
 | Var | Default | Effect |
 |---|---|---|
 | `SENTINEL_REPO` | `../..` | Host path to the sentinel checkout to mount RW. |
+| `SENTINEL_CRED_FILE` | `~/.claude/.credentials.json` | Host path to the Claude token mounted RO into the container. Point at a dedicated/throwaway credential for untrusted plans or fleet runs (the token is plaintext-readable in-container — see the read-vs-write caveat in `SANDBOX.md`). |
 | `HOST_UID` / `HOST_GID` | host's `id -u/-g` | UID/GID baked into the image so bind-mounted files stay writable. |
 | `SENTINEL_CLAUDE_DIR` | `/workspace/.container-state/claude` | Where the container's sentinel writes JSONL (set by compose). |
 | `SENTINEL_SANDBOX_PORT_RANGE` | `18000-18099` | Range claude-in-container is expected to bind preview services on. |
