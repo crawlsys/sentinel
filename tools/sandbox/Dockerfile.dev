@@ -1,0 +1,77 @@
+# Sentinel sandbox dev container.
+#
+# Differences from the original ~/.agents/notes/sentinel-docker-dev/Dockerfile:
+#   - installs Claude Code CLI globally (npm), so `claude` works inside.
+#   - $HOME/.claude is a symlink into the named state volume, so all Claude
+#     state (settings, projects history) lives in the volume — host stays
+#     untouched.
+#   - SENTINEL_CLAUDE_DIR points at the same volume path, so sentinel's view
+#     and Claude Code's view of "~/.claude" collapse to one location.
+
+FROM rust:1-bookworm AS base
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        git \
+        curl \
+        ca-certificates \
+        pkg-config \
+        libssl-dev \
+        build-essential \
+        cmake \
+        jq \
+        ripgrep \
+        fd-find \
+        less \
+        vim-tiny \
+        sudo \
+        bash-completion \
+        gnupg \
+        netcat-openbsd \
+    && rm -rf /var/lib/apt/lists/*
+
+# Node 22.x + pnpm + Claude Code CLI (Anthropic Max subscription auth is
+# carried in via a bind-mounted .credentials.json from the host — see
+# launch.sh).
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/* \
+    && corepack enable \
+    && corepack prepare pnpm@latest --activate \
+    && npm install -g @anthropic-ai/claude-code
+
+# Non-root dev user matching the typical host UID/GID so bind-mounts stay
+# writable. Override via --build-arg if the host UID differs.
+ARG DEV_UID=1000
+ARG DEV_GID=1000
+ARG DEV_USER=dev
+RUN groupadd -g "${DEV_GID}" "${DEV_USER}" \
+    && useradd -m -u "${DEV_UID}" -g "${DEV_GID}" -s /bin/bash "${DEV_USER}" \
+    && echo "${DEV_USER} ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/dev \
+    && chmod 0440 /etc/sudoers.d/dev
+
+# Make $HOME/.claude a symlink into the state volume. After the volume is
+# mounted at /workspace/.container-state, /home/dev/.claude resolves to
+# /workspace/.container-state/claude — same path SENTINEL_CLAUDE_DIR uses.
+RUN rm -rf /home/dev/.claude \
+    && ln -s /workspace/.container-state/claude /home/dev/.claude \
+    && mkdir -p /home/dev/.cache \
+    && chown -h dev:dev /home/dev/.claude /home/dev/.cache
+
+ENV CARGO_HOME=/workspace/.container-cache/cargo \
+    PNPM_HOME=/workspace/.container-cache/pnpm \
+    SENTINEL_CLAUDE_DIR=/workspace/.container-state/claude
+
+RUN printf '%s\n' \
+        'export CARGO_HOME=/workspace/.container-cache/cargo' \
+        'export PNPM_HOME=/workspace/.container-cache/pnpm' \
+        'export SENTINEL_CLAUDE_DIR=/workspace/.container-state/claude' \
+        'export PATH=/workspace/.container-cache/cargo/bin:/workspace/.container-cache/pnpm:/usr/local/cargo/bin:${PATH}' \
+        > /etc/profile.d/00-sentinel-dev.sh \
+    && chmod 0644 /etc/profile.d/00-sentinel-dev.sh
+
+USER ${DEV_USER}
+WORKDIR /workspace/sentinel
+
+CMD ["/bin/bash", "-l"]

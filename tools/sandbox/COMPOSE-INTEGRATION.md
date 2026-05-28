@@ -1,9 +1,8 @@
 # sentinel-viz × sentinel-sandbox compose integration
 
 The single-file compose stack at `tools/sandbox/docker-compose.yml`
-brings up the whole sentinel observability mesh in one shot:
+brings up the sentinel observability mesh in one shot:
 
-- `qdrant` + `neo4j` + `memory-server` — sentinel's memory stores
 - `sentinel-bridge` — tails hook-invocation JSONLs into the
   activegraph SQLite store
 - `viz-api` — Rust HTTP API on port 8082 (host-forwarded)
@@ -15,12 +14,27 @@ brings up the whole sentinel observability mesh in one shot:
   port range `18000-18099` so the in-container Claude can spin up
   ad-hoc preview services the host can browse.
 
+> The stack is intentionally minimal. The memory-server / qdrant /
+> neo4j trio that earlier drafts of this compose carried has been
+> dropped — that path isn't load-bearing for sentinel's current
+> observability flow, and three services worth of pull/boot time
+> for zero day-1 benefit doesn't pay rent. When memory-server lands
+> in production wiring, add it back under `--profile memory`.
+
 Bring it up:
 
 ```
-docker compose -f tools/sandbox/docker-compose.yml up -d
+bash tools/sandbox/sandbox-up.sh
 # wait ~30s for viz-next's first build, then:
 open http://localhost:8083
+```
+
+`sandbox-up.sh` is a thin wrapper around `docker compose ... up -d`
+that adds host-UID propagation and pre-flight bind-mount checks.
+You can also invoke compose directly:
+
+```
+docker compose -f tools/sandbox/docker-compose.yml up -d
 ```
 
 Exec into the dev container:
@@ -32,7 +46,8 @@ docker compose -f tools/sandbox/docker-compose.yml exec sandbox-dev bash
 Tear it down:
 
 ```
-docker compose -f tools/sandbox/docker-compose.yml down
+bash tools/sandbox/sandbox-down.sh           # stop + remove containers, keep volumes
+bash tools/sandbox/sandbox-down.sh --purge   # also drop volumes (destructive)
 ```
 
 ## Important: only ONE bridge can run

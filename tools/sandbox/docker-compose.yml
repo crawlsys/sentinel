@@ -1,14 +1,18 @@
 # Sentinel sandbox stack — one file, no override layering.
 #
-#   qdrant         — vector database, holds embedded memories
-#   neo4j          — graph database, holds tenancy + provenance + KG
-#   memory-server  — Rust HTTP API in front of both stores (JWT-scoped tenancy)
 #   sentinel-bridge — tails hook-invocation JSONLs into the activegraph SQLite store
 #   viz-api        — Rust HTTP API serving the sentinel activity graph (port 8082)
 #   viz-next       — Next.js dashboard on top of viz-api (port 8083, browse from host)
 #   sandbox-dev    — dev container with Claude Code CLI for working on sentinel,
 #                    wired to the bridge via metrics bind-mount and the canonical
 #                    hooked Claude settings profile.
+#
+# Intentionally minimal. The memory-server / qdrant / neo4j trio is NOT
+# included — that stack isn't load-bearing for sentinel's current
+# observability path. Bringing them up just to leave them idle adds three
+# services worth of pull time + boot time + memory pressure for zero day-1
+# benefit. When memory-server lands in production wiring, add it back with
+# a separate `--profile memory` so the default `up` stays light.
 #
 # Usage:
 #   docker compose -f tools/sandbox/docker-compose.yml up -d
@@ -27,62 +31,6 @@
 name: sentinel-sandbox
 
 services:
-
-  qdrant:
-    image: qdrant/qdrant:v1.12.4
-    ports:
-      - "127.0.0.1:6333:6333"   # REST
-      - "127.0.0.1:6334:6334"   # gRPC
-    volumes:
-      - qdrant-data:/qdrant/storage
-    environment:
-      QDRANT__SERVICE__GRPC_PORT: "6334"
-    healthcheck:
-      # Qdrant doesn't ship curl; use bash /dev/tcp probe.
-      test: ["CMD-SHELL", "bash -c '</dev/tcp/127.0.0.1/6333' >/dev/null 2>&1 || exit 1"]
-      interval: 10s
-      timeout: 3s
-      retries: 5
-
-  neo4j:
-    image: neo4j:5.26-community
-    ports:
-      - "127.0.0.1:7474:7474"   # HTTP
-      - "127.0.0.1:7687:7687"   # Bolt
-    environment:
-      NEO4J_AUTH: "neo4j/sentinel-dev-pass"
-      NEO4J_PLUGINS: '["apoc"]'
-      NEO4J_dbms_security_procedures_unrestricted: "apoc.*"
-    volumes:
-      - neo4j-data:/data
-      - neo4j-logs:/logs
-    healthcheck:
-      test: ["CMD-SHELL", "cypher-shell -u neo4j -p sentinel-dev-pass 'RETURN 1' >/dev/null 2>&1 || exit 1"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-
-  memory-server:
-    build:
-      context: ../..               # sentinel repo root
-      dockerfile: infra/sandbox/Dockerfile.memory-server
-    depends_on:
-      qdrant: { condition: service_healthy }
-      neo4j:  { condition: service_healthy }
-    environment:
-      RUST_LOG: "info,sentinel_memory_server=debug"
-      BIND_ADDR: "0.0.0.0:8080"
-      QDRANT_URL: "http://qdrant:6333"
-      QDRANT_API_KEY: ""           # local qdrant has no auth
-      NEO4J_URL: "bolt://neo4j:7687"
-      NEO4J_USER: "neo4j"
-      NEO4J_PASS: "sentinel-dev-pass"
-      # HS256 dev secret — production must rotate / use OIDC.
-      JWT_SECRET: "dev-secret-do-not-use-in-prod"
-      JWT_ISSUER: "sentinel-memory-server"
-    ports:
-      - "127.0.0.1:8080:8080"
-    restart: unless-stopped
 
   # Bridge tails the hook-invocation JSONLs the sandbox-dev container
   # writes (via `sentinel hook`) and ingests them into the activegraph
@@ -149,8 +97,10 @@ services:
 
   sandbox-dev:
     build:
-      context: .
-      dockerfile: Dockerfile.dev
+      # Build context is the repo root so the Dockerfile can COPY
+      # in workspace state if it grows beyond pure-package layers.
+      context: ../..
+      dockerfile: tools/sandbox/Dockerfile.dev
       args:
         DEV_UID: ${HOST_UID:-1000}
         DEV_GID: ${HOST_GID:-1000}
@@ -173,9 +123,6 @@ services:
       - "127.0.0.1:18000-18099:18000-18099"
     environment:
       SENTINEL_CLAUDE_DIR: /workspace/.container-state/claude
-      MEMORY_SERVER_URL: http://memory-server:8080
-      QDRANT_URL: http://qdrant:6333
-      NEO4J_URL: bolt://neo4j:7687
       # The agent-workload port range the in-container claude is
       # allowed to bind on. Helper code can pick a free port via
       # `ss -tln | awk` over this range.
@@ -188,11 +135,6 @@ services:
       # Share host Claude Max OAuth token read-only so the in-container
       # Claude inherits the subscription.
       - ${HOME}/.claude/.credentials.json:/workspace/.container-state/claude/.credentials.json:ro
-
-      # Share Qdrant Cloud config too — read-only; in-container Claude can
-      # still talk to the user's cloud collections if needed, separately
-      # from this stack's local qdrant.
-      - ${HOME}/.qdrant:/home/dev/.qdrant:ro
 
       # Sentinel hook output crosses up to the host bridge.
       # Container writes to $SENTINEL_CLAUDE_DIR/sentinel/metrics/
@@ -218,8 +160,6 @@ services:
       # plus gh CLI, container-local gitconfig, and worktree
       # pointer repair.
       - ${SENTINEL_REPO:-../..}/tools/sandbox/sandbox-bootstrap.sh:/usr/local/bin/sandbox-bootstrap.sh:ro
-    depends_on:
-      memory-server: { condition: service_started }
     # Run the bootstrap once at container start, then drop into
     # sleep infinity. Bootstrap is idempotent — subsequent restarts
     # return in <1s when state is cached.
@@ -231,9 +171,6 @@ services:
         exec sleep infinity
 
 volumes:
-  qdrant-data:
-  neo4j-data:
-  neo4j-logs:
   sandbox-cache:
   sandbox-state:
   # Shared between sentinel-bridge (writer) and viz-api (reader).

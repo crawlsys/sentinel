@@ -1,8 +1,12 @@
 # sentinel sandbox — container settings + hook wiring
 
-Drop-in settings files that wire sentinel sandbox containers
-(`legatus-docker-dev`, `sentinel-grind-*`) into the host's sentinel
-observability mesh.
+Drop-in settings files that wire sentinel sandbox containers into
+the host's sentinel observability mesh.
+
+> **Looking for the conceptual model?** See `SANDBOX.md`.
+> **Day-1 quick start?** Run `bash tools/sandbox/sandbox-up.sh`,
+> then `sandbox-smoke-test.sh` to verify, then open
+> http://localhost:8083.
 
 ## The problem this solves
 
