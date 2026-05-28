@@ -109,6 +109,29 @@ cmd_up() {
   docker image inspect sentinel-sandbox-dev:local >/dev/null 2>&1 \
     || die "sentinel-sandbox-dev:local image not built. run: bash $SCRIPT_DIR/sandbox-up.sh build"
 
+  # Resolve + verify the credential source. Fleet has no compose
+  # pre-flight (unlike sandbox-up.sh), so guard here: a missing
+  # file makes `docker run -v` silently create a DIRECTORY at the
+  # path and bind it, yielding a confusing "mounted as file" error
+  # inside each replica. Defaulting matches the base compose.
+  local cred_file="${SENTINEL_CRED_FILE:-$HOME/.claude/.credentials.json}"
+  [[ -e "$cred_file" ]] || die "credential file missing: $cred_file
+  - log in to Claude Code on the host, or set SENTINEL_CRED_FILE to an existing token.
+  - for fleet runs especially, prefer a dedicated/throwaway token (the same token is mounted into every replica)."
+
+  # Loud runtime warning when the personal token is in play — the
+  # fleet mounts THIS file RO into every replica, and RO blocks
+  # tampering, not reads (SANDBOX.md read-vs-write caveat). One
+  # compromised/injected replica can exfiltrate the token, so the
+  # blast radius is the whole fleet. sandbox-up.sh warns for the
+  # single-container case; the fleet is strictly higher-risk and
+  # must not be quieter. Set SENTINEL_CRED_FILE to a throwaway.
+  if [[ "$cred_file" == "$HOME/.claude/.credentials.json" ]]; then
+    say "WARNING: using your PERSONAL Claude token, mounted RO into ALL $count replica(s)." >&2
+    say "WARNING: it is plaintext-readable in-container; one compromised replica exposes it." >&2
+    say "WARNING: for untrusted plans or fleet runs, set SENTINEL_CRED_FILE to a throwaway token." >&2
+  fi
+
   # Ensure the host metrics dir exists — fleet replicas bind it
   # the same way the regular sandbox-dev container does.
   mkdir -p "$HOME/.claude/sentinel/metrics"
@@ -145,7 +168,7 @@ cmd_up() {
         -v "${SENTINEL_REPO:-$REPO_ROOT}":/workspace/sentinel:rw \
         -v "${cache_vol}":/workspace/.container-cache \
         -v "${state_vol}":/workspace/.container-state \
-        -v "${HOME}/.claude/.credentials.json":/workspace/.container-state/claude/.credentials.json:ro \
+        -v "${cred_file}":/workspace/.container-state/claude/.credentials.json:ro \
         -v "${HOME}/.claude/sentinel/metrics":/workspace/.container-state/claude/sentinel/metrics \
         -v "${SENTINEL_REPO:-$REPO_ROOT}/tools/sandbox/claude-settings-hooked.json":/workspace/.container-state/claude/settings.json:ro \
         -v "${HOME}/firefly/legatus-consul-agent":/workspace/legatus-consul-agent:rw \

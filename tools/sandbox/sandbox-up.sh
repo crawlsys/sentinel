@@ -35,11 +35,19 @@ export SENTINEL_REPO="${SENTINEL_REPO:-$REPO_ROOT}"
 export HOST_UID="${HOST_UID:-$(id -u)}"
 export HOST_GID="${HOST_GID:-$(id -g)}"
 
+# Credential source. Defaults to the operator's personal Claude Max
+# token, but can be redirected to a dedicated/throwaway credential
+# (SANDBOX.md read-vs-write caveat: the token is plaintext-readable
+# inside the container, so a sandbox compromise is a token
+# compromise — prefer a throwaway, especially for fleet runs).
+# Exported so the compose default resolves to the same path.
+export SENTINEL_CRED_FILE="${SENTINEL_CRED_FILE:-$HOME/.claude/.credentials.json}"
+
 # Pre-flight: the compose bind-mounts assume these exist on the
 # host. Create the ones that are safe to create empty (metrics
 # dir); error on the ones that aren't (credentials, sibling repo).
 REQUIRED_BINDS=(
-  "$HOME/.claude/.credentials.json"
+  "$SENTINEL_CRED_FILE"
   "$HOME/firefly/legatus-consul-agent"
 )
 CREATE_IF_MISSING=(
@@ -51,7 +59,7 @@ done
 for path in "${REQUIRED_BINDS[@]}"; do
   if [[ ! -e "$path" ]]; then
     die "host path missing: $path
-  - .credentials.json: log in to Claude Code on the host first (~/.claude/.credentials.json)
+  - credentials ($SENTINEL_CRED_FILE): log in to Claude Code on the host first, or set SENTINEL_CRED_FILE to an existing token
   - legatus-consul-agent: clone alongside (~/firefly/legatus-consul-agent)"
   fi
 done
@@ -59,6 +67,11 @@ done
 say "repo:    $SENTINEL_REPO"
 say "compose: $COMPOSE_FILE"
 say "uid/gid: $HOST_UID/$HOST_GID"
+say "cred:    $SENTINEL_CRED_FILE"
+if [[ "$SENTINEL_CRED_FILE" == "$HOME/.claude/.credentials.json" ]]; then
+  warn "using your PERSONAL Claude token (plaintext-readable in-container)."
+  warn "for untrusted plans or fleet runs, set SENTINEL_CRED_FILE to a throwaway."
+fi
 
 case "${1:-up}" in
   build)

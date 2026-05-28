@@ -30,9 +30,11 @@
 #      re-add it with `git worktree add --force` against an
 #      inferred branch.
 #
-# Invoked at container start by sandbox-compose-override.yml's
-# command: directive. First boot costs ~3 minutes for the cargo
-# install; cached boots return in <1s.
+# Invoked at container start by docker-compose.yml's inline
+# command: directive (the sandbox-compose-override.yml file is a
+# secondary/legacy artifact and is not the live entrypoint).
+# First boot costs ~3 minutes for the cargo install; cached boots
+# return in <1s.
 
 set -euo pipefail
 
