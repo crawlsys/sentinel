@@ -93,7 +93,10 @@ exit when the plan reports done. Use Sentinel tools as needed.'
 # the existing sandbox-dev compose definition doesn't include a
 # generic plan-mount slot, and editing the compose per-grind is
 # brittle. Instead, copy the plan into /workspace/plan.md
-# inside the container, run, then clean up.
+# inside the container, run, then clean up. Hooks fire normally
+# (the canonical settings profile is mounted by compose), so the
+# grind's hook output lands in the host's metrics dir like any
+# other sandbox session.
 say "grind:    $GRIND_NAME"
 say "plan:     $PLAN"
 say "log:      $LOG_FILE"

@@ -7,21 +7,18 @@
 # without containers stepping on each other.
 #
 # What it's good for:
-#   - Benchmarking: same plan against multiple model versions
-#     (set OLLAMA_MODEL or SENTINEL_LLM_PREFER per replica).
-#   - Regression hunt: same plan against multiple sentinel
-#     commits (set SENTINEL_REPO per replica to a different
-#     worktree).
-#   - Stress-test the bridge ingest path: 16 hookful grinds
-#     writing to the same metrics dir validates the bridge's
-#     per-session deduplication.
+#   - Benchmarking: same plan against multiple sentinel commits
+#     (set SENTINEL_REPO per replica to a different worktree).
 #   - Skill / hook A/B: half the fleet runs with hooks on, half
 #     with hooks off (claude-settings-hookless.json).
+#   - Throughput test: 16 sandboxes running real plans
+#     simultaneously to surface contention bugs in
+#     `sentinel hook`, the metrics dir, the host bridge ingest
+#     path, etc.
 #
 # What it's NOT good for:
-#   - Cheap exploratory work — the cargo cache is per-replica
-#     unless you share SANDBOX_CACHE_VOL, so first boot is
-#     ~3min × N.
+#   - Cheap exploratory work — each replica has its own
+#     sandbox-cache volume, so first boot is ~3min × N.
 #   - Anything sensitive to host port collisions — the agent
 #     workload port range gets carved into N stripes so each
 #     replica has its own slice.
@@ -31,10 +28,10 @@
 #   bash tools/sandbox/sandbox-fleet.sh logs --replica 2
 #   bash tools/sandbox/sandbox-fleet.sh down
 #
-# Each replica is named sentinel-sandbox-fleet-<i>; viz-api +
-# viz-next + sentinel-bridge are SHARED across the fleet (one
-# stack-level instance each) since the bridge is the central
-# observability sink.
+# Each replica is named sentinel-sandbox-fleet-<i>; all of them
+# share the host's ~/.claude/sentinel/metrics/ as their hook
+# output sink (and the operator's existing host-side
+# sentinel-bridge ingests from there).
 #
 # This is intentionally a thin orchestrator over `docker run`,
 # not a compose extension — fleet runs are short-lived and the
@@ -63,8 +60,8 @@ usage:
   $0 up --count N --plan /abs/plan.md [--detach]
         Spin up N replicas + run the grind on each.
   $0 down
-        Stop and remove all fleet replicas. The shared
-        viz/bridge stack is NOT touched (use sandbox-down.sh).
+        Stop and remove all fleet replicas. The non-fleet
+        sandbox-dev container (if any) is NOT touched.
   $0 logs --replica I
         Tail the log for replica I (1-indexed).
   $0 status
@@ -79,9 +76,8 @@ Env overrides:
 Per-replica behavior overrides (set before running 'up'):
   SENTINEL_REPO       host repo path (one worktree per replica is the
                        intended pattern for regression-search)
-  SENTINEL_LLM_PREFER local | cloud | auto
-  OLLAMA_HOST         override the unified LLM router target
-  OLLAMA_MODEL        override the active model name
+  SENTINEL_LLM_PREFER passed through to the container's sentinel binary
+                       — see that binary's own docs for accepted values
 EOF
 }
 
@@ -106,11 +102,16 @@ cmd_up() {
   [[ -f "$plan" ]] || die "plan not found: $plan"
   [[ "$plan" == /* ]] || die "plan must be absolute"
 
-  # Verify the shared stack is up. The bridge is the load-bearing
-  # piece — without it, the replicas produce metrics nothing
-  # consumes.
-  docker inspect -f '{{.State.Running}}' sentinel-bridge 2>/dev/null | grep -q true \
-    || die "shared stack not up. run: bash $SCRIPT_DIR/sandbox-up.sh"
+  # Verify the dev image is built. Fleet uses
+  # `sentinel-sandbox-dev:local` directly via `docker run` rather
+  # than through compose, so a fresh checkout needs the regular
+  # `sandbox-up.sh` to have built the image at least once.
+  docker image inspect sentinel-sandbox-dev:local >/dev/null 2>&1 \
+    || die "sentinel-sandbox-dev:local image not built. run: bash $SCRIPT_DIR/sandbox-up.sh build"
+
+  # Ensure the host metrics dir exists — fleet replicas bind it
+  # the same way the regular sandbox-dev container does.
+  mkdir -p "$HOME/.claude/sentinel/metrics"
 
   mkdir -p "$LOG_ROOT"
 
@@ -135,14 +136,11 @@ cmd_up() {
     (
       docker run --rm -d \
         --name "$name" \
-        --network "sentinel-sandbox_default" \
         --user "$(id -u):$(id -g)" \
         -e SENTINEL_CLAUDE_DIR=/workspace/.container-state/claude \
         -e SENTINEL_SANDBOX_PORT_RANGE="${port_lo}-${port_hi}" \
         -e SENTINEL_WORKSTREAM="fleet:${name}" \
         ${SENTINEL_LLM_PREFER:+-e SENTINEL_LLM_PREFER="$SENTINEL_LLM_PREFER"} \
-        ${OLLAMA_HOST:+-e OLLAMA_HOST="$OLLAMA_HOST"} \
-        ${OLLAMA_MODEL:+-e OLLAMA_MODEL="$OLLAMA_MODEL"} \
         -p "127.0.0.1:${port_lo}-${port_hi}:${port_lo}-${port_hi}" \
         -v "${SENTINEL_REPO:-$REPO_ROOT}":/workspace/sentinel:rw \
         -v "${cache_vol}":/workspace/.container-cache \

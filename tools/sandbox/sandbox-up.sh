@@ -75,12 +75,10 @@ case "${1:-up}" in
 esac
 
 say ""
-say "stack up. dashboard:   http://localhost:8083"
-say "         viz-api:      http://localhost:8082/api/healthz"
-say "         agent ports:  http://localhost:18000..18099"
+say "container up. agent-workload ports: http://localhost:18000..18099"
 say ""
 say "exec into the dev container:"
 say "  docker compose -f $COMPOSE_FILE exec sandbox-dev bash"
 say ""
-say "verify end-to-end:"
+say "verify the wiring:"
 say "  bash $SCRIPT_DIR/sandbox-smoke-test.sh"

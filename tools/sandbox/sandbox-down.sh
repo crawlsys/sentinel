@@ -1,17 +1,15 @@
 #!/usr/bin/env bash
 # sandbox-down.sh — stop the sentinel sandbox stack.
 #
-# Default: `down` (stop + remove containers, keep volumes — so a
-# follow-up `sandbox-up.sh` is a hot start: no rebuild, cargo
-# cache + claude state survive).
+# Default: `down` (stop + remove the container, keep volumes —
+# so a follow-up `sandbox-up.sh` is a hot start: no rebuild,
+# cargo cache + claude state survive).
 #
 # Pass `--purge` to drop volumes too. Destructive: deletes
 # sandbox-cache (cargo / pnpm artifacts, ~3min to rebuild) and
 # sandbox-state (claude session history, in-container worktrees).
-# `bridge-state` (the bridge's SQLite + tail offsets) is also
-# dropped — the next `up` re-ingests recent metrics from the
-# host's ~/.claude/sentinel/metrics/ but loses session-graph
-# history before that ingest point.
+# Hook output written to the host's ~/.claude/sentinel/metrics/
+# is OUTSIDE these volumes and is never touched by `--purge`.
 
 set -euo pipefail
 
@@ -30,7 +28,7 @@ case "${1:-down}" in
     ;;
   --purge|purge)
     say "stopping stack AND dropping volumes"
-    say "this deletes sandbox-cache, sandbox-state, bridge-state"
+    say "this deletes sandbox-cache + sandbox-state"
     read -r -p "are you sure? [y/N] " ans
     [[ "$ans" =~ ^[Yy]$ ]] || { say "aborted"; exit 0; }
     docker compose -f "$COMPOSE_FILE" down -v

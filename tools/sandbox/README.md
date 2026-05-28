@@ -1,114 +1,102 @@
-# sentinel sandbox — container settings + hook wiring
+# sentinel sandbox — docker containers for safe sentinel work at scale
 
-Drop-in settings files that wire sentinel sandbox containers into
-the host's sentinel observability mesh.
+This directory ships a docker-compose stack + a small set of
+launch scripts that spin up `sentinel-sandbox-dev` containers:
+isolated Linux environments with Claude Code, sentinel, and the
+toolchain pre-baked, so an operator can run sentinel work
+(interactive sessions, autonomous grinds, fleet benchmarks)
+without touching the host's `~/.claude/` or polluting the host
+filesystem.
 
-> **Looking for the conceptual model?** See `SANDBOX.md`.
-> **Day-1 quick start?** Run `bash tools/sandbox/sandbox-up.sh`,
-> then `sandbox-smoke-test.sh` to verify, then open
-> http://localhost:8083.
+This PR is **only about sandboxing**. Observability (the
+sentinel-bridge, viz-api, viz-next dashboard) lives outside this
+scope — the sandbox writes hook JSONL to a well-known host path
+and whatever the operator already runs to consume that path
+keeps consuming it.
 
-## The problem this solves
-
-By default, sentinel sandbox containers boot Claude Code with an
-empty `/home/dev/.claude/settings.json` and **no hooks**. Result:
-no hook events fire, no JSONL writes, the bridge never sees the
-session, and the viz dashboard at `archive.nashgo.org` / the
-sentinel-viz frontend can't display the container's work.
-
-Two coordinated mounts unblock visibility:
-
-1. **Settings mount.** Bind-mount `claude-settings-hooked.json` at
-   `/home/dev/.claude/settings.json` (the container Claude's
-   default settings location, equivalent to `~/.claude/settings.json`
-   from inside the container) so Claude fires
-   `sentinel hook --event <Name>` for every hook event.
-2. **Metrics mount.** Bind-mount the host's
-   `~/.claude/sentinel/metrics/` directory at the container's
-   `$SENTINEL_CLAUDE_DIR/sentinel/metrics/` so `sentinel hook`
-   writes its JSONL to a path the host's `sentinel_bridge.py` is
-   already tailing.
-
-`SENTINEL_CLAUDE_DIR` is honored by `sentinel hook` when deciding
-WHERE to write JSONL output (see
-`crates/sentinel-application/src/paths.rs::claude_dir`). It does
-NOT change where Claude Code reads its own config — that always
-stays at `$HOME/.claude/`. The two paths are intentionally split
-so the container's config lives behind an isolation boundary while
-the metrics output flows up to the host bridge.
-
-That's it. After those two mounts the container's session appears in
-the bridge SQLite (`~/.agents/scratch/activegraph-bridge/sentinel.db`)
-and shows up in the dashboard alongside host sessions.
-
-## Files
-
-| File | Purpose |
-|------|---------|
-| `claude-settings-hooked.json`   | Hooked profile — default for sandbox containers. Fires sentinel hooks. |
-| `claude-settings-hookless.json` | Hookless profile — for `SENTINEL_HOOKS=off`. Identical to the legacy `~/.agents/notes/sentinel-docker-dev/claude-settings.container.json`. |
-
-## Launcher wiring
-
-The legacy launcher (`~/.agents/notes/sentinel-docker-dev/legatus-docker-dev.sh`
-and `run-plan.sh`) needs two additions to consume these files. Apply
-to the host scratch-dir copies — they are NOT in this repo:
+## Day 1
 
 ```bash
-# 1. Pick which settings file to mount based on SENTINEL_HOOKS:
-SENTINEL_HOOKS="${SENTINEL_HOOKS:-on}"
-if [[ "$SENTINEL_HOOKS" == "off" ]]; then
-  SETTINGS_SRC="/workspace/sentinel/tools/sandbox/claude-settings-hookless.json"
-else
-  SETTINGS_SRC="/workspace/sentinel/tools/sandbox/claude-settings-hooked.json"
-fi
+# Build + start the sandbox container (~3 min first time)
+bash tools/sandbox/sandbox-up.sh
 
-# 2. Add these mounts to the docker run command:
-#    -v "${SETTINGS_SRC}:/home/dev/.claude/settings.json:ro"
-#    -v "${HOME}/.claude/sentinel/metrics:/workspace/.container-state/claude/sentinel/metrics"
-#    (the metrics mount nests under the sentinel-dev-state named
-#     volume — docker handles nested binds when -v args are passed
-#     in this order.)
+# Verify the wiring (4 checks, ~5 seconds)
+bash tools/sandbox/sandbox-smoke-test.sh
+
+# Exec into it
+docker compose -f tools/sandbox/docker-compose.yml exec sandbox-dev bash
+
+# Or run an autonomous claude session against a plan
+bash tools/sandbox/sandbox-grind.sh /abs/path/to/plan.md
+
+# Tear down (keeps volumes — hot start next time)
+bash tools/sandbox/sandbox-down.sh
+
+# Tear down + wipe all sandbox state (~3min rebuild next up)
+bash tools/sandbox/sandbox-down.sh --purge
 ```
 
-Both mounts use the sentinel repo path `/workspace/sentinel/tools/sandbox/...`
-which is already bind-mounted by the launcher's repo mount, so the
-settings file resolves naturally without a host-side copy.
+## Scripts
 
-## Env vars
+| Script | Purpose |
+|---|---|
+| `sandbox-up.sh` | Build (if needed) + start the sandbox-dev container. Pre-flights required host paths. |
+| `sandbox-down.sh` | Stop the container. `--purge` also drops volumes. |
+| `sandbox-smoke-test.sh` | 4-check verify: container running, binaries on PATH, metrics bind-mount round-trips host↔container, agent-workload port forwarding. |
+| `sandbox-grind.sh` | One-shot autonomous claude run inside the sandbox against a plan file. `--detach` for background. |
+| `sandbox-fleet.sh` | Spin N parallel sandbox containers with isolated cache+state. Subcommands: `up / down / logs / status`. The scale surface — see SANDBOX.md for use cases. |
+| `sandbox-bootstrap.sh` | In-container entrypoint that builds sentinel, installs gh, sets up a container-local gitconfig, repairs worktree pointers. Idempotent. |
+
+## What the container provides
+
+- **Rust 1.x toolchain** for building sentinel from source.
+- **Node 22 + pnpm** for any JS-side tooling.
+- **Claude Code CLI** installed globally — inherits the host's
+  Claude Max OAuth token via a RO bind of `.credentials.json`.
+- **gh CLI** for any `gh pr …` workflows.
+- **Container-local `$HOME/.claude`** (symlinked into a named
+  volume) so claude state doesn't leak into the host.
+- **`sentinel hook` PATH wiring** so the canonical hooked
+  settings profile (claude-settings-hooked.json) fires sentinel
+  hooks on every tool call.
+- **Forwarded agent-workload ports 18000-18099** so claude in
+  the container can spin up ad-hoc preview servers the host can
+  browse.
+
+## Hook output reaches the host
+
+The container's `$SENTINEL_CLAUDE_DIR/sentinel/metrics/` is
+bind-mounted to the host's `~/.claude/sentinel/metrics/` — same
+inode. The container's sentinel writes JSONL there; whatever
+process on the host already tails that directory (typically a
+host-side `sentinel-bridge`) picks it up. This PR makes no
+assumptions about what consumes the directory; it only
+guarantees the write surfaces.
+
+## Settings profiles
+
+| File | Use |
+|---|---|
+| `claude-settings-hooked.json` | Default. Fires `sentinel hook --event <Name>` on every PreToolUse / PostToolUse / etc. |
+| `claude-settings-hookless.json` | `SENTINEL_HOOKS=off`. Empty hook map — claude runs without sentinel observability. Useful for hook-on / hook-off A/B fleet runs. |
+
+Toggle by editing the compose's `claude-settings-*.json`
+bind-mount line, or set `SENTINEL_HOOKS=off` and re-launch via a
+launcher that picks the corresponding file.
+
+## Env knobs
 
 | Var | Default | Effect |
-|-----|---------|--------|
-| `SENTINEL_HOOKS`     | `on`  | Set to `off` to use the hookless profile. |
-| `SENTINEL_WORKSTREAM`| `—`   | Tag forwarded by `sentinel hook` into the bridge — shows in the viz dashboard's per-session label. The launcher sets this from the grind container name. |
-| `SENTINEL_CLAUDE_DIR`| `—`   | Set by the launcher (typically `/workspace/.container-state/claude`). The bind-mounts above target this path. |
+|---|---|---|
+| `SENTINEL_REPO` | `../..` | Host path to the sentinel checkout to mount RW. |
+| `HOST_UID` / `HOST_GID` | host's `id -u/-g` | UID/GID baked into the image so bind-mounted files stay writable. |
+| `SENTINEL_CLAUDE_DIR` | `/workspace/.container-state/claude` | Where the container's sentinel writes JSONL (set by compose). |
+| `SENTINEL_SANDBOX_PORT_RANGE` | `18000-18099` | Range claude-in-container is expected to bind preview services on. |
+| `FLEET_PORT_BASE` / `FLEET_PORT_SLICE` | `19000` / `10` | First port + per-replica slice width for `sandbox-fleet.sh`. |
 
-## Isolation seam (intentional)
+## See also
 
-Only the **metrics JSONL directory** crosses the host↔container
-boundary, not the whole `.claude/` profile. Container-side Claude
-keeps its own history, chat sessions, MCP config, and project
-state — those stay container-local under `$SENTINEL_CLAUDE_DIR`.
-This preserves the "sandbox" property (the container can't read
-your real Claude history or write to your host's project memory)
-while still letting observability events flow up to the bridge.
-
-## Verifying the wiring
-
-After launching a hooked grind container:
-
-```bash
-# Watch the bridge SQLite for new sessions:
-sqlite3 ~/.agents/scratch/activegraph-bridge/sentinel.db \
-  "SELECT session_id, datetime(last_activity_at,'unixepoch','localtime'), data->>'$.name' \
-   FROM nodes WHERE node_type='SentinelSession' \
-   ORDER BY last_activity_at DESC LIMIT 5"
-
-# Or hit the viz-api directly:
-curl -s http://172.16.100.22:8082/api/graph?limit=20 \
-  | jq -r '.nodes[] | select(.type=="SentinelSession" and .last_activity_age_s < 300) \
-                     | "\(.data.session_id) \(.session_status)"'
-```
-
-A fresh grind should show up with `last_activity_age_s < 60` within
-seconds of the first hook firing (SessionStart).
+- `SANDBOX.md` — isolation contract + scale model (read this
+  before running `sandbox-fleet.sh` against anything serious).
+- `sandbox-bootstrap.sh` header — what bootstrap actually does
+  in-container, in detail.
