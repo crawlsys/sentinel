@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "$comment": "Hookless settings.json for the sentinel sandbox containers. Used when SENTINEL_HOOKS=off — the container's Claude Code session runs WITHOUT firing sentinel hooks (no JSONL output, no bridge writes, no dashboard visibility). The hooked counterpart is tools/sandbox/claude-settings-hooked.json. This file is intentionally minimal and matches the legacy ~/.agents/notes/sentinel-docker-dev/claude-settings.container.json profile for backwards compatibility.",
+  "theme": "dark",
+  "verbose": false,
+  "alwaysThinkingEnabled": false,
+  "skipDangerousModePermissionPrompt": false,
+  "permissions": {
+    "allow": [],
+    "deny": []
+  },
+  "hooks": {},
+  "mcpServers": {},
+  "preferredNotifChannel": "terminal",
+  "agentPushNotifEnabled": false
+}

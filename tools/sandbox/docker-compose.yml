@@ -1,0 +1,105 @@
+# Sentinel sandbox stack — single container, single responsibility.
+#
+# ONE service: sandbox-dev. A dev container with Claude Code CLI
+# wired into the host's sentinel observability via a metrics
+# bind-mount. The container fires sentinel hooks normally; the
+# JSONL output crosses up to the host's
+# ~/.claude/sentinel/metrics/, where the operator's EXISTING
+# host-side sentinel-bridge picks it up.
+#
+# This compose does NOT include the bridge itself, viz-api, or
+# viz-next. Those are observability concerns that belong with
+# the viz workstream — adding them here would couple sandboxing
+# to a specific dashboard topology. The sandbox writes
+# observability events to a well-known path; whatever consumes
+# that path is somebody else's problem.
+#
+# Usage:
+#   bash tools/sandbox/sandbox-up.sh
+#   bash tools/sandbox/sandbox-down.sh
+#
+# Or invoke compose directly:
+#   docker compose -f tools/sandbox/docker-compose.yml up -d
+#
+# For multi-replica fleets (benchmarking, A/B, regression-search),
+# see sandbox-fleet.sh.
+
+name: sentinel-sandbox
+
+services:
+
+  sandbox-dev:
+    build:
+      context: ../..
+      dockerfile: tools/sandbox/Dockerfile.dev
+      args:
+        DEV_UID: ${HOST_UID:-1000}
+        DEV_GID: ${HOST_GID:-1000}
+    image: sentinel-sandbox-dev:local
+    container_name: sentinel-sandbox-dev
+    stdin_open: true
+    tty: true
+    working_dir: /workspace/sentinel
+    # Lets in-container processes reach host services (host-side
+    # bridge, dashboard if you run one) at host.docker.internal.
+    # Linux requires the host-gateway alias explicit.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    # Forward the agent-workload port range so claude-in-container
+    # can spin up ad-hoc preview services on any port in this
+    # window and the operator can browse them from the host
+    # without changing the compose. Convention: agents bind
+    # 0.0.0.0:<port> (not 127.0.0.1) on a free port in this range
+    # and surface the URL.
+    ports:
+      - "127.0.0.1:18000-18099:18000-18099"
+    environment:
+      SENTINEL_CLAUDE_DIR: /workspace/.container-state/claude
+      # The agent-workload port range the in-container claude is
+      # allowed to bind on. Helper code can pick a free port via
+      # `ss -tln | awk` over this range.
+      SENTINEL_SANDBOX_PORT_RANGE: 18000-18099
+    volumes:
+      - ${SENTINEL_REPO:-../..}:/workspace/sentinel:rw
+      - sandbox-cache:/workspace/.container-cache
+      - sandbox-state:/workspace/.container-state
+
+      # Share host Claude Max OAuth token RO so the in-container
+      # Claude inherits the subscription.
+      - ${HOME}/.claude/.credentials.json:/workspace/.container-state/claude/.credentials.json:ro
+
+      # Sentinel hook output crosses up to the host. The container
+      # writes to $SENTINEL_CLAUDE_DIR/sentinel/metrics/ (set
+      # above to /workspace/.container-state/claude/...); this
+      # bind makes that path the SAME inode as the host's
+      # ~/.claude/sentinel/metrics/ where the operator's
+      # host-side sentinel-bridge already tails.
+      - ${HOME}/.claude/sentinel/metrics:/workspace/.container-state/claude/sentinel/metrics
+
+      # Canonical hooks profile so every PreToolUse / PostToolUse
+      # / etc. fires `sentinel hook --event …`. The file ships
+      # with this repo so it travels with the bridge.
+      - ${SENTINEL_REPO:-../..}/tools/sandbox/claude-settings-hooked.json:/workspace/.container-state/claude/settings.json:ro
+
+      # Sibling legatus-consul-agent repo. sentinel-legatus
+      # path-depends on consul-protocol + consul-domain crates
+      # living here.
+      - ${HOME}/firefly/legatus-consul-agent:/workspace/legatus-consul-agent:rw
+
+      # The bootstrap script that builds sentinel on first run,
+      # installs gh, sets up a container-local gitconfig, and
+      # repairs worktree pointers.
+      - ${SENTINEL_REPO:-../..}/tools/sandbox/sandbox-bootstrap.sh:/usr/local/bin/sandbox-bootstrap.sh:ro
+    # Run bootstrap once at container start, then drop into sleep
+    # infinity. Bootstrap is idempotent — subsequent restarts
+    # return in <1s when state is cached.
+    command:
+      - bash
+      - -lc
+      - |
+        /usr/local/bin/sandbox-bootstrap.sh
+        exec sleep infinity
+
+volumes:
+  sandbox-cache:
+  sandbox-state:
