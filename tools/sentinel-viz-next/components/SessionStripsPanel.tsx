@@ -3,18 +3,29 @@
 import { useEffect, useMemo, useState } from "react";
 import { Chip, Stack, ToggleButton, ToggleButtonGroup } from "@mui/material";
 
-import type { GraphResponse, Node } from "../types/api";
-import { buildSessionStrips } from "../domain/session-strips";
+import type { GraphResponse, Node, NodeCategory } from "../types/api";
+import { buildSessionStrips, type SessionStripData } from "../domain/session-strips";
 import { sessionColorMap } from "../domain/session-colors";
 import { fetchSessionName } from "../adapters/http";
 import { SessionStrip } from "./SessionStrip";
 
 const HARNESS_FILTER_KEY = "sentinel-viz-harness-filter";
+const HARNESS_FILTER_VERSION_KEY = "sentinel-viz-harness-filter-version";
+const HARNESS_FILTER_VERSION = "2";
 // Allowlist: only claude + codex sessions are tracked. The bridge's
 // opencode/qwen/gemini shims are gated dormant behind a non-default
 // cargo feature; this list mirrors that.
 const HARNESSES = ["claude", "codex"] as const;
 type HarnessId = (typeof HARNESSES)[number];
+const DEFAULT_HARNESSES: HarnessId[] = ["claude", "codex"];
+const SESSION_NAME_FETCH_DELAY_MS = 4_000;
+const SESSION_NAME_FETCH_BATCH = 2;
+const STICKY_CATEGORY_ORDER: NodeCategory[] = ["tc", "planning", "communication", "prompt", "other"];
+
+function defaultHarnessSet(): Set<HarnessId> {
+  return new Set(DEFAULT_HARNESSES);
+}
+
 function harnessColor(h: string): string {
   switch (h) {
     case "claude":   return "#5B9BF6";
@@ -59,30 +70,39 @@ export function SessionStripsPanel({
   onSelectSession,
   dormantSessionIds,
 }: Props) {
-  const [windowMinutes, setWindowMinutes] = useState<number>(() => {
-    if (typeof window === "undefined") return DEFAULT_WINDOW;
-    const stored = window.localStorage.getItem(WINDOW_STORAGE_KEY);
-    const n = stored ? parseInt(stored, 10) : NaN;
-    return Number.isFinite(n) && n > 0 ? n : DEFAULT_WINDOW;
-  });
+  const [prefsLoaded, setPrefsLoaded] = useState(false);
+  const [windowMinutes, setWindowMinutes] = useState<number>(DEFAULT_WINDOW);
 
-  // Per-harness filter — operator can hide non-sentinel codex
-  // sessions (from other projects on the same host) without the
-  // bridge changing what it ingests. localStorage persists the
-  // preference. Default: only claude — sentinel-focused view.
-  const [enabledHarnesses, setEnabledHarnesses] = useState<Set<HarnessId>>(() => {
-    if (typeof window === "undefined") return new Set(["claude"]);
-    const raw = window.localStorage.getItem(HARNESS_FILTER_KEY);
-    if (raw) {
-      try {
-        const arr = JSON.parse(raw) as string[];
-        return new Set(arr.filter((h): h is HarnessId => HARNESSES.includes(h as HarnessId)));
-      } catch { /* fall through to default */ }
-    }
-    return new Set(["claude"]);
-  });
+  // Per-harness filter — operator can hide noisy harnesses without
+  // the bridge changing what it ingests. localStorage persists the
+  // preference. v2 default includes Codex; older browsers may have
+  // persisted the previous Claude-only default, so ignore old-version
+  // storage once and rewrite it below.
+  const [enabledHarnesses, setEnabledHarnesses] = useState<Set<HarnessId>>(() => defaultHarnessSet());
+  const [stripOrder, setStripOrder] = useState<string[]>([]);
+  const [stickyCategories, setStickyCategories] = useState<Map<string, Set<NodeCategory>>>(new Map());
+
   useEffect(() => {
     if (typeof window === "undefined") return;
+    const storedWindow = window.localStorage.getItem(WINDOW_STORAGE_KEY);
+    const n = storedWindow ? parseInt(storedWindow, 10) : NaN;
+    if (Number.isFinite(n) && n > 0) setWindowMinutes(n);
+
+    const version = window.localStorage.getItem(HARNESS_FILTER_VERSION_KEY);
+    const raw = window.localStorage.getItem(HARNESS_FILTER_KEY);
+    if (raw && version === HARNESS_FILTER_VERSION) {
+      try {
+        const arr = JSON.parse(raw) as string[];
+        const parsed = new Set(arr.filter((h): h is HarnessId => HARNESSES.includes(h as HarnessId)));
+        setEnabledHarnesses(parsed.size > 0 ? parsed : defaultHarnessSet());
+      } catch { /* fall through to default */ }
+    }
+    setPrefsLoaded(true);
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined" || !prefsLoaded) return;
+    window.localStorage.setItem(HARNESS_FILTER_VERSION_KEY, HARNESS_FILTER_VERSION);
     window.localStorage.setItem(
       HARNESS_FILTER_KEY,
       JSON.stringify(Array.from(enabledHarnesses)),
@@ -98,48 +118,13 @@ export function SessionStripsPanel({
   };
 
   useEffect(() => {
-    if (typeof window === "undefined") return;
+    if (typeof window === "undefined" || !prefsLoaded) return;
     window.localStorage.setItem(WINDOW_STORAGE_KEY, String(windowMinutes));
-  }, [windowMinutes]);
+  }, [windowMinutes, prefsLoaded]);
 
   const sessionColors = useMemo(() => sessionColorMap(graph), [graph]);
 
-  // Fetch LLM-assigned session names lazily for visible sids.
-  // Cache lives in the api-side fetch (httpcache) so this is
-  // cheap on re-renders.
   const [nameMap, setNameMap] = useState<Map<string, string>>(new Map());
-  useEffect(() => {
-    if (!graph) return;
-    const sids = new Set<string>();
-    for (const e of graph.events) {
-      const sid = typeof e.payload?.session_id === "string" ? (e.payload.session_id as string) : null;
-      if (sid) sids.add(sid);
-    }
-    let cancelled = false;
-    (async () => {
-      const next = new Map(nameMap);
-      const sidsToFetch = Array.from(sids).filter((s) => !next.has(s));
-      if (sidsToFetch.length === 0) return;
-      const results = await Promise.allSettled(
-        sidsToFetch.map((sid) => fetchSessionName(sid).then((r) => ({ sid, r }))),
-      );
-      if (cancelled) return;
-      let changed = false;
-      for (const r of results) {
-        if (r.status !== "fulfilled") continue;
-        const { sid, r: resp } = r.value;
-        if (resp.name && resp.name.length > 0) {
-          next.set(sid, resp.name);
-          changed = true;
-        }
-      }
-      if (changed) setNameMap(next);
-    })();
-    return () => {
-      cancelled = true;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [graph?.max_seq]);
 
   const stuckMap = useMemo(() => {
     const m = new Map<string, { ageSecs: number; kind: string | null; question: string | null }>();
@@ -155,7 +140,7 @@ export function SessionStripsPanel({
     return m;
   }, [stuck]);
 
-  const strips = useMemo(() => {
+  const rawStrips = useMemo(() => {
     const all = buildSessionStrips(graph, {
       windowMinutes,
       colors: sessionColors,
@@ -178,6 +163,102 @@ export function SessionStripsPanel({
     // dormancy clock.
     return harnessFiltered.filter((s) => !dormantSessionIds.has(s.sessionId) || s.stuck);
   }, [graph, windowMinutes, sessionColors, nameMap, stuckMap, dormantSessionIds, enabledHarnesses]);
+
+  useEffect(() => {
+    setStickyCategories((prev) => {
+      let changed = false;
+      const next = new Map(prev);
+      for (const strip of rawStrips) {
+        if (strip.rows.length === 0) continue;
+        let cats = next.get(strip.sessionId);
+        for (const row of strip.rows) {
+          if (!cats) {
+            cats = new Set<NodeCategory>();
+            next.set(strip.sessionId, cats);
+          }
+          if (!cats.has(row.category)) {
+            cats.add(row.category);
+            changed = true;
+          }
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, [rawStrips]);
+
+  const stickyStrips = useMemo(() => {
+    return rawStrips.map((strip): SessionStripData => {
+      const cats = stickyCategories.get(strip.sessionId);
+      if (!cats || cats.size === 0) return strip;
+      const rowsByCategory = new Map(strip.rows.map((row) => [row.category, row]));
+      const rows = STICKY_CATEGORY_ORDER
+        .filter((category) => cats.has(category) || rowsByCategory.has(category))
+        .map((category) =>
+          rowsByCategory.get(category) ?? {
+            category,
+            counts: new Array(windowMinutes * 2).fill(0),
+            total: 0,
+            peak: 0,
+          },
+        );
+      if (rows.length === strip.rows.length) return strip;
+      return { ...strip, rows };
+    });
+  }, [rawStrips, stickyCategories, windowMinutes]);
+
+  useEffect(() => {
+    setStripOrder((prev) => {
+      const seen = new Set(prev);
+      const appended = stickyStrips.map((s) => s.sessionId).filter((sid) => !seen.has(sid));
+      if (appended.length === 0) return prev;
+      return [...prev, ...appended];
+    });
+  }, [stickyStrips]);
+
+  const strips = useMemo(() => {
+    if (stripOrder.length === 0) return stickyStrips;
+    const order = new Map(stripOrder.map((sid, i) => [sid, i]));
+    return stickyStrips
+      .slice()
+      .sort((a, b) => (order.get(a.sessionId) ?? Number.MAX_SAFE_INTEGER) - (order.get(b.sessionId) ?? Number.MAX_SAFE_INTEGER));
+  }, [stickyStrips, stripOrder]);
+
+  const missingVisibleNameKey = useMemo(() => {
+    return strips
+      .map((s) => s.sessionId)
+      .filter((sid) => !nameMap.has(sid))
+      .join("|");
+  }, [strips, nameMap]);
+
+  // Fetch LLM-assigned session names lazily and only for visible
+  // strips. This is deliberately delayed/batched so session summary
+  // requests win the first Ollama slots when a dashboard opens.
+  useEffect(() => {
+    if (!missingVisibleNameKey) return;
+    let cancelled = false;
+    const sids = missingVisibleNameKey.split("|").filter(Boolean).slice(0, SESSION_NAME_FETCH_BATCH);
+    const timer = window.setTimeout(async () => {
+      for (const sid of sids) {
+        try {
+          const resp = await fetchSessionName(sid);
+          const name = resp.name;
+          if (cancelled || !name) continue;
+          setNameMap((prev) => {
+            if (prev.has(sid)) return prev;
+            const next = new Map(prev);
+            next.set(sid, name);
+            return next;
+          });
+        } catch {
+          /* low-priority ornamentation; keep the strip usable */
+        }
+      }
+    }, SESSION_NAME_FETCH_DELAY_MS);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [missingVisibleNameKey]);
 
   return (
     <section

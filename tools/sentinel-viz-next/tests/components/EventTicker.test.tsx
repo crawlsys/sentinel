@@ -208,14 +208,14 @@ describe("EventTicker", () => {
     expect(spy).toHaveBeenCalledWith("SentinelToolCall#tc1", expect.any(String));
   });
 
-  it("clicking the ×N badge expands the group without firing onSelectNode", () => {
+  it("duplicate-only ×N badge stays compact and does not open a low-value flyout", () => {
     const spy = vi.fn();
     render(<EventTicker events={sampleEvents} onSelectNode={spy} />);
     const badge = screen.getByText(/×2/);
     fireEvent.click(badge);
     expect(spy).not.toHaveBeenCalled();
-    // After expanding, the row should reveal both grouped members.
-    expect(screen.getAllByText("TC#tc1")).toHaveLength(2);
+    expect(screen.queryByTestId("ticker-flyout")).toBeNull();
+    expect(screen.queryByText("TC#tc1")).toBeNull();
   });
 
   describe("sticky stuck rows", () => {
@@ -245,7 +245,7 @@ describe("EventTicker", () => {
       expect(rows[0].getAttribute("data-stuck")).toBe("true");
     });
 
-    it("renders the stuck-reason sub-line with age, kind, and question", () => {
+    it("renders the stuck-reason sub-line with age, friendly kind, and question", () => {
       const stuckMeta = new Map([
         [
           "sess-a",
@@ -256,7 +256,12 @@ describe("EventTicker", () => {
       const reason = screen.getByTestId("stuck-reason-line");
       expect(reason.textContent).toMatch(/STUCK/);
       expect(reason.textContent).toMatch(/18m/);
-      expect(reason.textContent).toMatch(/AskUserQuestion/);
+      // The raw camel-case kind is translated to operator phrasing —
+      // "your answer", not "AskUserQuestion" — same jargon-to-words
+      // discipline the status badge already follows. Raw kind stays
+      // discoverable via the line's title attribute.
+      expect(reason.textContent).toMatch(/your answer/);
+      expect(reason.textContent).not.toMatch(/AskUserQuestion/);
       expect(reason.textContent).toMatch(/Should we proceed/);
     });
 

@@ -155,13 +155,12 @@ fn translate(
                         ));
                     }
                     "function_call_output" => {
-                        out.push((
-                            "PostToolUse".into(),
-                            "codex_shim_tool_result".into(),
-                            ts,
-                            repo_root.clone(),
-                            String::new(),
-                        ));
+                        // Codex rollout output rows do not carry the
+                        // normalized tool name or a concise result payload.
+                        // Emitting them produces high-volume
+                        // `codex_shim_tool_result` ticker noise while the
+                        // preceding function_call already records the useful
+                        // operator signal.
                     }
                     _ => {}
                 }

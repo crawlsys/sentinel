@@ -8,7 +8,7 @@ import { categoryForTool, deriveLabelAndCategory } from "./event-category";
 export interface SessionStripCategoryRow {
   /** Operator-facing tool category. */
   category: NodeCategory;
-  /** Per-minute event counts. Length === windowMinutes. Oldest first. */
+  /** Per-bucket event counts. Buckets are 30s wide, oldest first. */
   counts: number[];
   /** Sum of counts across the window. */
   total: number;
@@ -21,6 +21,10 @@ export interface SessionStripData {
   /** LLM-assigned session name when available, otherwise the
    *  short sid prefix. */
   displayName: string;
+  /** Deterministic recent-activity phrase. This is supporting
+   *  context, not a session title; the main title stays stable even
+   *  when no transcript-backed LLM name is available. */
+  activityBlurb: string | null;
   shortSid: string;
   /** Hex colour from the session palette. */
   color: string;
@@ -55,6 +59,8 @@ export interface SessionStripData {
 /// flavour for most sessions. "other" last so it never crowds out
 /// the meaningful categories.
 const CATEGORY_ORDER: NodeCategory[] = ["tc", "planning", "communication", "prompt", "other"];
+const BUCKETS_PER_MINUTE = 2;
+const BUCKET_MS = 60_000 / BUCKETS_PER_MINUTE;
 
 /// Human-readable label per category for the short-description
 /// fallback. Kept separate from `categoryLabel()` (used in the
@@ -237,9 +243,21 @@ export function deriveShortDescription(opts: {
   return parts.join(" · ");
 }
 
+/// Compact peak-intensity token for the strip header summary.
+/// Surfaces the session's burstiness — the signal that distinguishes
+/// a 15/min tool burst from a 2-event trickle when the operator scans
+/// a tall list of strips. Returns null below the floor so quiet
+/// sessions stay suffix-free: a peak of 0 (no activity / stuck-only)
+/// or 1 (a lone event per minute) isn't "bursty", and tagging every
+/// trickle "1/min" would be exactly the noise the ticker's
+/// shouldShowSubLine gating exists to avoid. Exported for unit tests.
+export function formatPeakRate(peakPerMin: number): string | null {
+  if (!Number.isFinite(peakPerMin) || peakPerMin <= 1) return null;
+  return `${peakPerMin}/min`;
+}
+
 export interface BuildOptions {
-  /** Time window in minutes. Default 60. Used to size the
-   *  bucket array (one entry per minute). */
+  /** Time window in minutes. Default 60. */
   windowMinutes: number;
   /** Map session_id → palette colour (from sessionColorMap). */
   colors: Map<string, string>;
@@ -260,7 +278,7 @@ export function buildSessionStrips(
   const now = opts.now ?? Date.now();
   const windowMs = opts.windowMinutes * 60_000;
   const windowStart = now - windowMs;
-  const numBuckets = opts.windowMinutes;
+  const numBuckets = opts.windowMinutes * BUCKETS_PER_MINUTE;
 
   // sid → SentinelSession node (for status, age, awaiting fields).
   const sessionNodes = new Map<string, Node>();
@@ -270,7 +288,9 @@ export function buildSessionStrips(
     if (sid) sessionNodes.set(sid, n);
   }
 
-  // sid → category → counts[numBuckets]
+  // sid → category → counts[numBuckets]. Buckets are 30s wide so
+  // short bursts visibly advance instead of hiding inside a full
+  // minute bucket.
   const perSession = new Map<string, Map<NodeCategory, number[]>>();
   // sid → source_harness, derived from the first hook_ingested event
   // for the session. The graph.nodes set is often narrower than the
@@ -302,7 +322,7 @@ export function buildSessionStrips(
 
     const bucketIdx = Math.min(
       numBuckets - 1,
-      Math.max(0, Math.floor((t - windowStart) / 60_000)),
+      Math.max(0, Math.floor((t - windowStart) / BUCKET_MS)),
     );
     const sentinelEvent =
       typeof e.payload?.sentinel_event === "string"
@@ -367,7 +387,8 @@ export function buildSessionStrips(
       const peak = counts.reduce((a, b) => (b > a ? b : a), 0);
       rows.push({ category, counts, total, peak });
       totalEvents += total;
-      if (peak > peakPerMin) peakPerMin = peak;
+      const peakPerMinute = peak * BUCKETS_PER_MINUTE;
+      if (peakPerMinute > peakPerMin) peakPerMin = peakPerMinute;
     }
     if (totalEvents === 0 && !stuckSids.has(sid)) continue;
 
@@ -384,33 +405,23 @@ export function buildSessionStrips(
       harnessBySid.get(sid) ??
       null;
     // Display-name preference order:
-    //   1. LLM-assigned name (best — captures activity flavour in plain English)
-    //   2. Prose blurb derived from recent tool activity ("editing
-    //      EventTicker.tsx", "running cargo test", "searching for hook").
-    //      Operator-readable, deterministic, LLM-free.
-    //   3. Stat-style short description (harness + dominant category + rate).
-    //   4. Bare s:<shortSid> as the final fallback.
+    //   1. LLM-assigned name (best — captures the actual task).
+    //   2. Stable harness/session label. Tool-verb prose belongs
+    //      in activityBlurb below the title; as a title it regresses
+    //      into "tracking editing running" noise when transcripts
+    //      are unavailable in sandbox print-mode.
     const prose = deriveProseBlurb(proseEventsBySid.get(sid) ?? []);
     let displayName: string;
     if (name && name.length > 0) {
       displayName = `${name} · s:${shortSid}`;
-    } else if (prose) {
-      displayName = `${prose} · s:${shortSid}`;
     } else {
-      displayName = deriveShortDescription({
-        harness: sourceHarness,
-        status,
-        topCategory: rows[0]?.category ?? null,
-        totalEvents,
-        peakPerMin,
-        stuckKind: stuck?.kind ?? null,
-        shortSid,
-      });
+      displayName = `${titleCase(sourceHarness || "agent")} session · s:${shortSid}`;
     }
 
     out.push({
       sessionId: sid,
       displayName,
+      activityBlurb: prose,
       shortSid,
       color,
       status,
@@ -441,18 +452,11 @@ export function buildSessionStrips(
       const stuckMeta = opts.stuck.get(sid) ?? null;
       const displayName = name && name.length > 0
         ? `${name} · s:${shortSid}`
-        : deriveShortDescription({
-            harness: sourceHarness,
-            status,
-            topCategory: null,
-            totalEvents: 0,
-            peakPerMin: 0,
-            stuckKind: stuckMeta?.kind ?? null,
-            shortSid,
-          });
+        : `${titleCase(sourceHarness || "agent")} session · s:${shortSid}`;
       out.push({
         sessionId: sid,
         displayName,
+        activityBlurb: null,
         shortSid,
         color: opts.colors.get(sid) ?? "#6e7681",
         status,
@@ -472,6 +476,11 @@ export function buildSessionStrips(
     return aw - bw;
   });
   return out;
+}
+
+function titleCase(s: string): string {
+  if (!s) return "Agent";
+  return `${s.slice(0, 1).toUpperCase()}${s.slice(1)}`;
 }
 
 /// Render a per-minute count array as a unicode bar sparkline. The

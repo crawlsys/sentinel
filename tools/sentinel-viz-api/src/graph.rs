@@ -1,9 +1,12 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::fs::File;
+use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
 use rusqlite::Connection;
+use serde_json::json;
 
 use crate::awaiting;
 use crate::db;
@@ -13,18 +16,12 @@ use crate::model::{
 };
 use crate::transcript;
 
-/// Window strategy constants. Original 2026-05-25 sizing was
-/// "5 sessions × 20 events = 100 datapoints" — that worked while
-/// rows were 1:1 with events. With P3-24 rollup collapsing
-/// adjacent same-category routine claude tool calls into single
-/// rows, 20 events per session yields very few visible rows after
-/// a tool-heavy turn. P3-29 bumps per-session cap 3× so the
-/// ticker has enough backlog to feel like the historical record
-/// it should be. Session count stays at 5 — that's an operator
-/// preference, not a perf concern.
+/// Number of sessions that get root nodes in the default graph.
+/// Event history is controlled by the request/window limit, not by
+/// a hidden per-session cap.
 const K_SESSIONS: usize = 5;
-const PER_SESSION_CAP_DEFAULT: usize = 150;
-const PER_SESSION_CAP_FOCUSED: usize = 250;
+const NODE_SESSION_CAP_DEFAULT: usize = 150;
+const NODE_SESSION_CAP_FOCUSED: usize = 250;
 
 /// Liveness thresholds (seconds). Match `viz_server.py:574-578`.
 const FIRING_THRESHOLD: f64 = 30.0;
@@ -38,6 +35,25 @@ const DORMANT_THRESHOLD: f64 = 1800.0;
 /// blocked work. Past this window the session falls to `dead`.
 const AWAIT_FRESHNESS_SECS: f64 = 86_400.0;
 
+/// Map a session's last-activity age (seconds) to its base liveness
+/// status. Pure and total: the half-open bands tile `[0, ∞)` with no
+/// gap or overlap, so a higher age can never decay to a *fresher*
+/// status. `AwaitingUser` is layered on top of this by the caller
+/// (transcript-driven) and is not produced here.
+fn classify_liveness(age: f64) -> SessionStatus {
+    if age < FIRING_THRESHOLD {
+        SessionStatus::Firing
+    } else if age < BUSY_THRESHOLD {
+        SessionStatus::Busy
+    } else if age < IDLE_THRESHOLD {
+        SessionStatus::Idle
+    } else if age < DORMANT_THRESHOLD {
+        SessionStatus::Dormant
+    } else {
+        SessionStatus::Dead
+    }
+}
+
 /// Knobs the HTTP layer can override per-request.
 #[derive(Debug, Clone)]
 pub struct GraphOpts {
@@ -49,19 +65,18 @@ pub struct GraphOpts {
     /// When `false` (default), hooks are filtered out and direct
     /// `session → tool_call` edges are synthesised in their place.
     pub include_hooks: bool,
-    /// Session id (the data.session_id value) that should get the
-    /// larger PER_SESSION_CAP_FOCUSED window. Others get the
-    /// default cap.
+    /// Session id (the data.session_id value) that should get
+    /// expanded nodes in graph views. Event history is not capped
+    /// per session.
     pub focused_session: Option<String>,
 }
 
 impl Default for GraphOpts {
     fn default() -> Self {
         Self {
-            // Matches K_SESSIONS × PER_SESSION_CAP_DEFAULT (5 × 150).
-            // Operator: "we should have a lot more events from the
-            // backlog" — P3-29.
-            limit: 750,
+            // Total event window. Operators can override with
+            // SENTINEL_VIZ_WINDOW or /api/graph?limit=...
+            limit: 6_000,
             since_secs: Some(6 * 3600),
             include_hooks: false,
             focused_session: None,
@@ -142,6 +157,8 @@ pub fn load_graph_with(conn: &Connection, opts: GraphOpts) -> Result<GraphRespon
         }
     }
 
+    augment_from_metric_files(&mut recent_events, &mut max_seq, opts.since_secs);
+
     // Collapse duplicate SentinelSession nodes: the bridge sometimes
     // materialises a new SentinelSession#<seq> when a session is
     // resumed, leaving two nodes for the same session_id. Keep the
@@ -202,6 +219,72 @@ pub fn load_graph_with(conn: &Connection, opts: GraphOpts) -> Result<GraphRespon
                 }
             }
             edges_all = rewritten;
+        }
+    }
+
+    // Bounded dashboard reads may start after the original
+    // SentinelSession object/relation rows, especially for noisy shim
+    // sessions. Synthesize a minimal session node from the live event
+    // payload so session strips still have a selectable timeline root
+    // instead of showing hook events with no session.
+    {
+        let mut session_ids: HashSet<String> = nodes
+            .values()
+            .filter(|n| n.kind == node_kind::SESSION)
+            .filter_map(|n| n.data.get("session_id").and_then(|v| v.as_str()).map(str::to_string))
+            .collect();
+        let mut synthetic: HashMap<String, (i64, String, String)> = HashMap::new();
+        for ev in &recent_events {
+            let Some(sid) = ev.payload.get("session_id").and_then(|v| v.as_str()) else { continue };
+            if sid.is_empty() || session_ids.contains(sid) {
+                continue;
+            }
+            let harness = ev
+                .payload
+                .get("source_harness")
+                .and_then(|v| v.as_str())
+                .unwrap_or("claude")
+                .to_string();
+            let ts = ev
+                .payload
+                .get("ts")
+                .and_then(|v| v.as_str())
+                .unwrap_or(&ev.ts)
+                .to_string();
+            synthetic
+                .entry(sid.to_string())
+                .and_modify(|cur| {
+                    if ev.seq < cur.0 {
+                        *cur = (ev.seq, harness.clone(), ts.clone());
+                    }
+                })
+                .or_insert((ev.seq, harness, ts));
+        }
+        for (sid, (seq, harness, ts)) in synthetic {
+            let id = format!("{}#synthetic-{}", node_kind::SESSION, sid);
+            session_ids.insert(sid.clone());
+            nodes.insert(
+                id.clone(),
+                Node {
+                    id,
+                    kind: node_kind::SESSION.to_string(),
+                    data: json!({
+                        "session_id": sid,
+                        "cwd": "",
+                        "platform": "",
+                        "started_at": ts,
+                        "source_harness": harness,
+                    }),
+                    ts,
+                    seq,
+                    session_status: None,
+                    last_activity_age_s: None,
+                    awaiting_kind: None,
+                    awaiting_question: None,
+                    awaiting_options: None,
+                    category: None,
+                },
+            );
         }
     }
 
@@ -311,6 +394,16 @@ pub fn load_graph_with(conn: &Connection, opts: GraphOpts) -> Result<GraphRespon
             *e = n.seq;
         }
     }
+    for ev in &recent_events {
+        let Some(sid) = ev.payload.get("session_id").and_then(|v| v.as_str()) else { continue };
+        if sid.is_empty() {
+            continue;
+        }
+        let e = session_max_seq.entry(sid.to_string()).or_insert(0);
+        if ev.seq > *e {
+            *e = ev.seq;
+        }
+    }
     let mut sessions_by_recency: Vec<(String, i64)> =
         session_max_seq.iter().map(|(k, v)| (k.clone(), *v)).collect();
     sessions_by_recency.sort_by(|a, b| b.1.cmp(&a.1));
@@ -325,9 +418,9 @@ pub fn load_graph_with(conn: &Connection, opts: GraphOpts) -> Result<GraphRespon
         // operator sees deep context for what they're looking at,
         // while peripheral sessions stay readable at 12 nodes each.
         let cap = if Some(sid) == opts.focused_session.as_ref() {
-            PER_SESSION_CAP_FOCUSED
+            NODE_SESSION_CAP_FOCUSED
         } else {
-            PER_SESSION_CAP_DEFAULT
+            NODE_SESSION_CAP_DEFAULT
         };
         if let Some(invs) = inv_by_session.get(sid) {
             let mut sorted: Vec<&&Node> = invs.iter().collect();
@@ -346,7 +439,7 @@ pub fn load_graph_with(conn: &Connection, opts: GraphOpts) -> Result<GraphRespon
             if let Some(invs) = inv_by_session.get(focus) {
                 let mut sorted: Vec<&&Node> = invs.iter().collect();
                 sorted.sort_by_key(|n| std::cmp::Reverse(n.seq));
-                for n in sorted.into_iter().take(PER_SESSION_CAP_FOCUSED) {
+                for n in sorted.into_iter().take(NODE_SESSION_CAP_FOCUSED) {
                     kept_inv_ids.insert(n.id.clone());
                 }
             }
@@ -409,17 +502,36 @@ pub fn load_graph_with(conn: &Connection, opts: GraphOpts) -> Result<GraphRespon
         &recent_events[..]
     };
 
-    // Expand kept_ids by walking the ticker tail newest-first, but
-    // honour per-session caps so each session keeps at most
-    // PER_SESSION_CAP_DEFAULT TCs (12), or PER_SESSION_CAP_FOCUSED
-    // (36) for the focused session. Sessions outside top_sids ∪
-    // focused are skipped — we don't drag in TCs from a session we
-    // deliberately dropped.
+    // Expand kept_ids by walking the ticker tail newest-first. This
+    // is only about graph node readability; event history itself is
+    // not capped per session.
     let visible_session_ids: HashSet<String> = top_sids
         .iter()
         .chain(opts.focused_session.iter())
         .cloned()
         .collect();
+    let root_session_ids: HashSet<String> = visible_session_ids
+        .iter()
+        .cloned()
+        .chain(events_tail_for_window.iter().filter_map(|ev| {
+            ev.payload
+                .get("session_id")
+                .and_then(|v| v.as_str())
+                .filter(|sid| !sid.is_empty())
+                .map(str::to_string)
+        }))
+        .collect();
+    for n in nodes.values() {
+        if n.kind == node_kind::SESSION
+            && n
+                .data
+                .get("session_id")
+                .and_then(|v| v.as_str())
+                .is_some_and(|sid| root_session_ids.contains(sid))
+        {
+            kept_ids.insert(n.id.clone());
+        }
+    }
     let mut tc_count_per_session: HashMap<String, usize> = HashMap::new();
     // Walk newest-first so we keep the freshest TCs per session.
     for ev in events_tail_for_window.iter().rev() {
@@ -435,11 +547,12 @@ pub fn load_graph_with(conn: &Connection, opts: GraphOpts) -> Result<GraphRespon
                 kept_ids.insert(n.id.clone());
             }
         }
-        // Apply per-session TC cap.
+        // Apply node cap only; the event list below remains governed
+        // by the total/time window.
         let cap = if Some(ev_sid) == opts.focused_session.as_deref() {
-            PER_SESSION_CAP_FOCUSED
+            NODE_SESSION_CAP_FOCUSED
         } else {
-            PER_SESSION_CAP_DEFAULT
+            NODE_SESSION_CAP_DEFAULT
         };
         let count = tc_count_per_session.entry(ev_sid.to_string()).or_insert(0);
         if *count >= cap {
@@ -554,6 +667,23 @@ pub fn load_graph_with(conn: &Connection, opts: GraphOpts) -> Result<GraphRespon
             *e = ts;
         }
     }
+    for ev in &recent_events {
+        let Some(sid) = ev.payload.get("session_id").and_then(|v| v.as_str()) else { continue };
+        if sid.is_empty() {
+            continue;
+        }
+        let ts_str = ev
+            .payload
+            .get("ts_sec")
+            .and_then(|v| v.as_str())
+            .or_else(|| ev.payload.get("ts").and_then(|v| v.as_str()))
+            .unwrap_or(&ev.ts);
+        let ts = parse_ts_to_epoch(ts_str);
+        let e = max_hook_ts_by_sid.entry(sid.to_string()).or_insert(0.0);
+        if ts > *e {
+            *e = ts;
+        }
+    }
 
     for n in kept_nodes.iter_mut() {
         if n.kind != node_kind::SESSION {
@@ -574,17 +704,7 @@ pub fn load_graph_with(conn: &Connection, opts: GraphOpts) -> Result<GraphRespon
             .unwrap_or(0.0);
         let last_activity = last_hook.max(tmtime);
         let age = if last_activity > 0.0 { now - last_activity } else { 1e9 };
-        let status = if age < FIRING_THRESHOLD {
-            SessionStatus::Firing
-        } else if age < BUSY_THRESHOLD {
-            SessionStatus::Busy
-        } else if age < IDLE_THRESHOLD {
-            SessionStatus::Idle
-        } else if age < DORMANT_THRESHOLD {
-            SessionStatus::Dormant
-        } else {
-            SessionStatus::Dead
-        };
+        let status = classify_liveness(age);
 
         let mut final_status = status;
         if let Some(p) = tpath.as_ref() {
@@ -602,31 +722,17 @@ pub fn load_graph_with(conn: &Connection, opts: GraphOpts) -> Result<GraphRespon
         n.last_activity_age_s = if last_activity > 0.0 { Some(age as i64) } else { None };
     }
 
-    // Ticker tail. Per-session cap (PER_SESSION_CAP_DEFAULT) keeps
-    // one session from monopolising the window when it has tens of
-    // thousands of events. Total cap is `limit` (defaults to
-    // K_SESSIONS × PER_SESSION_CAP_DEFAULT). P3-29 removed the
-    // hardcoded 100 here — operator wanted the full backlog visible
-    // and the frontend rollup keeps the row count manageable
-    // regardless of input size.
+    // Ticker/session-strip tail. Keep the newest `limit` events
+    // after the optional time floor. Do not enforce a hidden
+    // per-session cap here: sparklines need actual wall-clock
+    // history, and hook fanout can otherwise consume a tiny cap in
+    // seconds.
     let events_tail = {
-        let mut per_sid_count: HashMap<String, usize> = HashMap::new();
         let mut kept: Vec<RecentEvent> = Vec::with_capacity(limit);
         for ev in recent_events.into_iter().rev() {
             if kept.len() >= limit {
                 break;
             }
-            let sid = ev
-                .payload
-                .get("session_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            let count = per_sid_count.entry(sid.clone()).or_insert(0);
-            if *count >= PER_SESSION_CAP_DEFAULT {
-                continue;
-            }
-            *count += 1;
             kept.push(ev);
         }
         // We walked newest-first; flip back to chronological so the
@@ -656,6 +762,115 @@ pub fn load_graph_with(conn: &Connection, opts: GraphOpts) -> Result<GraphRespon
         stats,
         error: None,
     })
+}
+
+fn augment_from_metric_files(
+    recent_events: &mut Vec<RecentEvent>,
+    max_seq: &mut i64,
+    since_secs: Option<i64>,
+) {
+    let Some(home) = dirs::home_dir() else { return };
+    let dirs = [
+        home.join(".claude").join("sentinel").join("metrics"),
+        home.join(".claude-sentinel").join("sentinel").join("metrics"),
+        home.join(".codex").join("sentinel").join("metrics"),
+        home.join(".opencode").join("sentinel").join("metrics"),
+        home.join(".qwen").join("sentinel").join("metrics"),
+        home.join(".gemini").join("sentinel").join("metrics"),
+    ];
+    let now_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let cutoff = since_secs.map(|s| now_secs - s);
+    let mut wanted_sessions: HashSet<String> = HashSet::new();
+    for dir in &dirs {
+        let path = dir.join("sessions.jsonl");
+        let Ok(file) = File::open(path) else { continue };
+        for line in BufReader::new(file).lines().map_while(std::result::Result::ok) {
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else { continue };
+            if v.get("event").and_then(|x| x.as_str()) != Some("session_start") {
+                continue;
+            }
+            let Some(sid) = v.get("session_id").and_then(|x| x.as_str()) else { continue };
+            let ts = v.get("ts").and_then(|x| x.as_str()).unwrap_or("");
+            let ts_epoch = parse_ts_to_epoch(ts) as i64;
+            if cutoff.is_some_and(|c| ts_epoch > 0 && ts_epoch < c) {
+                continue;
+            }
+            wanted_sessions.insert(sid.to_string());
+        }
+    }
+    if wanted_sessions.is_empty() {
+        return;
+    }
+
+    let mut existing_traces: HashSet<String> = recent_events
+        .iter()
+        .filter_map(|ev| ev.payload.get("trace_id").and_then(|v| v.as_str()).map(str::to_string))
+        .collect();
+    let mut per_session: HashMap<String, Vec<RecentEvent>> = HashMap::new();
+    for dir in &dirs {
+        let path = dir.join("hook-invocations.jsonl");
+        let Ok(file) = File::open(path) else { continue };
+        for line in BufReader::new(file).lines().map_while(std::result::Result::ok) {
+            let Ok(mut v) = serde_json::from_str::<serde_json::Value>(&line) else { continue };
+            let Some(sid_raw) = v.get("session_id").and_then(|x| x.as_str()) else { continue };
+            let sid = sid_raw.to_string();
+            if !wanted_sessions.contains(&sid) {
+                continue;
+            }
+            let trace_id = v.get("trace_id").and_then(|x| x.as_str()).unwrap_or("");
+            if !trace_id.is_empty() && !existing_traces.insert(trace_id.to_string()) {
+                continue;
+            }
+            let ts = v.get("ts").and_then(|x| x.as_str()).unwrap_or("").to_string();
+            let ts_epoch = parse_ts_to_epoch(&ts) as i64;
+            if cutoff.is_some_and(|c| ts_epoch > 0 && ts_epoch < c) {
+                continue;
+            }
+            if let Some(obj) = v.as_object_mut() {
+                if let Some(event) = obj.get("event").cloned() {
+                    obj.insert("sentinel_event".to_string(), event);
+                }
+                obj.entry("source_harness".to_string()).or_insert_with(|| json!("claude"));
+            }
+            *max_seq += 1;
+            let kind = match v.get("outcome").and_then(|x| x.as_str()) {
+                Some("deny" | "denied" | "block" | "force_stop") => kind::HOOK_DENIED,
+                _ => kind::HOOK_INGESTED,
+            };
+            per_session.entry(sid).or_default().push(RecentEvent {
+                seq: *max_seq,
+                kind: kind.to_string(),
+                payload: v,
+                ts,
+            });
+        }
+    }
+    for events in per_session.values_mut() {
+        events.sort_by(|a, b| {
+            parse_ts_to_epoch(&a.ts)
+                .partial_cmp(&parse_ts_to_epoch(&b.ts))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        recent_events.append(events);
+    }
+    recent_events.sort_by(|a, b| {
+        parse_ts_to_epoch(
+            a.payload
+                .get("ts")
+                .and_then(|v| v.as_str())
+                .unwrap_or(&a.ts),
+        )
+        .partial_cmp(&parse_ts_to_epoch(
+            b.payload
+                .get("ts")
+                .and_then(|v| v.as_str())
+                .unwrap_or(&b.ts),
+        ))
+        .unwrap_or(std::cmp::Ordering::Equal)
+    });
 }
 
 pub fn load_graph_from_default(limit: usize) -> Result<GraphResponse> {
@@ -709,5 +924,60 @@ fn normalise_frac(t: &str) -> String {
         format!("{head}.{frac6}{tz}")
     } else {
         t.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::SessionStatus;
+
+    /// Pin every age→status boundary. The bands are half-open
+    /// `[lo, hi)`, so each threshold value belongs to the *older*
+    /// band, not the fresher one. A regression that flips a
+    /// comparison, reorders the ladder, or retunes a constant without
+    /// intent now fails here instead of silently mislabelling which
+    /// of the operator's agents is alive.
+    #[test]
+    fn classify_liveness_bucket_boundaries() {
+        // Interior of each band.
+        assert_eq!(classify_liveness(0.0), SessionStatus::Firing);
+        assert_eq!(classify_liveness(29.999), SessionStatus::Firing);
+        assert_eq!(classify_liveness(60.0), SessionStatus::Busy);
+        assert_eq!(classify_liveness(200.0), SessionStatus::Idle);
+        assert_eq!(classify_liveness(1000.0), SessionStatus::Dormant);
+        assert_eq!(classify_liveness(5000.0), SessionStatus::Dead);
+
+        // Exact thresholds fall into the older band (`<` is exclusive).
+        assert_eq!(classify_liveness(FIRING_THRESHOLD), SessionStatus::Busy);
+        assert_eq!(classify_liveness(BUSY_THRESHOLD), SessionStatus::Idle);
+        assert_eq!(classify_liveness(IDLE_THRESHOLD), SessionStatus::Dormant);
+        assert_eq!(classify_liveness(DORMANT_THRESHOLD), SessionStatus::Dead);
+
+        // The "no activity seen" sentinel (1e9) must read as Dead, not
+        // wrap to a fresher status.
+        assert_eq!(classify_liveness(1e9), SessionStatus::Dead);
+    }
+
+    /// Monotonicity: status never gets *fresher* as age grows. Guards
+    /// against a future reorder of the if/else ladder.
+    #[test]
+    fn classify_liveness_is_monotonic() {
+        let rank = |s: SessionStatus| match s {
+            SessionStatus::Firing => 0,
+            SessionStatus::Busy => 1,
+            SessionStatus::Idle => 2,
+            SessionStatus::Dormant => 3,
+            SessionStatus::Dead => 4,
+            SessionStatus::AwaitingUser => 5, // not produced here
+        };
+        let mut prev = -1;
+        let mut age = 0.0;
+        while age <= DORMANT_THRESHOLD + 100.0 {
+            let r = rank(classify_liveness(age));
+            assert!(r >= prev, "status got fresher at age {age}");
+            prev = r;
+            age += 5.0;
+        }
     }
 }

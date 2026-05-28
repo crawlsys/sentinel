@@ -79,6 +79,57 @@ export function statusColor(status?: string | null): string {
   return STATUS_COLOR[status] ?? "#6e7681";
 }
 
+// Operator-facing status words. The backend session_status enum is
+// machine jargon: `awaiting_user` (underscored), `firing` (sentinel-
+// internal for "actively producing events"). Translate to plain words
+// for the strip header badge — same key set as STATUS_COLOR so the two
+// can't drift. Unknown statuses fall through unchanged (mirrors
+// sentinelEventPhrase) so a novel backend status is never swallowed.
+// `awaiting_user` reads "waiting", not "stuck": the badge shows for any
+// awaiting session, while the red STUCK box is the dedicated past-the-
+// threshold signal.
+const STATUS_LABEL: Record<string, string> = {
+  firing: "active",
+  busy: "busy",
+  idle: "idle",
+  dormant: "dormant",
+  dead: "dead",
+  awaiting_user: "waiting",
+};
+
+export function statusLabel(status?: string | null): string {
+  if (!status) return "—";
+  return STATUS_LABEL[status] ?? status;
+}
+
+// Operator-facing phrasing for the bridge's `awaiting_kind` — WHY a
+// session is parked waiting on the operator. The bridge writes the
+// raw lifecycle/tool identifier that triggered the wait
+// (`AskUserQuestion`, `PreToolUse`, `Stop`) or the API's generic
+// classification (`question`, `reply`). Those leak into the highest-
+// signal surface the operator scans — the red STUCK banner — as
+// camel-case jargon. Translate to the same "what is it waiting on"
+// register the stuck box already speaks in.
+//
+// Same discipline as `statusLabel` / `sentinelEventPhrase`: unknown
+// kinds fall through UNCHANGED so a novel backend kind is surfaced,
+// not swallowed. null/undefined → "awaiting" — the fallback string
+// the stuck banners already used inline, kept here so the two paths
+// can't drift.
+const AWAITING_KIND_LABEL: Record<string, string> = {
+  AskUserQuestion: "your answer",
+  question: "your answer",
+  reply: "your reply",
+  PreToolUse: "tool approval",
+  Stop: "stop confirmation",
+  Notification: "your attention",
+};
+
+export function awaitingKindLabel(kind?: string | null): string {
+  if (!kind) return "awaiting";
+  return AWAITING_KIND_LABEL[kind] ?? kind;
+}
+
 const NODE_COLOR: Record<string, string> = {
   SentinelSession: "#bc8cff",
   SentinelHookInvocation: "#58a6ff",

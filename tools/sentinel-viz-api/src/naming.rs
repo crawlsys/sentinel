@@ -17,6 +17,8 @@
 //! it's a third-party API choice the operator configures.
 
 use std::collections::HashMap;
+use std::fs::File;
+use std::io::{BufRead, BufReader};
 use std::sync::RwLock;
 use std::time::{Duration, Instant};
 
@@ -128,25 +130,35 @@ pub async fn name_session(state: &NamingState, session_id: &str) -> NameResponse
     let model_snapshot = state.model.read().unwrap().clone();
     let Some(model) = model_snapshot.as_ref() else { return no_model };
 
-    // Build the prompt input — first user message + first 3 tool
-    // calls from the JSONL transcript.
-    let Some(path) = transcript::find_transcript(session_id) else {
-        return NameResponse {
-            session_id: session_id.to_string(),
-            name: None,
-            source: "no-transcript".to_string(),
-            cached: false,
-        };
+    // Build the prompt input. Prefer full transcript JSONL when it
+    // exists. Sandbox print-mode sessions intentionally do not mount
+    // container transcripts back to the host, so fall back to the
+    // read-only metrics activity-log for enough context to produce a
+    // real title without broadening the data boundary.
+    let (activity, source_prefix) = match transcript::find_transcript(session_id) {
+        Some(path) => {
+            let Ok(content) = std::fs::read_to_string(&path) else {
+                return NameResponse {
+                    session_id: session_id.to_string(),
+                    name: None,
+                    source: "read-error".to_string(),
+                    cached: false,
+                };
+            };
+            (extract_recent_activity(&content), "")
+        }
+        None => match extract_metric_activity(session_id) {
+            Some(activity) => (activity, "metrics:"),
+            None => {
+                return NameResponse {
+                    session_id: session_id.to_string(),
+                    name: None,
+                    source: "no-transcript".to_string(),
+                    cached: false,
+                };
+            }
+        },
     };
-    let Ok(content) = std::fs::read_to_string(&path) else {
-        return NameResponse {
-            session_id: session_id.to_string(),
-            name: None,
-            source: "read-error".to_string(),
-            cached: false,
-        };
-    };
-    let activity = extract_recent_activity(&content);
     if activity.is_empty() {
         return NameResponse {
             session_id: session_id.to_string(),
@@ -204,7 +216,7 @@ pub async fn name_session(state: &NamingState, session_id: &str) -> NameResponse
     NameResponse {
         session_id: session_id.to_string(),
         name,
-        source: model.label(),
+        source: format!("{source_prefix}{}", model.label()),
         cached: false,
     }
 }
@@ -336,6 +348,56 @@ fn extract_recent_activity(jsonl: &str) -> RecentActivity {
         tool_patterns,
         last_ts,
     }
+}
+
+fn extract_metric_activity(session_id: &str) -> Option<RecentActivity> {
+    let home = dirs::home_dir()?;
+    let dirs = [
+        home.join(".claude").join("sentinel").join("metrics"),
+        home.join(".claude-sentinel").join("sentinel").join("metrics"),
+        home.join(".codex").join("sentinel").join("metrics"),
+        home.join(".opencode").join("sentinel").join("metrics"),
+        home.join(".qwen").join("sentinel").join("metrics"),
+        home.join(".gemini").join("sentinel").join("metrics"),
+    ];
+    let mut tool_counts: std::collections::HashMap<String, u32> =
+        std::collections::HashMap::new();
+    let mut last_ts = String::new();
+    for dir in dirs {
+        let path = dir.join("activity-log.jsonl");
+        let Ok(file) = File::open(path) else { continue };
+        for line in BufReader::new(file).lines().map_while(std::result::Result::ok) {
+            let Ok(v): Result<serde_json::Value, _> = serde_json::from_str(&line) else { continue };
+            if v.get("session_id").and_then(|s| s.as_str()) != Some(session_id) {
+                continue;
+            }
+            let tool = v.get("tool").and_then(|s| s.as_str()).unwrap_or("");
+            if tool.is_empty() {
+                continue;
+            }
+            let summary = crate::activity::tool_summary(tool, &v);
+            let key = format!("{tool}: {summary}");
+            *tool_counts.entry(key).or_insert(0) += 1;
+            if let Some(ts) = v.get("ts").and_then(|s| s.as_str()) {
+                if last_ts.is_empty() || ts > last_ts.as_str() {
+                    last_ts = ts.to_string();
+                }
+            }
+        }
+    }
+    if tool_counts.is_empty() {
+        return None;
+    }
+    let mut tool_patterns: Vec<(u32, String)> =
+        tool_counts.into_iter().map(|(k, c)| (c, k)).collect();
+    tool_patterns.sort_by(|a, b| b.0.cmp(&a.0));
+    tool_patterns.truncate(MAX_TOOL_PATTERNS);
+    Some(RecentActivity {
+        first_prompt: String::new(),
+        recent_prompts: Vec::new(),
+        tool_patterns,
+        last_ts,
+    })
 }
 
 /// Minimal ISO-8601 → epoch seconds. Returns None on parse failure.

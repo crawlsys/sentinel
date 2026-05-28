@@ -545,7 +545,8 @@ export function GraphCanvas({ graph, selectedNodeId, onSelectNode, sessionColors
     initialPanRef.current = true;
   }, [viewport.width, viewport.height, desired]);
 
-  // Highlight + pan to the selected node, plus one-shot click-burst.
+  // Highlight the selected node without moving the viewport. The
+  // dashboard demo should never auto-pan or auto-focus on live updates.
   useEffect(() => {
     if (!gRef.current || !svgRef.current) return;
     select(gRef.current)
@@ -584,46 +585,7 @@ export function GraphCanvas({ graph, selectedNodeId, onSelectNode, sessionColors
           window.setTimeout(() => burst.remove(), 800);
         }
       });
-
-    if (!selectedNodeId || !zoomRef.current) return;
-    const target = nodesRef.current.find((n) => n.id === selectedNodeId);
-    if (!target || target.x == null || target.y == null) return;
-
-    const width = viewport.width || svgRef.current.clientWidth || 800;
-    const height = viewport.height || svgRef.current.clientHeight || 600;
-
-    // Pan-grace: preserve the user's current zoom unless the node
-    // would otherwise be invisible at that scale. Don't yank to a
-    // hardcoded k=1.4 every click — the user complained the auto-
-    // jump UX was disorienting.
-    const cur = d3Zoom.zoomTransform(svgRef.current);
-    const targetScreenX = target.x * cur.k + cur.x;
-    const targetScreenY = target.y * cur.k + cur.y;
-    const EDGE_PAD = 80;
-    const nodeOffscreen =
-      targetScreenX < EDGE_PAD
-      || targetScreenX > width - EDGE_PAD
-      || targetScreenY < EDGE_PAD
-      || targetScreenY > height - EDGE_PAD;
-    const nearCentre =
-      Math.abs(targetScreenX - width / 2) < width * 0.22
-      && Math.abs(targetScreenY - height / 2) < height * 0.22;
-    // If the node is already visible AND roughly centred, leave the
-    // viewport alone. The click-burst + stroke highlight are enough
-    // signal that something was selected.
-    if (!nodeOffscreen && nearCentre) return;
-
-    // If user has zoomed way out (k < 0.5) bring it back to 1.0 for
-    // legibility. Otherwise keep their scale.
-    const k = cur.k < 0.5 ? 1.0 : cur.k;
-    const tx = width / 2 - target.x * k;
-    const ty = height / 2 - target.y * k;
-    select(svgRef.current)
-      .transition()
-      .duration(700)
-      .ease((t) => t * (2 - t)) // ease-out-quad
-      .call(zoomRef.current.transform, d3Zoom.zoomIdentity.translate(tx, ty).scale(k));
-  }, [selectedNodeId, viewport.width, viewport.height, desired]);
+  }, [selectedNodeId, desired]);
 
   return (
     <svg

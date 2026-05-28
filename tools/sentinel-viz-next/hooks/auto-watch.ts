@@ -23,6 +23,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 const IDLE_MS = 10 * 60 * 1000;
 const TOGGLE_GRACE_MS = 750;
 const IDLE_POLL_MS = 30_000;
+export const AUTO_WATCH_DISABLED = true;
 
 /** data-* attribute the toggle button (and any other "operator
  *  control") sets on itself so click bubbling through the document
@@ -41,13 +42,19 @@ export interface AutoWatchAPI {
 }
 
 export function useAutoWatch(defaultOn: boolean = false): AutoWatchAPI {
-  const [on, setOnState] = useState<boolean>(defaultOn);
+  const [on, setOnState] = useState<boolean>(AUTO_WATCH_DISABLED ? false : defaultOn);
   const [reason, setReason] = useState<AutoWatchAPI["reason"]>("operator");
   const lastInteractionAt = useRef<number>(Date.now());
-  const onRef = useRef<boolean>(defaultOn);
+  const onRef = useRef<boolean>(AUTO_WATCH_DISABLED ? false : defaultOn);
   const lastOperatorSetAt = useRef<number>(0);
 
   const applyState = useCallback((next: boolean, why: AutoWatchAPI["reason"]) => {
+    if (AUTO_WATCH_DISABLED) {
+      onRef.current = false;
+      setOnState(false);
+      setReason("operator");
+      return;
+    }
     onRef.current = next;
     setOnState(next);
     setReason(why);
@@ -61,6 +68,7 @@ export function useAutoWatch(defaultOn: boolean = false): AutoWatchAPI {
 
   useEffect(() => {
     if (typeof window === "undefined") return;
+    if (AUTO_WATCH_DISABLED) return;
 
     function withinIgnoredControl(target: EventTarget | null): boolean {
       if (!(target instanceof Element)) return false;

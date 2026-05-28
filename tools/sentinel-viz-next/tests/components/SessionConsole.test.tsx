@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, render, screen, waitFor } from "@testing-library/react";
 
 import { SessionConsole } from "../../components/SessionConsole";
-import type { ActivityResponse, GraphResponse, Segment } from "../../types/api";
+import type { ActivityResponse, GraphResponse, RecentEvent, Segment } from "../../types/api";
 
 /// Mock fetchActivity so each test can stage what the API returns
 /// per session and observe how the console scopes/merges results.
@@ -32,7 +32,7 @@ function activityFor(sessionId: string, segments: Segment[]): ActivityResponse {
   };
 }
 
-function makeGraph(sids: string[]): GraphResponse {
+function makeGraph(sids: string[], events: RecentEvent[] = []): GraphResponse {
   return {
     nodes: sids.map((sid, i) => ({
       id: `SentinelSession#${sid}`,
@@ -42,7 +42,7 @@ function makeGraph(sids: string[]): GraphResponse {
       seq: i,
     })),
     edges: [],
-    events: [],
+    events,
     max_seq: sids.length,
     window_limit: 100,
     stats: {
@@ -108,6 +108,48 @@ describe("SessionConsole — cross-session merged view", () => {
     await Promise.resolve();
     expect(fetchSpy).not.toHaveBeenCalled();
     expect(screen.getByText(/no recent segments/i)).toBeInTheDocument();
+  });
+
+  it("rolls graph-only hook bursts into useful console context", async () => {
+    fetchSpy.mockResolvedValue(activityFor("sess-a", []));
+    const events: RecentEvent[] = [
+      {
+        seq: 1,
+        type: "sentinel.hook_ingested",
+        ts: "2026-05-25T00:00:01Z",
+        payload: {
+          session_id: "sess-a",
+          source_harness: "claude",
+          sentinel_event: "PreToolUse",
+          tool: "Bash",
+          hook: "pr_merge_gate",
+          outcome: "allow",
+          duration_us: 900,
+          ts: "2026-05-25T00:00:01.100Z",
+        },
+      },
+      {
+        seq: 2,
+        type: "sentinel.hook_ingested",
+        ts: "2026-05-25T00:00:01Z",
+        payload: {
+          session_id: "sess-a",
+          source_harness: "claude",
+          sentinel_event: "PreToolUse",
+          tool: "Bash",
+          hook: "db_ops_gate",
+          outcome: "allow",
+          duration_us: 2_100,
+          ts: "2026-05-25T00:00:01.200Z",
+        },
+      },
+    ];
+
+    render(<SessionConsole graph={makeGraph(["sess-a"], events)} sessionColors={new Map()} />);
+
+    await waitFor(() => expect(screen.getByText("Bash checks ×2")).toBeInTheDocument());
+    expect(screen.getByText(/claude · compute · PreToolUse/)).toBeInTheDocument();
+    expect(screen.getByText(/allowed by db ops, pr merge|allowed by pr merge, db ops/)).toBeInTheDocument();
   });
 });
 

@@ -25,10 +25,10 @@ async fn main() -> Result<()> {
     let window_limit: usize = std::env::var("SENTINEL_VIZ_WINDOW")
         .ok()
         .and_then(|s| s.parse().ok())
-        // P3-29: bumped from 100 to 750 (5 sessions × 150 cap).
-        // Operator wanted much more backlog visible; rollup keeps
-        // the visible row count tight even at this size.
-        .unwrap_or(750);
+        // Deep enough for 10-15m demo sparklines even with hook
+        // fanout; operators can still override with
+        // SENTINEL_VIZ_WINDOW.
+        .unwrap_or(6_000);
 
     // Build LLM state up-front: NamingState/SummaryState now probe
     // the local backend (`OLLAMA_HOST`) before deciding whether to

@@ -163,6 +163,56 @@ pub struct HealthResponse {
     pub uptime_sec: u64,
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Pin the on-the-wire string for every `SessionStatus` variant.
+    /// These literals are a cross-language contract: the viz-next web
+    /// app (`app/page.tsx`, `EventTicker.tsx`) and the Rust KPI
+    /// aggregator (`kpis.rs`) both match the *serialised* string, not
+    /// the Rust enum. A rename or a change to the `rename_all` rule
+    /// would compile cleanly yet silently break the operator's
+    /// stuck-session highlight and "active sessions" KPI. The
+    /// `awaiting_user` line guards the highest-signal status in the
+    /// whole feed — keep it exact.
+    #[test]
+    fn session_status_wire_strings_are_stable() {
+        let cases = [
+            (SessionStatus::Firing, "\"firing\""),
+            (SessionStatus::Busy, "\"busy\""),
+            (SessionStatus::Idle, "\"idle\""),
+            (SessionStatus::Dormant, "\"dormant\""),
+            (SessionStatus::Dead, "\"dead\""),
+            (SessionStatus::AwaitingUser, "\"awaiting_user\""),
+        ];
+        for (status, wire) in cases {
+            let got = serde_json::to_string(&status).unwrap();
+            assert_eq!(got, wire, "wire string drift for {status:?}");
+            // Round-trip: the consumer must be able to read it back.
+            let back: SessionStatus = serde_json::from_str(&got).unwrap();
+            assert_eq!(back, status, "round-trip drift for {status:?}");
+        }
+    }
+
+    /// `NodeCategory` is the other serialised enum the UI colours by;
+    /// pin its snake_case wire strings too so a variant rename can't
+    /// silently mislabel tool-call intent on the canvas.
+    #[test]
+    fn node_category_wire_strings_are_stable() {
+        let cases = [
+            (NodeCategory::Tc, "\"tc\""),
+            (NodeCategory::Planning, "\"planning\""),
+            (NodeCategory::Communication, "\"communication\""),
+            (NodeCategory::Prompt, "\"prompt\""),
+            (NodeCategory::Other, "\"other\""),
+        ];
+        for (cat, wire) in cases {
+            assert_eq!(serde_json::to_string(&cat).unwrap(), wire);
+        }
+    }
+}
+
 // ---------- /api/activity payload ----------
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

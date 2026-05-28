@@ -103,8 +103,78 @@ fn build_store(path: &std::path::Path) {
     emit("relation.created", "r4", mk_rel("SentinelSession#sess-b", "SentinelHookInvocation#h3", "has_invocation"), "2026-05-25T00:01:01Z");
 }
 
+/// Process-wide lock serialising `$HOME` mutation across the tests in
+/// this binary. `cargo test` runs test fns on multiple threads, and
+/// `set_var` is process-global, so without this the two fixtures race:
+/// one restores HOME while the other is mid-build, leaking the live
+/// metric files back in. Holding this for the whole test body makes the
+/// HOME swap atomic w.r.t. the sibling test.
+static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Repoint `$HOME` at an empty dir for the life of the returned guard.
+///
+/// `graph::load_graph_with` calls `augment_from_metric_files`, which reads
+/// `$HOME/.claude/sentinel/metrics/*.jsonl` (and five sibling harness homes).
+/// On a host that actually has those files — e.g. a live sandbox — they leak
+/// tens of thousands of real events into what is supposed to be a hermetic
+/// 11-event fixture, blowing the `max_seq` and node-kind assertions. Pinning
+/// HOME to an empty TempDir makes the metric-file read a no-op so the fixture
+/// reflects only the store it built. Restores the prior HOME on drop.
+struct HomeGuard {
+    prev: Option<std::ffi::OsString>,
+    _tmp: TempDir,
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
+
+impl HomeGuard {
+    fn empty() -> Self {
+        // Recover from a poisoned lock — a panicking sibling test must
+        // not wedge the rest of the suite.
+        let lock = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = TempDir::new().unwrap();
+        let prev = std::env::var_os("HOME");
+        // SAFETY: the HOME_LOCK guard above serialises this mutation
+        // against the only other code in this binary that touches HOME.
+        unsafe { std::env::set_var("HOME", tmp.path()) };
+        Self { prev, _tmp: tmp, _lock: lock }
+    }
+}
+
+impl HomeGuard {
+    /// Repoint `$HOME` at a temp dir that *contains* a synthetic
+    /// `~/.claude/sentinel/metrics/{sessions.jsonl,hook-invocations.jsonl}`,
+    /// so `augment_from_metric_files` has live data to fold in. Used to
+    /// exercise the metric-file fallback path — the one that surfaces
+    /// JSONL sessions into the per-session feed when the SQLite store is
+    /// thin or empty (the real shape inside a fresh sandbox).
+    fn with_metrics(sessions_jsonl: &str, hooks_jsonl: &str) -> Self {
+        let lock = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = TempDir::new().unwrap();
+        let metrics = tmp.path().join(".claude/sentinel/metrics");
+        std::fs::create_dir_all(&metrics).unwrap();
+        std::fs::write(metrics.join("sessions.jsonl"), sessions_jsonl).unwrap();
+        std::fs::write(metrics.join("hook-invocations.jsonl"), hooks_jsonl).unwrap();
+        let prev = std::env::var_os("HOME");
+        // SAFETY: serialised by HOME_LOCK, as in `empty()`.
+        unsafe { std::env::set_var("HOME", tmp.path()) };
+        Self { prev, _tmp: tmp, _lock: lock }
+    }
+}
+
+impl Drop for HomeGuard {
+    fn drop(&mut self) {
+        unsafe {
+            match self.prev.take() {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+    }
+}
+
 #[test]
 fn graph_default_hides_hooks_and_synthesises_session_to_tc_edges() {
+    let _home = HomeGuard::empty();
     let tmp = TempDir::new().unwrap();
     let path = tmp.path().join("fixture.db");
     build_store(&path);
@@ -149,6 +219,7 @@ fn graph_default_hides_hooks_and_synthesises_session_to_tc_edges() {
 
 #[test]
 fn graph_include_hooks_keeps_them_and_derived_chain_edges() {
+    let _home = HomeGuard::empty();
     let tmp = TempDir::new().unwrap();
     let path = tmp.path().join("fixture.db");
     build_store(&path);
@@ -193,4 +264,108 @@ fn graph_empty_db_returns_error_field() {
     let g = graph::load_graph_from_path(&missing, 50).unwrap();
     assert!(g.error.is_some());
     assert!(g.nodes.is_empty());
+}
+
+/// Create an empty-but-openable store: bridge schema, zero rows.
+fn build_empty_store(path: &std::path::Path) {
+    let conn = Connection::open(path).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE events (
+            seq INTEGER PRIMARY KEY AUTOINCREMENT,
+            id TEXT NOT NULL,
+            type TEXT NOT NULL,
+            actor TEXT,
+            payload TEXT NOT NULL,
+            frame_id TEXT,
+            caused_by TEXT,
+            timestamp TEXT NOT NULL,
+            run_id TEXT NOT NULL,
+            UNIQUE(id, run_id)
+        );",
+    )
+    .unwrap();
+}
+
+/// The per-session feed (the highest-signal status model) must still
+/// light up when the SQLite store carries no rows yet but the live
+/// JSONL metric files do — the real shape inside a fresh sandbox.
+/// `augment_from_metric_files` is the fallback that surfaces those
+/// sessions, and it only runs *inside* `load_graph_with`. This pins
+/// that a session present only in `hook-invocations.jsonl` reaches the
+/// response as a ticker event AND gets a computed `session_status`,
+/// so a regression that drops the augmentation can't silently blank
+/// the operator's live feed.
+#[test]
+fn graph_surfaces_metric_file_sessions_with_status() {
+    // Fresh timestamps so the default 6h time floor keeps them.
+    let now = chrono::Utc::now();
+    let ts = now.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
+    let sid = "metricfile-sess-1";
+
+    let sessions = format!(
+        "{}\n",
+        serde_json::json!({
+            "event": "session_start",
+            "session_id": sid,
+            "ts": ts,
+        })
+    );
+    let hooks = format!(
+        "{}\n",
+        serde_json::json!({
+            "event": "PreToolUse",
+            "hook": "phase_gate",
+            "outcome": "allow",
+            "session_id": sid,
+            "trace_id": "trace-mf-1",
+            "duration_us": 1200,
+            "ts": ts,
+            "tool": "Bash",
+        })
+    );
+
+    let _home = HomeGuard::with_metrics(&sessions, &hooks);
+    let tmp = TempDir::new().unwrap();
+    let path = tmp.path().join("empty.db");
+    build_empty_store(&path);
+
+    let conn = db::open_ro(&path).unwrap();
+    let g = graph::load_graph_with(
+        &conn,
+        GraphOpts {
+            limit: 50,
+            since_secs: Some(6 * 3600),
+            include_hooks: true,
+            focused_session: None,
+        },
+    )
+    .unwrap();
+
+    assert!(g.error.is_none(), "unexpected error: {:?}", g.error);
+
+    // The hook invocation from the JSONL surfaced as a ticker event.
+    assert!(
+        g.events.iter().any(|e| e
+            .payload
+            .get("session_id")
+            .and_then(|v| v.as_str())
+            == Some(sid)),
+        "metric-file session never reached the event tail: {:?}",
+        g.events
+    );
+
+    // And a synthesised session node carries a computed liveness
+    // status — the highest-signal field the operator's feed renders.
+    let node = g
+        .nodes
+        .iter()
+        .find(|n| {
+            n.kind == "SentinelSession"
+                && n.data.get("session_id").and_then(|v| v.as_str()) == Some(sid)
+        })
+        .expect("expected a synthesised session node for the metric-file session");
+    assert!(
+        node.session_status.is_some(),
+        "metric-file session missing session_status"
+    );
 }

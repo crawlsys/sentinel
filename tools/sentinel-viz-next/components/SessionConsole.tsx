@@ -8,7 +8,9 @@ import ChevronRightIcon from "@mui/icons-material/ChevronRightRounded";
 import { fetchActivity } from "../adapters/http";
 import { indexActivity } from "../adapters/activity-cache";
 import { colorForSession } from "../domain/session-colors";
-import type { GraphResponse, Segment } from "../types/api";
+import { categoryForTool } from "../domain/event-category";
+import { categoryLabel } from "../domain/format";
+import type { GraphResponse, RecentEvent, Segment } from "../types/api";
 
 interface Props {
   /** Latest graph snapshot — gives us the active session list. */
@@ -34,6 +36,18 @@ interface MergedEntry {
   hadError: boolean;
   /// ISO timestamp.
   ts: string;
+}
+
+interface FallbackBurst {
+  sessionId: string;
+  sentinelEvent: string;
+  tool: string;
+  outcome: string;
+  sourceHarness: string;
+  ts: string;
+  count: number;
+  hooks: Set<string>;
+  maxDurationUs: number;
 }
 
 /// Live log = the last 5 activity segments across the visible
@@ -148,6 +162,7 @@ export function SessionConsole({
         );
         if (cancelled) return;
         const merged: MergedEntry[] = [];
+        const sessionsWithActivity = new Set<string>();
         for (const res of responses) {
           if (res.status !== "fulfilled") continue;
           const { sid, r } = res.value;
@@ -159,7 +174,11 @@ export function SessionConsole({
           // dominated the ticker. Now the live-log's 8s sweep
           // doubles as ambient warming for the ticker.
           indexActivity(sid, r);
+          if (r.segments.length > 0) sessionsWithActivity.add(sid);
           for (const s of r.segments) merged.push(segmentToEntry(sid, s));
+        }
+        for (const e of fallbackEventEntries(graph?.events ?? [], sessionIds, sessionsWithActivity)) {
+          merged.push(e);
         }
         const seen = new Set<string>();
         const sorted = merged
@@ -185,7 +204,7 @@ export function SessionConsole({
       window.clearInterval(id);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessionIdsKey, paused]);
+  }, [sessionIdsKey, paused, graph?.max_seq]);
 
   return (
     <div
@@ -300,6 +319,133 @@ function segmentToEntry(sessionId: string, s: Segment): MergedEntry {
     hadError: !!s.had_error,
     ts: s.ts_end ?? s.ts,
   };
+}
+
+function fallbackEventEntries(
+  events: RecentEvent[],
+  sessionIds: string[],
+  sessionsWithActivity: Set<string>,
+): MergedEntry[] {
+  const wanted = new Set(sessionIds);
+  const bursts = new Map<string, FallbackBurst>();
+  const order: string[] = [];
+  for (const e of events.slice().reverse()) {
+    const sid = typeof e.payload?.session_id === "string" ? (e.payload.session_id as string) : null;
+    if (!sid || !wanted.has(sid) || sessionsWithActivity.has(sid)) continue;
+    const burst = eventToBurst(sid, e);
+    if (!burst) continue;
+    const bucket = eventSecond(burst.ts);
+    const key = `${sid}|${bucket}|${burst.sentinelEvent}|${burst.tool}|${burst.outcome}`;
+    const existing = bursts.get(key);
+    if (existing) {
+      existing.count += 1;
+      if (burst.hooks.size > 0) {
+        for (const hook of burst.hooks) existing.hooks.add(hook);
+      }
+      existing.maxDurationUs = Math.max(existing.maxDurationUs, burst.maxDurationUs);
+    } else {
+      bursts.set(key, burst);
+      order.push(key);
+    }
+    if (order.length >= CACHE_WARM_FETCH_LIMIT) break;
+  }
+  return order.map((key) => burstToEntry(bursts.get(key)!));
+}
+
+function eventToBurst(sessionId: string, e: RecentEvent): FallbackBurst | null {
+  const sentinelEvent =
+    typeof e.payload?.sentinel_event === "string"
+      ? (e.payload.sentinel_event as string)
+      : typeof e.payload?.event === "string"
+        ? (e.payload.event as string)
+        : e.type.replace(/^sentinel\./, "");
+  const hook = typeof e.payload?.hook === "string" ? (e.payload.hook as string) : "";
+  const tool = typeof e.payload?.tool === "string" ? (e.payload.tool as string) : "";
+  const outcome = typeof e.payload?.outcome === "string" ? (e.payload.outcome as string) : "";
+  if (isLowSignalEvent(sentinelEvent, tool, hook, outcome)) return null;
+  return {
+    sessionId,
+    sentinelEvent,
+    tool,
+    outcome,
+    sourceHarness:
+      typeof e.payload?.source_harness === "string" ? (e.payload.source_harness as string) : "",
+    ts: eventTs(e),
+    count: 1,
+    hooks: hook && hook !== "codex_shim" ? new Set([hook]) : new Set(),
+    maxDurationUs:
+      typeof e.payload?.duration_us === "number" ? (e.payload.duration_us as number) : 0,
+  };
+}
+
+function burstToEntry(burst: FallbackBurst): MergedEntry {
+  const tool = burst.tool;
+  const bad = burst.outcome === "deny" || burst.outcome === "block" || burst.outcome === "force_stop";
+  const action = bad ? "blocked" : burst.sentinelEvent === "PostToolUse" ? "completed" : "checks";
+  const labelBase = tool || friendlyEventLabel(burst.sentinelEvent);
+  const label = `${labelBase} ${action}${burst.count > 1 ? ` ×${burst.count}` : ""}`;
+  const category = categoryLabel(categoryForTool(burst.sentinelEvent, tool || null));
+  const hooks = Array.from(burst.hooks).map(humanizeHook).filter(Boolean);
+  const hookText = hooks.length > 0
+    ? `${bad ? "blocked by" : "allowed by"} ${hooks.slice(0, 3).join(", ")}${hooks.length > 3 ? ` +${hooks.length - 3}` : ""}`
+    : "";
+  const duration = burst.maxDurationUs > 0 ? `max ${formatDurationUs(burst.maxDurationUs)}` : "";
+  const parts = [
+    burst.sourceHarness || null,
+    category,
+    burst.sentinelEvent,
+    hookText,
+    duration,
+  ].filter((p): p is string => !!p && p.length > 0);
+  return {
+    sessionId: burst.sessionId,
+    label,
+    preview: parts.join(" · "),
+    tools: tool ? [tool] : [],
+    hadError: bad,
+    ts: burst.ts,
+  };
+}
+
+function isLowSignalEvent(sentinelEvent: string, tool: string, hook: string, outcome: string): boolean {
+  if (outcome === "deny" || outcome === "block" || outcome === "force_stop" || outcome === "inject") return false;
+  const h = hook.toLowerCase();
+  const t = tool.toLowerCase();
+  if (h === "codex_shim_tool_result") return true;
+  if (t === "write_stdin" || t === "codex_shim_tool_result") return true;
+  return sentinelEvent === "PostToolUse" && !tool && h.includes("tool_result");
+}
+
+function humanizeHook(hook: string): string {
+  return hook
+    .replace(/^codex_shim_/, "codex ")
+    .replace(/_(gate|hook)$/, "")
+    .replace(/_/g, " ");
+}
+
+function formatDurationUs(us: number): string {
+  if (us >= 1_000_000) return `${(us / 1_000_000).toFixed(1)}s`;
+  if (us >= 1_000) return `${Math.round(us / 1_000)}ms`;
+  return `${us}us`;
+}
+
+function eventSecond(ts: string): string {
+  return ts.replace(/\.\d+(?=(?:Z|[+-]\d{2}:?\d{2})?$)/, "");
+}
+
+function friendlyEventLabel(sentinelEvent: string): string {
+  if (sentinelEvent === "UserPromptSubmit") return "user input";
+  if (sentinelEvent === "SessionStart") return "session started";
+  if (sentinelEvent === "Stop") return "session stopped";
+  return sentinelEvent;
+}
+
+function eventTs(e: RecentEvent): string {
+  return (
+    (typeof e.payload?.ts_sec === "string" && (e.payload.ts_sec as string)) ||
+    (typeof e.payload?.ts === "string" && (e.payload.ts as string)) ||
+    e.ts
+  );
 }
 
 function timeShort(ts: string): string {

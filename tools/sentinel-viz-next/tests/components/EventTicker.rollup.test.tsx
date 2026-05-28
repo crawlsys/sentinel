@@ -77,6 +77,28 @@ function userPromptEvent(seq: number, sid: string): RecentEvent {
   };
 }
 
+function hookEvent(
+  seq: number,
+  sid: string,
+  sentinelEvent: string,
+  hook: string,
+  tool: string,
+): RecentEvent {
+  return {
+    seq,
+    type: "sentinel.hook_ingested",
+    ts: `2026-05-26T00:00:${String(seq).padStart(2, "0")}Z`,
+    payload: {
+      session_id: sid,
+      sentinel_event: sentinelEvent,
+      hook,
+      tool,
+      outcome: "allow",
+      ts: `2026-05-26T00:00:${String(seq).padStart(2, "0")}`,
+    },
+  };
+}
+
 describe("EventTicker — P3-22 sub-line noise gating", () => {
   it("routine PreToolUse rows do NOT render a 'about to run' sub-line", () => {
     render(
@@ -115,6 +137,40 @@ describe("EventTicker — P3-22 sub-line noise gating", () => {
     const ticker = screen.getByTestId("ticker-rows").textContent ?? "";
     expect(ticker).toContain("user prompt");
     expect(ticker).not.toContain("you submitted");
+  });
+
+  it("filters low-signal Codex shim result and write_stdin hook rows", () => {
+    render(
+      <EventTicker
+        events={[
+          hookEvent(1, "s-codex", "PostToolUse", "codex_shim_tool_result", ""),
+          hookEvent(2, "s-codex", "PreToolUse", "codex_shim_tool_write_stdin", "write_stdin"),
+          tcEvent(3, "s-codex", "Bash", "tc-real"),
+        ]}
+        onSelectNode={() => {}}
+      />,
+    );
+    const ticker = screen.getByTestId("ticker-rows").textContent ?? "";
+    expect(ticker).toContain("Bash");
+    expect(ticker).not.toContain("codex_shim_tool_result");
+    expect(ticker).not.toContain("write_stdin");
+  });
+
+  it("communication hook fanout stays collapsed instead of opening a duplicate flyout", () => {
+    const { container } = render(
+      <EventTicker
+        events={[
+          hookEvent(1, "s-ask", "PreToolUse", "ask_gate", "AskUserQuestion"),
+          hookEvent(2, "s-ask", "PreToolUse", "ask_gate", "AskUserQuestion"),
+          hookEvent(3, "s-ask", "PreToolUse", "ask_gate", "AskUserQuestion"),
+        ]}
+        onSelectNode={() => {}}
+      />,
+    );
+    expect(screen.getByText(/×3/)).toBeInTheDocument();
+    fireEvent.click(container.querySelector("li[data-actor]")!);
+    expect(container.querySelector('[data-testid="ticker-flyout"]')).toBeNull();
+    expect(container.querySelector('[data-testid="rolled-preview"]')).toBeNull();
   });
 
   it("shouldShowSubLine — intervention outcome → true", () => {

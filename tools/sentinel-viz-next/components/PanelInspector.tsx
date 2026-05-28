@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect } from "react";
+import { useEffect, useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { IconButton, Tooltip } from "@mui/material";
 import CloseIcon from "@mui/icons-material/CloseRounded";
@@ -8,7 +8,8 @@ import CloseIcon from "@mui/icons-material/CloseRounded";
 import type { Node, RecentEvent } from "../types/api";
 import { fetchActivity, fetchSummary } from "../adapters/http";
 import { indexActivity } from "../adapters/activity-cache";
-import { categoryColor, categoryLabel, relTime, statusColor } from "../domain/format";
+import { awaitingKindLabel, categoryColor, categoryLabel, relTime, statusColor, statusLabel } from "../domain/format";
+import { sentinelEventPhrase } from "./EventTicker";
 
 export function friendlyTitle(node: Node): string {
   switch (node.type) {
@@ -104,11 +105,29 @@ export function PanelInspector({ node, anchorTs, events, onClose }: Props) {
     enabled: !!sessionId && harnessSupportsTranscript,
     staleTime: 5_000,
   });
+  const fallbackRows = useMemo(
+    () => (sessionId ? buildHarnessTimelineRows(events ?? [], sessionId).slice(0, 12) : []),
+    [events, sessionId],
+  );
 
   // Feed the activity-cache for the EventTicker label join.
   useEffect(() => {
     if (sessionId && activityQ.data) indexActivity(sessionId, activityQ.data);
   }, [sessionId, activityQ.data]);
+
+  // "last activity" relative string. The React Compiler memoizes this
+  // function body, so a plain const (not a hand-written useMemo, which
+  // the compiler rejects when its deps are narrower than inferred) is
+  // the idiomatic form here. Date.now() is flagged impure in render;
+  // it's intentional — the age is relative to wall-clock-now and the
+  // value re-derives on the next render tick, which is the behaviour we
+  // want for an "X ago" readout.
+  // eslint-disable-next-line react-hooks/purity
+  const nowMs = Date.now();
+  const lastActivityLabel =
+    node?.last_activity_age_s != null
+      ? relTime(new Date(nowMs - node.last_activity_age_s * 1000).toISOString())
+      : null;
 
   const summaryKind: "wait" | "card" = node?.session_status === "awaiting_user" ? "wait" : "card";
   const summaryQ = useQuery({
@@ -162,11 +181,16 @@ export function PanelInspector({ node, anchorTs, events, onClose }: Props) {
         {node.session_status ? (
           <div className="flex justify-between">
             <span>status</span>
-            <span style={{ color: statusColor(node.session_status) }}>{node.session_status}</span>
+            <span
+              style={{ color: statusColor(node.session_status) }}
+              title={node.session_status}
+            >
+              {statusLabel(node.session_status)}
+            </span>
           </div>
         ) : null}
-        {node.last_activity_age_s != null ? (
-          <Row k="last activity" v={relTime(new Date(Date.now() - node.last_activity_age_s * 1000).toISOString())} />
+        {lastActivityLabel != null ? (
+          <Row k="last activity" v={lastActivityLabel} />
         ) : null}
         {typeof node.data?.session_id === "string" ? (
           <Row k="session" v={(node.data.session_id as string).slice(0, 12) + "…"} />
@@ -185,7 +209,12 @@ export function PanelInspector({ node, anchorTs, events, onClose }: Props) {
           data-testid="raw-awaiting-block"
           className="mt-4 p-2 bg-[#000] border border-[#222] rounded"
         >
-          <div className="text-[10px] uppercase text-[#bc8cff] mb-1">awaiting user · {node.awaiting_kind}</div>
+          <div
+            className="text-[10px] uppercase text-[#bc8cff] mb-1"
+            title={node.awaiting_kind ?? undefined}
+          >
+            awaiting user · {awaitingKindLabel(node.awaiting_kind)}
+          </div>
           <div className="text-[11px] whitespace-pre-wrap">{node.awaiting_question}</div>
         </div>
       ) : null}
@@ -218,11 +247,7 @@ export function PanelInspector({ node, anchorTs, events, onClose }: Props) {
             <span>{anchorTs ? "activity ± 60s" : "recent activity"}</span>
             {anchorTs ? <span className="text-[#5B9BF6]">@ {anchorTs.slice(11, 19)}</span> : null}
           </h4>
-          {activityQ.isPending ? (
-            <p className="text-[#999]">loading…</p>
-          ) : activityQ.error ? (
-            <p className="text-[#D71921]">activity error</p>
-          ) : activityQ.data?.segments.length ? (
+          {activityQ.data?.segments.length ? (
             <ul className="space-y-2" data-testid="activity-segments">
               {activityQ.data.segments.slice(-12).reverse().map((s, i) => {
                 const sty = segmentStyle(s.kind, !!s.had_error, s.tools ?? []);
@@ -291,6 +316,12 @@ export function PanelInspector({ node, anchorTs, events, onClose }: Props) {
                 );
               })}
             </ul>
+          ) : fallbackRows.length > 0 ? (
+            <GraphEventActivitySegments rows={fallbackRows} />
+          ) : activityQ.isPending ? (
+            <p className="text-[#999]">loading…</p>
+          ) : activityQ.error ? (
+            <p className="text-[#D71921]">activity error</p>
           ) : (
             <p className="text-[#999]">no segments in window</p>
           )}
@@ -322,6 +353,36 @@ function Row({ k, v }: { k: string; v: string }) {
   );
 }
 
+function GraphEventActivitySegments({ rows }: { rows: HarnessTimelineRow[] }) {
+  return (
+    <ul className="space-y-2" data-testid="activity-segments">
+      {rows.map((row, i) => {
+        const accent = outcomeAccent(row.outcome);
+        return (
+          <li
+            key={`${row.seq}-${i}`}
+            className="p-2 rounded border-l-2"
+            style={{ borderLeftColor: accent, backgroundColor: "#000" }}
+          >
+            <div className="flex justify-between items-baseline text-[10px] mb-1 gap-2">
+              <span className="font-bold truncate" style={{ color: accent }}>
+                {row.count > 1 ? `×${row.count} ` : ""}{row.label}
+              </span>
+              <span className="text-[#999] whitespace-nowrap">{relTime(row.ts)}</span>
+            </div>
+            {row.detail || row.outcome ? (
+              <div className="flex justify-between gap-2 text-[10px] text-[#999]">
+                <span className="truncate">{row.detail}</span>
+                {row.outcome ? <span>{row.outcome}</span> : null}
+              </div>
+            ) : null}
+          </li>
+        );
+      })}
+    </ul>
+  );
+}
+
 interface SummaryCardProps {
   kind: "card" | "wait";
   text: string | null;
@@ -349,48 +410,40 @@ export function CodexEventTimeline({
   harness: string | null;
   events: RecentEvent[];
 }) {
-  const filtered = events
-    .filter((e) => e.payload.session_id === sessionId)
-    .slice(-20)
-    .reverse();
+  const rows = buildHarnessTimelineRows(events, sessionId).slice(0, 20);
 
   return (
     <div className="mt-4 border-t border-[#222] pt-3">
       <h4 className="text-[10px] uppercase tracking-wider text-[#999] mb-2 flex justify-between">
         <span>{harness ?? "non-claude"} timeline</span>
-        <span className="text-[#666]">last {filtered.length}</span>
+        <span className="text-[#666]">last {rows.length}</span>
       </h4>
-      {filtered.length === 0 ? (
+      {rows.length === 0 ? (
         <p className="text-[10px] text-[#999] italic">
           no events for this session in the current snapshot
         </p>
       ) : (
         <ul className="space-y-1" data-testid="codex-event-timeline">
-          {filtered.map((e, i) => {
-            const tool = typeof e.payload.tool === "string" ? (e.payload.tool as string) : "";
-            const eventName = typeof e.payload.event === "string"
-              ? (e.payload.event as string)
-              : e.type;
-            const outcome = typeof e.payload.outcome === "string"
-              ? (e.payload.outcome as string)
-              : "";
-            const accent = outcomeAccent(outcome);
+          {rows.map((row, i) => {
+            const accent = outcomeAccent(row.outcome);
             return (
               <li
-                key={`${e.seq}-${i}`}
+                key={`${row.seq}-${i}`}
                 className="p-1.5 rounded border-l-2 text-[10px]"
                 style={{ borderLeftColor: accent, backgroundColor: "#000" }}
               >
                 <div className="flex justify-between gap-2 mb-0.5">
                   <span className="font-bold" style={{ color: accent }}>
-                    {tool || eventName}
+                    {row.count > 1 ? `×${row.count} ` : ""}{row.label}
                   </span>
-                  <span className="text-[#999] whitespace-nowrap">{relTime(e.ts)}</span>
+                  <span className="text-[#999] whitespace-nowrap">{relTime(row.ts)}</span>
                 </div>
-                <div className="flex justify-between gap-2 text-[#999]">
-                  <span>{eventName}</span>
-                  {outcome ? <span>{outcome}</span> : null}
-                </div>
+                {row.detail || row.outcome ? (
+                  <div className="flex justify-between gap-2 text-[#999]">
+                    <span className="truncate">{row.detail}</span>
+                    {row.outcome ? <span>{row.outcome}</span> : null}
+                  </div>
+                ) : null}
               </li>
             );
           })}
@@ -398,6 +451,98 @@ export function CodexEventTimeline({
       )}
     </div>
   );
+}
+
+interface HarnessTimelineRow {
+  seq: number;
+  ts: string;
+  label: string;
+  detail: string;
+  outcome: string;
+  count: number;
+}
+
+function buildHarnessTimelineRows(events: RecentEvent[], sessionId: string): HarnessTimelineRow[] {
+  const rows: HarnessTimelineRow[] = [];
+  const newest = events
+    .filter((e) => e.payload.session_id === sessionId)
+    .slice()
+    .reverse();
+  for (const e of newest) {
+    const tool = typeof e.payload.tool === "string" ? (e.payload.tool as string) : "";
+    const hook = typeof e.payload.hook === "string" ? (e.payload.hook as string) : "";
+    const sentinelEvent = typeof e.payload.sentinel_event === "string"
+      ? (e.payload.sentinel_event as string)
+      : typeof e.payload.event === "string"
+        ? (e.payload.event as string)
+        : e.type;
+    const outcome = typeof e.payload.outcome === "string"
+      ? (e.payload.outcome as string)
+      : "";
+    if (isLowSignalHarnessTimelineEvent(sentinelEvent, tool, hook, outcome)) continue;
+    const label = tool || friendlyTimelineEvent(sentinelEvent, hook);
+    const rawDetail = timelineDetail(sentinelEvent, hook);
+    // Drop the detail when it just restates the label — a tool-less
+    // lifecycle row (label "notified") shouldn't carry a duplicate
+    // "notified" sub-line, and we never want the raw event name to
+    // leak there either.
+    const detail = rawDetail === label ? "" : rawDetail;
+    const sig = `${label}\t${detail}\t${outcome}`;
+    const prev = rows[rows.length - 1];
+    if (prev && `${prev.label}\t${prev.detail}\t${prev.outcome}` === sig) {
+      prev.count += 1;
+      prev.seq = Math.max(prev.seq, e.seq);
+      prev.ts = e.ts;
+      continue;
+    }
+    rows.push({
+      seq: e.seq,
+      ts: e.ts,
+      label,
+      detail,
+      outcome,
+      count: 1,
+    });
+  }
+  return rows;
+}
+
+function isLowSignalHarnessTimelineEvent(
+  sentinelEvent: string,
+  tool: string,
+  hook: string,
+  outcome: string,
+): boolean {
+  if (outcome === "deny" || outcome === "block" || outcome === "force_stop" || outcome === "inject") {
+    return false;
+  }
+  const h = hook.toLowerCase();
+  const t = tool.toLowerCase();
+  if (h === "codex_shim_tool_result") return true;
+  if (t === "write_stdin" || t === "codex_shim_tool_result") return true;
+  return sentinelEvent === "PostToolUse" && !tool && h.includes("tool_result");
+}
+
+function friendlyTimelineEvent(sentinelEvent: string, hook: string): string {
+  if (sentinelEvent === "UserPromptSubmit") return "user prompt";
+  if (sentinelEvent === "SessionStart") return "session started";
+  if (sentinelEvent === "Stop") return "session stopped";
+  // A named hook is more specific than the lifecycle event, so prefer
+  // it. Otherwise route through the same translation the Claude ticker
+  // uses so a no-tool/no-hook codex event reads "notified" /
+  // "compacting" / "about to run" instead of leaking the raw
+  // `Notification` / `PreCompact` / `PreToolUse` lifecycle name.
+  return hook || sentinelEventPhrase(sentinelEvent);
+}
+
+function timelineDetail(sentinelEvent: string, hook: string): string {
+  // Translate the lifecycle event through the same phrase table the
+  // Claude ticker uses so the detail line never shows raw jargon
+  // ("PreToolUse" → "about to run"). When a hook is present, keep it
+  // appended — the hook name is operator-meaningful and specific.
+  const phrase = sentinelEventPhrase(sentinelEvent);
+  if (hook && hook !== "codex_shim") return `${phrase} · ${hook}`;
+  return phrase;
 }
 
 /// Mirror of EventTicker's outcome categorisation, narrowed for the

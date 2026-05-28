@@ -4,7 +4,7 @@ import { Box, Chip, IconButton, Stack, Tooltip, Typography } from "@mui/material
 import SettingsIcon from "@mui/icons-material/SettingsOutlined";
 
 import type { GraphResponse } from "../types/api";
-import { AUTO_WATCH_IGNORE_ATTR } from "../hooks/auto-watch";
+import { AUTO_WATCH_DISABLED, AUTO_WATCH_IGNORE_ATTR } from "../hooks/auto-watch";
 import type { StreamLiveness } from "../adapters/sse";
 import { KpiBar } from "./KpiBar";
 
@@ -146,17 +146,19 @@ export function StatusBar({
           data-testid="auto-watch-toggle"
           data-auto-on={autoOn ? "true" : "false"}
           data-auto-reason={autoReason}
-          label={`AUTO ${autoOn ? "ON" : "OFF"}`}
-          onClick={onToggleAuto}
-          clickable
+          label={AUTO_WATCH_DISABLED ? "AUTO DISABLED" : `AUTO ${autoOn ? "ON" : "OFF"}`}
+          onClick={AUTO_WATCH_DISABLED ? undefined : onToggleAuto}
+          clickable={!AUTO_WATCH_DISABLED}
           title={
-            autoOn
+            AUTO_WATCH_DISABLED
+              ? "auto-watch disabled for this demo"
+              : autoOn
               ? `auto-watch ON (${autoReason}) — click to disable; auto re-enables on blur or 10m idle`
               : `auto-watch OFF (${autoReason}) — click to enable, or it re-enables on blur / 10m idle`
           }
           sx={{
-            borderColor: autoOn ? "var(--success)" : "var(--border)",
-            color: autoOn ? "var(--success)" : "var(--text-secondary)",
+            borderColor: autoOn && !AUTO_WATCH_DISABLED ? "var(--success)" : "var(--border)",
+            color: autoOn && !AUTO_WATCH_DISABLED ? "var(--success)" : "var(--text-secondary)",
             fontWeight: 700,
           }}
           {...{ [AUTO_WATCH_IGNORE_ATTR]: "" }}

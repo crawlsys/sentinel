@@ -2,10 +2,10 @@
 
 import { useQuery } from "@tanstack/react-query";
 
-import { bucketsToSparkline } from "../domain/session-strips";
+import { bucketsToSparkline, formatPeakRate } from "../domain/session-strips";
 import type { SessionStripData } from "../domain/session-strips";
 import { fetchSummary } from "../adapters/http";
-import { categoryColor, categoryLabel, statusColor } from "../domain/format";
+import { awaitingKindLabel, categoryColor, categoryLabel, statusColor, statusLabel } from "../domain/format";
 
 interface Props {
   data: SessionStripData;
@@ -24,6 +24,9 @@ interface Props {
 export function SessionStrip({ data, selected, onSelect }: Props) {
   const isStuck = !!data.stuck;
   const statusText = data.status ?? "—";
+  // Header summary: per-session peak intensity. null for quiet/stuck
+  // sessions so only genuinely bursty strips carry the suffix.
+  const peakRate = formatPeakRate(data.peakPerMin);
 
   // P3-32: pull the narrative AI summary for this session so the
   // empty horizontal space on each strip carries a 1-2 line plain-
@@ -97,7 +100,9 @@ export function SessionStrip({ data, selected, onSelect }: Props) {
           >
             {data.displayName}
           </span>
-          <span className="text-[#999] text-[10px]">{statusText}</span>
+          <span className="text-[#999] text-[10px]" title={statusText}>
+            {statusLabel(data.status)}
+          </span>
           {data.sourceHarness ? (
             <span
               data-testid="session-strip-harness"
@@ -115,6 +120,15 @@ export function SessionStrip({ data, selected, onSelect }: Props) {
           ) : null}
           <span className="ml-auto text-[#999] text-[10px] whitespace-nowrap">
             {formatAge(data.lastActivityAgeS)} · {data.totalEvents} ev
+            {peakRate ? (
+              <span
+                data-testid="session-strip-peak-rate"
+                title="peak events/min in window"
+              >
+                {" · "}
+                {peakRate}
+              </span>
+            ) : null}
           </span>
         </div>
 
@@ -151,6 +165,16 @@ export function SessionStrip({ data, selected, onSelect }: Props) {
             </li>
           ))}
         </ul>
+
+        {data.activityBlurb && !summaryAvailable ? (
+          <div
+            data-testid="session-strip-activity-blurb"
+            className="mt-1 text-[10px] text-[#8B949E] leading-tight truncate"
+            title={data.activityBlurb}
+          >
+            {data.activityBlurb}
+          </div>
+        ) : null}
 
         {/* AI summary line (P3-32). Fills the wide-screen empty
             real estate with a 1-2 sentence narrative pulled from
@@ -223,7 +247,13 @@ export function SessionStrip({ data, selected, onSelect }: Props) {
               <span>⚠ STUCK</span>
               <span className="text-[#FFA198]">{formatStuckAge(data.stuck.ageSecs)}</span>
               <span className="text-[#FFA198]">·</span>
-              <span className="text-[#FFA198]">{data.stuck.kind ?? "awaiting"}</span>
+              <span
+                data-testid="session-strip-stuck-kind"
+                className="text-[#FFA198]"
+                title={data.stuck.kind ?? "awaiting"}
+              >
+                {awaitingKindLabel(data.stuck.kind)}
+              </span>
             </div>
             {/* AI "what needs to happen" rollup. Only renders
                 when we have actual text — falls back to a hint
@@ -243,7 +273,7 @@ export function SessionStrip({ data, selected, onSelect }: Props) {
             ) : summaryQ.isPending ? (
               <div className="text-[10px] text-[#5a1010] italic leading-snug">
                 <span className="uppercase tracking-wider text-[9px] mr-1">ai</span>
-                generating "what's needed"…
+                generating &ldquo;what&rsquo;s needed&rdquo;…
               </div>
             ) : null}
             {/* Raw question — always shown when present.

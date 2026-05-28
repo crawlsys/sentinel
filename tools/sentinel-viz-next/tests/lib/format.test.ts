@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 
-import { nodeColor, relTime, shortTime, statusColor, tickerTime } from "../../domain/format";
+import { awaitingKindLabel, nodeColor, relTime, shortTime, statusColor, statusLabel, tickerTime } from "../../domain/format";
 
 describe("format helpers", () => {
   it("relTime under one minute", () => {
@@ -21,6 +21,58 @@ describe("format helpers", () => {
     expect(statusColor()).toBe("#6e7681");
     expect(statusColor("firing")).toBe("#3fb950");
     expect(statusColor("awaiting_user")).toBe("#bc8cff");
+  });
+
+  describe("statusLabel translates raw enum jargon to operator words", () => {
+    it.each([
+      ["firing", "active"],
+      ["busy", "busy"],
+      ["idle", "idle"],
+      ["dormant", "dormant"],
+      ["dead", "dead"],
+      ["awaiting_user", "waiting"],
+    ])("maps %s -> %s", (raw, friendly) => {
+      expect(statusLabel(raw)).toBe(friendly);
+    });
+
+    it("never leaks the underscored 'awaiting_user' enum", () => {
+      expect(statusLabel("awaiting_user")).not.toContain("_");
+    });
+
+    it("returns a dash for null/undefined (matches the strip's empty fallback)", () => {
+      expect(statusLabel()).toBe("—");
+      expect(statusLabel(null)).toBe("—");
+    });
+
+    it("falls through unchanged for unknown statuses (never swallow a novel one)", () => {
+      expect(statusLabel("some_future_status")).toBe("some_future_status");
+    });
+  });
+
+  describe("awaitingKindLabel translates the stuck-reason kind to operator phrasing", () => {
+    it.each([
+      ["AskUserQuestion", "your answer"],
+      ["question", "your answer"],
+      ["reply", "your reply"],
+      ["PreToolUse", "tool approval"],
+      ["Stop", "stop confirmation"],
+      ["Notification", "your attention"],
+    ])("maps %s -> %s", (raw, friendly) => {
+      expect(awaitingKindLabel(raw)).toBe(friendly);
+    });
+
+    it("never leaks the camel-case 'AskUserQuestion' identifier", () => {
+      expect(awaitingKindLabel("AskUserQuestion")).not.toMatch(/AskUserQuestion/);
+    });
+
+    it("returns 'awaiting' for null/undefined (matches the banner's inline fallback)", () => {
+      expect(awaitingKindLabel()).toBe("awaiting");
+      expect(awaitingKindLabel(null)).toBe("awaiting");
+    });
+
+    it("falls through unchanged for an unknown kind (never swallow a novel one)", () => {
+      expect(awaitingKindLabel("SomeFutureKind")).toBe("SomeFutureKind");
+    });
   });
 
   describe("tickerTime buckets", () => {

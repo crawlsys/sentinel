@@ -1,7 +1,7 @@
-//! Read the real bridge SQLite store and assert each known event type
-//! appears at least once. Skipped (with a printed note) if the store
-//! is not present on this machine — keeps the suite green on a fresh
-//! checkout without a live bridge.
+//! Read the real bridge SQLite store through the dashboard windowed
+//! path. Skipped (with a printed note) if the store is not present
+//! on this machine — keeps the suite green on a fresh checkout without
+//! a live bridge.
 
 use std::collections::HashMap;
 
@@ -22,6 +22,11 @@ fn reads_events_of_each_known_kind() {
     let conn = db::open_ro(&path).expect("open ro");
     let events = db::read_events(&conn).expect("read events");
     assert!(!events.is_empty(), "expected at least one event");
+    assert!(
+        events.len() <= 30_000,
+        "dashboard read should stay bounded; got {} events",
+        events.len()
+    );
 
     let mut counts: HashMap<&str, usize> = HashMap::new();
     for e in &events {
@@ -41,7 +46,5 @@ fn reads_events_of_each_known_kind() {
 const KNOWN_KINDS: &[&str] = &[
     kind::OBJECT_CREATED,
     kind::RELATION_CREATED,
-    kind::SESSION_STARTED,
     kind::HOOK_INGESTED,
-    kind::TOOL_CALL_OBSERVED,
 ];

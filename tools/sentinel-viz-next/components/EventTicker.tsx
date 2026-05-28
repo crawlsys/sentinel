@@ -13,11 +13,10 @@ import {
   request as requestRollupSummary,
   subscribe as subscribeRollupSummary,
 } from "../adapters/rollup-summary-cache";
-import { categoryColor, categoryLabel, tickerTime } from "../domain/format";
+import { awaitingKindLabel, categoryColor, categoryLabel, tickerTime } from "../domain/format";
 import {
   compactBashCommand,
   compactPath,
-  formatGitDiffStats,
   parseGitDiffStats,
   smartTrunc,
   tildify,
@@ -76,6 +75,16 @@ interface TickerMember {
    *  Null for non-tool events. Used by the expand drawer so each
    *  member row in the ×N flyout can show its actual tool. */
   tool: string | null;
+}
+
+interface FlyoutGroup {
+  member: TickerMember;
+  count: number;
+  tool: string | null;
+  summary: string | null;
+  title: string | undefined;
+  diffStats: ReturnType<typeof parseGitDiffStats> | null;
+  err: boolean;
 }
 
 /// Who originated this row's underlying event.
@@ -522,18 +531,16 @@ export function EventTicker({ events, onSelectNode, sessionColors, stuckMeta, do
             ))
           : null}
         {orderedRows.map((row) => {
-          const isOpen = expanded.has(row.key);
-          const isRolled = row.members.length > 1;
+          const flyoutGroups = buildFlyoutGroups(row.sessionId, row.members);
+          const hasFlyout = rowHasUsefulFlyout(row, flyoutGroups);
+          const isOpen = hasFlyout && expanded.has(row.key);
           const focus = () => {
             // Single-click on the row body does BOTH things for
-            // rolled rows: selects the underlying node AND toggles
-            // the flyout open (or closed). For singletons it just
-            // selects. The ×N badge keeps stopPropagation so
-            // clicking it directly only toggles (no node selection
-            // change). Operator screenshot: "when any of these are
-            // clicked on they should fly out any folds
-            // automatically (dont require the fold specifically)."
-            if (isRolled) toggle(row.key);
+            // useful rolled rows: selects the underlying node AND
+            // toggles the flyout open (or closed). Duplicate-only
+            // hook fanout keeps the compact ×N badge but does not
+            // open a giant list of identical members.
+            if (hasFlyout) toggle(row.key);
             if (row.toolCallId) {
               onSelectNode(row.toolCallId, row.ts);
             } else if (row.sessionId) {
@@ -612,14 +619,24 @@ export function EventTicker({ events, onSelectNode, sessionColors, stuckMeta, do
                 />
                 <TimeAgo ts={row.ts} className="text-[#999] text-[10px] whitespace-nowrap" />
                 {row.members.length > 1 ? (
-                  <button
-                    type="button"
-                    onClick={(e) => { e.stopPropagation(); toggle(row.key); }}
-                    className="px-1 rounded bg-[#222] text-[#5B9BF6] text-[10px] hover:bg-[#222]"
-                    title="show grouped members"
-                  >
-                    ×{row.members.length} {isOpen ? "▾" : "▸"}
-                  </button>
+                  hasFlyout ? (
+                    <button
+                      type="button"
+                      onClick={(e) => { e.stopPropagation(); toggle(row.key); }}
+                      className="px-1 rounded bg-[#222] text-[#5B9BF6] text-[10px] hover:bg-[#222]"
+                      title="show grouped members"
+                    >
+                      ×{row.members.length} {isOpen ? "▾" : "▸"}
+                    </button>
+                  ) : (
+                    <span
+                      className="px-1 rounded bg-[#222] text-[#5B9BF6] text-[10px]"
+                      title="duplicate hook fanout collapsed"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      ×{row.members.length}
+                    </span>
+                  )
                 ) : null}
                 <span className="truncate flex-1">{row.label}</span>
               </div>
@@ -667,7 +684,7 @@ export function EventTicker({ events, onSelectNode, sessionColors, stuckMeta, do
                   Fires only at AI_BLURB_MIN_MEMBERS (3+) since
                   smaller rollups read fine from previews alone.
                   Cache-backed so re-renders don't re-fetch. */}
-              {row.members.length >= AI_BLURB_MIN_MEMBERS && row.sessionId && !isOpen ? (
+              {shouldRequestAiBlurb(row) && !isOpen ? (
                 <AiBlurb
                   cacheKey={rollupCacheKey(row)}
                   sessionId={row.sessionId}
@@ -686,20 +703,19 @@ export function EventTicker({ events, onSelectNode, sessionColors, stuckMeta, do
                   RolledPreview dedupes by (tool, summary) so the
                   three lines show distinct calls, not nine copies
                   of the same git command. */}
-              {row.members.length > 1 && row.sessionId && !isOpen ? (
+              {shouldShowRolledPreview(row) && !isOpen ? (
                 <RolledPreview row={row} />
               ) : null}
               </div>{/* /click-target */}
-              {isOpen ? (
+              {hasFlyout && isOpen ? (
                 <ul
                   className="mt-1 pl-4 border-l border-dashed border-[#222]"
                   data-testid="ticker-flyout"
                 >
-                  {row.members.map((m, i) => (
-                    <FlyoutMember
+                  {flyoutGroups.map((group, i) => (
+                    <FlyoutGroupRow
                       key={`${row.key}-m-${i}`}
-                      sessionId={row.sessionId}
-                      member={m}
+                      group={group}
                       onSelect={onSelectNode}
                     />
                   ))}
@@ -723,6 +739,7 @@ export function EventTicker({ events, onSelectNode, sessionColors, stuckMeta, do
 ///      operator actually starts losing context to the "×N tool"
 ///      label alone — that's where the blurb earns its keep.
 const AI_BLURB_MIN_MEMBERS = 3;
+const ROLLUP_SUMMARY_DELAY_MS = 5_000;
 
 /// Stable cache key for a rollup's AI blurb. Combines the
 /// grouping signature with the member count so different cluster
@@ -763,16 +780,20 @@ const AiBlurb = memo(function AiBlurb({
     // each member's activity-cache summary when warm; the server
     // falls back to bare tool name when empty.
     if (peekRollupSummary(cacheKey)) return;
-    const wire = members.map((m) => {
-      const tool = m.tool ?? "";
-      if (!tool || !sessionId) return { tool, summary: "" };
-      const tc = lookupActivityCache(sessionId, tool, m.ts);
-      const summary = tc?.summary ? compactSummaryFor(tool, tc.summary) : "";
-      return { tool, summary };
-    });
-    requestRollupSummary(cacheKey, sessionId, wire).catch(() => {
-      /* swallowed — adapter already logs */
-    });
+    const timer = window.setTimeout(() => {
+      if (peekRollupSummary(cacheKey)) return;
+      const wire = members.map((m) => {
+        const tool = m.tool ?? "";
+        if (!tool || !sessionId) return { tool, summary: "" };
+        const tc = lookupActivityCache(sessionId, tool, m.ts);
+        const summary = tc?.summary ? compactSummaryFor(tool, tc.summary) : "";
+        return { tool, summary };
+      });
+      requestRollupSummary(cacheKey, sessionId, wire).catch(() => {
+        /* swallowed — adapter already logs */
+      });
+    }, ROLLUP_SUMMARY_DELAY_MS);
+    return () => window.clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cacheKey, sessionId]);
 
@@ -883,38 +904,72 @@ function RolledPreview({ row }: { row: TickerRow }) {
   );
 }
 
-/// One row in the ×N flyout. Looks up the activity-cache for THIS
-/// specific (sid, tool, ts) so each member shows what it actually
-/// did — not just the tool name + tcid.
-function FlyoutMember({
-  sessionId,
-  member,
+function buildFlyoutGroups(sessionId: string | null, members: TickerMember[]): FlyoutGroup[] {
+  const groups: FlyoutGroup[] = [];
+  const byKey = new Map<string, FlyoutGroup>();
+  for (const member of members) {
+    const tc = sessionId && member.tool
+      ? lookupActivityCache(sessionId, member.tool, member.ts)
+      : null;
+    const summary = tc?.summary ? compactSummaryFor(member.tool ?? "", tc.summary) : null;
+    const diffStats = tc?.result_preview ? parseGitDiffStats(tc.result_preview) : null;
+    const err = !!tc?.error;
+    const key = [
+      member.tool ?? "",
+      summary ?? "",
+      err ? "err" : "",
+      diffStats ? `${diffStats.files}:${diffStats.insertions}:${diffStats.deletions}` : "",
+    ].join("\t");
+    const existing = byKey.get(key);
+    if (existing) {
+      existing.count += 1;
+      continue;
+    }
+    const group: FlyoutGroup = {
+      member,
+      count: 1,
+      tool: member.tool,
+      summary,
+      title: tc?.summary ?? undefined,
+      diffStats,
+      err,
+    };
+    byKey.set(key, group);
+    groups.push(group);
+  }
+  return groups;
+}
+
+/// One collapsed row in the ×N flyout. Equivalent members are
+/// rendered once with a count badge so a 40-call Bash burst reads as
+/// unique actions, not a wall of repeated labels.
+function FlyoutGroupRow({
+  group,
   onSelect,
 }: {
-  sessionId: string | null;
-  member: TickerMember;
+  group: FlyoutGroup;
   onSelect: (nodeId: string, eventTs?: string) => void;
 }) {
-  const tc = sessionId && member.tool
-    ? lookupActivityCache(sessionId, member.tool, member.ts)
-    : null;
-  const summary = tc?.summary ? compactSummaryFor(member.tool ?? "", tc.summary) : null;
-  const diffStats = tc?.result_preview ? parseGitDiffStats(tc.result_preview) : null;
-  const err = !!tc?.error;
+  const member = group.member;
+  const diffStats = group.diffStats;
+  const err = group.err;
   return (
     <li
       onClick={() => member.toolCallId && onSelect(member.toolCallId, member.ts)}
       className="py-0.5 text-[10px] text-[#E8E8E8] hover:text-[#5B9BF6] cursor-pointer flex gap-2 items-baseline"
     >
       <TimeAgo ts={member.ts} className="text-[#999] shrink-0" />
-      {member.tool ? (
-        <span className="text-[#E8E8E8] shrink-0 w-12 truncate">{member.tool}</span>
+      {group.count > 1 ? (
+        <span className="text-[#5B9BF6] shrink-0 w-8">×{group.count}</span>
+      ) : null}
+      {group.tool ? (
+        <span className="text-[#E8E8E8] shrink-0 w-12 truncate">{group.tool}</span>
       ) : null}
       <span
         className={`text-[9px] truncate flex-1 ${err ? "text-[#D71921]" : "text-[#999]"}`}
-        title={tc?.summary ?? undefined}
+        title={group.title}
       >
-        {summary ?? (
+        {group.summary ?? (
           <span className="text-[#666]">
             {member.toolCallId ? member.toolCallId.replace("SentinelToolCall#", "TC#") : ""}
           </span>
@@ -1004,7 +1059,9 @@ function subLineText(row: { sentinelEvent: string; outcome: string | null }): st
 
 function StuckReasonLine({ meta }: { meta: StuckMeta }) {
   const ageLabel = formatAge(meta.ageSecs);
-  const kindLabel = meta.kind ?? "awaiting";
+  // Operator phrasing for the wait reason; raw kind stays discoverable
+  // via the wrapper title (which prefers the question when present).
+  const kindLabel = awaitingKindLabel(meta.kind);
   const question = meta.question
     ? meta.question.length > 90
       ? `${meta.question.slice(0, 88)}…`
@@ -1014,7 +1071,7 @@ function StuckReasonLine({ meta }: { meta: StuckMeta }) {
     <div
       data-testid="stuck-reason-line"
       className="pl-4 mt-0.5 text-[10px] font-bold text-[#D71921] truncate"
-      title={meta.question ?? kindLabel}
+      title={meta.question ?? meta.kind ?? kindLabel}
     >
       ⚠ STUCK {ageLabel} · {kindLabel}
       {question ? <span className="font-normal text-[#FFA198] ml-1">— {question}</span> : null}
@@ -1060,6 +1117,9 @@ function buildRows(events: RecentEvent[]): TickerRow[] {
       sentinelEvent !== "UserPromptSubmit" &&
       KNOWN_TOOL_LIFECYCLE.has(sentinelEvent)
     ) {
+      continue;
+    }
+    if (isLowSignalShimNoise(sentinelEvent, tool, hook, outcome)) {
       continue;
     }
     const ts = bestTs(e);
@@ -1151,6 +1211,44 @@ function buildRows(events: RecentEvent[]): TickerRow[] {
     });
   }
   return rows;
+}
+
+function isLowSignalShimNoise(
+  sentinelEvent: string,
+  tool: string | null,
+  hook: string | null,
+  outcome: string | null,
+): boolean {
+  if (isInterventionOutcome(outcome)) return false;
+  const h = (hook ?? "").toLowerCase();
+  const t = (tool ?? "").toLowerCase();
+  if (h === "codex_shim_tool_result") return true;
+  if (t === "write_stdin" || t === "codex_shim_tool_result") return true;
+  return sentinelEvent === "PostToolUse" && !tool && h.includes("tool_result");
+}
+
+function rowHasUsefulFlyout(row: TickerRow, groups: FlyoutGroup[]): boolean {
+  if (row.members.length <= 1) return false;
+  if (row.isIntervention) return true;
+  if (groups.length > 1) return true;
+  if (groups.length === 1 && (groups[0].summary || groups[0].diffStats || groups[0].err)) return true;
+  return row.members.some((m) => isInterventionOutcome(m.outcome));
+}
+
+function shouldRequestAiBlurb(row: TickerRow): row is TickerRow & { sessionId: string } {
+  return (
+    row.members.length >= AI_BLURB_MIN_MEMBERS &&
+    !!row.sessionId &&
+    row.category !== "communication"
+  );
+}
+
+function shouldShowRolledPreview(row: TickerRow): row is TickerRow & { sessionId: string } {
+  return (
+    row.members.length > 1 &&
+    !!row.sessionId &&
+    (row.category === "tc" || row.category === "planning" || row.tools.length > 1)
+  );
 }
 
 function strField(p: Record<string, unknown>, k: string): string | null {

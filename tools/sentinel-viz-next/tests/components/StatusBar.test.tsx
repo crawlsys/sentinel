@@ -44,24 +44,24 @@ describe("StatusBar", () => {
   });
 
   describe("auto-watch toggle", () => {
-    it("renders OFF state when autoOn is false", () => {
+    it("renders disabled state while demo auto-watch is disabled", () => {
       render(
         <StatusBar graph={fakeGraph} connected={true} error={null} autoOn={false} />,
       );
       const btn = screen.getByTestId("auto-watch-toggle");
-      expect(btn.textContent).toMatch(/auto\s+off/i);
+      expect(btn.textContent).toMatch(/auto\s+disabled/i);
     });
 
-    it("renders ON state and exposes the active flag via data-auto-on", () => {
+    it("keeps the state contract via data-auto-on even while the label is disabled", () => {
       render(<StatusBar graph={fakeGraph} connected={true} error={null} autoOn={true} />);
       const btn = screen.getByTestId("auto-watch-toggle");
-      expect(btn.textContent).toMatch(/auto\s+on/i);
+      expect(btn.textContent).toMatch(/auto\s+disabled/i);
       // Visual cue comes from the MUI sx-based theme; we assert the
       // state contract via data attr rather than a class string.
       expect(btn.getAttribute("data-auto-on")).toBe("true");
     });
 
-    it("invokes onToggleAuto when clicked", () => {
+    it("does not invoke onToggleAuto while disabled", () => {
       const spy = vi.fn();
       render(
         <StatusBar
@@ -73,7 +73,7 @@ describe("StatusBar", () => {
         />,
       );
       fireEvent.click(screen.getByTestId("auto-watch-toggle"));
-      expect(spy).toHaveBeenCalledOnce();
+      expect(spy).not.toHaveBeenCalled();
     });
 
     it("carries the data-auto-watch-ignore attribute so its own click doesn't flip auto off", () => {
@@ -84,7 +84,7 @@ describe("StatusBar", () => {
       expect(btn.hasAttribute(AUTO_WATCH_IGNORE_ATTR)).toBe(true);
     });
 
-    it("tooltip reflects current state and trigger conditions", () => {
+    it("tooltip explains that auto-watch is disabled", () => {
       const { rerender } = render(
         <StatusBar
           graph={fakeGraph}
@@ -95,7 +95,7 @@ describe("StatusBar", () => {
         />,
       );
       expect(screen.getByTestId("auto-watch-toggle").getAttribute("title")).toMatch(
-        /off.*re-enables on blur/i,
+        /disabled for this demo/i,
       );
       rerender(
         <StatusBar
@@ -107,7 +107,7 @@ describe("StatusBar", () => {
         />,
       );
       expect(screen.getByTestId("auto-watch-toggle").getAttribute("title")).toMatch(
-        /on.*idle/i,
+        /disabled for this demo/i,
       );
     });
   });

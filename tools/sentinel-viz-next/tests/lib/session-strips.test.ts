@@ -5,6 +5,7 @@ import {
   bucketsToSparkline,
   deriveProseBlurb,
   deriveShortDescription,
+  formatPeakRate,
 } from "../../domain/session-strips";
 import type { GraphResponse, RecentEvent } from "../../types/api";
 
@@ -116,8 +117,8 @@ describe("buildSessionStrips", () => {
     const prompt = s.rows.find((r) => r.category === "prompt");
     expect(tc?.total).toBe(7);
     expect(prompt?.total).toBe(1);
-    // Each row's counts array length is windowMinutes.
-    expect(tc?.counts.length).toBe(60);
+    // Rows use 30s buckets, so a 60m window has 120 samples.
+    expect(tc?.counts.length).toBe(120);
   });
 
   it("drops events older than the window", () => {
@@ -204,7 +205,7 @@ describe("buildSessionStrips", () => {
     expect(categories).toEqual(["tc", "planning", "communication", "prompt"]);
   });
 
-  it("uses the LLM name when provided, else a prose blurb derived from recent activity", () => {
+  it("uses the LLM name when provided, else a stable session title with activity subheading", () => {
     const events: RecentEvent[] = [tcEvent(1, "sess-a", "Bash", 1)];
     // With LLM name → "name · s:<shortSid>"
     const namedStrips = buildSessionStrips(graphOf(events), {
@@ -215,17 +216,15 @@ describe("buildSessionStrips", () => {
     });
     expect(namedStrips[0].displayName).toBe("warm-otter · s:sess-a");
 
-    // Without LLM name → prose blurb wins over the stat-style
-    // fallback. A single Bash event with no command payload still
-    // yields a verb ("running") which is more readable than a bare
-    // sid. The blurb always ends with "· s:<shortSid>" for
-    // disambiguation.
+    // Without LLM name → the main title stays stable; the verb
+    // phrase is supporting context, not the primary heading.
     const unnamedStrips = buildSessionStrips(graphOf(events), {
       windowMinutes: 60,
       colors: COLOR_MAP,
       now: NOW,
     });
-    expect(unnamedStrips[0].displayName).toBe("running · s:sess-a");
+    expect(unnamedStrips[0].displayName).toBe("Agent session · s:sess-a");
+    expect(unnamedStrips[0].activityBlurb).toBe("running");
     // Must NOT be just the bare sid placeholder.
     expect(unnamedStrips[0].displayName).not.toBe("s:sess-a");
   });
@@ -349,6 +348,24 @@ describe("deriveProseBlurb", () => {
       { tool: "Edit", payload: {} },
     ];
     expect(deriveProseBlurb(events)).toBe("editing");
+  });
+});
+
+describe("formatPeakRate", () => {
+  it("renders a /min token for bursty sessions (peak > 1)", () => {
+    expect(formatPeakRate(15)).toBe("15/min");
+    expect(formatPeakRate(2)).toBe("2/min");
+  });
+
+  it("returns null at or below the floor so trickle sessions stay clean", () => {
+    // peak 1 = a lone event per minute, not a burst — no suffix.
+    expect(formatPeakRate(1)).toBeNull();
+    // peak 0 = no in-window activity (quiet / stuck-only strip).
+    expect(formatPeakRate(0)).toBeNull();
+  });
+
+  it("returns null for non-finite input rather than 'NaN/min'", () => {
+    expect(formatPeakRate(Number.NaN)).toBeNull();
   });
 });
 

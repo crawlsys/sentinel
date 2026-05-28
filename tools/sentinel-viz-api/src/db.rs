@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use rusqlite::{Connection, OpenFlags};
+use rusqlite::{Connection, OpenFlags, Row};
 
 use crate::model::Event;
 
@@ -42,37 +42,75 @@ pub fn peek_max_seq(conn: &Connection) -> Result<i64> {
     Ok(seq.unwrap_or(0))
 }
 
-/// Read every event ordered by `seq` ascending.
+/// Read the recent event window ordered by `seq` ascending.
+///
+/// The dashboard only renders a bounded live window, but the bridge DB can
+/// grow past a million rows during harness/shim demos. Full scans made first
+/// render block behind JSON payload parsing. Keep the historical DB intact and
+/// read only the newest rows by default; set `SENTINEL_VIZ_EVENT_WINDOW_ROWS=0`
+/// to restore full-corpus reads for offline analysis.
 pub fn read_events(conn: &Connection) -> Result<Vec<Event>> {
-    let mut stmt = conn.prepare(
+    let window_rows = std::env::var("SENTINEL_VIZ_EVENT_WINDOW_ROWS")
+        .ok()
+        .and_then(|s| s.parse::<i64>().ok())
+        .unwrap_or(30_000);
+    let max_seq = peek_max_seq(conn)?;
+    let min_seq = if window_rows <= 0 {
+        0
+    } else {
+        (max_seq - window_rows + 1).max(0)
+    };
+    read_events_from_seq(conn, min_seq)
+}
+
+/// Explicit full-corpus read for offline tests/analysis.
+pub fn read_all_events(conn: &Connection) -> Result<Vec<Event>> {
+    read_events_from_seq(conn, 0)
+}
+
+fn read_events_from_seq(conn: &Connection, min_seq: i64) -> Result<Vec<Event>> {
+    let sql = if min_seq > 0 {
         "SELECT seq, id, type, actor, payload, frame_id, caused_by, timestamp, run_id \
-         FROM events ORDER BY seq ASC",
-    )?;
-    let rows = stmt.query_map([], |row| {
-        let payload_text: String = row.get(4)?;
-        let payload: serde_json::Value =
-            serde_json::from_str(&payload_text).map_err(|e| {
-                rusqlite::Error::FromSqlConversionFailure(
-                    4,
-                    rusqlite::types::Type::Text,
-                    Box::new(e),
-                )
-            })?;
-        Ok(Event {
-            seq: row.get(0)?,
-            id: row.get(1)?,
-            kind: row.get(2)?,
-            actor: row.get(3)?,
-            payload,
-            frame_id: row.get(5)?,
-            caused_by: row.get(6)?,
-            timestamp: row.get(7)?,
-            run_id: row.get(8)?,
-        })
-    })?;
+         FROM events WHERE seq >= ?1 ORDER BY seq ASC"
+    } else {
+        "SELECT seq, id, type, actor, payload, frame_id, caused_by, timestamp, run_id \
+         FROM events ORDER BY seq ASC"
+    };
+    let mut stmt = conn.prepare(sql)?;
     let mut out = Vec::new();
-    for r in rows {
-        out.push(r?);
+    if min_seq > 0 {
+        let rows = stmt.query_map([min_seq], row_to_event)?;
+        for r in rows {
+            out.push(r?);
+        }
+    } else {
+        let rows = stmt.query_map([], row_to_event)?;
+        for r in rows {
+            out.push(r?);
+        }
     }
     Ok(out)
+}
+
+fn row_to_event(row: &Row<'_>) -> rusqlite::Result<Event> {
+    let payload_text: String = row.get(4)?;
+    let payload: serde_json::Value =
+        serde_json::from_str(&payload_text).map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(
+                4,
+                rusqlite::types::Type::Text,
+                Box::new(e),
+            )
+        })?;
+    Ok(Event {
+        seq: row.get(0)?,
+        id: row.get(1)?,
+        kind: row.get(2)?,
+        actor: row.get(3)?,
+        payload,
+        frame_id: row.get(5)?,
+        caused_by: row.get(6)?,
+        timestamp: row.get(7)?,
+        run_id: row.get(8)?,
+    })
 }

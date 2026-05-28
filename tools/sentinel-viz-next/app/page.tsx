@@ -15,34 +15,28 @@ import { useAutoWatch } from "../hooks/auto-watch";
 
 export default function Page() {
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+  const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
   const [anchorTs, setAnchorTs] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  // We resolve `selectedSessionId` from the previous graph snapshot
-  // so the focused-session re-fetch can fire without waiting on the
-  // current snapshot's node list (it might not include this session
-  // yet). Stored in a state hook to break the SSE→graph→selection
-  // chain.
-  const [pendingFocusSession, setPendingFocusSession] = useState<string | null>(null);
 
-  const { graph, error, connected, liveness } = useGraphStream(pendingFocusSession);
+  const { graph, error, connected, liveness } = useGraphStream(null);
 
   const selectedNode = useMemo(() => {
-    if (!graph || !selectedNodeId) return null;
-    return graph.nodes.find((n) => n.id === selectedNodeId) ?? null;
-  }, [graph, selectedNodeId]);
-
-  // Resolve the session_id for the selected node (session OR a child
-  // tool-call): both shapes expose session_id in data.
-  const selectedSessionId = useMemo(() => {
-    const sid = selectedNode?.data?.session_id;
-    return typeof sid === "string" ? sid : null;
-  }, [selectedNode]);
-
-  // Sync the focus state so the SSE/initial-fetch loop re-issues
-  // with `focused_session=<sid>` whenever the selection changes.
-  useEffect(() => {
-    setPendingFocusSession(selectedSessionId);
-  }, [selectedSessionId]);
+    if (!graph) return null;
+    if (selectedNodeId) {
+      const node = graph.nodes.find((n) => n.id === selectedNodeId);
+      if (node) return node;
+    }
+    if (selectedSessionId) {
+      return graph.nodes.find(
+        (n) =>
+          n.type === "SentinelSession" &&
+          typeof n.data?.session_id === "string" &&
+          (n.data.session_id as string) === selectedSessionId,
+      ) ?? null;
+    }
+    return null;
+  }, [graph, selectedNodeId, selectedSessionId]);
 
   const stuck = useMemo(() => stuckSessions(graph), [graph]);
   const sessionColors = useMemo(() => sessionColorMap(graph), [graph]);
@@ -139,47 +133,16 @@ export default function Page() {
     maybeFireStuckAlert(stuck.length, stuck);
   }, [stuck]);
 
-  // Auto-watch: when on and the graph snapshot ticks, jump selection
-  // to the freshest event (latest of graph.events). Operator
-  // interaction immediately disables auto via the auto-watch hook,
-  // so this only fires while the user is genuinely hands-off.
-  //
-  // Codex-pin exemption: if the operator deliberately selected a
-  // non-claude session, don't bulldoze it. Quiet sessions lose every
-  // freshness race against busier claude main sessions, so without
-  // this guard a codex selection drifts back to main within seconds
-  // of being made.
-  useEffect(() => {
-    if (!auto.on || !graph || graph.events.length === 0) return;
-
-    if (selectedNodeId) {
-      const selected = graph.nodes.find((n) => n.id === selectedNodeId);
-      const selectedHarness = typeof selected?.data?.source_harness === "string"
-        ? (selected.data.source_harness as string)
-        : null;
-      if (selected?.type === "SentinelSession" && selectedHarness && selectedHarness !== "claude") {
-        return;
-      }
-    }
-
-    const latest = graph.events[graph.events.length - 1];
-    const tcid = typeof latest.payload.tool_call_id === "string"
-      ? (latest.payload.tool_call_id as string)
-      : null;
-    const sid = typeof latest.payload.session_id === "string"
-      ? (latest.payload.session_id as string)
-      : null;
-    const ts = typeof latest.payload.ts_sec === "string"
-      ? (latest.payload.ts_sec as string)
-      : (typeof latest.payload.ts === "string" ? (latest.payload.ts as string) : latest.ts);
-    if (tcid) selectNode(tcid, ts);
-    else if (sid) selectSessionBySid(sid, ts);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [auto.on, graph?.max_seq]);
-
   function selectNode(nodeId: string | null, ts?: string) {
     setSelectedNodeId(nodeId);
     setAnchorTs(ts ?? null);
+    if (!nodeId) {
+      setSelectedSessionId(null);
+      return;
+    }
+    const node = graph?.nodes.find((n) => n.id === nodeId);
+    const sid = node?.data?.session_id;
+    setSelectedSessionId(typeof sid === "string" ? sid : null);
   }
 
   // P3-36 bug fix: session node IDs are `SentinelSession#<seq>`
@@ -198,7 +161,9 @@ export default function Page() {
         typeof n.data?.session_id === "string" &&
         (n.data.session_id as string) === sid,
     );
-    selectNode(node?.id ?? null, ts);
+    setSelectedSessionId(sid);
+    setSelectedNodeId(node?.id ?? null);
+    setAnchorTs(ts ?? null);
   }
 
   // sid → graph-node id map, passed into children that take a

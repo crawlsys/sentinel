@@ -3,9 +3,10 @@
 import type { GraphResponse, Node } from "../types/api";
 
 /** A session is "stuck" if it's been waiting on a user reply for
- *  more than this many seconds. The bridge's freshness gate expires
- *  awaiting_user after 1h; anything past 15m here is a real ask
- *  that hasn't been picked up. */
+ *  more than this many seconds. The viz-api keeps a session flagged
+ *  awaiting_user for up to 24h (graph.rs AWAIT_FRESHNESS_SECS), so a
+ *  multi-hour block stays visible; anything past 15m here is a real
+ *  ask that hasn't been picked up. */
 export const STUCK_THRESHOLD_SECS = 900;
 
 /** How many stuck sessions trigger the "you should look at this"
@@ -78,7 +79,6 @@ export function maybeFireStuckAlert(stuckCount: number, stuck: Node[]): void {
         tag: "sentinel-stuck",
       });
       n.onclick = () => {
-        window.focus();
         n.close();
       };
     } catch {

@@ -14,11 +14,9 @@ export function apiBase(): string {
 }
 
 export async function fetchGraph(
-  // Matches backend GraphOpts::default().limit (5 sessions ×
-  // PER_SESSION_CAP_DEFAULT=150). P3-29 bump: was 100, raised to
-  // 750 so the operator sees the full backlog — the P3-24 rollup
-  // collapses bursts so this many events still renders fast.
-  limit = 750,
+  // Matches backend GraphOpts::default().limit. Needs enough event
+  // history for session sparklines, not just the latest hook burst.
+  limit = 6_000,
   signal?: AbortSignal,
   opts: { focusedSession?: string | null } = {},
 ): Promise<GraphResponse> {

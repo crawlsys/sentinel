@@ -33,7 +33,7 @@ LOG_DIR="${SENTINEL_VIZ_LOG_DIR:-/tmp/sentinel-viz/logs}"
 # ollama-research NodePort. Override by exporting before
 # invocation.
 export SENTINEL_LLM_PREFER="${SENTINEL_LLM_PREFER:-local}"
-export OLLAMA_HOST="${OLLAMA_HOST:-http://172.16.100.125:31435}"
+export OLLAMA_HOST="${OLLAMA_HOST:-http://172.16.100.125:31434}"
 export OLLAMA_MODEL="${OLLAMA_MODEL:-qwen3-coder:30b}"
 
 # Frontend → backend URL. Baked into the client bundle at build
@@ -148,7 +148,7 @@ say "      viz-next pid=$(cat $PID_DIR/viz-next.pid)  log=$LOG_DIR/viz-next.log"
 
 sleep 2
 say "done. health:"
-say "  viz-api:  $(curl -sS -o /dev/null -w '%{http_code} in %{time_total}s' "http://localhost:$VIZ_API_PORT/api/health" 2>&1 || echo unreachable)"
+say "  viz-api:  $(curl -sS -o /dev/null -w '%{http_code} in %{time_total}s' "http://localhost:$VIZ_API_PORT/api/healthz" 2>&1 || echo unreachable)"
 say "  viz-next: $(curl -sS -o /dev/null -w '%{http_code} in %{time_total}s' "http://localhost:$VIZ_NEXT_PORT/" 2>&1 || echo unreachable)"
 say ""
 say "first 30 lines of viz-api log (look for 'llm_router' routing decision):"
