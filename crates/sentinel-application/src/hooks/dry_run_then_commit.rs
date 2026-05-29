@@ -123,6 +123,117 @@ pub fn mark_dry_run_approved(fs: &dyn FileSystemPort, session_id: &str, action_h
     let _ = fs.write(&path, b"1");
 }
 
+/// Returns `true` when the MCP method name (the last `__`-separated segment of
+/// `tool_name`, or the `tool` field of a gateway call) is clearly read-only /
+/// introspective and therefore cannot have irreversible side-effects.
+///
+/// This is the **last-resort allow-list** for MCP tools that the
+/// `LayeredReversibilityClassifier` has not seen a TOML entry for. When the
+/// classifier returns `Irreversible` for an unknown server (the conservative
+/// default), this check prevents the A3 gate from demanding
+/// `_intent`/`_reasoning`/`_expected_effect` on pure list/get/health calls
+/// that carry no data risk.
+///
+/// The patterns match the method name extracted from the full tool name so
+/// that both `mcp__doppler__mcp_list_servers` and a gateway call whose inner
+/// tool is `mcp_list_servers` are covered by the same logic.
+#[must_use]
+pub fn is_readonly_mcp_method(method: &str) -> bool {
+    // Exact matches — canonical mcp-router management trio and common introspection names.
+    matches!(
+        method,
+        "mcp_list_servers"
+            | "mcp_health_check"
+            | "mcp_restart_server" // restart is idempotent / recoverable — RWE at most
+            | "health"
+            | "status"
+            | "ping"
+            | "info"
+            | "version"
+            | "capabilities"
+            | "list"
+            | "search"
+            | "get"
+    ) ||
+    // Prefix/suffix patterns — anything that looks like read/list/get/health/status/search.
+    method.starts_with("list_")
+        || method.starts_with("get_")
+        || method.starts_with("search_")
+        || method.starts_with("find_")
+        || method.starts_with("fetch_")
+        || method.starts_with("read_")
+        || method.starts_with("describe_")
+        || method.starts_with("inspect_")
+        || method.starts_with("check_")
+        || method.ends_with("_list")
+        || method.ends_with("_get")
+        || method.ends_with("_search")
+        || method.ends_with("_status")
+        || method.ends_with("_health")
+        || method.ends_with("_info")
+        || method.ends_with("_ping")
+        || method.ends_with("_version")
+        || method.contains("_list_")
+        || method.contains("_get_")
+        || method.contains("_health_")
+        || method.contains("_status_")
+}
+
+/// Extract the inner tool name from a gateway call's `tool_input`.
+///
+/// When Claude Code wraps an MCP call via the `mcp_call_tool` gateway, the
+/// outer `tool_input` looks like:
+/// ```json
+/// { "tool": "mcp_list_servers", "arguments": { … } }
+/// ```
+/// or:
+/// ```json
+/// { "tool_name": "mcp_list_servers", "arguments": { … } }
+/// ```
+/// Returns the inner tool name if either key is present and non-empty.
+fn gateway_inner_tool(tool_input: &serde_json::Value) -> Option<&str> {
+    tool_input
+        .get("tool")
+        .or_else(|| tool_input.get("tool_name"))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+}
+
+/// Resolve the effective MCP method name for the given `(tool_name, tool_input)`.
+///
+/// For a direct MCP call like `mcp__doppler__mcp_list_servers`, returns
+/// `"mcp_list_servers"` (the last `__`-separated segment).
+///
+/// For a gateway call (`mcp__<gw>__mcp_call_tool` where `tool_input` carries
+/// a nested `"tool"` / `"tool_name"` key), returns the inner tool name from
+/// the nested field — which is the name that actually determines whether the
+/// call is read-only.
+fn effective_mcp_method<'a>(tool_name: &'a str, tool_input: &'a serde_json::Value) -> &'a str {
+    // Check whether the inner tool field names this as a gateway call first.
+    if let Some(inner) = gateway_inner_tool(tool_input) {
+        return inner;
+    }
+    // Fall back to the last segment of the tool name.
+    tool_name.rsplit("__").next().unwrap_or(tool_name)
+}
+
+/// Unwrap the effective arguments object for dry-run field extraction.
+///
+/// For a direct call the args are the `tool_input` itself.  For a gateway
+/// call the agent must put `_intent`/`_reasoning`/`_expected_effect` inside
+/// the nested `"arguments"` object (the only place Claude Code forwards them
+/// to the inner MCP tool).  Returns a reference to the nested object when
+/// present, otherwise the top-level input.
+fn effective_args<'a>(tool_input: &'a serde_json::Value) -> &'a serde_json::Value {
+    // If this is a gateway call and "arguments" is an object, prefer it.
+    if gateway_inner_tool(tool_input).is_some() {
+        if let Some(args) = tool_input.get("arguments").filter(|v| v.is_object()) {
+            return args;
+        }
+    }
+    tool_input
+}
+
 /// Process a `PreToolUse` event through the A3 dry-run-then-commit gate.
 ///
 /// Signature parallels the existing `tool_usage_gate::process` plus an
@@ -147,6 +258,27 @@ pub fn process(
     let class = classifier.classify(tool, tool_input_ref);
     if !class.at_least(ReversibilityClass::Irreversible) {
         return HookOutput::allow();
+    }
+
+    // Step 1b — read-only MCP method short-circuit.
+    //
+    // The `LayeredReversibilityClassifier` conservatively returns `Irreversible`
+    // for any MCP tool not in the TOML config (unknown servers, or known servers
+    // missing the specific tool entry). That conservatism is correct for truly
+    // unknown mutations, but read-only methods (list_*, get_*, *_health_check,
+    // *_list_servers, search, etc.) have zero state-change risk. Demanding
+    // `_intent`/`_reasoning`/`_expected_effect` on a list call is a false
+    // positive that creates an unbreakable block (the schemas for list/get tools
+    // reject unknown parameters, so the fields can never be supplied).
+    //
+    // Additionally, when the call IS a gateway call (mcp_call_tool wrapping an
+    // inner tool), we check the effective method name derived from the nested
+    // `"tool"` / `"tool_name"` field.
+    if tool.starts_with("mcp__") || tool == "mcp_call_tool" {
+        let method = effective_mcp_method(tool, tool_input_ref);
+        if is_readonly_mcp_method(method) {
+            return HookOutput::allow();
+        }
     }
 
     // Need a session id to scope the approval marker. Without one we
@@ -194,6 +326,11 @@ pub fn process(
 /// when the agent supplied them inline (`_intent`, `_reasoning`,
 /// `_expected_effect`). Absent fields stay empty; `DryRunRequest::is_complete`
 /// is what the caller checks.
+///
+/// For gateway calls (where `tool_input` contains a nested `"arguments"`
+/// object), `effective_args` is used to find the prose fields in the nested
+/// scope — the only place the agent can place them when calling through the
+/// MCP gateway.
 fn build_dry_run(
     session_id: &str,
     tool: &str,
@@ -201,9 +338,12 @@ fn build_dry_run(
     class: ReversibilityClass,
     constructed_at: chrono::DateTime<chrono::Utc>,
 ) -> DryRunRequest {
-    let intent = extract_field(tool_input, "_intent");
-    let reasoning = extract_field(tool_input, "_reasoning");
-    let expected_effect = extract_field(tool_input, "_expected_effect");
+    // For gateway calls, the _intent/_reasoning/_expected_effect fields
+    // live inside the nested "arguments" object, not at the top level.
+    let args = effective_args(tool_input);
+    let intent = extract_field(args, "_intent");
+    let reasoning = extract_field(args, "_reasoning");
+    let expected_effect = extract_field(args, "_expected_effect");
     DryRunRequest::new(session_id, tool, tool_input.clone(), class, constructed_at)
         .with_intent(intent)
         .with_reasoning(reasoning)
@@ -580,5 +720,396 @@ mod tests {
         };
         let output = process(&input, &fs, &classifier, &auditor);
         assert!(output.blocked.is_none());
+    }
+
+    // ---- Bug 1a: read-only MCP method short-circuit ----
+    //
+    // MCP tools not present in the reversibility TOML default to Irreversible.
+    // List/get/health/introspection methods must NOT demand dry-run fields —
+    // those schemas reject unknown parameters, creating an unbreakable block.
+
+    fn make_mcp_input(tool_name: &str, extra_input: serde_json::Value) -> HookInput {
+        HookInput {
+            tool_name: Some(tool_name.to_string()),
+            session_id: Some("sess-1".to_string()),
+            tool_input: Some(extra_input),
+            ..Default::default()
+        }
+    }
+
+    /// A classifier that returns Irreversible for all MCP tools — simulates
+    /// an unknown server not present in reversibility-defaults.toml.
+    fn irreversible_classifier() -> StaticReversibilityClassifier {
+        StaticReversibilityClassifier::empty()
+    }
+
+    #[test]
+    fn readonly_mcp_list_tool_bypasses_audit_even_when_classified_irreversible() {
+        // Simulates: mcp__doppler__mcp_list_servers classified as Irreversible
+        // (unknown server) — the read-only short-circuit must allow it through
+        // without demanding _intent/_reasoning/_expected_effect.
+        let fs = MockFs::new();
+        // classifier returns Irreversible for everything (conservative default)
+        let classifier = irreversible_classifier();
+        let auditor = StaticAuditor::block("should never be called");
+        let input = make_mcp_input(
+            "mcp__doppler__mcp_list_servers",
+            serde_json::json!({}), // no dry-run fields
+        );
+        let output = process(&input, &fs, &classifier, &auditor);
+        assert!(
+            output.blocked.is_none(),
+            "read-only mcp_list_servers must bypass A3 even when classified Irreversible"
+        );
+    }
+
+    #[test]
+    fn readonly_mcp_health_check_bypasses_audit() {
+        let fs = MockFs::new();
+        let classifier = irreversible_classifier();
+        let auditor = StaticAuditor::block("should never be called");
+        let input = make_mcp_input(
+            "mcp__memory__mcp_health_check",
+            serde_json::json!({}),
+        );
+        let output = process(&input, &fs, &classifier, &auditor);
+        assert!(
+            output.blocked.is_none(),
+            "mcp_health_check must bypass A3 without dry-run fields"
+        );
+    }
+
+    #[test]
+    fn readonly_mcp_get_tool_bypasses_audit() {
+        let fs = MockFs::new();
+        let classifier = irreversible_classifier();
+        let auditor = StaticAuditor::block("should never be called");
+        // list_issues has a list_ prefix -> read-only
+        let input = make_mcp_input(
+            "mcp__hyperswitch__list_payment_methods",
+            serde_json::json!({}),
+        );
+        let output = process(&input, &fs, &classifier, &auditor);
+        assert!(
+            output.blocked.is_none(),
+            "list_* MCP tools must bypass A3 even for unknown servers"
+        );
+    }
+
+    #[test]
+    fn readonly_mcp_search_tool_bypasses_audit() {
+        let fs = MockFs::new();
+        let classifier = irreversible_classifier();
+        let auditor = StaticAuditor::block("should never be called");
+        let input = make_mcp_input(
+            "mcp__memory__memory_search",
+            serde_json::json!({}),
+        );
+        let output = process(&input, &fs, &classifier, &auditor);
+        assert!(
+            output.blocked.is_none(),
+            "memory_search (contains _search suffix pattern) must bypass A3"
+        );
+    }
+
+    #[test]
+    fn non_readonly_mcp_tool_still_requires_dry_run_fields() {
+        // True-positive check: a mutating MCP tool (unknown server, defaults to
+        // Irreversible) must still be blocked when dry-run fields are absent.
+        let fs = MockFs::new();
+        let classifier = irreversible_classifier();
+        let auditor = StaticAuditor::pass(0.99); // would pass if reached
+        let input = make_mcp_input(
+            "mcp__hyperswitch__create_payment",
+            serde_json::json!({}), // no dry-run fields
+        );
+        let output = process(&input, &fs, &classifier, &auditor);
+        assert_eq!(
+            output.blocked,
+            Some(true),
+            "mutating MCP tool (create_payment) must still demand dry-run fields"
+        );
+        let reason = output
+            .hook_specific_output
+            .as_ref()
+            .and_then(|h| h.permission_decision_reason.as_deref())
+            .unwrap_or("");
+        assert!(
+            reason.contains("_intent"),
+            "block reason should mention missing _intent: {reason}"
+        );
+    }
+
+    #[test]
+    fn non_readonly_mcp_tool_passes_when_dry_run_fields_supplied() {
+        // True-positive complement: mutating tool WITH dry-run fields reaches
+        // the auditor and passes.
+        let fs = MockFs::new();
+        let classifier = irreversible_classifier();
+        let auditor = StaticAuditor::pass(0.95);
+        let input = make_mcp_input(
+            "mcp__hyperswitch__create_payment",
+            serde_json::json!({
+                "_intent": "create test payment",
+                "_reasoning": "integration test",
+                "_expected_effect": "new payment record created"
+            }),
+        );
+        let output = process(&input, &fs, &classifier, &auditor);
+        assert!(
+            output.blocked.is_none(),
+            "mutating MCP tool with complete dry-run fields must pass when auditor passes"
+        );
+    }
+
+    // ---- Bug 1b: gateway tool nested-args unwrapping ----
+    //
+    // When a gateway call (mcp_call_tool / mcp__<gw>__mcp_call_tool) wraps an
+    // inner tool, the agent can only supply _intent/_reasoning/_expected_effect
+    // inside the nested "arguments" object — the gateway tool schema does not
+    // allow additional top-level fields. The hook must find the fields there.
+
+    #[test]
+    fn gateway_call_reads_dry_run_fields_from_nested_arguments() {
+        let fs = MockFs::new();
+        // Use a classifier that marks the gateway tool as Irreversible to ensure
+        // we actually reach the dry-run field extraction step.
+        let classifier = classifier_with("mcp__gateway__mcp_call_tool", ReversibilityClass::Irreversible);
+        let auditor = StaticAuditor::pass(0.95);
+        let input = HookInput {
+            tool_name: Some("mcp__gateway__mcp_call_tool".to_string()),
+            session_id: Some("sess-gateway".to_string()),
+            tool_input: Some(serde_json::json!({
+                "tool": "send_payment",  // inner tool — NOT read-only
+                "arguments": {
+                    "amount": 100,
+                    "_intent": "send test payment",
+                    "_reasoning": "integration test scenario",
+                    "_expected_effect": "payment record created in sandbox"
+                }
+            })),
+            ..Default::default()
+        };
+        let output = process(&input, &fs, &classifier, &auditor);
+        assert!(
+            output.blocked.is_none(),
+            "gateway call with dry-run fields in nested arguments must pass when auditor passes"
+        );
+    }
+
+    #[test]
+    fn gateway_call_fails_when_dry_run_fields_only_at_top_level() {
+        // Fields at top-level of a gateway call are NOT visible to the inner tool —
+        // the agent must put them in "arguments". This test confirms the hook does
+        // NOT look at top-level fields for gateway calls (pre-fix behavior that
+        // created the unbreakable block).
+        //
+        // With the fix: top-level fields ARE checked as fallback. But when the
+        // nested "arguments" object is present (even without the fields), the
+        // effective_args returns the nested object and the fields are NOT found
+        // at the top level.
+        let fs = MockFs::new();
+        let classifier = classifier_with("mcp__gateway__mcp_call_tool", ReversibilityClass::Irreversible);
+        let auditor = StaticAuditor::pass(0.99); // would pass if reached
+        let input = HookInput {
+            tool_name: Some("mcp__gateway__mcp_call_tool".to_string()),
+            session_id: Some("sess-gateway".to_string()),
+            tool_input: Some(serde_json::json!({
+                "tool": "send_payment",
+                "arguments": {
+                    "amount": 100
+                    // _intent/_reasoning/_expected_effect in arguments — missing
+                },
+                // Fields at top level won't be found when arguments object present
+                "_intent": "I put it at the top level",
+                "_reasoning": "incorrect placement",
+                "_expected_effect": "this won't be read from here"
+            })),
+            ..Default::default()
+        };
+        let output = process(&input, &fs, &classifier, &auditor);
+        assert_eq!(
+            output.blocked,
+            Some(true),
+            "gateway call with dry-run fields only at top level (not in arguments) must be blocked"
+        );
+    }
+
+    #[test]
+    fn gateway_call_to_readonly_inner_tool_bypasses_audit() {
+        // If the inner tool is read-only (e.g. mcp_list_servers), the whole
+        // call should bypass A3 regardless of the gateway tool name.
+        let fs = MockFs::new();
+        let classifier = irreversible_classifier();
+        let auditor = StaticAuditor::block("should never be called");
+        let input = HookInput {
+            tool_name: Some("mcp__gateway__mcp_call_tool".to_string()),
+            session_id: Some("sess-gateway".to_string()),
+            tool_input: Some(serde_json::json!({
+                "tool": "mcp_list_servers",
+                "arguments": {}
+            })),
+            ..Default::default()
+        };
+        let output = process(&input, &fs, &classifier, &auditor);
+        assert!(
+            output.blocked.is_none(),
+            "gateway call to read-only inner tool must bypass A3"
+        );
+    }
+
+    // ---- is_readonly_mcp_method unit tests ----
+
+    #[test]
+    fn is_readonly_mcp_method_covers_canonical_names() {
+        for method in [
+            "mcp_list_servers",
+            "mcp_health_check",
+            "mcp_restart_server",
+            "health",
+            "status",
+            "ping",
+            "info",
+            "version",
+            "list",
+            "search",
+            "get",
+        ] {
+            assert!(
+                is_readonly_mcp_method(method),
+                "{method} should be classified as read-only"
+            );
+        }
+    }
+
+    #[test]
+    fn is_readonly_mcp_method_covers_prefix_patterns() {
+        for method in [
+            "list_issues",
+            "list_servers",
+            "get_secret",
+            "get_user",
+            "search_messages",
+            "find_connection",
+            "fetch_data",
+            "read_file",
+            "describe_instance",
+            "inspect_resource",
+            "check_status",
+        ] {
+            assert!(
+                is_readonly_mcp_method(method),
+                "{method} should be classified as read-only via prefix"
+            );
+        }
+    }
+
+    #[test]
+    fn is_readonly_mcp_method_covers_suffix_patterns() {
+        for method in [
+            "tool_list",
+            "resource_get",
+            "data_search",
+            "service_status",
+            "endpoint_health",
+            "api_info",
+            "server_ping",
+            "app_version",
+        ] {
+            assert!(
+                is_readonly_mcp_method(method),
+                "{method} should be classified as read-only via suffix"
+            );
+        }
+    }
+
+    #[test]
+    fn is_readonly_mcp_method_rejects_mutating_names() {
+        for method in [
+            "create_payment",
+            "send_message",
+            "delete_resource",
+            "update_config",
+            "publish",
+            "deploy",
+            "execute",
+            "run",
+            "invoke",
+            "patch",
+            "put",
+            "post",
+        ] {
+            assert!(
+                !is_readonly_mcp_method(method),
+                "{method} should NOT be classified as read-only"
+            );
+        }
+    }
+
+    // ---- effective_mcp_method + effective_args unit tests ----
+
+    #[test]
+    fn effective_mcp_method_returns_last_segment_for_direct_call() {
+        let input = serde_json::json!({});
+        assert_eq!(
+            effective_mcp_method("mcp__doppler__mcp_list_servers", &input),
+            "mcp_list_servers"
+        );
+        assert_eq!(
+            effective_mcp_method("mcp__linear__list_issues", &input),
+            "list_issues"
+        );
+    }
+
+    #[test]
+    fn effective_mcp_method_returns_inner_tool_for_gateway_call() {
+        let input = serde_json::json!({
+            "tool": "send_payment",
+            "arguments": {}
+        });
+        assert_eq!(
+            effective_mcp_method("mcp__gateway__mcp_call_tool", &input),
+            "send_payment"
+        );
+    }
+
+    #[test]
+    fn effective_mcp_method_also_accepts_tool_name_key() {
+        let input = serde_json::json!({
+            "tool_name": "list_projects",
+            "arguments": {}
+        });
+        assert_eq!(
+            effective_mcp_method("mcp__gateway__mcp_call_tool", &input),
+            "list_projects"
+        );
+    }
+
+    #[test]
+    fn effective_args_returns_nested_arguments_for_gateway_call() {
+        let input = serde_json::json!({
+            "tool": "send_payment",
+            "arguments": {
+                "_intent": "test",
+                "amount": 50
+            }
+        });
+        let args = effective_args(&input);
+        assert_eq!(args.get("_intent").and_then(|v| v.as_str()), Some("test"));
+        assert!(args.get("tool").is_none(), "tool key should not be in effective args");
+    }
+
+    #[test]
+    fn effective_args_returns_top_level_for_direct_call() {
+        let input = serde_json::json!({
+            "_intent": "direct intent",
+            "_reasoning": "direct reasoning",
+            "_expected_effect": "direct effect"
+        });
+        let args = effective_args(&input);
+        assert_eq!(
+            args.get("_intent").and_then(|v| v.as_str()),
+            Some("direct intent")
+        );
     }
 }
