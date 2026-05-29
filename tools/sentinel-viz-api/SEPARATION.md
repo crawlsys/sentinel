@@ -23,7 +23,7 @@ Runtime contracts that DO span the boundary:
 
 | Contract | Shape | Owner today | After peel-off |
 |---|---|---|---|
-| SQLite event store | path `~/.agents/scratch/activegraph-bridge/sentinel.db`, schema `events(seq, id, type, actor, payload, frame_id, caused_by, timestamp, run_id)` plus `runs`, `meta` | Sentinel's `sentinel_bridge.py` (in `tools/sentinel-viz/`) writes | Same; viz READS only |
+| SQLite store | path `~/.agents/scratch/activegraph-bridge/sentinel.db` (legacy dir name), relational schema `sessions(session_id, source_harness, cwd, platform, started_at, last_activity_ts)` + `hook_events(id, session_id, ts, sentinel_event, hook, tool, outcome, duration_us, trace_id, source_harness)` + `meta` | `tools/sentinel-bridge` (Rust) writes | Same; viz READS only |
 | Transcript JSONL | `~/.claude/projects/*/<sid>.jsonl` + `~/.claude-sentinel/projects/*/<sid>.jsonl` | Claude Code writes | Same; viz reads |
 | Container bind path | `/workspace/sentinel/tools/sentinel-viz-api` under the Docker dev image | `legatus-docker-dev.sh` mounts the host repo | Mount the standalone repo instead |
 
@@ -34,7 +34,7 @@ single-line comment of the form `// WORKSTREAM: <name> — <note>`.
 Grep `WORKSTREAM:` to find them all. Today they are:
 
 ```
-WORKSTREAM: sentinel-bridge — reads `events` table the bridge owns
+WORKSTREAM: sentinel-bridge — reads `sessions` + `hook_events` tables the bridge owns
 WORKSTREAM: claude-code — reads transcript JSONLs Claude Code owns
 WORKSTREAM: sentinel-viz — internal to this crate
 ```
@@ -52,9 +52,9 @@ The day you decide to split:
    the repo root.
 4. In the new repo, document the SQLite + JSONL contracts as part of
    the public README rather than this private SEPARATION.md.
-5. Bump `sentinel_bridge.py` over to the new repo too if you want a
-   single home for the data path; otherwise leave it where it is and
-   document the link.
+5. Bump `tools/sentinel-bridge` (Rust) over to the new repo too if you
+   want a single home for the data path; otherwise leave it where it is
+   and document the link.
 
 ## Smoke signals if the boundary breaks
 
