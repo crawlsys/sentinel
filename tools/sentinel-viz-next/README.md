@@ -9,8 +9,10 @@ it. See `~/.agents/plans/sentinel-viz-next.md`.
 
 ## Components
 
-- `components/GraphCanvas.tsx` — SVG + `d3-force` simulation. Pan / zoom
-  via `d3-zoom`. Click a node → `onSelectNode`.
+- `components/SessionStripsPanel.tsx` — main view. One strip per active
+  session with a per-category sparkline; click a strip → `onSelectSession`.
+  (Replaced the force-directed `GraphCanvas`, removed in the relational
+  read-model refactor — the API no longer emits a node/edge graph.)
 - `components/EventTicker.tsx` — right-rail ticker. Groups consecutive
   events by `(session_id, type, tool_call_id, outcome)` (plan
   gotcha #9). Click a row → focus the referenced node.

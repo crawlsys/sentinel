@@ -79,7 +79,8 @@ pub fn read_new(path: &Path, offset: u64) -> Result<(Vec<Value>, u64)> {
 
 /// Read the entire file once. Used by shims that operate on
 /// always-rewritten JSON arrays (gemini) rather than append-only
-/// JSONLs.
+/// JSONLs — only the `extra-harnesses` feature wires those in.
+#[allow(dead_code)]
 pub fn read_full_array(path: &Path) -> Result<Vec<Value>> {
     let raw = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
     let parsed: Value = serde_json::from_str(&raw)?;

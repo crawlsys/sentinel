@@ -123,8 +123,7 @@ export function StatusBar({
 
       {graph ? (
         <>
-          <Typography component="span" sx={STAT_LABEL_SX}>nodes: {graph.stats.nodes_total}</Typography>
-          <Typography component="span" sx={STAT_LABEL_SX}>edges: {graph.stats.edges_total}</Typography>
+          <Typography component="span" sx={STAT_LABEL_SX}>sessions: {graph.stats.nodes_total}</Typography>
           <Typography component="span" sx={STAT_LABEL_SX}>events: {graph.stats.events_total}</Typography>
           <Typography
             component="span"

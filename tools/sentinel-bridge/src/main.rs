@@ -7,16 +7,14 @@
 //!      shims/ but are dormant; see the Shim enum below) into the
 //!      bridge's hook-invocation JSONL format.
 //!   2. Tail every metrics dir's hook-invocations.jsonl + sessions.jsonl
-//!      and persist into the activegraph-compatible SQLite store that
-//!      sentinel-viz-api serves.
+//!      and persist into the relational SQLite store
+//!      (sessions + hook_events) that sentinel-viz-api serves.
 //!
 //! Subcommands:
 //!   sentinel-bridge tail           — full ingest loop (default cadence)
-//!   sentinel-bridge backfill       — one-shot pass, exit
+//!   sentinel-bridge backfill       — one-shot pass, exit (rebuild path:
+//!                                    point at a fresh DB to rebuild from JSONL)
 //!   sentinel-bridge shim <name>    — run a single shim once
-//!
-//! Schema parity with the retired Python bridge is verified in
-//! tests/parity.rs against fixture JSONLs.
 
 mod ingest;
 mod jsonl;

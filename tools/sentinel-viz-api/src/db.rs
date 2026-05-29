@@ -1,18 +1,23 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use rusqlite::{Connection, OpenFlags, Row};
-
-use crate::model::Event;
+use rusqlite::{Connection, OpenFlags};
 
 /// Default location of the bridge's SQLite store, overridable via env.
 ///
 /// WORKSTREAM: sentinel-bridge — this path is owned by
-/// `tools/sentinel-viz/sentinel_bridge.py`, which writes the file.
-/// The viz crate opens READ-ONLY. If the bridge moves, override
-/// `SENTINEL_VIZ_DB` rather than hard-coding a new default here.
+/// `tools/sentinel-bridge`, which writes the file (relational schema:
+/// `sessions` + `hook_events`). The viz crate opens READ-ONLY. If the
+/// bridge moves, override `SENTINEL_VIZ_DB` rather than hard-coding a
+/// new default here.
 pub const DEFAULT_DB_ENV: &str = "SENTINEL_VIZ_DB";
 const DEFAULT_DB_REL: &str = ".agents/scratch/activegraph-bridge/sentinel.db";
+
+/// How many recent sessions the dashboard renders. Recency is by
+/// `last_activity_ts`, NOT by row insertion order — this is what makes
+/// a long-quiet-then-active session reappear, and removes the old
+/// hidden top-K (=5) truncation.
+pub const MAX_SESSIONS: usize = 200;
 
 /// Resolve the SQLite path from `$SENTINEL_VIZ_DB`, falling back to
 /// `$HOME/.agents/scratch/activegraph-bridge/sentinel.db`.
@@ -33,84 +38,147 @@ pub fn open_ro(path: &Path) -> Result<Connection> {
     .with_context(|| format!("opening sentinel db at {}", path.display()))
 }
 
-/// Cheap MAX(seq) probe — single index hit, used by SSE to decide
-/// whether a full graph reload is needed.
+/// Cheap recency probe — `MAX(id)` over `hook_events`, used by SSE/health
+/// to decide whether a full graph reload is needed. (Name retained from
+/// the event-store era; the value is now the newest hook_event rowid.)
 pub fn peek_max_seq(conn: &Connection) -> Result<i64> {
-    let seq: Option<i64> = conn
-        .query_row("SELECT MAX(seq) FROM events", [], |row| row.get(0))
+    let v: Option<i64> = conn
+        .query_row("SELECT MAX(id) FROM hook_events", [], |row| row.get(0))
         .unwrap_or(None);
-    Ok(seq.unwrap_or(0))
+    Ok(v.unwrap_or(0))
 }
 
-/// Read the recent event window ordered by `seq` ascending.
-///
-/// The dashboard only renders a bounded live window, but the bridge DB can
-/// grow past a million rows during harness/shim demos. Full scans made first
-/// render block behind JSON payload parsing. Keep the historical DB intact and
-/// read only the newest rows by default; set `SENTINEL_VIZ_EVENT_WINDOW_ROWS=0`
-/// to restore full-corpus reads for offline analysis.
-pub fn read_events(conn: &Connection) -> Result<Vec<Event>> {
-    let window_rows = std::env::var("SENTINEL_VIZ_EVENT_WINDOW_ROWS")
-        .ok()
-        .and_then(|s| s.parse::<i64>().ok())
-        .unwrap_or(30_000);
-    let max_seq = peek_max_seq(conn)?;
-    let min_seq = if window_rows <= 0 {
-        0
-    } else {
-        (max_seq - window_rows + 1).max(0)
-    };
-    read_events_from_seq(conn, min_seq)
+/// One row of the `sessions` table.
+#[derive(Debug, Clone)]
+pub struct SessionRow {
+    pub session_id: String,
+    pub source_harness: String,
+    pub cwd: String,
+    pub platform: String,
+    pub started_at: String,
+    pub last_activity_ts: String,
 }
 
-/// Explicit full-corpus read for offline tests/analysis.
-pub fn read_all_events(conn: &Connection) -> Result<Vec<Event>> {
-    read_events_from_seq(conn, 0)
+/// One row of the `hook_events` table.
+#[derive(Debug, Clone)]
+pub struct HookEventRow {
+    pub id: i64,
+    pub session_id: String,
+    pub ts: String,
+    pub sentinel_event: String,
+    pub hook: String,
+    pub tool: String,
+    pub outcome: String,
+    pub duration_us: i64,
+    pub source_harness: String,
 }
 
-fn read_events_from_seq(conn: &Connection, min_seq: i64) -> Result<Vec<Event>> {
-    let sql = if min_seq > 0 {
-        "SELECT seq, id, type, actor, payload, frame_id, caused_by, timestamp, run_id \
-         FROM events WHERE seq >= ?1 ORDER BY seq ASC"
-    } else {
-        "SELECT seq, id, type, actor, payload, frame_id, caused_by, timestamp, run_id \
-         FROM events ORDER BY seq ASC"
-    };
-    let mut stmt = conn.prepare(sql)?;
+/// Read the most-recently-active sessions. `since_secs` is a coarse
+/// time floor on `last_activity_ts` (lexicographic on ISO-8601 UTC —
+/// fine for a window cutoff and index-friendly). Ordered newest-active
+/// first, capped at `limit`.
+fn session_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionRow> {
+    Ok(SessionRow {
+        session_id: row.get(0)?,
+        source_harness: row.get(1)?,
+        cwd: row.get(2)?,
+        platform: row.get(3)?,
+        started_at: row.get(4)?,
+        last_activity_ts: row.get(5)?,
+    })
+}
+
+const SESSION_COLS: &str =
+    "session_id, source_harness, cwd, platform, started_at, last_activity_ts";
+
+/// Fetch a single session by id (honours `?focus=` even when the
+/// session is older than the recent-window cutoff).
+pub fn read_session(conn: &Connection, session_id: &str) -> Result<Option<SessionRow>> {
+    let sql = format!("SELECT {SESSION_COLS} FROM sessions WHERE session_id = ?1");
+    let mut stmt = conn.prepare(&sql)?;
+    let mut rows = stmt.query_map([session_id], session_from_row)?;
+    match rows.next() {
+        Some(r) => Ok(Some(r?)),
+        None => Ok(None),
+    }
+}
+
+pub fn read_recent_sessions(
+    conn: &Connection,
+    since_secs: Option<i64>,
+    limit: usize,
+) -> Result<Vec<SessionRow>> {
+    let map_row = session_from_row;
+    let cols = SESSION_COLS;
     let mut out = Vec::new();
-    if min_seq > 0 {
-        let rows = stmt.query_map([min_seq], row_to_event)?;
-        for r in rows {
-            out.push(r?);
+    match since_secs {
+        Some(secs) => {
+            let cutoff = cutoff_iso(secs);
+            let sql = format!(
+                "SELECT {cols} FROM sessions \
+                 WHERE last_activity_ts >= ?1 \
+                 ORDER BY last_activity_ts DESC LIMIT ?2"
+            );
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt.query_map(rusqlite::params![cutoff, limit as i64], map_row)?;
+            for r in rows {
+                out.push(r?);
+            }
         }
-    } else {
-        let rows = stmt.query_map([], row_to_event)?;
-        for r in rows {
-            out.push(r?);
+        None => {
+            let sql = format!(
+                "SELECT {cols} FROM sessions ORDER BY last_activity_ts DESC LIMIT ?1"
+            );
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt.query_map(rusqlite::params![limit as i64], map_row)?;
+            for r in rows {
+                out.push(r?);
+            }
         }
     }
     Ok(out)
 }
 
-fn row_to_event(row: &Row<'_>) -> rusqlite::Result<Event> {
-    let payload_text: String = row.get(4)?;
-    let payload: serde_json::Value =
-        serde_json::from_str(&payload_text).map_err(|e| {
-            rusqlite::Error::FromSqlConversionFailure(
-                4,
-                rusqlite::types::Type::Text,
-                Box::new(e),
-            )
-        })?;
-    Ok(Event {
-        seq: row.get(0)?,
-        id: row.get(1)?,
-        kind: row.get(2)?,
-        actor: row.get(3)?,
-        payload,
-        frame_id: row.get(5)?,
-        caused_by: row.get(6)?,
-        timestamp: row.get(7)?,
-        run_id: row.get(8)?,
-    })
+/// Read the newest `limit` hook_events globally, newest-first (by
+/// rowid). Walks the integer-PK index descending and stops after
+/// `limit` rows — O(limit), no sort, regardless of table size. The
+/// caller filters to the sessions it is displaying in memory.
+///
+/// Why global rather than `WHERE session_id IN (...)`: an IN-filter
+/// combined with `ORDER BY id DESC` cannot use the PK for ordering, so
+/// SQLite gathers every matching row and sorts it (≈1.2s on 100k rows).
+/// Recent-by-activity sessions own the newest events anyway, so the
+/// global tail covers them; there is NO hidden per-session cap.
+pub fn read_recent_events(conn: &Connection, limit: usize) -> Result<Vec<HookEventRow>> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    let sql = "SELECT id, session_id, ts, sentinel_event, hook, tool, outcome, duration_us, source_harness \
+               FROM hook_events ORDER BY id DESC LIMIT ?1";
+    let mut stmt = conn.prepare(sql)?;
+    let rows = stmt.query_map([limit as i64], |row| {
+        Ok(HookEventRow {
+            id: row.get(0)?,
+            session_id: row.get(1)?,
+            ts: row.get(2)?,
+            sentinel_event: row.get(3)?,
+            hook: row.get(4)?,
+            tool: row.get(5)?,
+            outcome: row.get(6)?,
+            duration_us: row.get(7)?,
+            source_harness: row.get(8)?,
+        })
+    })?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r?);
+    }
+    Ok(out)
+}
+
+/// ISO-8601 UTC string for `now - secs`, matching the bridge's stored
+/// timestamp format closely enough for a lexicographic floor.
+fn cutoff_iso(secs: i64) -> String {
+    let t = chrono::Utc::now() - chrono::Duration::seconds(secs);
+    t.format("%Y-%m-%dT%H:%M:%SZ").to_string()
 }

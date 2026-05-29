@@ -29,6 +29,11 @@ pub fn metrics_dirs() -> Vec<PathBuf> {
 }
 
 pub fn store_path() -> PathBuf {
+    // SENTINEL_BRIDGE_DB lets a rebuild target a scratch DB instead of
+    // the live store (validation, tests) without touching real data.
+    if let Ok(p) = std::env::var("SENTINEL_BRIDGE_DB") {
+        return PathBuf::from(p);
+    }
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("/"))
         .join(".agents")
@@ -38,6 +43,9 @@ pub fn store_path() -> PathBuf {
 }
 
 pub fn offset_state_path() -> PathBuf {
+    if let Ok(p) = std::env::var("SENTINEL_BRIDGE_STATE") {
+        return PathBuf::from(p);
+    }
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("/"))
         .join(".agents")
@@ -82,23 +90,11 @@ pub fn run_pass(store: &mut Store, state: &mut OffsetState) -> Result<usize> {
             let (records, new_off) = read_new(&hooks_path, off)?;
             for rec in records {
                 if let Some(hd) = parse_hook_record(&rec) {
-                    let session_obj_id = match store.lookup_session_obj_id(&hd.session_id)? {
-                        Some(id) => id,
-                        None => {
-                            // Synthesise a session from the hook's
-                            // own metadata. Mirrors the Python stub
-                            // creation path.
-                            let stub = SessionData {
-                                session_id: hd.session_id.clone(),
-                                cwd: hd.repo_root.clone(),
-                                platform: String::new(),
-                                started_at: hd.ts.clone(),
-                                source_harness: hd.source_harness.clone(),
-                            };
-                            store.upsert_session(&stub)?
-                        }
-                    };
-                    store.ingest_hook(&hd, &session_obj_id)?;
+                    // ingest_hook stubs the session from the hook's own
+                    // metadata when unseen (how codex/all-harness
+                    // sessions exist), dedupes on trace_id, and bumps
+                    // the session's last_activity_ts.
+                    store.ingest_hook(&hd)?;
                     emitted += 1;
                 }
             }
