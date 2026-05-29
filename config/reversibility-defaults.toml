@@ -646,3 +646,15 @@ class = "TriviallyReversible"
 # Example (commented out — operators uncomment + add their own):
 # "mcp__custom__safe_tool" = "TriviallyReversible"
 # "mcp__ba_orchestrator__publish_exec_deck" = "Catastrophic"
+
+# Claude Code orchestration tools. These spawn sub-agents / fan-out work but
+# do NOT themselves mutate durable state — each sub-action a workflow performs
+# is re-gated individually by the same reversibility stack. Without these
+# entries they hit the unknown-tool fallback (Irreversible) and the dry-run
+# auditor blocks every Workflow/Agent/Task call. Classifying the orchestrators
+# themselves as trivially reversible lets the per-action gates do the real work.
+"Workflow" = "TriviallyReversible"
+"Agent" = "TriviallyReversible"
+"Task" = "TriviallyReversible"
+"TaskCreate" = "TriviallyReversible"
+"TaskUpdate" = "TriviallyReversible"
