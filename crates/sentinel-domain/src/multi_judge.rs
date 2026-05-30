@@ -79,7 +79,6 @@ pub enum JudgeTrustTier {
     AuditGrade,
 }
 
-
 impl JudgeTrustTier {
     /// The list of judges to run for this tier. Order is stable —
     /// callers iterate in this order and disagreement messages

@@ -165,7 +165,10 @@ mod tests {
     fn test_judge_model_display() {
         assert_eq!(JudgeModel::Codex.to_string(), "openai/gpt-5.5-pro");
         assert_eq!(JudgeModel::Kimi.to_string(), "moonshotai/kimi-k2.6");
-        assert_eq!(JudgeModel::Sonnet.to_string(), "anthropic/claude-sonnet-4.6");
+        assert_eq!(
+            JudgeModel::Sonnet.to_string(),
+            "anthropic/claude-sonnet-4.6"
+        );
         assert_eq!(JudgeModel::Opus.to_string(), "anthropic/claude-opus-4.7");
     }
 

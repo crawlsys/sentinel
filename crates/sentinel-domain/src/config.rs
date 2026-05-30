@@ -33,8 +33,7 @@ use crate::ssrf::SsrfPolicy;
 
 /// The top-level Sentinel config. All sub-configs are composable
 /// — drop in a new `Default` and the parent picks it up.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SentinelConfig {
     #[serde(default)]
     pub request_limits: RequestLimits,
@@ -47,7 +46,6 @@ pub struct SentinelConfig {
     #[serde(default)]
     pub signing: SigningConfig,
 }
-
 
 impl SentinelConfig {
     /// Run every sub-validator and return the complete punch list.

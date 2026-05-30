@@ -597,7 +597,8 @@ impl HookOutput {
                         };
                         if dominated {
                             self_hso.permission_decision = Some(other_pd);
-                            self_hso.permission_decision_reason
+                            self_hso
+                                .permission_decision_reason
                                 .clone_from(&other_hso.permission_decision_reason);
                         }
                     }

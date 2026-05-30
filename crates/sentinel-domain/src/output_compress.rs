@@ -16,6 +16,15 @@
 //! safety contract: compression can only ever remove *noise*, never the lines
 //! a downstream gate parses to decide pass/fail. Tests assert this directly.
 //!
+//! ## Losslessness for grep/find/ls
+//!
+//! Search and file-listing output (grep, rg, find, fd, ls) is treated as
+//! **near-verbatim**: only trailing whitespace and runs of blank lines are
+//! removed. Consecutive identical lines are deduplicated (a true repeat
+//! carries zero information), but no hard line cap is applied — every unique
+//! result line is preserved regardless of count. This fixes the previous
+//! lossy behaviour where lines beyond position 100 were silently dropped.
+//!
 //! ## Pure
 //!
 //! Zero IO. `compress(command, raw_output) -> CompressionResult`. The CLI
@@ -166,7 +175,10 @@ pub fn compress(command: &str, raw: &str) -> CompressionResult {
         CommandKind::CargoTest => compress_cargo_test(raw),
         CommandKind::CargoBuildLike => compress_cargo_build_like(raw),
         CommandKind::GitStatus => compress_passthrough_trim(raw),
-        CommandKind::Grep | CommandKind::FileList => compress_dedup_cap(raw),
+        // Grep and FileList: lossless dedup-only (no cap). Every unique result
+        // line is preserved in input order. Only consecutive identical lines
+        // (true repeats, zero information) are collapsed.
+        CommandKind::Grep | CommandKind::FileList => compress_dedup_only(raw),
         CommandKind::Other => return CompressionResult::passthrough(raw),
     };
 
@@ -241,35 +253,34 @@ fn compress_passthrough_trim(raw: &str) -> String {
     join_nonempty(&out)
 }
 
-/// Dedup consecutive identical lines and cap total at [`MAX_LIST_LINES`] with
-/// a truncation marker. For `grep`/`find`/`ls` style output. Signal lines are
-/// never dropped by the cap.
-fn compress_dedup_cap(raw: &str) -> String {
-    const MAX_LIST_LINES: usize = 100;
+/// Lossless dedup for `grep`/`find`/`ls` style output.
+///
+/// Collapses only **consecutive identical lines** (true repeats that carry zero
+/// extra information) while preserving every unique line in its original order.
+/// No line cap is applied: every distinct search result is preserved regardless
+/// of count, so a `grep -n` across a large codebase returns all matches.
+///
+/// This replaces the old `compress_dedup_cap` which silently dropped lines
+/// beyond position 100, causing lossy and apparently non-deterministic output
+/// (the exact set of lines that survived depended on which signal-line patterns
+/// happened to match first, consuming cap slots before unique results were
+/// seen).
+fn compress_dedup_only(raw: &str) -> String {
     let mut out: Vec<String> = Vec::new();
-    let mut last: Option<String> = None;
-    let mut total = 0usize;
-    let mut truncated = 0usize;
+    let mut last: Option<&str> = None;
 
     for line in raw.lines() {
         let t = line.trim_end();
         if t.trim().is_empty() {
+            last = None; // reset dedup across blank runs
             continue;
         }
-        let signal = is_signal_line(t);
-        if !signal && last.as_deref() == Some(t) {
-            continue; // consecutive dup
-        }
-        if !signal && total >= MAX_LIST_LINES {
-            truncated += 1;
+        // Only collapse consecutive identical lines (same content back-to-back).
+        if last == Some(t) {
             continue;
         }
         out.push(t.to_string());
-        last = Some(t.to_string());
-        total += 1;
-    }
-    if truncated > 0 {
-        out.push(format!("… {truncated} more line(s) truncated"));
+        last = Some(t);
     }
     join_nonempty(&out)
 }
@@ -303,8 +314,14 @@ mod tests {
             classify("cd /repo && cargo test -p foo"),
             CommandKind::CargoTest
         );
-        assert_eq!(classify("cargo clippy --workspace"), CommandKind::CargoBuildLike);
-        assert_eq!(classify("cargo build --release"), CommandKind::CargoBuildLike);
+        assert_eq!(
+            classify("cargo clippy --workspace"),
+            CommandKind::CargoBuildLike
+        );
+        assert_eq!(
+            classify("cargo build --release"),
+            CommandKind::CargoBuildLike
+        );
         assert_eq!(classify("git status --short"), CommandKind::GitStatus);
         assert_eq!(classify("grep -rn foo src"), CommandKind::Grep);
         assert_eq!(classify("find . -name '*.rs'"), CommandKind::FileList);
@@ -351,7 +368,9 @@ failures:
 test result: FAILED. 4 passed; 1 failed; 0 ignored";
         let r = compress("cargo test --workspace", raw);
         // Signal lines survive verbatim.
-        assert!(r.compressed.contains("test result: FAILED. 4 passed; 1 failed; 0 ignored"));
+        assert!(r
+            .compressed
+            .contains("test result: FAILED. 4 passed; 1 failed; 0 ignored"));
         assert!(r.compressed.contains("test b::bad ... FAILED"));
         // ok-spam collapsed, not enumerated.
         assert!(!r.compressed.contains("test a::ok1 ... ok"));
@@ -373,7 +392,9 @@ test y ... ok
 test z ... ok
 test result: ok. 3 passed; 0 failed; 0 ignored";
         let r = compress("cargo test", raw);
-        assert!(r.compressed.contains("test result: ok. 3 passed; 0 failed; 0 ignored"));
+        assert!(r
+            .compressed
+            .contains("test result: ok. 3 passed; 0 failed; 0 ignored"));
         assert!(r.compressed.contains("3 passing test(s) (ok) collapsed"));
         assert!(r.savings_ratio() > 0.0);
     }
@@ -391,16 +412,140 @@ error[E0432]: unresolved import
         assert!(!r.compressed.contains("Finished"));
     }
 
+    // --- Losslessness regression tests (the lossy-compression bug) ---
+
+    /// Grep output with near-duplicate lines (shared prefix, different line
+    /// numbers) must preserve EVERY line in order. This was the primary bug:
+    /// lines beyond position 100 were silently dropped.
     #[test]
-    fn grep_dedups_and_caps() {
-        let mut raw = String::new();
-        for _ in 0..150 {
-            raw.push_str("src/lib.rs: match found\n");
+    fn grep_near_duplicate_lines_all_preserved_in_order() {
+        // Simulate `grep -n "pub struct" large_file.rs`: each line has a
+        // distinct line number, so no two adjacent lines are identical.
+        let lines: Vec<String> = (1..=150)
+            .map(|n| format!("src/lib.rs:{n}:pub struct Foo{n}"))
+            .collect();
+        let raw = lines.join("\n");
+
+        let r = compress("grep -n 'pub struct' src/lib.rs", &raw);
+
+        // Every unique line must survive.
+        for n in 1..=150 {
+            let expected = format!("src/lib.rs:{n}:pub struct Foo{n}");
+            assert!(
+                r.compressed.contains(&expected),
+                "line {n} was dropped: {expected}"
+            );
         }
-        let r = compress("grep -rn match src", &raw);
-        // Consecutive dups collapse to one + truncation marker keeps it bounded.
-        assert!(r.compressed.lines().count() < 150);
-        assert!(r.compressed_bytes < r.original_bytes);
+        // Output preserves input order.
+        let out_lines: Vec<&str> = r.compressed.lines().collect();
+        assert_eq!(
+            out_lines.len(),
+            150,
+            "expected 150 lines, got {}",
+            out_lines.len()
+        );
+        for (i, line) in out_lines.iter().enumerate() {
+            let n = i + 1;
+            assert!(
+                line.contains(&format!("Foo{n}")),
+                "line at position {i} out of order: {line}"
+            );
+        }
+    }
+
+    /// True consecutive duplicates (e.g. a grep that repeats the same match
+    /// multiple times in a row) are still collapsed — that's the one lossless
+    /// reduction we keep.
+    #[test]
+    fn grep_true_consecutive_duplicates_collapsed() {
+        let raw =
+            "src/lib.rs:42:match found\nsrc/lib.rs:42:match found\nsrc/lib.rs:43:other match\n";
+        let r = compress("grep -rn match src", raw);
+        // The duplicate is collapsed to one occurrence.
+        let count = r.compressed.matches("src/lib.rs:42:match found").count();
+        assert_eq!(
+            count, 1,
+            "consecutive dup should collapse to 1, got {count}"
+        );
+        // But the distinct line is still present.
+        assert!(r.compressed.contains("src/lib.rs:43:other match"));
+    }
+
+    /// A `find` result with >100 unique paths must preserve all of them.
+    #[test]
+    fn find_more_than_100_paths_all_preserved() {
+        let lines: Vec<String> = (1..=120)
+            .map(|n| format!("./src/module{n}/lib.rs"))
+            .collect();
+        let raw = lines.join("\n");
+        let r = compress("find . -name '*.rs'", &raw);
+        assert_eq!(
+            r.compressed.lines().count(),
+            120,
+            "all 120 find results must be preserved"
+        );
+        for n in 1..=120 {
+            assert!(
+                r.compressed.contains(&format!("module{n}")),
+                "path for module{n} was dropped"
+            );
+        }
+    }
+
+    /// `ls` output with >100 files must preserve all entries.
+    #[test]
+    fn ls_more_than_100_files_all_preserved() {
+        let lines: Vec<String> = (1..=110).map(|n| format!("file{n:03}.rs")).collect();
+        let raw = lines.join("\n");
+        let r = compress("ls src/", &raw);
+        assert_eq!(
+            r.compressed.lines().count(),
+            110,
+            "all 110 ls entries must be preserved"
+        );
+    }
+
+    /// The compressor must be deterministic: same input always produces the
+    /// same output, regardless of how many times it is called.
+    #[test]
+    fn compression_is_deterministic() {
+        let lines: Vec<String> = (1..=80)
+            .map(|n| format!("src/lib.rs:{n}:pub struct S{n}"))
+            .collect();
+        let raw = lines.join("\n");
+
+        let first = compress("grep -n 'pub struct' src", &raw);
+        for i in 1..=10 {
+            let repeated = compress("grep -n 'pub struct' src", &raw);
+            assert_eq!(
+                first.compressed, repeated.compressed,
+                "compression not deterministic on run {i}"
+            );
+        }
+    }
+
+    /// A `cat` / `Read` of source code must be byte-identical (modulo trailing
+    /// whitespace on each line) since `cat` classifies as `Other` → passthrough.
+    #[test]
+    fn cat_command_is_passthrough() {
+        let raw = "fn main() {\n    println!(\"hello\");\n}\n";
+        let r = compress("cat src/main.rs", raw);
+        assert_eq!(r.compressed, raw, "cat output must pass through unchanged");
+        assert_eq!(r.lines_dropped, 0);
+    }
+
+    #[test]
+    fn grep_output_same_input_same_output() {
+        // Regression for the non-determinism symptom: same grep output must
+        // always compress to the same result.
+        let raw = (1..=50)
+            .map(|n| format!("{n}: pub struct Foo"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let a = compress("grep -n 'pub struct' file.rs", &raw);
+        let b = compress("grep -n 'pub struct' file.rs", &raw);
+        assert_eq!(a.compressed, b.compressed);
+        assert_eq!(a.lines_dropped, b.lines_dropped);
     }
 
     #[test]
@@ -417,5 +562,24 @@ error[E0432]: unresolved import
         let r = compress("cargo test", "");
         assert_eq!(r.compressed, "");
         assert!((r.savings_ratio() - 0.0).abs() < f64::EPSILON);
+    }
+
+    /// Old grep_dedups_and_caps test updated: consecutive dups still collapse,
+    /// but there is no longer a hard 100-line cap that drops unique lines.
+    #[test]
+    fn grep_consecutive_dups_collapse_no_lossy_cap() {
+        // 150 lines all identical → collapse to 1 (consecutive dedup).
+        let mut raw = String::new();
+        for _ in 0..150 {
+            raw.push_str("src/lib.rs: match found\n");
+        }
+        let r = compress("grep -rn match src", &raw);
+        // Collapsed to a single line (all are consecutive identical).
+        assert_eq!(
+            r.compressed.lines().count(),
+            1,
+            "150 identical consecutive lines should collapse to 1"
+        );
+        assert!(r.compressed_bytes < r.original_bytes);
     }
 }
