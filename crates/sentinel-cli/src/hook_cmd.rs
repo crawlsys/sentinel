@@ -1321,6 +1321,15 @@ fn handle_pre_tool_use(
     });
     output.merge(&bug_gate_output);
 
+    // Task decomposition gate — block mutating tools (Edit/Write/NotebookEdit,
+    // state-changing Bash) when no live decomposed task list exists for the
+    // session. Allowlists Read/Glob/Grep/Task*/Skill/sequential-thinking so the
+    // gate never blocks the fix path; fails open when task state is unreadable.
+    let task_decomp_output = time_and_record(ctx.fs, &mk_ctx("task_decomposition_gate"), || {
+        hooks::task_decomposition_gate::process(input, ctx)
+    });
+    output.merge(&task_decomp_output);
+
     // Skill invocation gate — block tools when a skill was detected
     // by skill_router but not yet invoked. Allowlists Read/Glob/Grep/
     // Skill/Task* so the gate doesn't refuse to let Claude clear it.

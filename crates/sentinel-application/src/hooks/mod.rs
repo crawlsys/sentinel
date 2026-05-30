@@ -74,6 +74,7 @@ pub mod subagent_start;
 pub mod subagent_stop;
 pub mod task_completed;
 pub mod task_coverage_check;
+pub mod task_decomposition_gate;
 pub mod task_created;
 pub mod task_persist;
 pub mod task_rehydrate;
@@ -316,6 +317,7 @@ pub const HOOK_NAMES: &[&str] = &[
     "subagent_stop",
     "task_completed",
     "task_coverage_check",
+    "task_decomposition_gate",
     "task_created",
     "task_persist",
     "task_rehydrate",

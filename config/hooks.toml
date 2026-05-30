@@ -70,6 +70,13 @@ depends_on = []
 has_api_call = false
 
 [[hooks]]
+id = "task-decomposition-gate"
+event = "PreToolUse"
+description = "Block mutating tools (Edit/Write/state-changing Bash) when no live decomposed task list exists; require numbered #N + Na/Nb real child subtasks, [P0-P3] priority, two-emoji prefix (status ⬜🔄✅❌ then priority 🔴🟠🟡🟢), parent mirror checklist, blocking deps. Reads/Task*/sequential-thinking always allowed; fails open when task state is unreadable."
+depends_on = []
+has_api_call = false
+
+[[hooks]]
 id = "skill-invocation-gate"
 event = "PreToolUse"
 description = "Block tool use when skill_router detected a skill that has not been invoked"
