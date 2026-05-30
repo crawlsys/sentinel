@@ -119,6 +119,17 @@ fn write_pending_skill_state(
     }
 }
 
+/// Remove the pending-skill marker for a session. Called when a new user
+/// message routes to *no* skill so a marker left over from an earlier message
+/// doesn't keep `skill_invocation_gate` blocking (and re-firing) indefinitely
+/// until its 5-minute TTL. A new message that routes to a *different* skill is
+/// already handled by `write_pending_skill_state` overwriting the file.
+pub(crate) fn clear_pending_skill_state(fs: &dyn FileSystemPort, session_id: &str) {
+    if let Some(path) = pending_skill_state_path(fs, session_id) {
+        let _ = fs.remove_file(&path);
+    }
+}
+
 /// Write telemetry state files so `skill_telemetry` can track the execution.
 fn write_telemetry_state(fs: &dyn FileSystemPort, skill: &str, run_id: &str) {
     let dir = match telemetry_dir(fs) {
@@ -286,6 +297,15 @@ pub async fn process(
         }
     } else {
         tracing::warn!("No AI classifier available — skill routing disabled for this message");
+    }
+
+    // This message routed to no skill. Clear any pending-skill marker left by
+    // an earlier message so the invocation gate stops blocking on a skill the
+    // user has already moved past, rather than waiting out the 5-minute TTL.
+    if let Some(session_id) = input.session_id.as_deref() {
+        if !session_id.is_empty() {
+            clear_pending_skill_state(fs, session_id);
+        }
     }
 
     build_no_match_output(fs)
