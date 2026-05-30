@@ -16,8 +16,8 @@
 //! Flow: build turn → gate trivial turns → `spawn_detached("memory",
 //! ["turn-capture", "--project", P, "--prompt", U, "--response", A])`.
 
-use sentinel_domain::events::{HookInput, HookOutput};
-use tracing::debug;
+use sentinel_domain::events::{HookEvent, HookInput, HookOutput};
+use tracing::{debug, warn};
 
 /// Minimum combined turn length (chars) worth extracting from. Below this, a
 /// turn is almost certainly an ack / tool-noise with no durable fact — skip it
@@ -74,17 +74,43 @@ fn memory_bin() -> Option<String> {
     if cargo_bin_unix.exists() {
         return Some(cargo_bin_unix.to_string_lossy().to_string());
     }
-    let dev = home
-        .join("Documents")
-        .join("GitHub")
-        .join("memory")
-        .join("target")
-        .join("release")
-        .join("memory.exe");
-    if dev.exists() {
-        return Some(dev.to_string_lossy().to_string());
+    // Dev fallback: the CLI lives in `memory-cli-rust` (binary `memory`).
+    // Check the common clone locations + both platform binary names.
+    for repo in ["memory-cli-rust", "memory"] {
+        for base in ["Downloads", "Documents/GitHub", "repos"] {
+            let mut dir = home.clone();
+            for seg in base.split('/') {
+                dir = dir.join(seg);
+            }
+            let root = dir.join(repo).join("target").join("release");
+            for name in ["memory", "memory.exe"] {
+                let cand = root.join(name);
+                if cand.exists() {
+                    return Some(cand.to_string_lossy().to_string());
+                }
+            }
+        }
     }
     None
+}
+
+/// Returns true at most once per session: writes a session-scoped marker so
+/// the "memory CLI missing" notice surfaces a single time instead of on every
+/// Stop. Best-effort — if state can't be written, default to warning (a
+/// repeated visible warning is far better than a silent capture outage).
+fn first_warn_this_session(ctx: &super::HookContext<'_>) -> bool {
+    let Some(home) = ctx.fs.home_dir() else {
+        return true;
+    };
+    let dir = home.join(".claude").join("sentinel").join("state");
+    let sid = ctx.session_id().unwrap_or_else(|| "unknown".to_string());
+    let path = dir.join(format!("memory-bin-missing-warned-{sid}"));
+    if ctx.fs.read_to_string(&path).is_ok() {
+        return false; // already warned this session
+    }
+    let _ = ctx.fs.create_dir_all(&dir);
+    let _ = ctx.fs.write(&path, b"1");
+    true
 }
 
 /// Stop-hook entry point. Fast: spawns the detached extractor and returns.
@@ -95,7 +121,19 @@ pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
     };
 
     let Some(bin) = memory_bin() else {
-        debug!("memory_turn_capture: memory CLI not found — skipping");
+        // The `memory` CLI is a HARD dependency of auto-capture. If it's missing
+        // every turn silently captures nothing — an undetectable memory outage
+        // (this exact gap hid a multi-session capture loss). Surface it LOUDLY,
+        // but only once per session so we don't spam every Stop.
+        warn!("memory_turn_capture: `memory` CLI binary not found — auto-capture is DISABLED");
+        if first_warn_this_session(ctx) {
+            let msg = "🧠 [memory] auto-capture DISABLED: the `memory` CLI binary \
+                is not installed. Memories are NOT being saved this session. Fix: \
+                `cargo install --path ~/Downloads/memory-cli-rust/crates/memory-cli --bin memory`.";
+            let mut out = HookOutput::inject_context(HookEvent::Stop, msg);
+            out.system_message = Some(msg.to_string());
+            return out;
+        }
         return HookOutput::allow();
     };
 
