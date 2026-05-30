@@ -34,6 +34,7 @@ pub mod good_citizen_observer;
 pub mod hookdeck_decoders;
 pub mod hygiene_override;
 pub mod hygiene_reminders;
+pub mod linear_inbound_sync;
 pub mod linear_lifecycle;
 pub mod mcp_health;
 pub mod memory_extract;
@@ -279,6 +280,7 @@ pub const HOOK_NAMES: &[&str] = &[
     "good_citizen_observer",
     "hygiene_override",
     "hygiene_reminders",
+    "linear_inbound_sync",
     "linear_lifecycle",
     "mcp_health",
     "memory_extract",

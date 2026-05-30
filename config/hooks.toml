@@ -54,6 +54,13 @@ depends_on = []
 has_api_call = false
 
 [[hooks]]
+id = "linear-inbound-sync"
+event = "UserPromptSubmit"
+description = "INBOUND Linear→task sync: poll Linear GraphQL for in-progress @linear-tagged tasks that moved to a terminal state (completed/canceled) and inject TaskUpdate instructions. Best-effort, fail-open, throttled to one poll per 5min per session. Key resolved from env then ~/.claude/sentinel/secrets.toml."
+depends_on = []
+has_api_call = true  # Linear GraphQL HTTP
+
+[[hooks]]
 id = "memory-inject"
 event = "UserPromptSubmit"
 description = "Search Qdrant for semantically relevant memories and inject into context"

@@ -1218,6 +1218,14 @@ async fn handle_user_prompt_submit(
     });
     output.merge(&todo_output);
 
+    // Linear inbound sync — poll Linear for in-progress @linear-tagged tasks
+    // that have moved to a terminal state and inject TaskUpdate instructions.
+    // Best-effort, fail-open, throttled to one Linear poll per session window.
+    let linear_inbound_output = time_and_record(ctx.fs, &mk_ctx("linear_inbound_sync"), || {
+        hooks::linear_inbound_sync::process(input, ctx)
+    });
+    output.merge(&linear_inbound_output);
+
     // --- Two-phase hooks (read state written by Stop, inject instructions) ---
 
     // Doc drift — inject update instructions for stale docs
