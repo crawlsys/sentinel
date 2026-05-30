@@ -52,12 +52,10 @@ fn load_pending_state(fs: &dyn FileSystemPort, session_id: &str) -> Option<Pendi
 }
 
 fn clear_pending_state(fs: &dyn FileSystemPort, session_id: &str) {
-    if let Some(path) = super::skill_router::pending_skill_state_path(fs, session_id) {
-        // Best-effort delete via overwrite-and-ignore; FileSystemPort doesn't
-        // expose remove(). Writing empty content makes load_pending_state
-        // return None on next read since serde_json::from_str("") fails.
-        let _ = fs.write(&path, b"");
-    }
+    // Delegate to the router's helper, which removes the file via
+    // `remove_file`. (The old implementation overwrote the file with empty
+    // bytes because it assumed FileSystemPort had no remove(); it does.)
+    super::skill_router::clear_pending_skill_state(fs, session_id);
 }
 
 /// True when `detected_at` is older than the TTL.
@@ -71,9 +69,33 @@ fn is_stale(detected_at: &str) -> bool {
     }
 }
 
+/// True when this tool call originates from inside a subagent rather than the
+/// main session. Claude Code stamps `agent_id` (and usually `agent_type`) on
+/// every hook payload that fires from a spawned agent's context; the main
+/// session leaves both unset. We treat either being present as "subagent".
+///
+/// The pending-skill state file is keyed by `session_id`, which a subagent
+/// shares with its parent. Without this check the gate would block a
+/// subagent's tools based on a skill the *main* session was asked to invoke —
+/// a skill the subagent was never told about and has no way to satisfy.
+fn is_subagent(input: &HookInput) -> bool {
+    let nonempty = |o: &Option<String>| o.as_deref().is_some_and(|s| !s.is_empty());
+    nonempty(&input.agent_id) || nonempty(&input.agent_type)
+}
+
 /// `PreToolUse` handler — block when there's a pending skill and the tool
 /// isn't on the allowlist.
 pub fn process_pretool(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
+    // Never gate subagent/teammate tool calls. The pending-skill marker is a
+    // main-session concept: it records that the user's message routed to a
+    // skill the *main* session must invoke. A subagent shares the parent's
+    // `session_id` but runs in its own context with its own instructions, so
+    // gating it on the parent's pending skill is always wrong (and the
+    // subagent can't clear the marker without derailing its own task).
+    if is_subagent(input) {
+        return HookOutput::allow();
+    }
+
     let session_id = match input.session_id.as_deref() {
         Some(s) if !s.is_empty() => s,
         _ => return HookOutput::allow(),
@@ -299,5 +321,56 @@ mod tests {
         // so the gate doesn't refuse to let Claude clear it.
         assert!(ALLOWED_TOOLS.contains(&"Skill"));
         assert!(ALLOWED_TOOLS.contains(&"Read"));
+    }
+
+    #[test]
+    fn test_is_subagent_detects_agent_id() {
+        let input = HookInput {
+            agent_id: Some("a3f2-deadbeef".to_string()),
+            ..Default::default()
+        };
+        assert!(is_subagent(&input));
+    }
+
+    #[test]
+    fn test_is_subagent_detects_agent_type() {
+        let input = HookInput {
+            agent_type: Some("code-reviewer".to_string()),
+            ..Default::default()
+        };
+        assert!(is_subagent(&input));
+    }
+
+    #[test]
+    fn test_is_subagent_false_for_main_session() {
+        // Main-session payloads leave both fields unset (or empty).
+        let input = HookInput {
+            agent_id: Some(String::new()),
+            agent_type: None,
+            ..Default::default()
+        };
+        assert!(!is_subagent(&input));
+        assert!(!is_subagent(&HookInput::default()));
+    }
+
+    #[test]
+    fn test_pretool_never_blocks_subagent_tool_calls() {
+        // The core fix: even with a session_id whose pending-skill marker would
+        // otherwise gate a non-allowlisted tool, a subagent call (agent_id set)
+        // must pass through. We don't need pending state on disk to prove this —
+        // is_subagent short-circuits before state is ever loaded — but we use a
+        // real non-allowlisted tool name to make the intent explicit.
+        let input = HookInput {
+            session_id: Some("shared-with-parent".to_string()),
+            tool_name: Some("Bash".to_string()),
+            agent_id: Some("a3f2-deadbeef".to_string()),
+            ..Default::default()
+        };
+        let ctx = crate::hooks::test_support::stub_ctx();
+        let output = process_pretool(&input, &ctx);
+        assert!(
+            output.blocked.is_none(),
+            "subagent Bash call must not be gated on the parent's pending skill",
+        );
     }
 }

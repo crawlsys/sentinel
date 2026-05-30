@@ -224,7 +224,7 @@ fn effective_mcp_method<'a>(tool_name: &'a str, tool_input: &'a serde_json::Valu
 /// the nested `"arguments"` object (the only place Claude Code forwards them
 /// to the inner MCP tool).  Returns a reference to the nested object when
 /// present, otherwise the top-level input.
-fn effective_args<'a>(tool_input: &'a serde_json::Value) -> &'a serde_json::Value {
+fn effective_args(tool_input: &serde_json::Value) -> &serde_json::Value {
     // If this is a gateway call and "arguments" is an object, prefer it.
     if gateway_inner_tool(tool_input).is_some() {
         if let Some(args) = tool_input.get("arguments").filter(|v| v.is_object()) {
