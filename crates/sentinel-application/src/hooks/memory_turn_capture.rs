@@ -66,16 +66,22 @@ fn project_label(cwd: &str) -> String {
 /// dev release build. Returns the command string for `spawn_detached`.
 fn memory_bin() -> Option<String> {
     let home = dirs::home_dir()?;
-    let cargo_bin = home.join(".cargo").join("bin").join("memory.exe");
-    if cargo_bin.exists() {
-        return Some(cargo_bin.to_string_lossy().to_string());
+    // Binary names, newest convention first. The CLI binary was standardized to
+    // `memory-rs` (the `{product}-rs` convention); the legacy `memory` name is
+    // kept as a fallback so this resolves whether the new or old binary is
+    // installed. Order matters: prefer `memory-rs`.
+    let bin_names = ["memory-rs", "memory-rs.exe", "memory", "memory.exe"];
+
+    let cargo_bin_dir = home.join(".cargo").join("bin");
+    for name in bin_names {
+        let cand = cargo_bin_dir.join(name);
+        if cand.exists() {
+            return Some(cand.to_string_lossy().to_string());
+        }
     }
-    let cargo_bin_unix = home.join(".cargo").join("bin").join("memory");
-    if cargo_bin_unix.exists() {
-        return Some(cargo_bin_unix.to_string_lossy().to_string());
-    }
-    // Dev fallback: the CLI lives in `memory-cli-rust` (binary `memory`).
-    // Check the common clone locations + both platform binary names.
+
+    // Dev fallback: the CLI lives in `memory-cli-rust` (binary `memory-rs`,
+    // legacy `memory`). Check the common clone locations + both names.
     for repo in ["memory-cli-rust", "memory"] {
         for base in ["Downloads", "Documents/GitHub", "repos"] {
             let mut dir = home.clone();
@@ -83,7 +89,7 @@ fn memory_bin() -> Option<String> {
                 dir = dir.join(seg);
             }
             let root = dir.join(repo).join("target").join("release");
-            for name in ["memory", "memory.exe"] {
+            for name in bin_names {
                 let cand = root.join(name);
                 if cand.exists() {
                     return Some(cand.to_string_lossy().to_string());
