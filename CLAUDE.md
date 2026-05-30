@@ -35,7 +35,7 @@ sentinel mcp                           Start MCP server over stdio
 | Crate | Binary | Purpose |
 |-------|--------|---------|
 | `sentinel-domain` | — | Pure business logic: proofs, workflows, evidence, hooks, routing |
-| `sentinel-application` | — | Use cases: engine, classifier, gate, 79 hook modules |
+| `sentinel-application` | — | Use cases: engine, classifier, gate, 81 hook modules |
 | `sentinel-infrastructure` | — | IO adapters: config, state store, git, MCP transport, AI judge |
 | `sentinel-cli` | `sentinel` | CLI (34 top-level subcommands) + dashboard REST API (axum) + in-repo MCP host (stdio) |
 | `sentinel-legatus` | — | Legatus integration (consul peers, federation client) |
@@ -82,7 +82,7 @@ Hooks are invoked by Claude Code's runtime via `sentinel hook --event <Event>`:
 - `Stop` — when Claude finishes responding
 - `SessionStart` / `PreCompact` — session lifecycle
 
-79 hook modules (one `.rs` file per hook in `hooks/`). The categories below are **representative, not exhaustive** — they show a sampling of each category, not all 79:
+81 hook modules (one `.rs` file per hook in `hooks/`). The categories below are **representative, not exhaustive** — they show a sampling of each category, not all 81:
 
 | Category | Hooks (representative) |
 |----------|-------|
