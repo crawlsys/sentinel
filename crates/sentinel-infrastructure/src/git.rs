@@ -110,6 +110,26 @@ pub fn repo_root(start_path: &str) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+/// Resolve the current `HEAD` commit SHA via `git rev-parse HEAD`. Returns
+/// `None` if git fails (not a repo, unborn HEAD, git unavailable) or stdout
+/// is empty.
+pub fn head_sha(repo_path: &str) -> Option<String> {
+    let output = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(repo_path)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let sha = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if sha.is_empty() {
+        None
+    } else {
+        Some(sha)
+    }
+}
+
 /// Resolve a merge-base against a base ref. Returns `None` if either ref
 /// fails to resolve or the merge-base call fails (e.g. unrelated histories).
 pub fn merge_base(repo_path: &str, base_ref: &str) -> Option<String> {
@@ -279,6 +299,10 @@ impl GitStatusPort for RealGit {
 
     fn list_worktree_names(&self, repo_path: &str) -> Vec<String> {
         list_worktree_names(repo_path)
+    }
+
+    fn head_sha(&self, repo_path: &str) -> Option<String> {
+        head_sha(repo_path)
     }
 
     fn merge_base(&self, repo_path: &str, base_ref: &str) -> Option<String> {

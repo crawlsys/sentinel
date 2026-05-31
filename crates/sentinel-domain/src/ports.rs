@@ -81,6 +81,17 @@ pub trait GitStatusPort {
     /// excludes `HEAD`, `main`, `master`, and `<base_ref>` itself.
     /// Returns empty Vec on error.
     fn merged_remote_branches(&self, repo_path: &str, base_ref: &str) -> Vec<String>;
+
+    /// Resolve the current `HEAD` commit SHA (`git rev-parse HEAD`). Returns
+    /// `None` when the path is not a git repo, HEAD is unborn (no commits yet),
+    /// or git is unavailable. Used by `task_coverage_check` to detect a new
+    /// commit between consecutive Stop events (the "done signal").
+    ///
+    /// A default `None` impl keeps existing test stubs compiling — only the
+    /// real adapter needs to implement it.
+    fn head_sha(&self, _repo_path: &str) -> Option<String> {
+        None
+    }
 }
 
 // ---------------------------------------------------------------------------
