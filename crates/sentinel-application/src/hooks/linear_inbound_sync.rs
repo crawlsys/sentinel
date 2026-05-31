@@ -6,33 +6,46 @@
 //!
 //! ## What it does
 //!
+//! Rather than polling the Linear GraphQL API per-issue, this hook polls the
+//! **Hookdeck Events API** for Linear webhook deliveries that Hookdeck has
+//! *already captured* from Linear. Hookdeck is the inbound webhook gateway, so
+//! every Linear `Issue.update` (state change, etc.) lands there as an event.
+//! We read the newest events for the Linear source and reconcile in-progress
+//! native tasks against the state transitions Linear pushed.
+//!
 //! 1. Reads the active session's native tasks (same on-disk format as
 //!    `task_persist`) and finds those tagged `@linear:{ID}` that are currently
-//!    *in progress* (two-emoji status prefix `🔄`).
-//! 2. For each distinct Linear issue ID, queries the Linear GraphQL API
-//!    (`https://api.linear.app/graphql`) for the issue's current workflow state
-//!    name + type. The query is batched across all IDs in a single request.
-//! 3. Maps the Linear state type to a desired native-task status emoji:
-//!    - `started` (In Progress) → `🔄` (no drift)
-//!    - `completed` (Done / QA states surfaced as completed) → suggest `✅`
-//!    - `canceled` → suggest `❌`
-//! 4. When (and only when) there is actual drift, injects a concise context
-//!    block telling the agent which tasks to `TaskUpdate`. The hook itself
-//!    cannot call `TaskUpdate` — it injects an instruction, mirroring the
-//!    established pattern in `task_completed.rs`.
+//!    *in progress* (native status `in_progress` and/or the `🔄` emoji prefix).
+//! 2. Polls the Hookdeck Events API for the Linear source
+//!    ([`LINEAR_SOURCE_ID`]), newest-first, with the raw delivery body included.
+//!    Only events *newer* than the persisted cursor are processed.
+//! 3. Parses each event's raw Linear webhook body (reusing the field shape from
+//!    [`crate::hooks::hookdeck_decoders::linear`]) to extract the issue
+//!    identifier (e.g. `FIR-123`) and its new workflow-state name. The state
+//!    name is mapped to a desired native-task status emoji:
+//!    - In Progress / Started / In Review / Code Review → `🔄` (no drift)
+//!    - Done / Completed / Merged / any QA state → suggest `✅`
+//!    - Canceled / Duplicate → suggest `❌`
+//! 4. Cross-references against the in-progress `@linear`-tagged tasks. When (and
+//!    only when) there is actual drift (the Hookdeck event state differs from
+//!    the task's current in-progress emoji), injects a concise context block
+//!    telling the agent which tasks to `TaskUpdate`. The hook itself cannot call
+//!    `TaskUpdate` — it injects an instruction, mirroring `task_completed.rs`.
+//! 5. Advances the cursor past the newest processed event.
 //!
 //! ## Throttle
 //!
-//! Polls the Linear API at most once per [`POLL_INTERVAL`] per session. A
-//! timestamp marker is written to `~/.claude/sentinel/state/`. Within the
+//! Polls the Hookdeck API at most once per [`POLL_INTERVAL`] per session. A
+//! timestamp marker is written to `~/.claude/sentinel/state/` **before** the
+//! network call so a failed request still counts against the window. Within the
 //! window the hook short-circuits to `allow()` without any network call.
 //!
 //! ## Key resolution
 //!
-//! `LINEAR_API_KEY` is resolved from the process env first (populated from
-//! `~/.claude/settings.json`), then — if absent — by reading
-//! `~/.claude/sentinel/secrets.toml` directly and scanning each `[account]`
-//! section for a `LINEAR_API_KEY`. No MCP server is involved.
+//! `HOOKDECK_API_KEY` is resolved from the process env first, then — if absent —
+//! by reading `~/.claude/sentinel/secrets.toml` directly and scanning each
+//! section (`[account]` + `[global]`) for a `HOOKDECK_API_KEY`. The key lives in
+//! `[global]`. No MCP server is involved.
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -41,11 +54,17 @@ use sentinel_domain::events::{HookEvent, HookInput, HookOutput};
 
 use super::{EnvPort, FileSystemPort, HookContext};
 
-/// Minimum interval between Linear API polls, per session.
+/// Minimum interval between Hookdeck API polls, per session.
 const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5 * 60);
 
-/// Linear GraphQL endpoint.
-const LINEAR_GRAPHQL_URL: &str = "https://api.linear.app/graphql";
+/// Hookdeck Events API endpoint (pinned API version `2024-09-01`).
+const HOOKDECK_EVENTS_URL: &str = "https://api.hookdeck.com/2024-09-01/events";
+
+/// The Hookdeck source id for Linear webhook deliveries.
+const LINEAR_SOURCE_ID: &str = "src_ebtn42uit6926m";
+
+/// Page size for the events poll.
+const EVENTS_LIMIT: u32 = 50;
 
 /// A task read from Claude Code's on-disk format. Mirrors the subset of fields
 /// `task_persist::Task` uses that this hook needs.
@@ -98,25 +117,45 @@ impl DesiredStatus {
     }
 }
 
-/// Map a Linear workflow-state *type* (`state.type` in the GraphQL schema) to
-/// the desired native-task status.
+/// Map a Linear workflow-state **name** (as it appears in the webhook body's
+/// `data.state.name`) to the desired native-task status.
 ///
-/// Linear's state types are: `triage`, `backlog`, `unstarted`, `started`,
-/// `completed`, `canceled`. We only act on the three that matter for an
-/// in-progress native task:
-/// - `started` → still in progress (`🔄`)
-/// - `completed` → suggest `✅` (Done and QA-style states surface here)
-/// - `canceled` → suggest `❌`
+/// Unlike the previous GraphQL implementation we only reliably have the
+/// human-readable state *name* in the webhook payload, so we match
+/// case-insensitively on the well-known state-name families used across the
+/// Firefly Pro / Linear pipelines:
 ///
-/// Everything else (`triage`/`backlog`/`unstarted`, or an unknown type) is
-/// treated as "no actionable drift" → `None`.
-fn map_linear_state(state_type: &str) -> Option<DesiredStatus> {
-    match state_type {
-        "started" => Some(DesiredStatus::InProgress),
-        "completed" => Some(DesiredStatus::Completed),
-        "canceled" => Some(DesiredStatus::Canceled),
-        _ => None,
+/// - `In Progress` / `Started` / `In Review` / `Code Review` → still in
+///   progress (`🔄`)
+/// - `Done` / `Completed` / `Merged` / any `QA` state (`QA Testing`,
+///   `QA Failed`, `QA`) → suggest `✅` (the inbound sync treats handed-off
+///   QA-land states as "done" for an in-progress dev task)
+/// - `Canceled` / `Cancelled` / `Duplicate` → suggest `❌`
+///
+/// Anything else (Backlog, Todo, Triage, or an unknown name) is treated as
+/// "no actionable drift" → `None`.
+fn map_linear_state(state_name: &str) -> Option<DesiredStatus> {
+    let n = state_name.trim().to_ascii_lowercase();
+    if n.is_empty() {
+        return None;
     }
+    // Canceled family first (so "cancelled"/"duplicate" never fall through).
+    if n.contains("cancel") || n == "duplicate" {
+        return Some(DesiredStatus::Canceled);
+    }
+    // Completed / done family, including QA states.
+    if n.contains("done") || n.contains("complete") || n.contains("merged") || n.contains("qa") {
+        return Some(DesiredStatus::Completed);
+    }
+    // In-progress family.
+    if n.contains("in progress")
+        || n.contains("started")
+        || n.contains("in review")
+        || n.contains("code review")
+    {
+        return Some(DesiredStatus::InProgress);
+    }
+    None
 }
 
 /// Extract a Linear issue ID from a task subject containing `@linear:{ID}`.
@@ -206,31 +245,31 @@ fn collect_linked_in_progress(tasks: &[Task]) -> Vec<LinkedTask> {
         .collect()
 }
 
-/// Resolve the Linear API key: env first, then `~/.claude/sentinel/secrets.toml`.
+/// Resolve the Hookdeck API key: env first, then `~/.claude/sentinel/secrets.toml`.
 ///
 /// The secrets.toml is account-keyed TOML; each top-level section is an account
-/// and a section may carry a `LINEAR_API_KEY`. We scan all sections and return
-/// the first key found (a `[global]` section is included in the scan).
-fn resolve_linear_api_key(env: &dyn EnvPort, fs: &dyn FileSystemPort) -> Option<String> {
-    if let Some(key) = env.var("LINEAR_API_KEY").filter(|s| !s.is_empty()) {
+/// (or `[global]`) and a section may carry a `HOOKDECK_API_KEY`. We scan all
+/// sections and return the first key found. The Hookdeck key lives in `[global]`.
+fn resolve_hookdeck_api_key(env: &dyn EnvPort, fs: &dyn FileSystemPort) -> Option<String> {
+    if let Some(key) = env.var("HOOKDECK_API_KEY").filter(|s| !s.is_empty()) {
         return Some(key);
     }
     let home = fs.home_dir()?;
-    let path = home
-        .join(".claude")
-        .join("sentinel")
-        .join("secrets.toml");
+    let path = home.join(".claude").join("sentinel").join("secrets.toml");
     let content = fs.read_to_string(&path).ok()?;
-    parse_linear_key_from_secrets(&content)
+    parse_hookdeck_key_from_secrets(&content)
 }
 
-/// Parse the first `LINEAR_API_KEY` out of an account-keyed secrets.toml body.
-fn parse_linear_key_from_secrets(content: &str) -> Option<String> {
+/// Parse the first `HOOKDECK_API_KEY` out of an account-keyed secrets.toml body.
+fn parse_hookdeck_key_from_secrets(content: &str) -> Option<String> {
     let value: toml::Value = toml::from_str(content).ok()?;
     let table = value.as_table()?;
     for (_account, section) in table {
         if let Some(section_table) = section.as_table() {
-            if let Some(key) = section_table.get("LINEAR_API_KEY").and_then(|v| v.as_str()) {
+            if let Some(key) = section_table
+                .get("HOOKDECK_API_KEY")
+                .and_then(|v| v.as_str())
+            {
                 if !key.is_empty() {
                     return Some(key.to_string());
                 }
@@ -249,6 +288,36 @@ fn throttle_marker(fs: &dyn FileSystemPort, session_id: &str) -> Option<PathBuf>
             .join("state")
             .join(format!("linear-inbound-sync-{session_id}.ts")),
     )
+}
+
+/// Path to the per-session Hookdeck cursor (stores the last-seen event id).
+fn cursor_path(fs: &dyn FileSystemPort, session_id: &str) -> Option<PathBuf> {
+    let home = fs.home_dir()?;
+    Some(
+        home.join(".claude")
+            .join("sentinel")
+            .join("state")
+            .join(format!("linear-hookdeck-cursor-{session_id}")),
+    )
+}
+
+/// Read the persisted cursor (last-seen event id). Missing/empty → `None`.
+fn read_cursor(fs: &dyn FileSystemPort, path: &Path) -> Option<String> {
+    let content = fs.read_to_string(path).ok()?;
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+/// Persist the cursor (newest processed event id). Best-effort.
+fn write_cursor(fs: &dyn FileSystemPort, path: &Path, event_id: &str) {
+    if let Some(parent) = path.parent() {
+        let _ = fs.create_dir_all(parent);
+    }
+    let _ = fs.write(path, event_id.as_bytes());
 }
 
 /// Return `true` if a poll is allowed right now (no recent marker), `false` if
@@ -279,73 +348,82 @@ fn now_unix() -> u64 {
         .map_or(0, |d| d.as_secs())
 }
 
-/// A Linear issue's resolved state, keyed by identifier (e.g. `FIR-123`).
+/// One Linear state transition parsed out of a Hookdeck event delivery.
 #[derive(Debug, Clone)]
-struct LinearState {
+struct EventTransition {
+    /// The Hookdeck event id (used to advance the cursor).
+    event_id: String,
+    /// The Linear issue identifier, e.g. `FIR-123`.
     identifier: String,
+    /// The Linear workflow-state name from `data.state.name`.
     state_name: String,
-    state_type: String,
 }
 
-/// Build a batched GraphQL query that fetches each issue by identifier.
+/// Parse the Hookdeck events-list response into newest-first transitions,
+/// keeping only those carrying a parseable Linear `Issue` payload with a state.
 ///
-/// Linear's `issue(id:)` accepts the human identifier (e.g. `"FIR-123"`), so we
-/// alias one field per issue: `i0: issue(id: "FIR-123") { identifier state { name type } }`.
-fn build_batched_query(ids: &[String]) -> String {
-    let mut q = String::from("query {");
-    for (idx, id) in ids.iter().enumerate() {
-        // ids are validated PREFIX-NUMBER shape, safe to interpolate, but escape
-        // quotes defensively anyway.
-        let safe = id.replace('"', "\\\"");
-        let _ = write!(
-            q,
-            " i{idx}: issue(id: \"{safe}\") {{ identifier state {{ name type }} }}"
-        );
-    }
-    q.push_str(" }");
-    q
-}
-
-/// Parse the batched-query response into a list of resolved states.
-fn parse_states(body: &serde_json::Value) -> Vec<LinearState> {
+/// The Hookdeck event model nests the raw webhook delivery under `data`
+/// (requested via `include=data`); the original webhook JSON body is at
+/// `data.body`. Each event also has a top-level `id` (the cursor key).
+///
+/// We extract the Linear issue identifier + new state name from `data.body`
+/// using the same field shape `hookdeck_decoders::linear` decodes: a Linear
+/// webhook body has `type: "Issue"`, `data.identifier`, and `data.state.name`.
+fn parse_events(body: &serde_json::Value) -> Vec<EventTransition> {
     let mut out = Vec::new();
-    let Some(data) = body.get("data").and_then(|d| d.as_object()) else {
+    let Some(models) = body.get("models").and_then(|m| m.as_array()) else {
         return out;
     };
-    for issue in data.values() {
-        let Some(identifier) = issue.get("identifier").and_then(|v| v.as_str()) else {
+    for event in models {
+        let Some(event_id) = event.get("id").and_then(|v| v.as_str()) else {
             continue;
         };
-        let state = issue.get("state");
-        let state_name = state
-            .and_then(|s| s.get("name"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        let state_type = state
-            .and_then(|s| s.get("type"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        out.push(LinearState {
-            identifier: identifier.to_string(),
-            state_name,
-            state_type,
-        });
+        // The raw Linear webhook body lives at data.body when include=data.
+        let Some(webhook) = event.pointer("/data/body") else {
+            continue;
+        };
+        if let Some((identifier, state_name)) = parse_linear_webhook(webhook) {
+            out.push(EventTransition {
+                event_id: event_id.to_string(),
+                identifier,
+                state_name,
+            });
+        }
     }
     out
 }
 
-/// Query the Linear GraphQL API for the current state of each issue ID.
-/// Returns an empty vec on any error (fail-open). Runs inside the shared
-/// bounded async runtime so it can never block the hook beyond the budget.
-fn query_linear_states(api_key: &str, ids: &[String]) -> Vec<LinearState> {
-    if ids.is_empty() {
-        return Vec::new();
+/// Extract `(identifier, state_name)` from a raw Linear webhook body.
+///
+/// Only `Issue` payloads that carry a `data.state.name` are considered (these
+/// are the state-bearing snapshots — `create`/`update` both include the issue's
+/// current state). Mirrors the field shape decoded by
+/// `hookdeck_decoders::linear` (`type == "Issue"`, `data.identifier`,
+/// `data.state.name`).
+fn parse_linear_webhook(webhook: &serde_json::Value) -> Option<(String, String)> {
+    let entity = webhook.get("type").and_then(|v| v.as_str())?;
+    if entity != "Issue" {
+        return None;
     }
-    let query = build_batched_query(ids);
-    let api_key = api_key.to_string();
+    let identifier = webhook
+        .pointer("/data/identifier")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())?
+        .to_string();
+    let state_name = webhook
+        .pointer("/data/state/name")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())?
+        .to_string();
+    Some((identifier, state_name))
+}
 
+/// Poll the Hookdeck Events API for the Linear source, newest-first, with the
+/// raw delivery body included. Returns parsed transitions on success or an empty
+/// vec on any error (fail-open). Runs inside the shared bounded async runtime so
+/// it can never block the hook beyond the budget.
+fn poll_hookdeck_events(api_key: &str) -> Vec<EventTransition> {
+    let api_key = api_key.to_string();
     super::run_async(async move {
         let client = match reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(8))
@@ -355,10 +433,17 @@ fn query_linear_states(api_key: &str, ids: &[String]) -> Vec<LinearState> {
             Err(_) => return Vec::new(),
         };
         let resp = client
-            .post(LINEAR_GRAPHQL_URL)
-            .header("Authorization", api_key)
-            .header("Content-Type", "application/json")
-            .json(&serde_json::json!({ "query": query }))
+            .get(HOOKDECK_EVENTS_URL)
+            .bearer_auth(&api_key)
+            .query(&[
+                ("source_id", LINEAR_SOURCE_ID),
+                ("limit", &EVENTS_LIMIT.to_string()),
+                ("order_by", "created_at"),
+                ("dir", "desc"),
+                // include=data is REQUIRED — without it the event model omits
+                // the `data` object (and thus the raw webhook at `data.body`).
+                ("include", "data"),
+            ])
             .send()
             .await;
         let resp = match resp {
@@ -369,14 +454,32 @@ fn query_linear_states(api_key: &str, ids: &[String]) -> Vec<LinearState> {
             return Vec::new();
         }
         match resp.json::<serde_json::Value>().await {
-            Ok(body) => parse_states(&body),
+            Ok(body) => parse_events(&body),
             Err(_) => Vec::new(),
         }
     })
 }
 
-/// A detected drift: an in-progress native task whose Linear issue has moved to
-/// a terminal state.
+/// Split the newest-first event list at the cursor: return only events newer
+/// than (i.e. listed *before*) the event whose id equals the cursor. If the
+/// cursor is absent or not found in the page, every event is "new".
+fn events_after_cursor<'a>(
+    events: &'a [EventTransition],
+    cursor: Option<&str>,
+) -> &'a [EventTransition] {
+    let Some(cursor) = cursor else {
+        return events;
+    };
+    match events.iter().position(|e| e.event_id == cursor) {
+        // Events before the cursor position are strictly newer (desc order).
+        Some(idx) => &events[..idx],
+        // Cursor not on this page → treat all as new (e.g. cursor aged out).
+        None => events,
+    }
+}
+
+/// A detected drift: an in-progress native task whose Linear issue (per the
+/// Hookdeck event stream) has moved to a state that disagrees with `🔄`.
 struct Drift {
     task_id: String,
     subject: String,
@@ -385,18 +488,26 @@ struct Drift {
     desired: DesiredStatus,
 }
 
-/// Compute drifts: for each linked in-progress task, look up its Linear state
-/// and emit a drift only when the desired status is terminal (`✅`/`❌`).
-fn compute_drifts(linked: &[LinkedTask], states: &[LinearState]) -> Vec<Drift> {
+/// Compute drifts by cross-referencing new Hookdeck events against in-progress
+/// linked tasks.
+///
+/// For each linked task we take the **most recent** (newest-first wins) event
+/// for its Linear id, map the event's state name to a desired status, and emit
+/// a drift only when the desired status disagrees with the task's current
+/// in-progress `🔄` (i.e. the event says `✅`/`❌`). Events whose state maps to
+/// `InProgress` (or doesn't map at all) produce no drift.
+fn compute_drifts(linked: &[LinkedTask], events: &[EventTransition]) -> Vec<Drift> {
     let mut drifts = Vec::new();
     for task in linked {
-        let Some(state) = states.iter().find(|s| s.identifier == task.linear_id) else {
+        // Newest-first list → first match is the latest known state.
+        let Some(event) = events.iter().find(|e| e.identifier == task.linear_id) else {
             continue;
         };
-        let Some(desired) = map_linear_state(&state.state_type) else {
+        let Some(desired) = map_linear_state(&event.state_name) else {
             continue;
         };
-        // An in-progress task whose Linear issue is still "started" is in sync.
+        // An in-progress task whose Linear issue is still "in progress" is in
+        // sync — no drift (the task already shows 🔄).
         if desired == DesiredStatus::InProgress {
             continue;
         }
@@ -404,7 +515,7 @@ fn compute_drifts(linked: &[LinkedTask], states: &[LinearState]) -> Vec<Drift> {
             task_id: task.task_id.clone(),
             subject: task.subject.clone(),
             linear_id: task.linear_id.clone(),
-            linear_state_name: state.state_name.clone(),
+            linear_state_name: event.state_name.clone(),
             desired,
         });
     }
@@ -414,8 +525,9 @@ fn compute_drifts(linked: &[LinkedTask], states: &[LinearState]) -> Vec<Drift> {
 /// Render the context block injected when drift is detected.
 fn render_drift_context(drifts: &[Drift]) -> String {
     let mut ctx = String::from(
-        "[Linear Inbound Sync] One or more in-progress tasks have moved in Linear. \
-         Reconcile each via TaskUpdate (update status + the two-emoji subject prefix):\n",
+        "[Linear Inbound Sync] One or more in-progress tasks have moved in Linear \
+         (detected via the Hookdeck event stream). Reconcile each via TaskUpdate \
+         (update status + the two-emoji subject prefix):\n",
     );
     for d in drifts {
         let _ = write!(
@@ -442,7 +554,7 @@ fn render_drift_context(drifts: &[Drift]) -> String {
 /// `HookOutput::allow()`. The only non-allow output is a context injection,
 /// which never blocks.
 pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
-    // Need a session id to scope tasks + the throttle marker.
+    // Need a session id to scope tasks + the throttle marker + the cursor.
     let session_id = match input
         .session_id
         .as_deref()
@@ -465,8 +577,8 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
         return HookOutput::allow();
     }
 
-    // 2. Resolve the API key (env → secrets.toml). No key → silent allow.
-    let Some(api_key) = resolve_linear_api_key(ctx.env, ctx.fs) else {
+    // 2. Resolve the Hookdeck API key (env → secrets.toml). No key → silent allow.
+    let Some(api_key) = resolve_hookdeck_api_key(ctx.env, ctx.fs) else {
         return HookOutput::allow();
     };
 
@@ -477,21 +589,36 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     if !poll_allowed(ctx.fs, &marker) {
         return HookOutput::allow();
     }
-    // Record the poll attempt up front so a slow/failed Linear call still
+    // Record the poll attempt up front so a slow/failed Hookdeck call still
     // counts against the throttle window (don't hammer the API on errors).
     record_poll(ctx.fs, &marker);
 
-    // 4. Distinct Linear IDs, batched query.
-    let mut ids: Vec<String> = linked.iter().map(|t| t.linear_id.clone()).collect();
-    ids.sort();
-    ids.dedup();
-    let states = query_linear_states(&api_key, &ids);
-    if states.is_empty() {
+    // 4. Poll Hookdeck for the newest Linear-source events.
+    let all_events = poll_hookdeck_events(&api_key);
+    if all_events.is_empty() {
         return HookOutput::allow();
     }
 
-    // 5. Compute drift; only inject when there's an actual terminal change.
-    let drifts = compute_drifts(&linked, &states);
+    // 5. Cursor: process only events newer than the last-seen one.
+    let Some(cursor_file) = cursor_path(ctx.fs, &session_id) else {
+        return HookOutput::allow();
+    };
+    let cursor = read_cursor(ctx.fs, &cursor_file);
+    let new_events = events_after_cursor(&all_events, cursor.as_deref());
+
+    // Advance the cursor to the newest event id regardless of drift (the page
+    // is newest-first, so element 0 is the highwater). Persisting even when
+    // there's no drift means we won't re-scan the same events next window.
+    if let Some(newest) = all_events.first() {
+        write_cursor(ctx.fs, &cursor_file, &newest.event_id);
+    }
+
+    if new_events.is_empty() {
+        return HookOutput::allow();
+    }
+
+    // 6. Compute drift; only inject when a new event disagrees with 🔄.
+    let drifts = compute_drifts(&linked, new_events);
     if drifts.is_empty() {
         return HookOutput::allow();
     }
@@ -500,7 +627,7 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
 
     // Emit a channel event so the drift surfaces as a real-time push too.
     let summary = format!(
-        "{} task(s) drifted from Linear (in-progress → terminal)",
+        "{} task(s) drifted from Linear (in-progress → terminal, via Hookdeck)",
         drifts.len()
     );
     let mut meta = serde_json::Map::new();
@@ -535,34 +662,42 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
 mod tests {
     use super::*;
 
-    // --- state → emoji/status mapping -------------------------------------
+    // --- state-name → emoji/status mapping --------------------------------
 
     #[test]
-    fn test_map_linear_state_started_is_in_progress() {
-        assert_eq!(map_linear_state("started"), Some(DesiredStatus::InProgress));
+    fn test_map_linear_state_in_progress_family() {
+        assert_eq!(map_linear_state("In Progress"), Some(DesiredStatus::InProgress));
+        assert_eq!(map_linear_state("Started"), Some(DesiredStatus::InProgress));
+        assert_eq!(map_linear_state("Code Review"), Some(DesiredStatus::InProgress));
         assert_eq!(DesiredStatus::InProgress.emoji(), "🔄");
         assert_eq!(DesiredStatus::InProgress.task_status(), "in_progress");
     }
 
     #[test]
-    fn test_map_linear_state_completed_is_done() {
-        assert_eq!(map_linear_state("completed"), Some(DesiredStatus::Completed));
+    fn test_map_linear_state_completed_family() {
+        assert_eq!(map_linear_state("Done"), Some(DesiredStatus::Completed));
+        assert_eq!(map_linear_state("Completed"), Some(DesiredStatus::Completed));
+        assert_eq!(map_linear_state("QA Testing"), Some(DesiredStatus::Completed));
+        assert_eq!(map_linear_state("Merged"), Some(DesiredStatus::Completed));
         assert_eq!(DesiredStatus::Completed.emoji(), "✅");
         assert_eq!(DesiredStatus::Completed.task_status(), "completed");
     }
 
     #[test]
-    fn test_map_linear_state_canceled_is_failed() {
-        assert_eq!(map_linear_state("canceled"), Some(DesiredStatus::Canceled));
+    fn test_map_linear_state_canceled_family() {
+        assert_eq!(map_linear_state("Canceled"), Some(DesiredStatus::Canceled));
+        assert_eq!(map_linear_state("Cancelled"), Some(DesiredStatus::Canceled));
+        assert_eq!(map_linear_state("Duplicate"), Some(DesiredStatus::Canceled));
         assert_eq!(DesiredStatus::Canceled.emoji(), "❌");
         assert_eq!(DesiredStatus::Canceled.task_status(), "failed");
     }
 
     #[test]
     fn test_map_linear_state_non_actionable() {
-        assert_eq!(map_linear_state("backlog"), None);
-        assert_eq!(map_linear_state("unstarted"), None);
-        assert_eq!(map_linear_state("triage"), None);
+        assert_eq!(map_linear_state("Backlog"), None);
+        assert_eq!(map_linear_state("Todo"), None);
+        assert_eq!(map_linear_state("Triage"), None);
+        assert_eq!(map_linear_state(""), None);
         assert_eq!(map_linear_state("weird"), None);
     }
 
@@ -632,88 +767,221 @@ mod tests {
     // --- secrets.toml key resolution -------------------------------------
 
     #[test]
-    fn test_parse_linear_key_from_secrets() {
+    fn test_parse_hookdeck_key_from_global() {
         let toml = r#"
 [firefly-pro]
 LINEAR_API_KEY = "lin_api_ABC123"
 [global]
-HOOKDECK_API_KEY = "x"
+HOOKDECK_API_KEY = "hd_global_key"
 "#;
         assert_eq!(
-            parse_linear_key_from_secrets(toml),
-            Some("lin_api_ABC123".to_string())
+            parse_hookdeck_key_from_secrets(toml),
+            Some("hd_global_key".to_string())
         );
     }
 
     #[test]
-    fn test_parse_linear_key_from_secrets_in_global() {
+    fn test_parse_hookdeck_key_in_account_section() {
         let toml = r#"
-[global]
-LINEAR_API_KEY = "lin_global"
+[firefly-pro]
+HOOKDECK_API_KEY = "hd_account_key"
 "#;
         assert_eq!(
-            parse_linear_key_from_secrets(toml),
-            Some("lin_global".to_string())
+            parse_hookdeck_key_from_secrets(toml),
+            Some("hd_account_key".to_string())
         );
     }
 
     #[test]
-    fn test_parse_linear_key_from_secrets_absent() {
+    fn test_parse_hookdeck_key_absent() {
         let toml = r#"
 [global]
-HOOKDECK_API_KEY = "x"
+LINEAR_API_KEY = "x"
 "#;
-        assert_eq!(parse_linear_key_from_secrets(toml), None);
+        assert_eq!(parse_hookdeck_key_from_secrets(toml), None);
     }
 
     #[test]
-    fn test_resolve_linear_api_key_prefers_env() {
-        let env = crate::hooks::test_support::StubEnv::with(&[("LINEAR_API_KEY", "from_env")]);
+    fn test_resolve_hookdeck_api_key_prefers_env() {
+        let env = crate::hooks::test_support::StubEnv::with(&[("HOOKDECK_API_KEY", "from_env")]);
         let fs = crate::hooks::test_support::StubFs;
         assert_eq!(
-            resolve_linear_api_key(&env, &fs),
+            resolve_hookdeck_api_key(&env, &fs),
             Some("from_env".to_string())
         );
     }
 
     #[test]
-    fn test_resolve_linear_api_key_none_when_nothing() {
+    fn test_resolve_hookdeck_api_key_none_when_nothing() {
         // StubEnv has no var; StubFs read_to_string always errors → no secrets.
         let env = crate::hooks::test_support::StubEnv::new();
         let fs = crate::hooks::test_support::StubFs;
-        assert_eq!(resolve_linear_api_key(&env, &fs), None);
+        assert_eq!(resolve_hookdeck_api_key(&env, &fs), None);
     }
 
-    // --- batched query + parse -------------------------------------------
+    // --- Hookdeck event parsing ------------------------------------------
 
-    #[test]
-    fn test_build_batched_query() {
-        let q = build_batched_query(&["FIR-1".into(), "SYN-2".into()]);
-        assert!(q.contains("i0: issue(id: \"FIR-1\")"));
-        assert!(q.contains("i1: issue(id: \"SYN-2\")"));
-        assert!(q.contains("state { name type }"));
+    /// Build a Hookdeck events-list response wrapping the given Linear webhook
+    /// bodies, each as one event with the supplied id (caller supplies
+    /// newest-first order).
+    fn hookdeck_response(events: &[(&str, serde_json::Value)]) -> serde_json::Value {
+        let models: Vec<serde_json::Value> = events
+            .iter()
+            .map(|(id, webhook)| {
+                serde_json::json!({
+                    "id": id,
+                    "source_id": LINEAR_SOURCE_ID,
+                    "data": { "body": webhook }
+                })
+            })
+            .collect();
+        serde_json::json!({ "models": models, "count": models.len() })
     }
 
-    #[test]
-    fn test_parse_states() {
-        let body = serde_json::json!({
+    fn linear_issue_webhook(identifier: &str, state_name: &str) -> serde_json::Value {
+        serde_json::json!({
+            "action": "update",
+            "type": "Issue",
             "data": {
-                "i0": { "identifier": "FIR-1", "state": { "name": "Done", "type": "completed" } },
-                "i1": { "identifier": "FIR-2", "state": { "name": "In Progress", "type": "started" } }
-            }
-        });
-        let mut states = parse_states(&body);
-        states.sort_by(|a, b| a.identifier.cmp(&b.identifier));
-        assert_eq!(states.len(), 2);
-        assert_eq!(states[0].identifier, "FIR-1");
-        assert_eq!(states[0].state_type, "completed");
-        assert_eq!(states[1].state_type, "started");
+                "identifier": identifier,
+                "title": "Some issue",
+                "state": { "name": state_name, "type": "completed" }
+            },
+            "updatedFrom": { "stateId": "prior" }
+        })
     }
 
     #[test]
-    fn test_parse_states_empty_on_no_data() {
-        let body = serde_json::json!({ "errors": [{ "message": "boom" }] });
-        assert!(parse_states(&body).is_empty());
+    fn test_parse_events_extracts_identifier_and_state() {
+        let body = hookdeck_response(&[
+            ("evt_2", linear_issue_webhook("FIR-2", "In Progress")),
+            ("evt_1", linear_issue_webhook("FIR-1", "Done")),
+        ]);
+        let events = parse_events(&body);
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].event_id, "evt_2");
+        assert_eq!(events[0].identifier, "FIR-2");
+        assert_eq!(events[0].state_name, "In Progress");
+        assert_eq!(events[1].identifier, "FIR-1");
+        assert_eq!(events[1].state_name, "Done");
+    }
+
+    #[test]
+    fn test_parse_events_skips_non_issue_and_stateless() {
+        let comment = serde_json::json!({
+            "type": "Comment",
+            "data": { "issue": { "identifier": "FIR-9" }, "body": "hi" }
+        });
+        let issue_no_state = serde_json::json!({
+            "type": "Issue",
+            "data": { "identifier": "FIR-8", "title": "no state" }
+        });
+        let body = hookdeck_response(&[
+            ("evt_c", comment),
+            ("evt_ns", issue_no_state),
+            ("evt_ok", linear_issue_webhook("FIR-7", "Done")),
+        ]);
+        let events = parse_events(&body);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].identifier, "FIR-7");
+    }
+
+    #[test]
+    fn test_parse_events_empty_on_no_models() {
+        let body = serde_json::json!({ "count": 0, "pagination": {} });
+        assert!(parse_events(&body).is_empty());
+    }
+
+    #[test]
+    fn test_parse_linear_webhook_shape() {
+        let wh = linear_issue_webhook("FIR-5", "QA Testing");
+        assert_eq!(
+            parse_linear_webhook(&wh),
+            Some(("FIR-5".to_string(), "QA Testing".to_string()))
+        );
+    }
+
+    // --- cursor advance ---------------------------------------------------
+
+    fn transition(id: &str, identifier: &str, state: &str) -> EventTransition {
+        EventTransition {
+            event_id: id.into(),
+            identifier: identifier.into(),
+            state_name: state.into(),
+        }
+    }
+
+    #[test]
+    fn test_events_after_cursor_none_returns_all() {
+        let events = vec![
+            transition("evt_3", "FIR-3", "Done"),
+            transition("evt_2", "FIR-2", "Done"),
+            transition("evt_1", "FIR-1", "Done"),
+        ];
+        assert_eq!(events_after_cursor(&events, None).len(), 3);
+    }
+
+    #[test]
+    fn test_events_after_cursor_stops_at_cursor() {
+        let events = vec![
+            transition("evt_3", "FIR-3", "Done"),
+            transition("evt_2", "FIR-2", "Done"),
+            transition("evt_1", "FIR-1", "Done"),
+        ];
+        // Cursor = evt_2 → only evt_3 (newer) is new.
+        let new = events_after_cursor(&events, Some("evt_2"));
+        assert_eq!(new.len(), 1);
+        assert_eq!(new[0].event_id, "evt_3");
+    }
+
+    #[test]
+    fn test_events_after_cursor_unknown_cursor_returns_all() {
+        let events = vec![transition("evt_3", "FIR-3", "Done")];
+        // Cursor aged out of the page → treat all as new.
+        assert_eq!(events_after_cursor(&events, Some("evt_old")).len(), 1);
+    }
+
+    #[test]
+    fn test_read_write_cursor_roundtrip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("cursor");
+        struct RealFs;
+        impl FileSystemPort for RealFs {
+            fn home_dir(&self) -> Option<PathBuf> {
+                dirs::home_dir()
+            }
+            fn read_to_string(&self, p: &Path) -> anyhow::Result<String> {
+                Ok(std::fs::read_to_string(p)?)
+            }
+            fn write(&self, p: &Path, c: &[u8]) -> anyhow::Result<()> {
+                if let Some(par) = p.parent() {
+                    std::fs::create_dir_all(par)?;
+                }
+                Ok(std::fs::write(p, c)?)
+            }
+            fn create_dir_all(&self, p: &Path) -> anyhow::Result<()> {
+                Ok(std::fs::create_dir_all(p)?)
+            }
+            fn read_dir(&self, _: &Path) -> anyhow::Result<Vec<PathBuf>> {
+                Ok(vec![])
+            }
+            fn exists(&self, p: &Path) -> bool {
+                p.exists()
+            }
+            fn is_dir(&self, p: &Path) -> bool {
+                p.is_dir()
+            }
+            fn metadata(&self, p: &Path) -> anyhow::Result<std::fs::Metadata> {
+                Ok(std::fs::metadata(p)?)
+            }
+            fn append(&self, _: &Path, _: &[u8]) -> anyhow::Result<()> {
+                Ok(())
+            }
+        }
+        let fs = RealFs;
+        assert_eq!(read_cursor(&fs, &path), None);
+        write_cursor(&fs, &path, "evt_42");
+        assert_eq!(read_cursor(&fs, &path), Some("evt_42".to_string()));
     }
 
     // --- drift computation -----------------------------------------------
@@ -726,23 +994,15 @@ HOOKDECK_API_KEY = "x"
         }
     }
 
-    fn state(id: &str, name: &str, ty: &str) -> LinearState {
-        LinearState {
-            identifier: id.into(),
-            state_name: name.into(),
-            state_type: ty.into(),
-        }
-    }
-
     #[test]
     fn test_compute_drifts_flags_completed_and_canceled_only() {
         let tasks = vec![linked("1", "FIR-1"), linked("2", "FIR-2"), linked("3", "FIR-3")];
-        let states = vec![
-            state("FIR-1", "Done", "completed"),
-            state("FIR-2", "In Progress", "started"), // no drift
-            state("FIR-3", "Canceled", "canceled"),
+        let events = vec![
+            transition("e1", "FIR-1", "Done"),
+            transition("e2", "FIR-2", "In Progress"), // no drift
+            transition("e3", "FIR-3", "Canceled"),
         ];
-        let drifts = compute_drifts(&tasks, &states);
+        let drifts = compute_drifts(&tasks, &events);
         assert_eq!(drifts.len(), 2);
         let ids: Vec<&str> = drifts.iter().map(|d| d.linear_id.as_str()).collect();
         assert!(ids.contains(&"FIR-1"));
@@ -753,8 +1013,29 @@ HOOKDECK_API_KEY = "x"
     #[test]
     fn test_compute_drifts_empty_when_all_in_sync() {
         let tasks = vec![linked("1", "FIR-1")];
-        let states = vec![state("FIR-1", "In Progress", "started")];
-        assert!(compute_drifts(&tasks, &states).is_empty());
+        let events = vec![transition("e1", "FIR-1", "In Progress")];
+        assert!(compute_drifts(&tasks, &events).is_empty());
+    }
+
+    #[test]
+    fn test_compute_drifts_ignores_unmatched_issues() {
+        // Event for an issue with no in-progress task → no drift.
+        let tasks = vec![linked("1", "FIR-1")];
+        let events = vec![transition("e1", "FIR-99", "Done")];
+        assert!(compute_drifts(&tasks, &events).is_empty());
+    }
+
+    #[test]
+    fn test_compute_drifts_uses_newest_event_per_issue() {
+        // Newest-first: the Done event (e2) precedes a stale In Progress (e1).
+        let tasks = vec![linked("1", "FIR-1")];
+        let events = vec![
+            transition("e2", "FIR-1", "Done"),
+            transition("e1", "FIR-1", "In Progress"),
+        ];
+        let drifts = compute_drifts(&tasks, &events);
+        assert_eq!(drifts.len(), 1);
+        assert_eq!(drifts[0].desired, DesiredStatus::Completed);
     }
 
     #[test]
@@ -768,6 +1049,7 @@ HOOKDECK_API_KEY = "x"
         }];
         let ctx = render_drift_context(&drifts);
         assert!(ctx.contains("[Linear Inbound Sync]"));
+        assert!(ctx.contains("Hookdeck"));
         assert!(ctx.contains("Task #7"));
         assert!(ctx.contains("FIR-9"));
         assert!(ctx.contains("completed"));

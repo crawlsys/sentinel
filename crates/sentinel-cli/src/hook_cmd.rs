@@ -1218,9 +1218,10 @@ async fn handle_user_prompt_submit(
     });
     output.merge(&todo_output);
 
-    // Linear inbound sync — poll Linear for in-progress @linear-tagged tasks
-    // that have moved to a terminal state and inject TaskUpdate instructions.
-    // Best-effort, fail-open, throttled to one Linear poll per session window.
+    // Linear inbound sync — poll the Hookdeck Events API for already-captured
+    // Linear webhook deliveries and reconcile in-progress @linear-tagged tasks
+    // whose issue moved to a terminal state, injecting TaskUpdate instructions.
+    // Best-effort, fail-open, throttled to one Hookdeck poll per session window.
     let linear_inbound_output = time_and_record(ctx.fs, &mk_ctx("linear_inbound_sync"), || {
         hooks::linear_inbound_sync::process(input, ctx)
     });
