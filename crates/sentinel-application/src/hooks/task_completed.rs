@@ -100,24 +100,138 @@ fn detect_claims(text: &str) -> ClaimSignals {
 /// a weak commit signal. Requiring a digit avoids tripping on plain hex-only
 /// words.
 fn contains_sha(lower: &str) -> bool {
-    lower.split(|c: char| !c.is_ascii_hexdigit()).any(|tok| {
-        let n = tok.len();
-        (7..=40).contains(&n)
-            && tok.chars().all(|c| c.is_ascii_hexdigit())
-            && tok.chars().any(|c| c.is_ascii_digit())
-    })
+    extract_sha(lower).is_some()
+}
+
+/// Extract the first git-sha-looking token from text — a standalone run of
+/// 7–40 hex chars containing at least one digit. Returns the matched token
+/// (lowercased by the caller's input if already lowercased). Used to drive the
+/// REAL `git merge-base --is-ancestor` reachability check.
+fn extract_sha(text: &str) -> Option<String> {
+    text.split(|c: char| !c.is_ascii_hexdigit())
+        .find(|tok| {
+            let n = tok.len();
+            (7..=40).contains(&n)
+                && tok.chars().all(|c| c.is_ascii_hexdigit())
+                && tok.chars().any(|c| c.is_ascii_digit())
+        })
+        .map(str::to_string)
+}
+
+/// A PR reference extracted from task text: its number, and optionally the
+/// `owner/repo` slug when the reference came from a full GitHub URL.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PrRef {
+    number: u32,
+    /// `Some(("owner", "repo"))` when parsed from a github.com/owner/repo URL.
+    repo: Option<(String, String)>,
+}
+
+/// Extract a PR reference from task text. Recognises (in priority order):
+///   1. A full GitHub PR URL: `https://github.com/OWNER/REPO/pull/N` → repo + N.
+///   2. A bare `PR #N` / `pull request #N` / `pull/N` form → just N.
+///
+/// Returns the first match found. FAIL-OPEN friendly: returns `None` when no
+/// number can be parsed (caller then skips the gh check).
+fn extract_pr(text: &str) -> Option<PrRef> {
+    // 1) Full URL form — github.com/owner/repo/pull/123
+    if let Some(idx) = text.find("github.com/") {
+        let rest = &text[idx + "github.com/".len()..];
+        let mut segs = rest.split('/');
+        if let (Some(owner), Some(repo), Some(kw), Some(num)) =
+            (segs.next(), segs.next(), segs.next(), segs.next())
+        {
+            if (kw == "pull" || kw == "pulls") && !owner.is_empty() && !repo.is_empty() {
+                if let Some(n) = parse_leading_u32(num) {
+                    return Some(PrRef {
+                        number: n,
+                        repo: Some((owner.to_string(), repo.to_string())),
+                    });
+                }
+            }
+        }
+    }
+
+    // 2) Bare forms — find a `#N` or `pull/N` / `pull request N`.
+    let lower = text.to_lowercase();
+    // `#N`
+    if let Some(hash) = lower.find('#') {
+        if let Some(n) = parse_leading_u32(&text[hash + 1..]) {
+            return Some(PrRef {
+                number: n,
+                repo: None,
+            });
+        }
+    }
+    // `pull/N`
+    if let Some(p) = lower.find("pull/") {
+        if let Some(n) = parse_leading_u32(&text[p + "pull/".len()..]) {
+            return Some(PrRef {
+                number: n,
+                repo: None,
+            });
+        }
+    }
+    None
+}
+
+/// Parse a leading run of ASCII digits from `s` into a `u32`. Returns `None`
+/// when `s` does not begin with a digit or the number overflows.
+fn parse_leading_u32(s: &str) -> Option<u32> {
+    let digits: String = s.chars().take_while(char::is_ascii_digit).collect();
+    if digits.is_empty() {
+        return None;
+    }
+    digits.parse::<u32>().ok()
+}
+
+/// Does the task text claim the PR/work was *merged* (vs merely opened)?
+fn claims_merged(lower: &str) -> bool {
+    lower.contains("merged")
+        || lower.contains("merge to")
+        || lower.contains("merged to")
+        || lower.contains("landed")
+}
+
+/// Run a short git/gh subprocess via the process port, FAIL-OPEN.
+///
+/// Returns `Some(ProcessOutput)` only when the command actually executed (even
+/// if it exited non-zero — the caller inspects `.success`). Returns `None` when
+/// the binary is missing / not a repo / any spawn error, so the caller can fall
+/// back to the soft heuristic and never blocks the gate.
+///
+/// There is no per-call timeout primitive on `ProcessPort::run`; the commands
+/// used here are deliberately fast & bounded (`git merge-base --is-ancestor` is
+/// a local ancestry walk, `gh pr view --json` is a single bounded API call with
+/// gh's own internal HTTP timeout). Any hang/error surfaces as `Err` → `None`.
+fn run_check(
+    ctx: &super::HookContext<'_>,
+    cmd: &str,
+    args: &[&str],
+    cwd: &str,
+) -> Option<sentinel_domain::ports::ProcessOutput> {
+    ctx.process.run(cmd, args, Some(cwd)).ok()
 }
 
 /// Run the claim-vs-reality checks and return any mismatch warning lines.
 ///
-/// FAIL OPEN: any git error is swallowed (treated as "can't verify" → no
-/// warning). We only emit a hard warning on a *real, observed* mismatch; soft
-/// "please confirm" notes are emitted for claims we cannot verify here.
+/// Performs REAL verification via `ctx.process` where possible:
+///   * COMMIT — a concrete sha is checked for reachability on HEAD with
+///     `git merge-base --is-ancestor <sha> HEAD`; otherwise the dirty-tree
+///     heuristic is used.
+///   * PR — the claimed PR is checked with `gh pr view <N> --json state,merged`
+///     (with `--repo owner/repo` when a URL supplied one); a claimed-merged PR
+///     that gh reports as open/closed is a hard mismatch.
+///   * BUILD/TEST — can't be re-run here → soft confirm note (unchanged).
+///
+/// FAIL OPEN: any subprocess error, missing binary, or non-repo cwd falls back
+/// to the soft heuristic (or silence) — this never blocks `TaskCompleted`.
 ///
 /// `first_in_progress` is true when this is the first time the task entered
 /// `in_progress` (suspiciously fast done — claimed complete on the first hop).
 fn verify_claims(
     claims: ClaimSignals,
+    text: &str,
     ctx: &super::HookContext<'_>,
     cwd: &str,
     first_in_progress: bool,
@@ -128,33 +242,135 @@ fn verify_claims(
         return warnings;
     }
 
+    let lower = text.to_lowercase();
+
     // --- Commit/push claim: the KEY high-value check ---
-    // If the task says it committed/pushed but the working tree is still dirty,
-    // that's a concrete contradiction worth surfacing.
     if claims.commit {
-        // has_uncommitted_changes returns Err on git failure → fail open (false).
-        let dirty = ctx.git.has_uncommitted_changes(cwd).unwrap_or(false);
-        // Only treat as a mismatch when we can actually confirm a repo + HEAD.
-        // No HEAD (unborn / not a repo) → can't verify → stay silent.
-        let has_head = ctx.git.head_sha(cwd).is_some();
-        if dirty && has_head {
-            warnings.push(
-                "claims a commit/push, but the working tree still has \
-                 UNCOMMITTED changes — confirm the work was actually committed \
-                 (run `git status`), not just edited"
-                    .to_string(),
-            );
+        // If a SPECIFIC sha is named, do the REAL reachability check: is it an
+        // ancestor of HEAD? `git merge-base --is-ancestor <sha> HEAD` exits 0
+        // when reachable, 1 when not. Only a confirmed exit-1 (sha resolved but
+        // not on history) is a hard mismatch. Anything else (sha doesn't
+        // resolve, gh/git missing, not a repo) → fall back to the heuristic.
+        let real_sha_checked = if let Some(sha) = extract_sha(&lower) {
+            match run_check(
+                ctx,
+                "git",
+                &["merge-base", "--is-ancestor", &sha, "HEAD"],
+                cwd,
+            ) {
+                Some(out) if out.success => true, // reachable → claim corroborated
+                Some(out) => {
+                    // Exit non-zero. Distinguish "not an ancestor" (the bad
+                    // case) from "bad object / unknown rev" (can't verify).
+                    // git prints to stderr on a bad rev; --is-ancestor on a
+                    // valid-but-unreachable rev exits 1 with empty stderr.
+                    let stderr = out.stderr.to_lowercase();
+                    let unresolved = stderr.contains("not a valid")
+                        || stderr.contains("bad revision")
+                        || stderr.contains("unknown revision")
+                        || stderr.contains("malformed")
+                        || stderr.contains("ambiguous argument");
+                    if unresolved {
+                        // Sha doesn't resolve in this repo → can't verify, no warn.
+                        false
+                    } else {
+                        warnings.push(format!(
+                            "claimed commit {sha} is NOT on HEAD's history \
+                             (`git merge-base --is-ancestor {sha} HEAD` failed) — \
+                             the commit may live on another branch, or was never \
+                             made; confirm before ✅"
+                        ));
+                        true
+                    }
+                }
+                None => false, // git missing / spawn error → fall back
+            }
+        } else {
+            false
+        };
+
+        // No specific sha verified → fall back to the dirty-tree heuristic:
+        // "committed" but the tree is still dirty is a soft contradiction.
+        if !real_sha_checked {
+            let dirty = ctx.git.has_uncommitted_changes(cwd).unwrap_or(false);
+            let has_head = ctx.git.head_sha(cwd).is_some();
+            if dirty && has_head {
+                warnings.push(
+                    "claims a commit/push, but the working tree still has \
+                     UNCOMMITTED changes — confirm the work was actually committed \
+                     (run `git status`), not just edited"
+                        .to_string(),
+                );
+            }
         }
     }
 
-    // --- PR claim: can't verify without gh → soft confirm note (only if claimed) ---
+    // --- PR claim: REAL gh check when a PR number is parseable ---
     if claims.pr {
-        warnings.push(
-            "references a PR (opened/merged) — sentinel can't see GitHub here; \
-             confirm the PR actually exists and is in the claimed state \
-             (`gh pr view`) before ✅"
-                .to_string(),
-        );
+        if let Some(pr) = extract_pr(text) {
+            let n = pr.number.to_string();
+            let mut args: Vec<&str> = vec!["pr", "view", &n, "--json", "state,merged,number"];
+            let repo_slug; // keep alive for the &str borrow
+            if let Some((owner, repo)) = &pr.repo {
+                repo_slug = format!("{owner}/{repo}");
+                args.push("--repo");
+                args.push(&repo_slug);
+            }
+
+            match run_check(ctx, "gh", &args, cwd) {
+                Some(out) if out.success => {
+                    // gh returned JSON describing the PR. Parse merged/state.
+                    let merged = serde_json::from_str::<serde_json::Value>(&out.stdout)
+                        .ok()
+                        .and_then(|v| v.get("merged").and_then(serde_json::Value::as_bool));
+                    let state = serde_json::from_str::<serde_json::Value>(&out.stdout)
+                        .ok()
+                        .and_then(|v| {
+                            v.get("state")
+                                .and_then(serde_json::Value::as_str)
+                                .map(str::to_string)
+                        })
+                        .unwrap_or_else(|| "UNKNOWN".to_string());
+
+                    if claims_merged(&lower) {
+                        match merged {
+                            Some(true) => { /* claim corroborated → no warn */ }
+                            _ => warnings.push(format!(
+                                "PR #{n} is claimed MERGED but gh shows it is \
+                                 {state} (merged=false) — do NOT ✅ until the PR \
+                                 is actually merged"
+                            )),
+                        }
+                    }
+                    // Non-merge PR claims (just "opened PR #N") are corroborated
+                    // by gh finding the PR at all → no warning.
+                }
+                Some(out) => {
+                    // gh ran but failed (PR not found, no repo, auth). Soft note.
+                    let err = first_line(&out.stderr);
+                    warnings.push(format!(
+                        "could not verify PR #{n} (gh: {err}) — confirm the PR \
+                         exists and is in the claimed state (`gh pr view {n}`) before ✅"
+                    ));
+                }
+                None => {
+                    // gh missing / spawn error → fail open to the soft note.
+                    warnings.push(format!(
+                        "references PR #{n} but sentinel could not run gh here — \
+                         confirm the PR exists and is in the claimed state \
+                         (`gh pr view {n}`) before ✅"
+                    ));
+                }
+            }
+        } else {
+            // PR claimed but no number parseable → soft confirm note.
+            warnings.push(
+                "references a PR (opened/merged) — sentinel couldn't parse a PR \
+                 number; confirm the PR actually exists and is in the claimed \
+                 state (`gh pr view`) before ✅"
+                    .to_string(),
+            );
+        }
     }
 
     // --- Build/test claim: can't re-run → soft confirm note (only if claimed) ---
@@ -178,6 +394,21 @@ fn verify_claims(
     }
 
     warnings
+}
+
+/// First non-empty line of a (possibly multi-line) error string, trimmed and
+/// length-capped — keeps gh's stderr from flooding the injected context.
+fn first_line(s: &str) -> String {
+    let line = s
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or("unknown error");
+    if line.len() > 200 {
+        format!("{}…", &line[..200])
+    } else {
+        line.to_string()
+    }
 }
 
 /// Process `TaskCompleted` event
@@ -277,11 +508,10 @@ pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
             .extra
             .get("task_in_progress_count")
             .and_then(serde_json::Value::as_u64)
-            .map(|n| n == 1)
-            .unwrap_or(false);
+            == Some(1);
 
         let cwd = input.cwd.as_deref().unwrap_or(".");
-        verify_claims(claims, ctx, cwd, first_in_progress)
+        verify_claims(claims, &scan_text, ctx, cwd, first_in_progress)
     }))
     .unwrap_or_default();
 
@@ -414,10 +644,99 @@ mod tests {
         }
     }
 
+    use sentinel_domain::ports::{ProcessOutput, ProcessPort};
+
+    /// Programmable process port for the real-check tests.
+    ///
+    /// Each closure-free field controls one command family:
+    ///   * `git_missing` / `gh_missing` — `run` returns `Err` (binary absent /
+    ///     spawn failure) so the hook must fail open.
+    ///   * `merge_base_ancestor` — `Some(true)`=exit0 (reachable),
+    ///     `Some(false)`=exit1 (not an ancestor, empty stderr),
+    ///     `None`=unresolved rev (exit1 with a "bad revision" stderr).
+    ///   * `gh_stdout` / `gh_success` — what `gh pr view` returns.
+    struct FakeProcess {
+        git_missing: bool,
+        gh_missing: bool,
+        merge_base_ancestor: Option<bool>,
+        gh_success: bool,
+        gh_stdout: String,
+        gh_stderr: String,
+    }
+    impl Default for FakeProcess {
+        fn default() -> Self {
+            FakeProcess {
+                git_missing: false,
+                gh_missing: false,
+                merge_base_ancestor: Some(true),
+                gh_success: true,
+                gh_stdout: String::new(),
+                gh_stderr: String::new(),
+            }
+        }
+    }
+    impl ProcessPort for FakeProcess {
+        fn run(
+            &self,
+            command: &str,
+            args: &[&str],
+            _cwd: Option<&str>,
+        ) -> anyhow::Result<ProcessOutput> {
+            match command {
+                "git" if self.git_missing => anyhow::bail!("git: command not found"),
+                "gh" if self.gh_missing => anyhow::bail!("gh: command not found"),
+                "git" if args.first() == Some(&"merge-base") => match self.merge_base_ancestor {
+                    Some(true) => Ok(ProcessOutput {
+                        success: true,
+                        stdout: String::new(),
+                        stderr: String::new(),
+                    }),
+                    Some(false) => Ok(ProcessOutput {
+                        success: false,
+                        stdout: String::new(),
+                        stderr: String::new(), // valid rev, just not an ancestor
+                    }),
+                    None => Ok(ProcessOutput {
+                        success: false,
+                        stdout: String::new(),
+                        stderr: "fatal: Not a valid commit name deadbe1f".to_string(),
+                    }),
+                },
+                "gh" => Ok(ProcessOutput {
+                    success: self.gh_success,
+                    stdout: self.gh_stdout.clone(),
+                    stderr: self.gh_stderr.clone(),
+                }),
+                // Anything else → benign success.
+                _ => Ok(ProcessOutput {
+                    success: true,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                }),
+            }
+        }
+        fn spawn_detached(&self, _: &str, _: &[&str]) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
     /// Build a HookContext using `git` and otherwise-stub ports.
     fn ctx_with_git(git: &dyn GitStatusPort) -> super::super::HookContext<'_> {
         let base = crate::hooks::test_support::stub_ctx();
         super::super::HookContext { git, ..base }
+    }
+
+    /// Build a HookContext with both a custom git and a custom process port.
+    fn ctx_with<'a>(
+        git: &'a dyn GitStatusPort,
+        process: &'a dyn ProcessPort,
+    ) -> super::super::HookContext<'a> {
+        let base = crate::hooks::test_support::stub_ctx();
+        super::super::HookContext {
+            git,
+            process,
+            ..base
+        }
     }
 
     #[test]
@@ -699,14 +1018,41 @@ mod tests {
     }
 
     #[test]
-    fn pr_claim_emits_soft_confirm() {
+    fn pr_claim_gh_finds_open_pr_no_merge_claim_no_warn() {
+        // "Opened PR #123" — not a merge claim. gh finds the PR → corroborated,
+        // no warning.
         let input = claim_input("Opened PR #123 for the refactor");
         let git = FakeGit::default();
-        let ctx = ctx_with_git(&git);
+        let proc = FakeProcess {
+            gh_success: true,
+            gh_stdout: r#"{"number":123,"state":"OPEN","merged":false}"#.to_string(),
+            ..FakeProcess::default()
+        };
+        let ctx = ctx_with(&git, &proc);
+        let out = process(&input, &ctx);
+        let text = injected(&out);
+        assert!(
+            !text.contains("⚠️ Verify before ✅"),
+            "open PR with no merge claim must not warn: {text}"
+        );
+    }
+
+    #[test]
+    fn pr_claim_gh_not_found_emits_soft_confirm() {
+        // gh ran but the PR doesn't exist → soft "could not verify" note.
+        let input = claim_input("Opened PR #123 for the refactor");
+        let git = FakeGit::default();
+        let proc = FakeProcess {
+            gh_success: false,
+            gh_stderr: "GraphQL: Could not resolve to a PullRequest with the number of 123."
+                .to_string(),
+            ..FakeProcess::default()
+        };
+        let ctx = ctx_with(&git, &proc);
         let out = process(&input, &ctx);
         let text = injected(&out);
         assert!(text.contains("⚠️ Verify before ✅"), "{text}");
-        assert!(text.contains("gh pr view"), "{text}");
+        assert!(text.contains("could not verify PR #123"), "{text}");
     }
 
     #[test]
@@ -723,14 +1069,194 @@ mod tests {
     #[test]
     fn first_in_progress_hop_with_claim_warns_premature() {
         let mut input = claim_input("Committed the fix");
-        input.extra.insert(
-            "task_in_progress_count".to_string(),
-            serde_json::json!(1),
-        );
+        input
+            .extra
+            .insert("task_in_progress_count".to_string(), serde_json::json!(1));
         let git = FakeGit::default(); // clean tree, has HEAD
         let ctx = ctx_with_git(&git);
         let out = process(&input, &ctx);
         let text = injected(&out);
         assert!(text.contains("FIRST in_progress hop"), "{text}");
+    }
+
+    // ---- REAL git/gh check tests ----
+
+    #[test]
+    fn extract_sha_finds_first_token() {
+        assert_eq!(
+            extract_sha("landed at deadbe1f now").as_deref(),
+            Some("deadbe1f")
+        );
+        assert_eq!(extract_sha("sha abc1234 done").as_deref(), Some("abc1234"));
+        assert_eq!(extract_sha("no sha here"), None);
+        assert_eq!(extract_sha("deadbeef"), None); // hex but no digit
+    }
+
+    #[test]
+    fn extract_pr_parses_bare_and_url() {
+        assert_eq!(
+            extract_pr("Opened PR #42 for the fix"),
+            Some(PrRef {
+                number: 42,
+                repo: None
+            })
+        );
+        assert_eq!(
+            extract_pr("see https://github.com/garysomerhalder/sentinel/pull/146 merged"),
+            Some(PrRef {
+                number: 146,
+                repo: Some(("garysomerhalder".to_string(), "sentinel".to_string()))
+            })
+        );
+        assert_eq!(extract_pr("no pr referenced"), None);
+    }
+
+    #[test]
+    fn real_sha_on_head_no_warn() {
+        // Task names a sha that IS reachable on HEAD (merge-base exit 0) → no warn.
+        let input = claim_input("Committed at deadbe1f and verified");
+        let git = FakeGit::default();
+        let proc = FakeProcess {
+            merge_base_ancestor: Some(true),
+            ..FakeProcess::default()
+        };
+        let ctx = ctx_with(&git, &proc);
+        let out = process(&input, &ctx);
+        let text = injected(&out);
+        assert!(
+            !text.contains("⚠️ Verify before ✅"),
+            "sha on HEAD must not warn: {text}"
+        );
+    }
+
+    #[test]
+    fn bogus_sha_not_ancestor_warns() {
+        // Task names a sha that resolves but is NOT an ancestor of HEAD → warn.
+        let input = claim_input("Committed at deadbe1f on the branch");
+        let git = FakeGit::default();
+        let proc = FakeProcess {
+            merge_base_ancestor: Some(false), // exit 1, empty stderr = valid but unreachable
+            ..FakeProcess::default()
+        };
+        let ctx = ctx_with(&git, &proc);
+        let out = process(&input, &ctx);
+        let text = injected(&out);
+        assert!(text.contains("⚠️ Verify before ✅"), "{text}");
+        assert!(text.contains("NOT on HEAD"), "{text}");
+        assert!(text.contains("deadbe1f"), "{text}");
+    }
+
+    #[test]
+    fn unresolved_sha_no_warn() {
+        // Sha doesn't resolve (bad object) → can't verify → no hard warn,
+        // and no dirty-tree fallback warning since the tree is clean.
+        let input = claim_input("Committed at deadbe1f");
+        let git = FakeGit::default(); // clean tree
+        let proc = FakeProcess {
+            merge_base_ancestor: None, // exit 1 with "Not a valid commit name" stderr
+            ..FakeProcess::default()
+        };
+        let ctx = ctx_with(&git, &proc);
+        let out = process(&input, &ctx);
+        let text = injected(&out);
+        assert!(
+            !text.contains("NOT on HEAD"),
+            "unresolved sha must not produce the ancestor warning: {text}"
+        );
+    }
+
+    #[test]
+    fn pr_claimed_merged_but_gh_shows_open_warns() {
+        // The headline real-check: claim says merged, gh shows OPEN → hard warn.
+        let input = claim_input("Merged PR #42 to main");
+        let git = FakeGit::default();
+        let proc = FakeProcess {
+            gh_success: true,
+            gh_stdout: r#"{"number":42,"state":"OPEN","merged":false}"#.to_string(),
+            ..FakeProcess::default()
+        };
+        let ctx = ctx_with(&git, &proc);
+        let out = process(&input, &ctx);
+        let text = injected(&out);
+        assert!(text.contains("⚠️ Verify before ✅"), "{text}");
+        assert!(text.contains("PR #42 is claimed MERGED"), "{text}");
+        assert!(text.contains("OPEN"), "{text}");
+    }
+
+    #[test]
+    fn pr_claimed_merged_and_gh_shows_merged_no_warn() {
+        let input = claim_input("Merged PR #42 to main");
+        let git = FakeGit::default();
+        let proc = FakeProcess {
+            gh_success: true,
+            gh_stdout: r#"{"number":42,"state":"MERGED","merged":true}"#.to_string(),
+            ..FakeProcess::default()
+        };
+        let ctx = ctx_with(&git, &proc);
+        let out = process(&input, &ctx);
+        let text = injected(&out);
+        assert!(
+            !text.contains("⚠️ Verify before ✅"),
+            "a genuinely-merged PR must not warn: {text}"
+        );
+    }
+
+    #[test]
+    fn gh_missing_fails_open_with_soft_note() {
+        // gh binary absent → run errors → fail open to a soft note (NOT silence,
+        // since a PR was explicitly claimed), and must never panic/block.
+        let input = claim_input("Merged PR #42 to main");
+        let git = FakeGit::default();
+        let proc = FakeProcess {
+            gh_missing: true,
+            ..FakeProcess::default()
+        };
+        let ctx = ctx_with(&git, &proc);
+        let out = process(&input, &ctx);
+        let text = injected(&out);
+        // Fail-open: a soft confirm note, but NOT the hard "claimed MERGED" warn.
+        assert!(
+            !text.contains("PR #42 is claimed MERGED"),
+            "gh missing must not produce the hard mismatch warning: {text}"
+        );
+        assert!(
+            text.contains("could not run gh"),
+            "gh missing should surface a soft confirm note: {text}"
+        );
+    }
+
+    #[test]
+    fn git_missing_commit_sha_fails_open() {
+        // Named sha but git binary absent → run errors → fall back to dirty
+        // heuristic. Clean tree → no warning at all (fail open, no panic).
+        let input = claim_input("Committed at deadbe1f");
+        let git = FakeGit::default(); // clean tree
+        let proc = FakeProcess {
+            git_missing: true,
+            ..FakeProcess::default()
+        };
+        let ctx = ctx_with(&git, &proc);
+        let out = process(&input, &ctx);
+        let text = injected(&out);
+        assert!(
+            !text.contains("NOT on HEAD"),
+            "git missing must fail open (no ancestor warning): {text}"
+        );
+        assert!(
+            !text.contains("UNCOMMITTED"),
+            "clean tree fallback must not warn: {text}"
+        );
+    }
+
+    #[test]
+    fn no_claim_no_real_checks_no_warn() {
+        // No concrete claim → verify_claims returns early, no git/gh spawned.
+        let input = claim_input("Investigate the slow query path");
+        let git = FakeGit::default();
+        let proc = FakeProcess::default();
+        let ctx = ctx_with(&git, &proc);
+        let out = process(&input, &ctx);
+        let text = injected(&out);
+        assert!(!text.contains("⚠️ Verify before ✅"), "{text}");
     }
 }
