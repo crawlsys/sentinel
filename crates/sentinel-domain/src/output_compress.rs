@@ -160,6 +160,12 @@ pub fn is_signal_line(line: &str) -> bool {
         // Non-zero exit / failure markers some tools print.
         || lower.contains("failed to ")
         || lower.contains("could not compile")
+        // cargo success marker: "Finished `release` profile …" / "Finished test …"
+        // This is the primary outcome line for every successful cargo invocation.
+        // Previously classified as noise (dropped), causing agents to see zero
+        // confirmation that a build/test completed — the root cause of the
+        // SENTINEL_COMPRESS_BYPASS=1 workaround being needed.
+        || t.starts_with("Finished ")
 }
 
 /// Compress `raw` output for the given `command`.
@@ -286,10 +292,15 @@ fn compress_dedup_only(raw: &str) -> String {
 }
 
 /// `cargo`/rustc build-progress chatter that carries no signal.
+///
+/// NOTE: `Finished` is intentionally absent — it is the primary outcome line
+/// ("Finished `release` profile [optimized] target(s) in X.Xs") and must
+/// always survive compression. It is now classified as a signal line via
+/// [`is_signal_line`]. Dropping it was the root cause of the
+/// SENTINEL_COMPRESS_BYPASS=1 workaround.
 fn is_cargo_build_noise(t: &str) -> bool {
     let s = t.trim_start();
     s.starts_with("Compiling ")
-        || s.starts_with("Finished ")
         || s.starts_with("Running ")
         || s.starts_with("Fresh ")
         || s.starts_with("Building ")
@@ -375,9 +386,12 @@ test result: FAILED. 4 passed; 1 failed; 0 ignored";
         // ok-spam collapsed, not enumerated.
         assert!(!r.compressed.contains("test a::ok1 ... ok"));
         assert!(r.compressed.contains("passing test(s) (ok) collapsed"));
-        // Build chatter dropped.
+        // Compiling chatter dropped; Finished is now a signal line and must survive.
         assert!(!r.compressed.contains("Compiling"));
-        assert!(!r.compressed.contains("Finished"));
+        assert!(
+            r.compressed.contains("Finished"),
+            "Finished is a signal line and must be preserved"
+        );
         // Net smaller.
         assert!(r.compressed_bytes < r.original_bytes);
         assert!(r.lines_dropped > 0);
@@ -409,7 +423,102 @@ error[E0432]: unresolved import
         let r = compress("cargo build", raw);
         assert!(r.compressed.contains("error[E0432]: unresolved import"));
         assert!(!r.compressed.contains("Compiling foo"));
-        assert!(!r.compressed.contains("Finished"));
+        // "Finished" is now a signal line and must be preserved verbatim — it is
+        // the primary success/completion indicator for every cargo invocation.
+        // Previously it was classified as noise (the root cause of the
+        // SENTINEL_COMPRESS_BYPASS=1 workaround).
+        assert!(
+            r.compressed.contains("Finished"),
+            "Finished line must be preserved verbatim — it is the build outcome"
+        );
+    }
+
+    /// Root-cause regression test: `cargo build --release` output must preserve
+    /// the "Finished" line without SENTINEL_COMPRESS_BYPASS=1.
+    ///
+    /// This is the exact scenario that caused the bug: `cargo build 2>&1` piped
+    /// through the compressor silently dropped the "Finished `release` profile"
+    /// line, giving no confirmation the build succeeded.
+    #[test]
+    fn cargo_build_release_preserves_finished_verbatim() {
+        let raw = "\
+   Compiling sentinel v0.5.0 (/repo)
+   Compiling sentinel-cli v0.5.0 (/repo)
+   Compiling more-crates v1.0.0 (/repo)
+    Finished `release` profile [optimized] target(s) in 12.34s";
+        let r = compress("cargo build --release", raw);
+        // The Finished line must survive.
+        assert!(
+            r.compressed
+                .contains("Finished `release` profile [optimized] target(s) in 12.34s"),
+            "Finished line was dropped; compressed output:\n{}",
+            r.compressed
+        );
+        // Compiling noise is still collapsed.
+        assert!(
+            !r.compressed.contains("Compiling sentinel v"),
+            "Compiling lines should still be dropped"
+        );
+    }
+
+    /// cargo test success: "Finished", "test result: ok", and the collapsed ok
+    /// count must all survive. This was failing before the fix because "Finished"
+    /// was in `is_cargo_build_noise`, causing it to be silently dropped even
+    /// though it is the primary confirmation the test binary was built.
+    #[test]
+    fn cargo_test_success_preserves_finished_and_test_result() {
+        let raw = "\
+   Compiling sentinel v0.5.0 (/repo)
+    Finished test [unoptimized + debuginfo] target(s) in 3.21s
+     Running unittests src/lib.rs (target/debug/deps/sentinel-abc123)
+
+running 4 tests
+test compress::works ... ok
+test signal::basic ... ok
+test signal::edge_case ... ok
+test round_trip ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out";
+        let r = compress("cargo test --workspace", raw);
+        // test result summary must survive (already was a signal line — regression guard).
+        assert!(
+            r.compressed
+                .contains("test result: ok. 4 passed; 0 failed; 0 ignored"),
+            "test result line dropped"
+        );
+        // "Finished" must now survive too (this was the bug).
+        assert!(
+            r.compressed
+                .contains("Finished test [unoptimized + debuginfo] target(s) in 3.21s"),
+            "Finished line was dropped from cargo test output; compressed:\n{}",
+            r.compressed
+        );
+        // ok-spam must still be collapsed.
+        assert!(
+            !r.compressed.contains("compress::works ... ok"),
+            "per-test ok lines should be collapsed"
+        );
+        assert!(
+            r.compressed.contains("passing test(s) (ok) collapsed"),
+            "collapsed ok-run marker missing"
+        );
+    }
+
+    #[test]
+    fn is_signal_line_includes_finished() {
+        // Verify the invariant directly.
+        assert!(
+            is_signal_line("    Finished `release` profile [optimized] target(s) in 5.67s"),
+            "Finished line must be a signal line"
+        );
+        assert!(
+            is_signal_line("Finished test [unoptimized + debuginfo] target(s) in 1.23s"),
+            "Finished test line must be a signal line"
+        );
+        assert!(
+            !is_signal_line("   Compiling foo v0.1.0"),
+            "Compiling must remain noise (not a signal line)"
+        );
     }
 
     // --- Losslessness regression tests (the lossy-compression bug) ---
