@@ -293,6 +293,13 @@ description = "Surface unaddressed warnings/findings observed during the turn â€
 depends_on = []
 has_api_call = false
 
+[[hooks]]
+id = "claim-reality-check"
+event = "Stop"
+description = "Sweep newly-completed (âœ…) tasks and flag any whose commit/PR/merge claim fails git/gh verification (false-done detection)"
+depends_on = []
+has_api_call = false  # local git + gh subprocess only
+
 # === PreCompact ===
 
 [[hooks]]

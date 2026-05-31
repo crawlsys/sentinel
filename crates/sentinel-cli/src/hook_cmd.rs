@@ -1948,6 +1948,13 @@ fn handle_stop(
     });
     output.merge(&coverage_output);
 
+    // Claim reality check — sweep newly-completed (✅) tasks and flag any whose
+    // commit/PR/merge claim doesn't hold against git/gh (false-done detection).
+    let reality_output = time_and_record(ctx.fs, &mk_ctx("claim_reality_check"), || {
+        hooks::claim_reality_check::process(input, ctx)
+    });
+    output.merge(&reality_output);
+
     // Good citizen observer — surface unaddressed warnings/findings
     // observed during the turn, prompt agent to file TaskCreate.
     let citizen_output = time_and_record(ctx.fs, &mk_ctx("good_citizen_observer"), || {

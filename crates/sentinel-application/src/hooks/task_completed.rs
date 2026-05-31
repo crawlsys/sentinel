@@ -41,17 +41,17 @@ fn extract_linear_id(subject: &str) -> Option<&str> {
 /// a *claim of completed work* whose truth we can try to corroborate against
 /// the working tree before letting the teammate mark the task ✅.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-struct ClaimSignals {
+pub(crate) struct ClaimSignals {
     /// Text claims a commit/push happened ("committed", "pushed", a sha, ✅).
-    commit: bool,
+    pub(crate) commit: bool,
     /// Text references a PR ("PR #N", "pull request", "opened/merged PR").
-    pr: bool,
+    pub(crate) pr: bool,
     /// Text claims a build/test outcome ("build clean", "tests pass", "N passed").
-    build_test: bool,
+    pub(crate) build_test: bool,
 }
 
 impl ClaimSignals {
-    fn any(self) -> bool {
+    pub(crate) fn any(self) -> bool {
         self.commit || self.pr || self.build_test
     }
 }
@@ -62,7 +62,7 @@ impl ClaimSignals {
 /// is to catch the obvious "plausible-but-false done" phrasings, not to parse
 /// natural language. False negatives (missed claims) are fine; we only act on
 /// a *mismatch*, so a missed claim just means no warning.
-fn detect_claims(text: &str) -> ClaimSignals {
+pub(crate) fn detect_claims(text: &str) -> ClaimSignals {
     let lower = text.to_lowercase();
 
     let commit = lower.contains("commit")        // commit / committed / commits
@@ -229,7 +229,7 @@ fn run_check(
 ///
 /// `first_in_progress` is true when this is the first time the task entered
 /// `in_progress` (suspiciously fast done — claimed complete on the first hop).
-fn verify_claims(
+pub(crate) fn verify_claims(
     claims: ClaimSignals,
     text: &str,
     ctx: &super::HookContext<'_>,
