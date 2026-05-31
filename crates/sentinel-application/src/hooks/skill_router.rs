@@ -98,7 +98,7 @@ pub(crate) struct PendingSkillState {
 
 /// Persist the pending-skill marker so the invocation gate can enforce
 /// "you must invoke the detected skill before doing anything else."
-fn write_pending_skill_state(
+pub(crate) fn write_pending_skill_state(
     fs: &dyn FileSystemPort,
     skill: &str,
     skill_path: &str,
@@ -127,6 +127,103 @@ fn write_pending_skill_state(
 pub(crate) fn clear_pending_skill_state(fs: &dyn FileSystemPort, session_id: &str) {
     if let Some(path) = pending_skill_state_path(fs, session_id) {
         let _ = fs.remove_file(&path);
+    }
+}
+
+/// Path to the session-scoped "satisfied skills" file. This is a JSON array
+/// of skill names that have been fully invoked (via `Skill` tool or SKILL.md
+/// `Read`) at least once this session. Once a skill is satisfied, the router
+/// MUST NOT re-arm the gate on subsequent detections of the same skill, so
+/// re-occurring cron prompts and multi-turn conversations don't repeatedly
+/// force skill re-invocation.
+pub(crate) fn skill_satisfied_state_path(
+    fs: &dyn FileSystemPort,
+    session_id: &str,
+) -> Option<std::path::PathBuf> {
+    let dir = fs
+        .home_dir()?
+        .join(".claude")
+        .join("sentinel")
+        .join("state");
+    let _ = fs.create_dir_all(&dir);
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(session_id.as_bytes());
+    let h: String = hasher.finalize()[..6]
+        .iter()
+        .fold(String::new(), |mut s, b| {
+            let _ = write!(s, "{b:02x}");
+            s
+        });
+    Some(dir.join(format!("skill-satisfied-{h}.json")))
+}
+
+/// Return true when `skill` has already been invoked and recorded as satisfied
+/// for this session. This is the key guard that prevents re-detection of a
+/// previously-invoked skill from re-arming the gate on every subsequent turn.
+pub(crate) fn is_skill_satisfied(
+    fs: &dyn FileSystemPort,
+    session_id: &str,
+    skill: &str,
+) -> bool {
+    let path = match skill_satisfied_state_path(fs, session_id) {
+        Some(p) => p,
+        None => return false,
+    };
+    let content = match fs.read_to_string(&path) {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    let skills: Vec<String> = serde_json::from_str(&content).unwrap_or_default();
+    skills.iter().any(|s| s == skill)
+}
+
+/// Write the pending-skill marker only when the skill has NOT already been
+/// invoked this session. This is the call-site used by `build_match_output`
+/// (and exposed for testing) so that re-detection of a satisfied skill is
+/// a no-op rather than unconditionally re-arming the gate.
+///
+/// Callers that bypassed `build_match_output` (e.g. tests) can call this
+/// directly to simulate the router behaviour without going through the full
+/// `process()` async path.
+pub(crate) fn write_pending_skill_state_if_not_satisfied(
+    fs: &dyn FileSystemPort,
+    skill: &str,
+    skill_path: &str,
+    session_id: &str,
+) {
+    if !is_skill_satisfied(fs, session_id, skill) {
+        write_pending_skill_state(fs, skill, skill_path, session_id);
+    }
+}
+
+/// Record `skill` as satisfied for this session. After this call, the router
+/// will not write a pending-skill marker for this skill again in the same
+/// session, so the gate won't re-block on re-detection. Idempotent — calling
+/// it twice for the same skill is a no-op.
+pub(crate) fn mark_skill_satisfied(
+    fs: &dyn FileSystemPort,
+    session_id: &str,
+    skill: &str,
+) {
+    let path = match skill_satisfied_state_path(fs, session_id) {
+        Some(p) => p,
+        None => return,
+    };
+    // Read existing list (or start empty).
+    let mut skills: Vec<String> = fs
+        .read_to_string(&path)
+        .ok()
+        .and_then(|c| serde_json::from_str(&c).ok())
+        .unwrap_or_default();
+
+    // Idempotent: only append if not already recorded.
+    if !skills.iter().any(|s| s == skill) {
+        skills.push(skill.to_string());
+    }
+
+    if let Ok(json) = serde_json::to_string(&skills) {
+        let _ = fs.write(&path, json.as_bytes());
     }
 }
 
@@ -338,9 +435,15 @@ fn build_match_output(
     // Persist pending-skill state for `skill_invocation_gate` to enforce.
     // Without this, the MANDATORY message below is just a polite request
     // — Claude can ignore it and use other tools without invoking the skill.
+    //
+    // Exception: if this skill was already invoked (and therefore marked
+    // satisfied) earlier this session, do NOT re-arm the gate. Re-detection
+    // happens routinely on cron-injected prompts and multi-turn conversations
+    // that mention a skill keyword; re-arming on every re-detection is the
+    // root cause of the per-turn re-blocking loop (SEN-skill-gate-refire).
     if let Some(session_id) = input.session_id.as_deref() {
         let skill_path_str = format!("~/.claude/skills/{skill}/SKILL.md");
-        write_pending_skill_state(fs, skill, &skill_path_str, session_id);
+        write_pending_skill_state_if_not_satisfied(fs, skill, &skill_path_str, session_id);
     }
 
     // Log the routing source for diagnostics

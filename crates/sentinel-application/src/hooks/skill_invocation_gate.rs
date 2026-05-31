@@ -153,6 +153,13 @@ pub fn process_posttool(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput 
 
     if cleared {
         clear_pending_state(ctx.fs, session_id);
+        // Record that this skill has been satisfied for the session so the
+        // skill_router will NOT re-arm the gate the next time it detects the
+        // same skill on a subsequent turn (e.g. cron-injected prompts that
+        // mention the skill keyword, or multi-turn conversations). Without
+        // this, re-detection unconditionally overwrites the pending marker
+        // with a fresh timestamp, causing the gate to block on every turn.
+        super::skill_router::mark_skill_satisfied(ctx.fs, session_id, &state.skill);
     }
     HookOutput::allow()
 }
@@ -197,6 +204,61 @@ fn read_target_matches(input: &HookInput, skill_path: &str, skill: &str) -> bool
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::{Path, PathBuf};
+
+    /// Real-filesystem adapter scoped to a temp directory. Used for tests that
+    /// exercise the full pending + satisfied state round-trip on disk, which the
+    /// in-memory `StubFs` cannot support (it always returns Err for reads).
+    struct TempDirFs {
+        home: PathBuf,
+    }
+
+    impl crate::hooks::FileSystemPort for TempDirFs {
+        fn home_dir(&self) -> Option<PathBuf> {
+            Some(self.home.clone())
+        }
+        fn read_to_string(&self, p: &Path) -> anyhow::Result<String> {
+            Ok(std::fs::read_to_string(p)?)
+        }
+        fn write(&self, p: &Path, c: &[u8]) -> anyhow::Result<()> {
+            if let Some(par) = p.parent() {
+                std::fs::create_dir_all(par)?;
+            }
+            Ok(std::fs::write(p, c)?)
+        }
+        fn create_dir_all(&self, p: &Path) -> anyhow::Result<()> {
+            Ok(std::fs::create_dir_all(p)?)
+        }
+        fn read_dir(&self, p: &Path) -> anyhow::Result<Vec<PathBuf>> {
+            Ok(std::fs::read_dir(p)?
+                .filter_map(|e| e.ok().map(|e| e.path()))
+                .collect())
+        }
+        fn exists(&self, p: &Path) -> bool {
+            p.exists()
+        }
+        fn is_dir(&self, p: &Path) -> bool {
+            p.is_dir()
+        }
+        fn metadata(&self, p: &Path) -> anyhow::Result<std::fs::Metadata> {
+            Ok(std::fs::metadata(p)?)
+        }
+        fn append(&self, p: &Path, c: &[u8]) -> anyhow::Result<()> {
+            use std::io::Write as _;
+            let mut f = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(p)?;
+            f.write_all(c)?;
+            Ok(())
+        }
+        fn remove_file(&self, p: &Path) -> anyhow::Result<()> {
+            if p.exists() {
+                std::fs::remove_file(p)?;
+            }
+            Ok(())
+        }
+    }
 
     #[test]
     fn test_is_stale_true_for_old_timestamp() {
@@ -371,6 +433,179 @@ mod tests {
         assert!(
             output.blocked.is_none(),
             "subagent Bash call must not be gated on the parent's pending skill",
+        );
+    }
+
+    /// Regression test for the per-turn re-blocking loop (SEN-skill-gate-refire).
+    ///
+    /// Sequence:
+    ///   Turn 1: skill_router writes pending marker for "linear".
+    ///   Turn 1: Claude invokes Skill("linear") → process_posttool clears pending
+    ///           AND marks "linear" as satisfied for the session.
+    ///   Turn 2: skill_router re-detects "linear" → build_match_output sees
+    ///           "linear" is already satisfied → does NOT write pending marker.
+    ///   Turn 2: gate MUST allow Bash (no pending state to block on).
+    #[test]
+    fn test_gate_allows_bash_after_skill_invoked_even_on_redetection() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let fs = TempDirFs {
+            home: tmp.path().to_path_buf(),
+        };
+        let session_id = "test-session-refire-regression";
+        let skill = "linear";
+        let skill_path = format!("~/.claude/skills/{skill}/SKILL.md");
+
+        // — Turn 1a: router writes pending marker —
+        super::super::skill_router::write_pending_skill_state(
+            &fs,
+            skill,
+            &skill_path,
+            session_id,
+        );
+
+        // Gate should block Bash at this point (pending marker exists).
+        {
+            let git = Box::leak(Box::new(crate::hooks::test_support::StubGit));
+            let process = Box::leak(Box::new(crate::hooks::test_support::StubProcess));
+            let memory_mcp = Box::leak(Box::new(crate::hooks::test_support::StubMemoryMcp));
+            let env = Box::leak(Box::new(crate::hooks::test_support::StubEnv::new()));
+            let fs_ref: &TempDirFs = &fs;
+            // SAFETY: we hold tmp alive for the whole test scope, so the
+            // reference is valid. The Box::leak for other ports is fine since
+            // tests are single-process and these tiny structs have no Drop.
+            let ctx = crate::hooks::HookContext {
+                git,
+                vector_store: None,
+                fs: fs_ref,
+                process,
+                llm: None,
+                memory_mcp,
+                env,
+            };
+            let pretool_input = HookInput {
+                session_id: Some(session_id.to_string()),
+                tool_name: Some("Bash".to_string()),
+                ..Default::default()
+            };
+            let out = process_pretool(&pretool_input, &ctx);
+            assert!(
+                out.blocked.is_some(),
+                "gate must block Bash when pending marker exists (pre-condition check)"
+            );
+        }
+
+        // — Turn 1b: Claude calls Skill("linear") → posttool clears pending
+        //            and records the skill as satisfied —
+        {
+            let git = Box::leak(Box::new(crate::hooks::test_support::StubGit));
+            let process = Box::leak(Box::new(crate::hooks::test_support::StubProcess));
+            let memory_mcp = Box::leak(Box::new(crate::hooks::test_support::StubMemoryMcp));
+            let env = Box::leak(Box::new(crate::hooks::test_support::StubEnv::new()));
+            let fs_ref: &TempDirFs = &fs;
+            let ctx = crate::hooks::HookContext {
+                git,
+                vector_store: None,
+                fs: fs_ref,
+                process,
+                llm: None,
+                memory_mcp,
+                env,
+            };
+            let posttool_input = HookInput {
+                session_id: Some(session_id.to_string()),
+                tool_name: Some("Skill".to_string()),
+                tool_input: Some(serde_json::json!({"skill": skill})),
+                ..Default::default()
+            };
+            let out = process_posttool(&posttool_input, &ctx);
+            assert!(out.blocked.is_none(), "posttool must not block");
+        }
+
+        // — Turn 2: router re-detects "linear" and would normally overwrite
+        //   the pending marker. With the fix, it must skip writing because
+        //   the skill is now in the satisfied set. —
+        super::super::skill_router::write_pending_skill_state_if_not_satisfied(
+            &fs,
+            skill,
+            &skill_path,
+            session_id,
+        );
+
+        // Gate must allow Bash — no pending state should exist.
+        {
+            let git = Box::leak(Box::new(crate::hooks::test_support::StubGit));
+            let process = Box::leak(Box::new(crate::hooks::test_support::StubProcess));
+            let memory_mcp = Box::leak(Box::new(crate::hooks::test_support::StubMemoryMcp));
+            let env = Box::leak(Box::new(crate::hooks::test_support::StubEnv::new()));
+            let fs_ref: &TempDirFs = &fs;
+            let ctx = crate::hooks::HookContext {
+                git,
+                vector_store: None,
+                fs: fs_ref,
+                process,
+                llm: None,
+                memory_mcp,
+                env,
+            };
+            let pretool_input = HookInput {
+                session_id: Some(session_id.to_string()),
+                tool_name: Some("Bash".to_string()),
+                ..Default::default()
+            };
+            let out = process_pretool(&pretool_input, &ctx);
+            assert!(
+                out.blocked.is_none(),
+                "gate MUST allow Bash after skill was invoked, even when router re-detects the same skill on a later turn"
+            );
+        }
+    }
+
+    /// Sanity: a genuinely new skill (never invoked this session) still blocks.
+    #[test]
+    fn test_gate_still_blocks_newly_detected_never_invoked_skill() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let fs = TempDirFs {
+            home: tmp.path().to_path_buf(),
+        };
+        let session_id = "test-session-new-skill";
+        let skill = "memory";
+        let skill_path = format!("~/.claude/skills/{skill}/SKILL.md");
+
+        // Mark a *different* skill as satisfied (simulates a prior invocation
+        // of "linear" — should have no effect on blocking "memory").
+        super::super::skill_router::mark_skill_satisfied(&fs, session_id, "linear");
+
+        // Router writes pending marker for the new, never-invoked skill "memory".
+        super::super::skill_router::write_pending_skill_state_if_not_satisfied(
+            &fs,
+            skill,
+            &skill_path,
+            session_id,
+        );
+
+        let git = Box::leak(Box::new(crate::hooks::test_support::StubGit));
+        let process = Box::leak(Box::new(crate::hooks::test_support::StubProcess));
+        let memory_mcp = Box::leak(Box::new(crate::hooks::test_support::StubMemoryMcp));
+        let env = Box::leak(Box::new(crate::hooks::test_support::StubEnv::new()));
+        let fs_ref: &TempDirFs = &fs;
+        let ctx = crate::hooks::HookContext {
+            git,
+            vector_store: None,
+            fs: fs_ref,
+            process,
+            llm: None,
+            memory_mcp,
+            env,
+        };
+        let pretool_input = HookInput {
+            session_id: Some(session_id.to_string()),
+            tool_name: Some("Bash".to_string()),
+            ..Default::default()
+        };
+        let out = process_pretool(&pretool_input, &ctx);
+        assert!(
+            out.blocked.is_some(),
+            "gate MUST still block a newly-detected skill that has never been invoked"
         );
     }
 }
