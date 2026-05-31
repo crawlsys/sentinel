@@ -199,23 +199,55 @@ fn format_rehydrate_instruction(
     }
 }
 
-/// Process `SessionStart` — inject persistent tasks into context
+/// Process `SessionStart` — inject persistent tasks + last-session prose.
+///
+/// Two independent context sources, either of which may be empty:
+///   1. The structured task graph (`tasks.json`) — incomplete tasks to resume.
+///   2. The prose `[Last Session]` summary (`session-summary.json`, written by
+///      [`super::session_summary`]) — what shipped / was in flight last time.
+///
+/// We inject whichever exist. A session that finished all its tasks still gets
+/// the prose summary ("last session you merged X, Y, Z"); a session killed
+/// mid-work gets both.
 pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     let session_id = input.session_id.as_deref().unwrap_or("unknown");
     let cwd = input.cwd.as_deref().unwrap_or(".");
     let proj_hash = project_hash(cwd);
 
+    let tasks_block = build_tasks_block(input, ctx, &proj_hash, session_id);
+    let summary_block = build_summary_block(ctx, &proj_hash, session_id);
+
+    match (tasks_block, summary_block) {
+        (None, None) => HookOutput::allow(),
+        (Some(t), None) => HookOutput::inject_context(HookEvent::SessionStart, &t),
+        (None, Some(s)) => HookOutput::inject_context(HookEvent::SessionStart, &s),
+        (Some(t), Some(s)) => {
+            // Prose summary first (orientation), then the structured task list.
+            let combined = format!("{s}\n\n{t}");
+            HookOutput::inject_context(HookEvent::SessionStart, &combined)
+        }
+    }
+}
+
+/// Build the structured persistent-tasks context block, or `None` when there's
+/// nothing to rehydrate (no file, current-session tasks, or no incomplete tasks).
+fn build_tasks_block(
+    input: &HookInput,
+    ctx: &HookContext<'_>,
+    proj_hash: &str,
+    session_id: &str,
+) -> Option<String> {
     // Read persistent tasks
-    let tasks = match read_persistent_tasks(ctx.fs, &proj_hash) {
+    let tasks = match read_persistent_tasks(ctx.fs, proj_hash) {
         Some(t) if !t.is_empty() => t,
-        _ => return HookOutput::allow(),
+        _ => return None,
     };
 
     // Check if these are from the current session (skip rehydration)
-    if let Some(meta) = read_meta(ctx.fs, &proj_hash) {
+    if let Some(meta) = read_meta(ctx.fs, proj_hash) {
         if is_current_session(&meta, session_id) {
             tracing::debug!("Persistent tasks are from current session — skipping rehydration");
-            return HookOutput::allow();
+            return None;
         }
     }
 
@@ -224,11 +256,12 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     let completed_count = tasks.iter().filter(|t| t.status == "completed").count();
 
     if incomplete.is_empty() {
-        return HookOutput::allow();
+        return None;
     }
 
+    let _ = input; // reserved for future per-input shaping
     // Read meta for timestamp
-    let time_str = read_meta(ctx.fs, &proj_hash).map_or_else(|| "unknown".to_string(), |m| relative_time(&m.updated_at));
+    let time_str = read_meta(ctx.fs, proj_hash).map_or_else(|| "unknown".to_string(), |m| relative_time(&m.updated_at));
 
     // Detect whether any task has blocking relationships
     let has_blocking = incomplete
@@ -312,7 +345,49 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
         format_rehydrate_instruction(incomplete.len(), has_blocking, ctx.autopilot_enabled());
     context.push_str(&instruction);
 
-    HookOutput::inject_context(HookEvent::SessionStart, &context)
+    Some(context)
+}
+
+/// Build the `[Last Session]` prose block from `session-summary.json`, or
+/// `None` when absent / from the current session / empty.
+///
+/// Mirrors the on-disk struct written by [`super::session_summary`] without a
+/// hard dependency on its exact field set (extra fields are ignored).
+fn build_summary_block(ctx: &HookContext<'_>, proj_hash: &str, session_id: &str) -> Option<String> {
+    let summary = super::session_summary::read_summary(ctx.fs, proj_hash)?;
+
+    // Skip a summary written by THIS session (e.g. SessionStart fired twice) —
+    // it would just echo our own teardown back at us.
+    if summary.session_id == session_id {
+        return None;
+    }
+
+    let when = relative_time(&summary.written_at);
+    let mut block = format!("[Last Session] ended {when}");
+    if !summary.branch.is_empty() {
+        let _ = write!(block, " on `{}`", summary.branch);
+    }
+    if !summary.head_sha.is_empty() {
+        let _ = write!(block, " @ {}", summary.head_sha);
+    }
+    let _ = write!(
+        block,
+        ".\nTasks last seen: {} completed, {} in progress, {} pending.",
+        summary.completed, summary.in_progress, summary.pending
+    );
+
+    if !summary.recent_commits.is_empty() {
+        block.push_str("\nRecently shipped (newest first):");
+        for c in summary.recent_commits.iter().take(10) {
+            let _ = write!(block, "\n  • {c}");
+        }
+    }
+    block.push_str(
+        "\n\nThis is orientation context from the prior session — not a directive. \
+         Use it to resume where work left off; the structured task list (if any) below is authoritative for what to do next.",
+    );
+
+    Some(block)
 }
 
 #[cfg(test)]
@@ -408,5 +483,30 @@ mod tests {
                     .is_none()
             }
         );
+    }
+
+    #[test]
+    fn summary_block_absent_yields_none() {
+        // No session-summary.json on disk for this hash → no prose block.
+        let ctx = crate::hooks::test_support::stub_ctx();
+        assert!(build_summary_block(&ctx, "zzzzzzzz", "any-session").is_none());
+    }
+
+    #[test]
+    fn no_tasks_and_no_summary_allows_quietly() {
+        // The combined path: neither source present → plain allow(), no context.
+        let input = HookInput {
+            session_id: Some("test-session".to_string()),
+            cwd: Some("/nonexistent/project".to_string()),
+            ..Default::default()
+        };
+        let ctx = crate::hooks::test_support::stub_ctx();
+        let output = process(&input, &ctx);
+        let has_ctx = output
+            .hook_specific_output
+            .as_ref()
+            .and_then(|h| h.additional_context.as_ref())
+            .is_some();
+        assert!(!has_ctx, "expected no context injection when both sources empty");
     }
 }

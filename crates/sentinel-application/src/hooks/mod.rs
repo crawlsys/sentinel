@@ -63,6 +63,7 @@ pub mod requirements_traceability_gate;
 pub mod session_end;
 pub mod session_index;
 pub mod session_init;
+pub mod session_summary;
 pub mod setup;
 pub mod skill_invocation_gate;
 pub mod skill_router;

@@ -592,19 +592,29 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
 
         // ── New events added from Claude Code v2.1.88 source analysis ──
         HookEvent::SessionEnd => {
+            let mk_ctx = |hook: &'static str| InvocationContext {
+                event: "SessionEnd",
+                hook,
+                tool: None,
+                session_id: input.session_id.as_deref(),
+                repo_root: repo_root_for_metrics.as_deref(),
+            };
+
             // Session cleanup — flush state, log session end (1.5s timeout!)
-            let end_output = time_and_record(
-                ctx.fs,
-                &InvocationContext {
-                    event: "SessionEnd",
-                    hook: "session_end",
-                    tool: None,
-                    session_id: input.session_id.as_deref(),
-                    repo_root: repo_root_for_metrics.as_deref(),
-                },
-                || hooks::session_end::process(&input, &ctx),
-            );
+            let end_output =
+                time_and_record(ctx.fs, &mk_ctx("session_end"), || {
+                    hooks::session_end::process(&input, &ctx)
+                });
             output.merge(&end_output);
+
+            // Session summary — write a prose "where we left off" note beside the
+            // persisted task graph so the next SessionStart resumes with context
+            // (read back by task_rehydrate). Fail-open; one git log + one write.
+            let summary_output =
+                time_and_record(ctx.fs, &mk_ctx("session_summary"), || {
+                    hooks::session_summary::process(&input, &ctx)
+                });
+            output.merge(&summary_output);
         }
 
         HookEvent::PostCompact => {
