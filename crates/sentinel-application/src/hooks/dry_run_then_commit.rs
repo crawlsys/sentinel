@@ -281,6 +281,43 @@ pub fn process(
         }
     }
 
+    // Step 1c — Bash tool short-circuit.
+    //
+    // The Bash tool schema only accepts {command, description, timeout,
+    // run_in_background} — there is nowhere to attach `_intent`,
+    // `_reasoning`, or `_expected_effect`. Demanding those fields on a
+    // Bash-tool git push/commit/merge creates an **unbreakable block**:
+    // the agent physically cannot supply them, and `hygiene_override` is
+    // unavailable in agent context. This is the same structural problem as
+    // the MCP read-only carve-out above (step 1b) — A3 is designed for MCP
+    // tool calls that CAN carry prose fields.
+    //
+    // Shell git operations (git push, git commit, git merge) are already
+    // governed by `commit_message_validator`, `pr_merge_gate`,
+    // `git_hygiene`, and `db_ops_gate`. A3 does not add safety for them.
+    //
+    // Safety boundary: `Catastrophic`-class Bash commands (e.g. `rm -rf /`,
+    // history rewrites, force-push to a shared branch) still block — but
+    // with a message that names the catastrophic-shell reason rather than
+    // demanding the impossible dry-run fields. Only `Irreversible`-class
+    // Bash (normal git push / commit / merge) is allowed through here.
+    if tool == "Bash" {
+        if matches!(class, ReversibilityClass::Catastrophic) {
+            return HookOutput::deny(format!(
+                "🔴 [Dry-Run Auditor] BLOCKED: Catastrophic-class shell command \
+                 refused. This command poses unrecoverable risk (e.g. destructive \
+                 filesystem removal, git history rewrite, force-push to a shared \
+                 branch). If this is intentional and you have explicit human \
+                 approval, invoke `hygiene_override` to proceed. (class: {class:?})"
+            ));
+        }
+        // Irreversible-class Bash (git push, git commit, git merge, etc.) — allow.
+        // The Bash schema cannot carry A3 dry-run prose fields; demanding them
+        // is an unbreakable block. Shell git ops are covered by other sentinel
+        // gates; A3 does not apply here.
+        return HookOutput::allow();
+    }
+
     // Need a session id to scope the approval marker. Without one we
     // can't track approval state — block defensively for irreversible+.
     let session_id = match &input.session_id {
@@ -479,8 +516,12 @@ mod tests {
     }
 
     fn irreversible_input() -> HookInput {
+        // Uses "Edit" (not "Bash") so these generic A3 tests are not affected by
+        // the Bash tool carve-out added in step 1c of process(). The carve-out
+        // allows Irreversible Bash through immediately, which would short-circuit
+        // all the tests that exercise dry-run field validation and auditor scoring.
         HookInput {
-            tool_name: Some("Bash".to_string()),
+            tool_name: Some("Edit".to_string()),
             session_id: Some("sess-1".to_string()),
             tool_input: Some(complete_tool_input()),
             ..Default::default()
@@ -496,7 +537,7 @@ mod tests {
     #[test]
     fn trivially_classified_actions_bypass_audit() {
         let fs = MockFs::new();
-        let classifier = classifier_with("Bash", ReversibilityClass::TriviallyReversible);
+        let classifier = classifier_with("Edit", ReversibilityClass::TriviallyReversible);
         let auditor = StaticAuditor::pass(0.99); // shouldn't be consulted
         let output = process(&irreversible_input(), &fs, &classifier, &auditor);
         assert!(
@@ -508,7 +549,7 @@ mod tests {
     #[test]
     fn reversible_with_effort_actions_bypass_audit() {
         let fs = MockFs::new();
-        let classifier = classifier_with("Bash", ReversibilityClass::ReversibleWithEffort);
+        let classifier = classifier_with("Edit", ReversibilityClass::ReversibleWithEffort);
         let auditor = StaticAuditor::pass(0.99);
         let output = process(&irreversible_input(), &fs, &classifier, &auditor);
         assert!(
@@ -522,7 +563,7 @@ mod tests {
     #[test]
     fn missing_intent_field_blocks_with_clear_message() {
         let fs = MockFs::new();
-        let classifier = classifier_with("Bash", ReversibilityClass::Irreversible);
+        let classifier = classifier_with("Edit", ReversibilityClass::Irreversible);
         let auditor = StaticAuditor::pass(0.95);
         let mut input = irreversible_input();
         if let Some(obj) = input.tool_input.as_mut().and_then(|v| v.as_object_mut()) {
@@ -544,7 +585,7 @@ mod tests {
     #[test]
     fn missing_session_id_blocks() {
         let fs = MockFs::new();
-        let classifier = classifier_with("Bash", ReversibilityClass::Irreversible);
+        let classifier = classifier_with("Edit", ReversibilityClass::Irreversible);
         let auditor = StaticAuditor::pass(0.95);
         let mut input = irreversible_input();
         input.session_id = None;
@@ -557,7 +598,7 @@ mod tests {
     #[test]
     fn irreversible_pass_high_confidence_allows_and_records_marker() {
         let fs = MockFs::new();
-        let classifier = classifier_with("Bash", ReversibilityClass::Irreversible);
+        let classifier = classifier_with("Edit", ReversibilityClass::Irreversible);
         let auditor = StaticAuditor::pass(0.95);
         let input = irreversible_input();
         let output = process(&input, &fs, &classifier, &auditor);
@@ -565,14 +606,14 @@ mod tests {
         // Marker recorded so re-running the same action short-circuits.
         let null = serde_json::Value::Null;
         let tool_input_ref = input.tool_input.as_ref().unwrap_or(&null);
-        let hash = action_hash_for("Bash", tool_input_ref);
+        let hash = action_hash_for("Edit", tool_input_ref);
         assert!(has_dry_run_approval(&fs, "sess-1", &hash));
     }
 
     #[test]
     fn second_call_with_same_action_short_circuits_without_audit() {
         let fs = MockFs::new();
-        let classifier = classifier_with("Bash", ReversibilityClass::Irreversible);
+        let classifier = classifier_with("Edit", ReversibilityClass::Irreversible);
         // First call uses a passing auditor → marker recorded.
         let pass_auditor = StaticAuditor::pass(0.95);
         let input = irreversible_input();
@@ -592,7 +633,7 @@ mod tests {
     #[test]
     fn pass_below_threshold_blocks_for_human_review() {
         let fs = MockFs::new();
-        let classifier = classifier_with("Bash", ReversibilityClass::Irreversible);
+        let classifier = classifier_with("Edit", ReversibilityClass::Irreversible);
         let auditor = StaticAuditor::pass(0.7);
         let output = process(&irreversible_input(), &fs, &classifier, &auditor);
         assert_eq!(output.blocked, Some(true));
@@ -610,7 +651,7 @@ mod tests {
     #[test]
     fn catastrophic_pass_high_confidence_still_escalates() {
         let fs = MockFs::new();
-        let classifier = classifier_with("Bash", ReversibilityClass::Catastrophic);
+        let classifier = classifier_with("Edit", ReversibilityClass::Catastrophic);
         let auditor = StaticAuditor::pass(0.99);
         let output = process(&irreversible_input(), &fs, &classifier, &auditor);
         assert_eq!(
@@ -632,7 +673,7 @@ mod tests {
     #[test]
     fn block_decision_denies_with_auditor_reason() {
         let fs = MockFs::new();
-        let classifier = classifier_with("Bash", ReversibilityClass::Irreversible);
+        let classifier = classifier_with("Edit", ReversibilityClass::Irreversible);
         let auditor = StaticAuditor::block("exfiltration risk");
         let output = process(&irreversible_input(), &fs, &classifier, &auditor);
         assert_eq!(output.blocked, Some(true));
@@ -649,7 +690,7 @@ mod tests {
     #[test]
     fn irreversible_auditor_error_blocks_with_retry_message() {
         let fs = MockFs::new();
-        let classifier = classifier_with("Bash", ReversibilityClass::Irreversible);
+        let classifier = classifier_with("Edit", ReversibilityClass::Irreversible);
         let auditor = StaticAuditor::err(AuditorError::Unavailable("connection refused".into()));
         let output = process(&irreversible_input(), &fs, &classifier, &auditor);
         assert_eq!(output.blocked, Some(true));
@@ -665,7 +706,7 @@ mod tests {
     #[test]
     fn catastrophic_auditor_error_blocks_and_explicitly_escalates() {
         let fs = MockFs::new();
-        let classifier = classifier_with("Bash", ReversibilityClass::Catastrophic);
+        let classifier = classifier_with("Edit", ReversibilityClass::Catastrophic);
         let auditor =
             StaticAuditor::err(AuditorError::TimedOut(std::time::Duration::from_secs(30)));
         let output = process(&irreversible_input(), &fs, &classifier, &auditor);
@@ -720,6 +761,141 @@ mod tests {
         };
         let output = process(&input, &fs, &classifier, &auditor);
         assert!(output.blocked.is_none());
+    }
+
+    // ---- Bug 1c: Bash tool carve-out ----
+    //
+    // The Bash tool schema cannot carry `_intent`/`_reasoning`/`_expected_effect`.
+    // Demanding those fields on an Irreversible Bash command (git push, git commit,
+    // git merge) creates an unbreakable block — the agent cannot supply them, and
+    // `hygiene_override` is unavailable in agent context.
+    //
+    // Fix: Irreversible-class Bash is allowed through (shell git ops are governed
+    // by other gates). Catastrophic-class Bash (rm -rf, history rewrite, force-push
+    // to shared branch) still blocks — but with a message that names the
+    // catastrophic-shell reason rather than demanding the impossible dry-run fields.
+
+    fn bash_git_push_input() -> HookInput {
+        HookInput {
+            tool_name: Some("Bash".to_string()),
+            session_id: Some("sess-bash".to_string()),
+            tool_input: Some(serde_json::json!({
+                "command": "git push origin main",
+                "description": "push release commit"
+                // No _intent/_reasoning/_expected_effect — Bash schema doesn't have them
+            })),
+            ..Default::default()
+        }
+    }
+
+    fn bash_catastrophic_input() -> HookInput {
+        HookInput {
+            tool_name: Some("Bash".to_string()),
+            session_id: Some("sess-bash".to_string()),
+            tool_input: Some(serde_json::json!({
+                "command": "git push --force origin main",
+                "description": "force-push to main (catastrophic)"
+            })),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn bash_irreversible_git_push_is_allowed_without_dry_run_fields() {
+        // Regression test: Bash `git push` classified Irreversible was previously
+        // blocked with a demand for _intent/_reasoning/_expected_effect that the
+        // Bash schema cannot carry — an unbreakable block in agent context.
+        // The fix: Irreversible Bash is allowed through (step 1c carve-out).
+        let fs = MockFs::new();
+        let classifier = classifier_with("Bash", ReversibilityClass::Irreversible);
+        let auditor = StaticAuditor::block("should never be called");
+        let output = process(&bash_git_push_input(), &fs, &classifier, &auditor);
+        assert!(
+            output.blocked.is_none(),
+            "Irreversible Bash (git push) must be allowed — Bash schema can't carry dry-run fields"
+        );
+    }
+
+    #[test]
+    fn bash_catastrophic_still_blocks_but_does_not_demand_intent_fields() {
+        // Catastrophic Bash (force-push to main, rm -rf, history rewrite) must
+        // still be blocked — but the message must NOT demand `_intent`/`_reasoning`/
+        // `_expected_effect` (those fields are impossible to supply via Bash schema).
+        // Instead the message names the catastrophic-shell reason.
+        let fs = MockFs::new();
+        let classifier = classifier_with("Bash", ReversibilityClass::Catastrophic);
+        let auditor = StaticAuditor::pass(0.99); // should never be reached
+        let output = process(&bash_catastrophic_input(), &fs, &classifier, &auditor);
+        assert_eq!(
+            output.blocked,
+            Some(true),
+            "Catastrophic Bash must still be blocked"
+        );
+        let reason = output
+            .hook_specific_output
+            .as_ref()
+            .and_then(|h| h.permission_decision_reason.as_deref())
+            .unwrap_or("");
+        // Must mention catastrophic risk, not demand the impossible dry-run fields.
+        assert!(
+            reason.contains("Catastrophic") || reason.contains("catastrophic"),
+            "block reason should mention catastrophic risk: {reason}"
+        );
+        assert!(
+            !reason.contains("_intent"),
+            "block reason must NOT demand _intent fields (Bash schema can't carry them): {reason}"
+        );
+    }
+
+    #[test]
+    fn mcp_irreversible_without_dry_run_fields_still_denied_unchanged() {
+        // Verify that the Bash carve-out does NOT affect MCP tool behavior:
+        // a mutating MCP tool without dry-run fields must still be blocked.
+        // This is the unchanged true-positive path — existing behavior preserved.
+        let fs = MockFs::new();
+        let classifier = StaticReversibilityClassifier::empty(); // Irreversible default
+        let auditor = StaticAuditor::pass(0.99);
+        let input = HookInput {
+            tool_name: Some("mcp__hyperswitch__create_payment".to_string()),
+            session_id: Some("sess-mcp".to_string()),
+            tool_input: Some(serde_json::json!({})), // no dry-run fields
+            ..Default::default()
+        };
+        let output = process(&input, &fs, &classifier, &auditor);
+        assert_eq!(
+            output.blocked,
+            Some(true),
+            "MCP mutating tool without dry-run fields must still be blocked (unchanged behavior)"
+        );
+        let reason = output
+            .hook_specific_output
+            .as_ref()
+            .and_then(|h| h.permission_decision_reason.as_deref())
+            .unwrap_or("");
+        assert!(
+            reason.contains("_intent"),
+            "MCP block reason should still demand _intent: {reason}"
+        );
+    }
+
+    #[test]
+    fn mcp_readonly_still_allowed_unchanged() {
+        // Verify that MCP read-only carve-out (step 1b) is still in effect:
+        // the Bash carve-out must not interfere with existing MCP behavior.
+        let fs = MockFs::new();
+        let classifier = StaticReversibilityClassifier::empty(); // Irreversible default
+        let auditor = StaticAuditor::block("should never be called");
+        let input = HookInput {
+            tool_name: Some("mcp__doppler__mcp_list_servers".to_string()),
+            session_id: Some("sess-mcp".to_string()),
+            tool_input: Some(serde_json::json!({})),
+            ..Default::default()
+        };
+        let output = process(&input, &fs, &classifier, &auditor);
+        assert!(
+            output.blocked.is_none(),
+            "MCP read-only tool must still be allowed (unchanged behavior)"
+        );
     }
 
     // ---- Bug 1a: read-only MCP method short-circuit ----
