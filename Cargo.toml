@@ -9,6 +9,10 @@ members = [
     "crates/sentinel-npx-interceptor",
     "crates/sentinel-legatus",
 ]
+exclude = [
+    "tools/sentinel-viz-api",
+    "tools/sentinel-viz-next",
+]
 
 [workspace.package]
 version = "0.4.1"
