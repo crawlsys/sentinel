@@ -77,9 +77,40 @@ unsubscribe_from_issue = "ReversibleWithEffort"
 switch_account = "ReversibleWithEffort"
 add_account = "ReversibleWithEffort"
 remove_account = "ReversibleWithEffort"
+# Projects / milestones / documents / cycles / labels / initiatives / roadmaps —
+# planning artifacts, all recoverable (archive/update/delete in Linear UI).
+# Without these the unknown-MCP default (Irreversible) routes them through the
+# A3 dry-run gate, whose _intent/_reasoning/_expected_effect fields Linear's API
+# rejects (Argument Validation Error) — the same deadlock class as PR #23.
+create_project = "ReversibleWithEffort"
+update_project = "ReversibleWithEffort"
+create_milestone = "ReversibleWithEffort"
+update_milestone = "ReversibleWithEffort"
+create_document = "ReversibleWithEffort"
+update_document = "ReversibleWithEffort"
+create_label = "ReversibleWithEffort"
+update_label = "ReversibleWithEffort"
+create_cycle = "ReversibleWithEffort"
+update_cycle = "ReversibleWithEffort"
+create_initiative = "ReversibleWithEffort"
+update_initiative = "ReversibleWithEffort"
+create_roadmap = "ReversibleWithEffort"
+create_custom_view = "ReversibleWithEffort"
+create_attachment = "ReversibleWithEffort"
+link_attachment_url = "ReversibleWithEffort"
+update_project_status = "ReversibleWithEffort"
+create_project_milestone = "ReversibleWithEffort"
+archive_initiative = "ReversibleWithEffort"
+archive_project_status = "ReversibleWithEffort"
 # --- Irreversible ---
 delete_issue = "Irreversible"
 delete_comment = "Irreversible"
+delete_project = "Irreversible"
+delete_document = "Irreversible"
+delete_milestone = "Irreversible"
+archive_project = "Irreversible"
+delete_label = "Irreversible"
+delete_initiative = "Irreversible"
 
 # Confluence — org documentation. Pages are visible to others as soon as
 # they're published; recovery requires the wiki's version-history UX.
