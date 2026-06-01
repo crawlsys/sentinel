@@ -1201,7 +1201,7 @@ mod step_tools_tests {
         assert!(!result.success);
         let err = result.error.unwrap();
         assert!(
-            err.contains("insufficient"),
+            err.to_lowercase().contains("insufficient"),
             "error mentions insufficient: {err}"
         );
         // No chain mutation on failure.
