@@ -455,6 +455,24 @@ fn tool_definitions() -> serde_json::Value {
                 }
             },
             {
+                "name": "sentinel__replay_phase",
+                "description": "Time-travel: re-attempt a workflow phase by forking the phase graph from the checkpoint just before that phase was last completed. Drops the target phase (and later) from the completed set so it is re-run and re-judged fresh. Requires SENTINEL_GRAPH_ENGINE=1.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "skill": {
+                            "type": "string",
+                            "description": "Skill name (e.g., 'linear')"
+                        },
+                        "phase_id": {
+                            "type": "string",
+                            "description": "Phase id to replay (e.g., 'review')"
+                        }
+                    },
+                    "required": ["skill", "phase_id"]
+                }
+            },
+            {
                 "name": "sentinel__regenerate_claude_md",
                 "description": "Regenerate ~/.claude/CLAUDE.md from the compiled template. Re-counts components, refreshes project list and Linear accounts. Takes no arguments.",
                 "inputSchema": {
@@ -737,6 +755,9 @@ async fn handle_request(
             }
             if tool_name == "sentinel__get_workflow_progress" {
                 return handle_get_workflow_progress(request, &arguments, state).await;
+            }
+            if tool_name == "sentinel__replay_phase" {
+                return handle_replay_phase(request, &arguments, state).await;
             }
 
             // CLAUDE.md management — shared implementation with the CLI
@@ -1179,6 +1200,22 @@ async fn handle_submit_phase(
         }
     }
 
+    // Phase-engine shadow: when SENTINEL_GRAPH_ENGINE=1, drive the
+    // langgraph-core phase graph as the authoritative, durable checkpoint
+    // for this verdict. Runs alongside the legacy advance_sequential
+    // (which proof_engine still performs) until step 5 flips authority.
+    // Best-effort: a graph error never blocks the judge result.
+    if std::env::var("SENTINEL_GRAPH_ENGINE").as_deref() == Ok("1") {
+        let passed = proof_result.is_ok();
+        let session_id = { state.read().await.session_id.clone() };
+        if let Err(e) =
+            apply_graph_verdict_shadow(&skill, &session_id, &phase_id, passed).await
+        {
+            warn!(skill = %skill, phase = %phase_id, error = %e,
+                "phase-graph shadow update failed (non-fatal)");
+        }
+    }
+
     match proof_result {
         Ok(_) => {
             // SUCCESS — minimal info, no judge reasoning exposed
@@ -1202,6 +1239,46 @@ async fn handle_submit_phase(
             )
         }
     }
+}
+
+/// Drive the langgraph-core phase graph for a single judge verdict.
+///
+/// Compiles the skill's workflow into a checkpointed graph (sqlite under
+/// `~/.claude/sentinel/state/phase-graphs/{session}.db`) and records the
+/// verdict via `apply_verdict`, which advances on pass / loops back on fail.
+/// This is the durable authority for phase progression that powers
+/// time-travel and streaming; it mirrors the `WorkflowState` transition the
+/// legacy `advance_sequential` produces.
+async fn apply_graph_verdict_shadow(
+    skill: &str,
+    session_id: &str,
+    phase_id: &str,
+    passed: bool,
+) -> anyhow::Result<()> {
+    let workflow_configs = load_workflow_configs();
+    let Some(workflow) = workflow_configs.get(skill) else {
+        // No workflow definition — nothing to drive.
+        return Ok(());
+    };
+
+    let db_dir = sentinel_infrastructure::config::config_dir()
+        .parent()
+        .map(|p| p.join("state").join("phase-graphs"))
+        .ok_or_else(|| anyhow::anyhow!("cannot resolve sentinel state dir"))?;
+    std::fs::create_dir_all(&db_dir)?;
+    let db_path = db_dir.join(format!("{session_id}.db"));
+    let db_path = db_path.to_string_lossy().to_string();
+
+    let saver = sentinel_graph::phase_saver(&db_path)
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let graph = sentinel_graph::compile_skill_graph(workflow, saver)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    graph
+        .apply_verdict(skill, session_id, phase_id, passed)
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    Ok(())
 }
 
 /// Helper: Load skill steps config from the config directory
@@ -1463,6 +1540,7 @@ async fn handle_get_workflow_progress(
         }
     };
 
+    let session_id_for_graph = { Some(state.read().await.session_id.clone()) };
     let s = state.read().await;
     let steps_config = load_steps_config(&skill);
     let workflow_configs = load_workflow_configs();
@@ -1587,7 +1665,7 @@ async fn handle_get_workflow_progress(
         0
     };
 
-    let result = serde_json::json!({
+    let mut result = serde_json::json!({
         "skill": skill,
         "phases": phases_list,
         "overall": {
@@ -1597,7 +1675,127 @@ async fn handle_get_workflow_progress(
         }
     });
 
+    // Streaming projection: when the graph engine is armed, attach the
+    // durable checkpoint history so callers (dashboard / JSONL) can render
+    // the per-phase progression as it was recorded over time.
+    drop(s);
+    if std::env::var("SENTINEL_GRAPH_ENGINE").as_deref() == Ok("1") {
+        if let Some(checkpoints) = graph_checkpoint_projection(&skill, session_id_for_graph.as_deref()).await {
+            if let Some(obj) = result.as_object_mut() {
+                obj.insert("graph_checkpoints".to_string(), checkpoints);
+            }
+        }
+    }
+
     JsonRpcResponse::success(request.id.clone(), mcp_tool_result(true, result))
+}
+
+/// Compile the skill graph for a session and project its checkpoint history
+/// to a JSON array (oldest first). Best-effort: returns None on any error so
+/// the progress response degrades gracefully.
+async fn graph_checkpoint_projection(
+    skill: &str,
+    session_id: Option<&str>,
+) -> Option<serde_json::Value> {
+    let session_id = session_id?;
+    let workflow_configs = load_workflow_configs();
+    let workflow = workflow_configs.get(skill)?;
+    let db_path = phase_graph_db_path(session_id).ok()?;
+    let saver = sentinel_graph::phase_saver(&db_path).await.ok()?;
+    let graph = sentinel_graph::compile_skill_graph(workflow, saver).ok()?;
+    let history = graph.phase_history(session_id).await.ok()?;
+    let entries: Vec<serde_json::Value> = history
+        .iter()
+        .map(|st| {
+            serde_json::json!({
+                "current_phase": st.current_phase,
+                "completed_phases": st.completed_phases,
+                "complete": st.complete,
+            })
+        })
+        .collect();
+    Some(serde_json::json!(entries))
+}
+
+/// Resolve the per-session phase-graph sqlite path under the sentinel state dir.
+fn phase_graph_db_path(session_id: &str) -> anyhow::Result<String> {
+    let dir = sentinel_infrastructure::config::config_dir()
+        .parent()
+        .map(|p| p.join("state").join("phase-graphs"))
+        .ok_or_else(|| anyhow::anyhow!("cannot resolve sentinel state dir"))?;
+    std::fs::create_dir_all(&dir)?;
+    Ok(dir.join(format!("{session_id}.db")).to_string_lossy().to_string())
+}
+
+/// Handle `sentinel__replay_phase` — time-travel fork to re-run a phase.
+async fn handle_replay_phase(
+    request: &JsonRpcRequest,
+    args: &serde_json::Value,
+    state: &Arc<RwLock<SessionState>>,
+) -> JsonRpcResponse {
+    let Some(skill) = args.get("skill").and_then(|v| v.as_str()) else {
+        return JsonRpcResponse::success(
+            request.id.clone(),
+            mcp_tool_result(false, serde_json::json!({"error": "Missing 'skill'"})),
+        );
+    };
+    let Some(phase_id) = args.get("phase_id").and_then(|v| v.as_str()) else {
+        return JsonRpcResponse::success(
+            request.id.clone(),
+            mcp_tool_result(false, serde_json::json!({"error": "Missing 'phase_id'"})),
+        );
+    };
+    if std::env::var("SENTINEL_GRAPH_ENGINE").as_deref() != Ok("1") {
+        return JsonRpcResponse::success(
+            request.id.clone(),
+            mcp_tool_result(
+                false,
+                serde_json::json!({"error": "replay_phase requires SENTINEL_GRAPH_ENGINE=1"}),
+            ),
+        );
+    }
+
+    let workflow_configs = load_workflow_configs();
+    let Some(workflow) = workflow_configs.get(skill) else {
+        return JsonRpcResponse::success(
+            request.id.clone(),
+            mcp_tool_result(false, serde_json::json!({"error": format!("No workflow for '{skill}'")})),
+        );
+    };
+    let session_id = { state.read().await.session_id.clone() };
+
+    let outcome = async {
+        let db_path = phase_graph_db_path(&session_id)?;
+        let saver = sentinel_graph::phase_saver(&db_path)
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let graph = sentinel_graph::compile_skill_graph(workflow, saver)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        graph
+            .replay_phase(skill, &session_id, phase_id)
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))
+    }
+    .await;
+
+    match outcome {
+        Ok(forked) => JsonRpcResponse::success(
+            request.id.clone(),
+            mcp_tool_result(
+                true,
+                serde_json::json!({
+                    "skill": skill,
+                    "replayed_phase": phase_id,
+                    "current_phase": forked.current_phase,
+                    "completed_phases": forked.completed_phases,
+                }),
+            ),
+        ),
+        Err(e) => JsonRpcResponse::success(
+            request.id.clone(),
+            mcp_tool_result(false, serde_json::json!({"error": format!("replay failed: {e}")})),
+        ),
+    }
 }
 
 /// Format MCP tool result in the standard content array format

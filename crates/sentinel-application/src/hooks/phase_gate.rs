@@ -1107,6 +1107,20 @@ fn check_protected_path_write(
     let block_reason = reason.or(canonical_reason);
 
     if let Some(reason) = block_reason {
+        // Operator-armed self-development bypass. When SENTINEL_ALLOW_INFRA_EDITS=1
+        // is set in the operator's environment (NOT settable by an attacker who can
+        // only inject tool-result text — env is fixed at the Claude Code process
+        // launch), allow edits to the sentinel REPO SOURCE so sentinel can be
+        // developed on itself. Scoped to the repo-source reason ONLY: the live
+        // ~/.claude/sentinel config/state, settings.json (hook registrations), the
+        // compiled sentinel binary, and phase/skill files stay protected even when
+        // armed (least-privilege — Attack #201 still holds for everything that can
+        // neuter a RUNNING engine).
+        let armed = std::env::var("SENTINEL_ALLOW_INFRA_EDITS").as_deref() == Ok("1");
+        if infra_source_bypass(reason, armed) {
+            return None;
+        }
+
         // Allow editing SKILL.md files for skills OTHER than the active workflow skill.
         // The active skill's SKILL.md is always protected (prevents self-modification),
         // but non-active skills should remain editable during normal work.
@@ -1178,6 +1192,18 @@ fn extract_skill_name_from_path(normalized: &str) -> Option<&str> {
     } else {
         None
     }
+}
+
+/// Whether the operator-armed self-development bypass applies to this block
+/// `reason`. Pure (no env read) so it is deterministically testable.
+///
+/// Only the repo-source reason (`"sentinel infrastructure source code"`) is
+/// bypassable, and only when `armed`. Every other protected reason —
+/// live config/state, hook registrations, the sentinel binary, phase/skill
+/// files — is never bypassed, so an armed self-dev session still cannot
+/// neuter a running engine.
+fn infra_source_bypass(reason: &str, armed: bool) -> bool {
+    armed && reason == "sentinel infrastructure source code"
 }
 
 /// Textual path check for all protected paths.
@@ -2034,6 +2060,29 @@ mod tests {
         // it is a dependency, not enforcement infrastructure)
         let vulcan = "/c/Users/garys/Documents/GitHub/vulcan-mcp-sdk-rust/crates/vulcan/src/lib.rs";
         assert_eq!(check_protected_textual(vulcan), None);
+    }
+
+    #[test]
+    fn test_infra_source_bypass_only_when_armed_and_only_repo_source() {
+        // Repo source is bypassable only when armed.
+        assert!(infra_source_bypass("sentinel infrastructure source code", true));
+        assert!(!infra_source_bypass("sentinel infrastructure source code", false));
+
+        // Reasons that can neuter a running engine are NEVER bypassed, even armed.
+        for reason in [
+            "sentinel config/state directory",
+            "hook registration file",
+            "MCP server registration file",
+            "sentinel binary file",
+            "phase file modification",
+            "skill definition file",
+            "skill phases directory",
+        ] {
+            assert!(
+                !infra_source_bypass(reason, true),
+                "reason '{reason}' must never be bypassed even when armed"
+            );
+        }
     }
 
     #[test]
