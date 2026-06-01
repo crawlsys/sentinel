@@ -46,7 +46,7 @@ sentinel mcp                           Start MCP server over stdio
 
 ## MCP Server Tools
 
-The in-repo MCP host (`sentinel mcp`, defined in `crates/sentinel-cli/src/mcp_cmd.rs`) exposes 15 tools via Claude Code (`mcp__sentinel__<tool>`):
+The in-repo MCP host (`sentinel mcp`, defined in `crates/sentinel-cli/src/mcp_cmd.rs`) exposes 16 tools via Claude Code (`mcp__sentinel__<tool>`):
 
 | Tool | Description |
 |------|-------------|
@@ -65,6 +65,7 @@ The in-repo MCP host (`sentinel mcp`, defined in `crates/sentinel-cli/src/mcp_cm
 | `route_capability` | Consult the A2 capability router to pick the best-fit agent for a unit of work |
 | `delegate_codex` | Delegate an adversarial/code-reasoning task to the Codex worker model (via OpenRouter) |
 | `delegate_kimi_context_scan` | Delegate a cheap large-context scan to the Kimi worker model (via OpenRouter) |
+| `replay_phase` | Time-travel replay of a skill phase by forking from the checkpoint before it (first-class QA-failed re-attempt) |
 
 ### CLAUDE.md Self-Maintenance
 
