@@ -24,25 +24,10 @@ pub fn process(input: &HookInput) -> HookOutput {
 
     let op = tool.strip_prefix("mcp__linear__").unwrap_or("");
 
-    // Issue updated — check if state changed to "In Progress"
-    if op == "update_issue" {
-        if let Some(state_id) = extract_state_change(input) {
-            return HookOutput::inject_context(
-                HookEvent::PostToolUse,
-                format!(
-                    "[Linear Lifecycle] Issue state changed (state_id: {state_id}). \
-                     If this issue is now In Progress, consider creating a monitoring loop:\n\
-                     ```\n\
-                     CronCreate(cron: \"47 * * * *\", recurring: true,\n\
-                       prompt: \"Check the current Linear issue status. \
-                     If it's been In Progress for >24h without commits, remind Gary. \
-                     If blocked, identify the blocker. \
-                     If done, remind to update Linear status.\")\n\
-                     ```"
-                ),
-            );
-        }
-    }
+    // NOTE: the `update_issue` + `state_id` → CronCreate lifecycle monitor was
+    // migrated to the declarative `autocron` hook (rule `linear_state_change`),
+    // so cron emission lives in one data-driven place. This hook keeps only the
+    // `create_issue` subscribe nudge (advisory prose, not a cron).
 
     // Issue created — remind to subscribe
     if op == "create_issue" {
@@ -57,21 +42,14 @@ pub fn process(input: &HookInput) -> HookOutput {
     HookOutput::allow()
 }
 
-/// Extract `state_id` from `update_issue` tool input if present.
-fn extract_state_change(input: &HookInput) -> Option<String> {
-    let tool_input = input.tool_input.as_ref()?;
-    tool_input
-        .get("state_id")
-        .and_then(|v| v.as_str())
-        .map(String::from)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn test_detects_issue_state_change() {
+    fn test_state_change_cron_migrated_to_autocron() {
+        // The state_id → CronCreate monitor moved to autocron::linear_state_change;
+        // this hook no longer emits for update_issue (tested in autocron).
         let input = HookInput {
             tool_name: Some("mcp__linear__update_issue".to_string()),
             tool_input: Some(serde_json::json!({
@@ -80,13 +58,7 @@ mod tests {
             })),
             ..Default::default()
         };
-        let output = process(&input);
-        let ctx = output
-            .hook_specific_output
-            .as_ref()
-            .and_then(|h| h.additional_context.as_deref());
-        assert!(ctx.unwrap().contains("Linear Lifecycle"));
-        assert!(ctx.unwrap().contains("CronCreate"));
+        assert!(process(&input).hook_specific_output.is_none());
     }
 
     #[test]

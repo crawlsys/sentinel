@@ -1496,10 +1496,12 @@ something changes.
 calls, manual `gh pr checks` loops) when a cron or loop does the same
 thing asynchronously. The cost of spinning one up is a few seconds;
 the saving is minutes of context.
-- The Session Automation block above already schedules four mandatory
-crons (git hygiene, worktree cleanup, task audit, Linear cache refresh)
-— those fire whether you schedule them or not. Your job is to add
-*work-specific* crons on top when the work calls for them.
+- The Session Automation block above already schedules three mandatory
+crons (git hygiene, worktree cleanup, task audit) — those fire whether
+you schedule them or not. (The Linear cache is refreshed by the
+SessionStart key-cache path + the inbound-sync machinery, not by a
+CronCreate.) Your job is to add *work-specific* crons on top when the
+work calls for them.
 
 **Senior-engineering bar:**
 - **Think before you act on non-trivial changes.** Use

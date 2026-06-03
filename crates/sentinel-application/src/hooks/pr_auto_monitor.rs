@@ -67,42 +67,21 @@ pub fn process(input: &HookInput) -> HookOutput {
         None => return HookOutput::allow(),
     };
 
-    // Detect `gh pr create` — PR was just created
-    if cmd.contains("gh pr create") {
-        // Extract PR number from tool_result if available
-        let pr_ref = extract_pr_from_result(input).unwrap_or_else(|| "the new PR".to_string());
-
-        return HookOutput::inject_context(
-            HookEvent::PostToolUse,
-            format!(
-                "[PR Auto-Monitor] PR created ({pr_ref}). \
-                 Create a monitoring loop:\n\
-                 ```\n\
-                 CronCreate(cron: \"*/5 * * * *\", recurring: true,\n\
-                   prompt: \"Check PR {pr_ref}: run `gh pr checks` for CI status, \
-                 `gh pr view --comments` for new reviews. If CI fails, diagnose. \
-                 If new comments, summarize. If all green + approved, tell Gary it's ready to merge.\")\n\
-                 ```"
-            ),
-        );
-    }
-
-    // Detect `git push` to a non-main branch — likely pushing to PR
-    if cmd.contains("git push") && !cmd.contains("main") && !cmd.contains("master") {
-        return HookOutput::inject_context(
-            HookEvent::PostToolUse,
-            "[PR Auto-Monitor] Push detected. If this branch has an open PR, \
-             check CI status in ~2 minutes with `gh pr checks`."
-                .to_string(),
-        );
-    }
+    // NOTE: `gh pr create` (→ CronCreate) and `git push` to a PR branch are now
+    // handled by the declarative `autocron` hook (rules `pr_created` /
+    // `pr_branch_push`), which arms self-terminating, deduped monitors. Those
+    // branches were removed from here so cron emission lives in ONE data-driven
+    // place. This hook keeps only the merge-to-main verify/cleanup checklist,
+    // which is advisory prose (not a cron).
 
     // Detect merge to main — verify push + changelog. When the branch being
     // merged is named `worktree-*`, surface the exact cleanup commands so
     // the orphaned local + remote refs don't pile up the way they did before.
-    if (cmd.contains("git merge") && (cmd.contains("main") || cmd.contains("--no-edit")))
-        || cmd.contains("git merge --no-edit")
-    {
+    //
+    // Guard tightened (audit gap #5): require an explicit `main`/`master` target
+    // so a non-main `git merge feat/x --no-edit` (merging a branch INTO a feature
+    // branch) no longer trips the "Merge to main detected" message.
+    if cmd.contains("git merge") && (cmd.contains("main") || cmd.contains("master")) {
         // SEN-3: only suggest `git push` when a remote is actually configured.
         let push_step = if has_git_remote(input.cwd.as_deref()) {
             "1. Push to remote: `git push`"
@@ -145,7 +124,10 @@ fn extract_bash_command(input: &HookInput) -> Option<&str> {
 }
 
 /// Try to extract a PR number or URL from the tool result.
-fn extract_pr_from_result(input: &HookInput) -> Option<String> {
+///
+/// `pub(crate)` so the declarative `autocron` hook reuses the exact same
+/// extraction (single source of truth for `{pr_ref}` — closes audit gap #5).
+pub(crate) fn extract_pr_from_result(input: &HookInput) -> Option<String> {
     let result = input.tool_result.as_ref()?;
     let text = result
         .as_str()
@@ -184,30 +166,21 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_detects_gh_pr_create() {
-        let output = process(&bash_input("gh pr create --title 'Fix bug' --body 'stuff'"));
-        let ctx = output
-            .hook_specific_output
-            .as_ref()
-            .and_then(|h| h.additional_context.as_deref());
-        assert!(ctx.unwrap().contains("PR Auto-Monitor"));
-        assert!(ctx.unwrap().contains("CronCreate"));
-    }
+    // `gh pr create` and `git push`-to-PR-branch cron emission migrated to the
+    // `autocron` hook (rules pr_created / pr_branch_push) — tested there. This
+    // hook no longer emits for them; it only keeps the merge-to-main checklist.
 
     #[test]
-    fn test_detects_git_push_non_main() {
-        let output = process(&bash_input("git push -u origin feat/my-branch"));
-        let ctx = output
+    fn test_gh_pr_create_no_longer_handled_here() {
+        // Migrated to autocron::pr_created — pr_auto_monitor stays silent now.
+        assert!(process(&bash_input("gh pr create --title x"))
             .hook_specific_output
-            .as_ref()
-            .and_then(|h| h.additional_context.as_deref());
-        assert!(ctx.unwrap().contains("PR Auto-Monitor"));
+            .is_none());
     }
 
     #[test]
     fn test_detects_merge_to_main() {
-        let output = process(&bash_input("git merge worktree-feat+thing --no-edit"));
+        let output = process(&bash_input("git merge worktree-feat+thing --no-edit main"));
         let ctx = output
             .hook_specific_output
             .as_ref()
@@ -216,18 +189,12 @@ mod tests {
     }
 
     #[test]
-    fn test_ignores_git_push_main() {
-        let output = process(&bash_input("git push origin main"));
-        // Push to main is fine — no monitor needed
-        assert!(
-            output.hook_specific_output.is_none()
-                || output
-                    .hook_specific_output
-                    .as_ref()
-                    .and_then(|h| h.additional_context.as_deref())
-                    .map(|c| !c.contains("PR Auto-Monitor"))
-                    .unwrap_or(true)
-        );
+    fn test_non_main_no_edit_merge_does_not_trip() {
+        // Audit gap #5: merging a branch INTO a feature branch must NOT be
+        // mistaken for a merge to main now that the guard requires main/master.
+        assert!(process(&bash_input("git merge feat/foo --no-edit"))
+            .hook_specific_output
+            .is_none());
     }
 
     #[test]
@@ -262,7 +229,7 @@ mod tests {
 
         let input = HookInput {
             tool_name: Some("Bash".to_string()),
-            tool_input: Some(serde_json::json!({"command": "git merge feat/foo --no-edit"})),
+            tool_input: Some(serde_json::json!({"command": "git merge feat/foo --no-edit main"})),
             cwd: Some(tmp.path().to_string_lossy().into_owned()),
             ..Default::default()
         };
@@ -297,7 +264,7 @@ mod tests {
 
         let input = HookInput {
             tool_name: Some("Bash".to_string()),
-            tool_input: Some(serde_json::json!({"command": "git merge feat/foo --no-edit"})),
+            tool_input: Some(serde_json::json!({"command": "git merge feat/foo --no-edit main"})),
             cwd: Some(tmp.path().to_string_lossy().into_owned()),
             ..Default::default()
         };

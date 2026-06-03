@@ -8,6 +8,7 @@ pub mod account_cascade;
 pub mod activity_tracker;
 pub mod agent_revocation;
 pub mod audit_extract;
+pub mod autocron;
 mod block_context;
 pub mod bug_task_gate;
 pub mod build_auto_monitor;
@@ -260,8 +261,10 @@ pub const HOOK_NAMES: &[&str] = &[
     "activity_tracker",
     "agent_revocation",
     "audit_extract",
+    "autocron",
     "bug_task_gate",
     "build_auto_monitor",
+    "build_notify",
     "catastrophic_escalation",
     "claim_reality_check",
     "commit_hygiene",
@@ -280,6 +283,7 @@ pub const HOOK_NAMES: &[&str] = &[
     "evidence_collector",
     "execution_log",
     "git_hygiene",
+    "glass_break_gate",
     "good_citizen_observer",
     "hygiene_override",
     "hygiene_reminders",
@@ -289,7 +293,9 @@ pub const HOOK_NAMES: &[&str] = &[
     "memory_extract",
     "memory_feedback",
     "memory_inject",
+    "memory_turn_capture",
     "memory_verify",
+    "orchestration_nudge",
     "output_compressor",
     "permission_denied",
     "phase_gate",
@@ -310,6 +316,7 @@ pub const HOOK_NAMES: &[&str] = &[
     "session_end",
     "session_index",
     "session_init",
+    "session_summary",
     "setup",
     "skill_invocation_gate",
     "skill_router",

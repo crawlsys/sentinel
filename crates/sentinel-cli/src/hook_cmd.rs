@@ -1709,6 +1709,15 @@ async fn handle_post_tool_use(
     let linear_output = hooks::linear_lifecycle::process(input);
     output.merge(&linear_output);
 
+    // Declarative auto-cron — reads config/autocron-defaults.toml (+ the operator
+    // overlay), matches the current tool call against its rules, and injects a
+    // CronCreate/loop suggestion. Replaces pr_auto_monitor's gh-pr-create cron
+    // branch and linear_lifecycle's state-change cron branch (those literals were
+    // migrated to rows). Not inside the Bash guard: each rule declares its own
+    // `tool`, so this covers Bash + MCP (e.g. mcp__linear__update_issue) + TaskUpdate.
+    let autocron_output = hooks::autocron::process(input);
+    output.merge(&autocron_output);
+
     // Step judge (M1.4 → integration #9) — run the adversarial AI
     // judge against a completed step tool's evidence and PRODUCE a
     // verdict. Until now `step_judge` fired on no event; the judge was

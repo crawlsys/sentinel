@@ -1,0 +1,151 @@
+# Shipped autocron ruleset (compiled into the engine via include_str!).
+#
+# The autocron hook reads these rules + an optional operator overlay at
+# ~/.claude/sentinel/config/autocron.toml (merge-by-id, fail-open) and, on a
+# matching PostToolUse tool call, injects a CronCreate/loop SUGGESTION into model
+# context (additionalContext). Sentinel owns no cron store — the agent reads the
+# suggestion and calls the CronCreate/CronDelete/loop client tools itself. This
+# file just makes the suggestions declarative + operator-editable instead of
+# hardcoded Rust literals.
+#
+# Rules are evaluated in declaration order; the first match per tool call wins.
+# Operators override a shipped rule by re-declaring the same `id` (whole-rule
+# replace), append a new rule with a fresh `id`, or disable one with enabled=false.
+#
+# Schema per [[autocron]]:
+#   id               (string, req)  stable id; dedupe-ledger prefix + override key
+#   tool             (string, req)  exact tool name to gate on ("Bash",
+#                                   "TaskUpdate", "mcp__linear__update_issue", …)
+#   match            (regex,  req)  matched against the haystack (Bash→command;
+#                                   else flattened tool_input JSON). Named captures
+#                                   (?P<x>…) are usable in prompt_template as {x}.
+#   match_kind       (string, opt)  "regex" (default) | "git_push_branch" (argv
+#                                   tokenizer: take refspec after origin, skip
+#                                   main/master — fixes the feat/main-menu bug)
+#   exclude          (regex,  opt)  if it matches the haystack, skip the rule
+#   skip_tokens      (array,  opt)  literal substrings that suppress the rule
+#   action           (string, opt)  "cron" (default) | "loop"
+#   interval         (string, cron) cron expression (ignored for loop)
+#   terminal         (bool,   opt)  default true; rendered prompt must self-delete
+#   safety_cap_ticks (int,    opt)  default 20; 0 = no cap; render a stall backstop
+#   dedupe_key       (string, opt)  named capture used as the dedupe value;
+#                                   falls back to `id` (one suggestion/rule/session)
+#   authority        (bool,   opt)  default false; true → "[Sentinel-Authority]"
+#                                   prefix (comply-and-arm) vs "[Autocron]" advisory
+#   enabled          (bool,   opt)  default true; set false to kill a shipped rule
+#   prompt_template  (string, req)  CronCreate/loop body; {capture} + builtins
+#                                   {pr_ref} {cwd} {branch} {run_id}
+
+# --- Migrated from pr_auto_monitor.rs (gh pr create cron) ---
+[[autocron]]
+id               = "pr_created"
+tool             = "Bash"
+match            = 'gh\s+pr\s+create'
+exclude          = '--help'
+skip_tokens      = ["echo ", "<<", "#"]
+action           = "cron"
+interval         = "*/5 * * * *"
+terminal         = true
+safety_cap_ticks = 20
+dedupe_key       = "pr"
+authority        = false
+prompt_template  = """
+PR created ({pr_ref}). Arm a self-terminating monitor:
+```
+CronCreate(cron: "*/5 * * * *", recurring: true,
+  prompt: "[auto-monitor:pr:{pr_ref}] Run `gh pr checks` for CI and `gh pr view --comments` for reviews on {pr_ref}. While pending, stay quiet. On CI failure, diagnose and report. When all checks conclude + approved, tell Gary it's ready to merge, then CronDelete this job. If this job has run >20 times without conclusion, report the stall and CronDelete.")
+```"""
+
+# --- Migrated from linear_lifecycle.rs (state_id change cron) ---
+[[autocron]]
+id               = "linear_state_change"
+tool             = "mcp__linear__update_issue"
+match            = '"state_id"\s*:\s*"(?P<issue>[^"]+)"'
+action           = "cron"
+interval         = "47 * * * *"
+terminal         = false          # lifecycle nudge is intentionally perpetual-ish
+safety_cap_ticks = 0              # 0 = no cap rendered
+dedupe_key       = "issue"
+authority        = false
+prompt_template  = """
+Linear issue state changed (state_id {issue}). Arm a lifecycle monitor:
+```
+CronCreate(cron: "47 * * * *", recurring: true,
+  prompt: "[auto-monitor:linear:{issue}] Check this Linear issue's status. If In Progress >24h without commits, remind Gary. If blocked, identify the blocker. If done, remind to update Linear status.")
+```"""
+
+# --- NEW gap #1: remote deploy started → poll→diagnose→report→self-delete ---
+[[autocron]]
+id               = "deploy_started"
+tool             = "Bash"
+match            = 'wrangler(-cf)?\s+deploy|vercel\s+(--prod|deploy)|netlify\s+deploy|railway\s+up|fly\s+deploy|depot\s+build\s+--push'
+skip_tokens      = ["--help", "--dry-run", "echo ", "<<"]
+action           = "cron"
+interval         = "*/2 * * * *"
+terminal         = true
+safety_cap_ticks = 20
+dedupe_key       = "deploy_started"
+authority        = true           # authoritative "arm this" for deploys
+prompt_template  = """
+Remote deploy detected (from {cwd}). Before arming, run CronList and skip if any job's prompt contains the [auto-monitor:deploy:{cwd}] marker below. Arm a self-terminating watch:
+```
+CronCreate(cron: "*/2 * * * *", recurring: true,
+  prompt: "[auto-monitor:deploy:{cwd}] Deploy watch. 1. POLL deploy + CI status (wrangler deployments list / vercel ls / gh run list --branch {branch} --limit 1 --json status,conclusion,databaseId). 2. IF in progress: wait for next tick. 3. IF failed: fetch logs (gh run view <id> --log-failed / wrangler tail), diagnose root cause in 2-3 sentences, report the failing step to Gary, then CronDelete this job. 4. IF succeeded: report 'deploy green' + URL, one-line smoke check if a health endpoint is known, then CronDelete this job. 5. SAFETY: if this job has run >20 times (~40 min) without a terminal state, report the stall and CronDelete.")
+```"""
+
+# --- NEW gap #3: push to a PR branch → recurring CI check (argv-tokenized) ---
+[[autocron]]
+id               = "pr_branch_push"
+tool             = "Bash"
+match            = 'git\s+push'
+match_kind       = "git_push_branch"     # tokenizes argv; skips main/master correctly
+skip_tokens      = ["--tags", "--delete", "--help"]
+action           = "cron"
+interval         = "*/3 * * * *"
+terminal         = true
+safety_cap_ticks = 20
+dedupe_key       = "branch"
+authority        = false
+prompt_template  = """
+Pushed to feature branch {branch}. If it has an open PR, monitor CI:
+```
+CronCreate(cron: "*/3 * * * *", recurring: true,
+  prompt: "[auto-monitor:push:{branch}] Run `gh pr checks` for the PR on {branch}. While pending, stay quiet. On conclusion, summarize pass/fail to Gary (ready-to-merge or diagnose failure), then CronDelete this job. If run >20 times without conclusion, report the stall and CronDelete.")
+```"""
+
+# --- NEW gap #2: task moved to in_progress → staleness reminder ---
+[[autocron]]
+id               = "task_started_stale_watch"
+tool             = "TaskUpdate"
+match            = '"status"\s*:\s*"in_progress"'
+action           = "cron"
+interval         = "*/30 * * * *"
+terminal         = true
+safety_cap_ticks = 0             # perpetual until task leaves in_progress
+dedupe_key       = "task"
+authority        = false
+prompt_template  = """
+Task moved to in_progress. Arm a staleness reminder:
+```
+CronCreate(cron: "*/30 * * * *", recurring: true,
+  prompt: "[auto-monitor:task] Run TaskList. If this task is still in_progress with no activity for 60+ min, remind Gary. Once it's completed or no longer in_progress, CronDelete this job.")
+```"""
+
+# --- NEW gap #6: CI run watch (gh run watch / workflow run / tag push) ---
+[[autocron]]
+id               = "ci_run_watch"
+tool             = "Bash"
+match            = 'gh\s+run\s+watch|gh\s+workflow\s+run|git\s+push\s+.*--tags'
+skip_tokens      = ["--help"]
+action           = "cron"
+interval         = "*/2 * * * *"
+terminal         = true
+safety_cap_ticks = 20
+dedupe_key       = "run_id"
+authority        = false
+prompt_template  = """
+CI run started. Monitor to conclusion:
+```
+CronCreate(cron: "*/2 * * * *", recurring: true,
+  prompt: "[auto-monitor:ci:{run_id}] Run `gh run view {run_id} --json status,conclusion` (or `gh run list --limit 1` if no id). On conclusion, summarize to Gary; on failure run /debug on the failing job. Then CronDelete this job. If run >20 times without conclusion, report the stall and CronDelete.")
+```"""

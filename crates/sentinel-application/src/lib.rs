@@ -6,6 +6,7 @@
 
 pub mod appraisal_store;
 pub mod auditor;
+pub mod autocron_config;
 pub mod ba_orchestrator;
 pub mod cache_efficiency;
 pub mod capability_router;
