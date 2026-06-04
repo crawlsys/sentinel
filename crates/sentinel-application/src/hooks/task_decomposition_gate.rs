@@ -20,6 +20,16 @@
 //!     the same files `task_persist` snapshots from). If that state cannot be
 //!     read (no session id, no home dir, unreadable dir) the gate **fails
 //!     open** — allow + log — rather than bricking the session.
+//!   - "Decomposed earlier" survives task completion. The task store prunes a
+//!     task's `*.json` file when it completes, so a session that correctly
+//!     finished all its tasks would otherwise present an empty dir and get
+//!     re-blocked on its next mutating tool — punishing the agent for closing
+//!     out its work. To avoid that false positive the gate also consults the
+//!     store's monotonic `.highwatermark` counter (the highest task id ever
+//!     issued this session, which persists across pruning): if it is `>= 1`
+//!     the session has decomposed at least once and the gate allows even when
+//!     no open task files remain. Genuinely fresh sessions (no highwatermark,
+//!     or `0`) are still gated on their first mutating tool.
 //!
 //! The block message is `[Sentinel-Authority]`-prefixed (added automatically
 //! at the output boundary by `HookOutput::into_pretool_output`) and instructs
@@ -138,12 +148,16 @@ fn is_mutating_tool(input: &HookInput, tool_name: &str) -> bool {
     false
 }
 
-/// Best-effort: does a live task list exist for this session?
+/// Best-effort: has this session decomposed its work?
 ///
-/// Reads `~/.claude/tasks/{session_id}/*.json` (the same files `task_persist`
-/// snapshots from). Returns:
-///   - `Some(true)`  — at least one task file exists (a decomposed list is live).
-///   - `Some(false)` — the session dir is readable but has no task files.
+/// Reads `~/.claude/tasks/{session_id}/` (the same dir `task_persist` snapshots
+/// to). Returns:
+///   - `Some(true)`  — at least one open task file exists (a decomposed list is
+///                     live), OR the session decomposed earlier this session
+///                     (the `.highwatermark` counter is `>= 1`) even if every
+///                     task has since completed and its file was pruned.
+///   - `Some(false)` — the session dir is readable but shows no evidence the
+///                     session ever decomposed (no task files, no highwatermark).
 ///   - `None`        — state could not be read (no session id, no home dir,
 ///                     unreadable dir). Callers FAIL OPEN on `None`.
 fn has_live_task_list(fs: &dyn FileSystemPort, session_id: Option<&str>) -> Option<bool> {
@@ -157,8 +171,28 @@ fn has_live_task_list(fs: &dyn FileSystemPort, session_id: Option<&str>) -> Opti
         return Some(false);
     }
     let entries = fs.read_dir(&session_dir).ok()?;
-    let has_task_file = entries.iter().any(|p| is_task_json(p));
-    Some(has_task_file)
+    if entries.iter().any(|p| is_task_json(p)) {
+        return Some(true);
+    }
+    // No open task files — but completed tasks are pruned from disk, so an
+    // empty dir does NOT mean the session never decomposed. Consult the
+    // monotonic highwatermark: if the session ever issued a task id, the
+    // decomposition discipline is established and we must not re-block.
+    Some(decomposed_earlier(fs, &session_dir))
+}
+
+/// Has this session ever issued a task id? Reads the store's `.highwatermark`
+/// (the highest task id allocated this session, which persists across task
+/// completion/pruning) and returns `true` iff it parses to a value `>= 1`.
+/// Any read/parse failure is treated as "no evidence" (`false`) — the caller
+/// only reaches here after confirming the session dir is readable, so a
+/// missing/unparseable highwatermark legitimately means "never decomposed".
+fn decomposed_earlier(fs: &dyn FileSystemPort, session_dir: &std::path::Path) -> bool {
+    let hw_path = session_dir.join(".highwatermark");
+    fs.read_to_string(&hw_path)
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .is_some_and(|n| n >= 1)
 }
 
 /// True for a non-dotfile `*.json` task file (skips `.lock`, `.highwatermark`).
@@ -300,6 +334,15 @@ mod tests {
             ),
         )
         .unwrap();
+    }
+
+    /// Seed an empty session dir holding only a `.highwatermark` of `value`,
+    /// emulating a session that decomposed tasks which have since completed
+    /// (their `*.json` files pruned, the monotonic counter left behind).
+    fn seed_highwatermark(home: &Path, session: &str, value: &str) {
+        let dir = home.join(".claude").join("tasks").join(session);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(".highwatermark"), value).unwrap();
     }
 
     fn input(tool: &str, session: Option<&str>) -> HookInput {
@@ -529,6 +572,46 @@ mod tests {
             home: tmp.path().to_path_buf(),
         };
         assert_eq!(has_live_task_list(&fs, Some("sess-y")), Some(true));
+    }
+
+    #[test]
+    fn has_live_task_list_true_when_highwatermark_set_but_no_task_files() {
+        // Session decomposed tasks earlier; they completed and their files were
+        // pruned, leaving only the monotonic `.highwatermark`. Must NOT re-block.
+        let tmp = tempfile::tempdir().unwrap();
+        seed_highwatermark(tmp.path(), "sess-done", "4");
+        let fs = ScopedHomeFs {
+            home: tmp.path().to_path_buf(),
+        };
+        assert_eq!(has_live_task_list(&fs, Some("sess-done")), Some(true));
+    }
+
+    #[test]
+    fn has_live_task_list_false_when_highwatermark_zero() {
+        // A `0` highwatermark means no task id was ever issued → still gated.
+        let tmp = tempfile::tempdir().unwrap();
+        seed_highwatermark(tmp.path(), "sess-zero", "0");
+        let fs = ScopedHomeFs {
+            home: tmp.path().to_path_buf(),
+        };
+        assert_eq!(has_live_task_list(&fs, Some("sess-zero")), Some(false));
+    }
+
+    #[test]
+    fn edit_after_task_completion_allows() {
+        // Integration: only a `.highwatermark` remains (all tasks completed).
+        // A follow-up mutating tool must be allowed — no re-block-after-completion.
+        let tmp = tempfile::tempdir().unwrap();
+        seed_highwatermark(tmp.path(), "sess-done", "7");
+        let fs: &'static ScopedHomeFs = Box::leak(Box::new(ScopedHomeFs {
+            home: tmp.path().to_path_buf(),
+        }));
+        let ctx = ctx_with_fs(fs);
+        let out = process(&input("Edit", Some("sess-done")), &ctx);
+        assert!(
+            out.blocked.is_none(),
+            "Edit after completing all tasks must be allowed (highwatermark proves prior decomposition)"
+        );
     }
 
     #[test]
