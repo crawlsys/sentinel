@@ -61,6 +61,18 @@ pub trait GitStatusPort {
     /// distance from HEAD is shortest (most-recent common ancestor).
     fn rev_list_count(&self, repo_path: &str, from: &str) -> Option<u32>;
 
+    /// Count commits in an arbitrary `range` passed verbatim to
+    /// `git rev-list --count <range>` (NO implicit `..HEAD` suffix, unlike
+    /// [`rev_list_count`]). Use for ranges where HEAD is not the right-hand
+    /// side — e.g. `"HEAD..origin/main"` to count how far *behind* the local
+    /// branch is. Returns `None` on git failure (bad ref / not a repo).
+    ///
+    /// Default impl returns `None` so existing test stubs keep compiling; the
+    /// real infrastructure adapter overrides it.
+    fn rev_list_count_range(&self, _repo_path: &str, _range: &str) -> Option<u32> {
+        None
+    }
+
     /// Run `git diff --name-only <range>` and return the changed file paths.
     /// `range` is the diff spec — `"HEAD"`, `"--cached"`, `"main..HEAD"`,
     /// `"<sha>..HEAD"`, etc. Returns `None` on git failure (bad ref, not a

@@ -51,9 +51,12 @@ fn freshness_notice(git: &dyn GitStatusPort, cwd: &str) -> Option<String> {
     // Count commits on the remote that we don't have locally, using the
     // already-fetched ref — NO network. `HEAD..origin/<branch>` = commits
     // reachable from the remote ref but not from HEAD, i.e. how far behind we
-    // are. `None`/0 → nothing to say (no upstream ref resolves, or current).
+    // are. Must use rev_list_count_range (verbatim range): plain
+    // rev_list_count appends `..HEAD`, which would mangle this into an invalid
+    // `HEAD..origin/<b>..HEAD`. `None`/0 → nothing to say (ref unresolved or
+    // current).
     let upstream = format!("origin/{branch}");
-    let behind = git.rev_list_count(&repo, &format!("HEAD..{upstream}"))?;
+    let behind = git.rev_list_count_range(&repo, &format!("HEAD..{upstream}"))?;
     if behind == 0 {
         return None;
     }
@@ -153,7 +156,17 @@ mod tests {
             None
         }
         fn rev_list_count(&self, _: &str, _: &str) -> Option<u32> {
-            self.behind
+            // Not used by this hook; behind-count comes via the range method.
+            Some(0)
+        }
+        fn rev_list_count_range(&self, _: &str, range: &str) -> Option<u32> {
+            // The hook asks for "HEAD..origin/<branch>"; return the configured
+            // behind count for that shape, else 0.
+            if range.starts_with("HEAD..origin/") {
+                self.behind
+            } else {
+                Some(0)
+            }
         }
         fn diff_names(&self, _: &str, _: &str) -> Option<Vec<String>> {
             None

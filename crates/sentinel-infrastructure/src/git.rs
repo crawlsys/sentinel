@@ -163,6 +163,21 @@ pub fn rev_list_count(repo_path: &str, from: &str) -> Option<u32> {
     String::from_utf8_lossy(&output.stdout).trim().parse().ok()
 }
 
+/// Count commits in an arbitrary `range`, passed verbatim to
+/// `git rev-list --count <range>` (no implicit `..HEAD`). Returns `None` on
+/// git failure or unparseable output.
+pub fn rev_list_count_range(repo_path: &str, range: &str) -> Option<u32> {
+    let output = Command::new("git")
+        .args(["rev-list", "--count", range])
+        .current_dir(repo_path)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&output.stdout).trim().parse().ok()
+}
+
 /// Run `git diff --name-only <range>` and return the changed file paths.
 /// `range` may be a flag (`--cached`) or a ref-spec (`HEAD`, `main..HEAD`,
 /// `<sha>..HEAD`, etc.). Returns `None` on git failure.
@@ -311,6 +326,10 @@ impl GitStatusPort for RealGit {
 
     fn rev_list_count(&self, repo_path: &str, from: &str) -> Option<u32> {
         rev_list_count(repo_path, from)
+    }
+
+    fn rev_list_count_range(&self, repo_path: &str, range: &str) -> Option<u32> {
+        rev_list_count_range(repo_path, range)
     }
 
     fn diff_names(&self, repo_path: &str, range: &str) -> Option<Vec<String>> {
