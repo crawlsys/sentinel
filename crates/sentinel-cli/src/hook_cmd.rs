@@ -1593,6 +1593,14 @@ fn handle_pre_tool_use(
         });
         output.merge(&db_output);
 
+        // Plan title gate — block ExitPlanMode only when the plan has no
+        // derivable title, so plan_organizer can always file it under a
+        // descriptive name. Fails open; ignores non-ExitPlanMode tools.
+        let plan_title_output = time_and_record(ctx.fs, &mk_ctx("plan_title_gate"), || {
+            hooks::plan_title_gate::process(input, ctx)
+        });
+        output.merge(&plan_title_output);
+
         // Output compressor (LAST, Bash only) — rewrite noisy commands
         // to route through `sentinel compress`. Runs only if no gate
         // above blocked the call (never rewrite a command that's about

@@ -97,8 +97,146 @@ fn next_versioned_path(fs: &dyn FileSystemPort, target_dir: &Path, slug: &str) -
     target_dir.join(format!("{slug}-v999.md"))
 }
 
+/// Like [`next_versioned_path`], but tries the bare `{slug}.md` first and only
+/// falls back to `-v{N}` on collision — so the common case yields a clean
+/// descriptive name without a version suffix.
+fn next_descriptive_path(fs: &dyn FileSystemPort, target_dir: &Path, slug: &str) -> PathBuf {
+    let bare = target_dir.join(format!("{slug}.md"));
+    if !fs.exists(&bare) {
+        return bare;
+    }
+    next_versioned_path(fs, target_dir, slug)
+}
+
+/// Derive a descriptive kebab-case slug from a plan's title heading. Returns
+/// `None` when the plan has no derivable title (the `plan_title_gate` makes
+/// this rare for new plans, but the root-sweep can hit legacy untitled files).
+///
+/// "## Plan: Force Plan Organization" → `force-plan-organization`. Slugifies:
+/// lowercase, every run of non-alphanumeric → single `-`, trim leading/trailing
+/// `-`, cap at ~60 chars (on a `-` boundary when possible).
+pub fn descriptive_slug(content: &str) -> Option<String> {
+    let title = super::plan_title_gate::title_line(content)?;
+    let mut slug = String::with_capacity(title.len());
+    let mut prev_dash = false;
+    for c in title.chars() {
+        if c.is_ascii_alphanumeric() {
+            slug.push(c.to_ascii_lowercase());
+            prev_dash = false;
+        } else if !prev_dash {
+            slug.push('-');
+            prev_dash = true;
+        }
+    }
+    let slug = slug.trim_matches('-');
+    if slug.is_empty() {
+        return None;
+    }
+    // Cap length, preferring to cut on a dash boundary.
+    let capped = if slug.len() > 60 {
+        let cut = slug[..60].rfind('-').unwrap_or(60);
+        slug[..cut.max(1)].trim_matches('-')
+    } else {
+        slug
+    };
+    if capped.is_empty() {
+        None
+    } else {
+        Some(capped.to_string())
+    }
+}
+
+/// Whether a file's content is just a relocation pointer this hook left behind
+/// (so the root-sweep doesn't try to re-process pointers).
+fn is_pointer(content: &str) -> bool {
+    content.trim_start().starts_with("Moved to:")
+}
+
+/// Build the pointer text left at a plan's original path after it's moved, so
+/// Claude Code's `/plan` (which reads the original path) still resolves.
+fn pointer_text(dest: &Path) -> String {
+    format!(
+        "Moved to: {}\n\nThis plan was organized by sentinel under a descriptive \
+         name. Edit it at the path above.\n",
+        dest.display()
+    )
+}
+
+/// Move a plan's content to `dest` and replace the original at `src` with a
+/// pointer. Best-effort: returns `Ok(())` only when the destination write
+/// succeeds (the pointer write is non-fatal — the canonical copy is what
+/// matters). `src == dest` is a no-op success.
+fn move_plan(fs: &dyn FileSystemPort, src: &Path, dest: &Path, content: &str) -> anyhow::Result<()> {
+    if src == dest {
+        return Ok(());
+    }
+    fs.write(dest, content.as_bytes())?;
+    // Leave a pointer at the original location (non-fatal on failure).
+    if let Err(e) = fs.write(src, pointer_text(dest).as_bytes()) {
+        tracing::warn!(error = %e, src = ?src, "Failed to write plan pointer (non-fatal)");
+    }
+    Ok(())
+}
+
+/// Sweep loose `*.md` files sitting directly in `~/.claude/plans/` into
+/// per-project subfolders under descriptive names. Best-effort and bounded:
+/// processes at most `MAX_SWEEP` files per run, skips pointers and dirs, never
+/// deletes content (always a move-with-pointer). Legacy root files have no cwd
+/// context so they land in `general/`. Returns (from → to) moves performed.
+fn sweep_plan_root(fs: &dyn FileSystemPort, plans_root: &Path) -> Vec<(PathBuf, PathBuf)> {
+    const MAX_SWEEP: usize = 25;
+    let mut moved = Vec::new();
+    let entries = match fs.read_dir(plans_root) {
+        Ok(e) => e,
+        Err(_) => return moved,
+    };
+    for path in entries {
+        if moved.len() >= MAX_SWEEP {
+            tracing::info!("plan root sweep hit MAX_SWEEP cap; rest left for next run");
+            break;
+        }
+        if fs.is_dir(&path) {
+            continue;
+        }
+        let is_md = path
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("md"));
+        if !is_md {
+            continue;
+        }
+        let content = match fs.read_to_string(&path) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        if is_pointer(&content) {
+            continue;
+        }
+        let slug = descriptive_slug(&content).unwrap_or_else(|| {
+            path.file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("plan")
+                .to_string()
+        });
+        let dest_dir = plans_root.join("general");
+        if fs.create_dir_all(&dest_dir).is_err() {
+            continue;
+        }
+        let dest = next_descriptive_path(fs, &dest_dir, &slug);
+        if move_plan(fs, &path, &dest, &content).is_ok() {
+            moved.push((path, dest));
+        }
+    }
+    moved
+}
+
 /// Process an `ExitPlanMode` `PostToolUse` event.
-/// Copies the plan file into `~/.claude/plans/{project}/{slug}-v{N}.md`.
+///
+/// MOVES the plan from Claude Code's random-slug path into
+/// `~/.claude/plans/{project}/{descriptive}.md`, leaves a pointer at the
+/// original location so `/plan` still resolves, also writes the opt-in
+/// repo-local `.sentinel/plans/` copy, and sweeps any loose random-slug files
+/// still sitting in the plans root into project subfolders. Fully best-effort
+/// and fail-open — plan organization must never block or lose a plan.
 pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     // Only fire on ExitPlanMode
     if input.tool_name.as_deref() != Some("ExitPlanMode") {
@@ -109,32 +247,26 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     let project = detect_project(cwd);
 
     // Extract the plan file path from the tool response
-    let plan_path = if let Some(p) = extract_plan_path(input.tool_result.as_ref()) { p } else {
+    let plan_path = if let Some(p) = extract_plan_path(input.tool_result.as_ref()) {
+        p
+    } else {
         tracing::debug!("No plan file path in ExitPlanMode response; skipping");
         return HookOutput::allow();
     };
 
-    // Derive slug from filename (strip .md extension)
-    let slug = plan_path
-        .file_stem()
-        .and_then(|n| n.to_str())
-        .unwrap_or("plan")
-        .to_string();
-
-    // Build target directory
     let home = match ctx.fs.home_dir() {
         Some(h) => h,
         None => return HookOutput::allow(),
     };
-    let target_dir = home.join(".claude").join("plans").join(&project);
+    let plans_root = home.join(".claude").join("plans");
+    let target_dir = plans_root.join(&project);
 
-    // Create target dir
     if let Err(e) = ctx.fs.create_dir_all(&target_dir) {
         tracing::warn!(error = %e, dir = ?target_dir, "Failed to create plans dir");
         return HookOutput::allow();
     }
 
-    // Read the plan content
+    // Read the plan content (from the random-slug file Claude Code just wrote).
     let plan_content = match ctx.fs.read_to_string(&plan_path) {
         Ok(c) => c,
         Err(e) => {
@@ -143,10 +275,19 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
         }
     };
 
-    // Write versioned copy
-    let target_path = next_versioned_path(ctx.fs, &target_dir, &slug);
-    if let Err(e) = ctx.fs.write(&target_path, plan_content.as_bytes()) {
-        tracing::warn!(error = %e, path = ?target_path, "Failed to write plan copy");
+    // Descriptive name from the plan title; fall back to the random stem only
+    // if the plan somehow has no title (the plan_title_gate makes that rare).
+    let random_stem = plan_path
+        .file_stem()
+        .and_then(|n| n.to_str())
+        .unwrap_or("plan")
+        .to_string();
+    let slug = descriptive_slug(&plan_content).unwrap_or_else(|| random_stem.clone());
+
+    // MOVE the plan into {project}/{descriptive}.md and leave a pointer behind.
+    let target_path = next_descriptive_path(ctx.fs, &target_dir, &slug);
+    if let Err(e) = move_plan(ctx.fs, &plan_path, &target_path, &plan_content) {
+        tracing::warn!(error = %e, path = ?target_path, "Failed to move plan");
         return HookOutput::allow();
     }
 
@@ -154,34 +295,39 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
         project = %project,
         slug = %slug,
         path = ?target_path,
-        "Plan organized (global archive)"
+        "Plan organized (moved to descriptive name)"
     );
 
-    // M9.2 — repo-local archive. Opt-in: only writes when
-    // <repo>/.sentinel/plans/ already exists (i.e. someone ran
-    // `sentinel project init` in this repo). Failures here are
-    // best-effort — log and continue; the global archive above is
-    // the authoritative copy.
+    // Repo-local archive (opt-in: only when <repo>/.sentinel/plans/ exists),
+    // under the descriptive slug.
     let repo_local_path =
         try_write_repo_local_archive(ctx.fs, Path::new(cwd), &slug, plan_content.as_bytes());
 
+    // Sweep any loose random-slug files still in the plans root into folders.
+    let swept = sweep_plan_root(ctx.fs, &plans_root);
+
     // Emit channel event for real-time notification
-    let summary = format!("Plan archived: {}", target_path.display());
+    let summary = format!("Plan organized: {}", target_path.display());
     let mut meta = serde_json::Map::new();
     meta.insert(
         "project".to_string(),
         serde_json::Value::String(project.clone()),
     );
-    meta.insert("slug".to_string(), serde_json::Value::String(slug));
     meta.insert(
-        "archived_path".to_string(),
+        "slug".to_string(),
+        serde_json::Value::String(slug.clone()),
+    );
+    meta.insert(
+        "organized_path".to_string(),
         serde_json::Value::String(target_path.display().to_string()),
     );
-    // Mention the repo-local copy in the channel event metadata too,
-    // when it landed.
+    meta.insert(
+        "swept_count".to_string(),
+        serde_json::Value::Number(swept.len().into()),
+    );
     if let Some(p) = &repo_local_path {
         meta.insert(
-            "repo_local_archived_path".to_string(),
+            "repo_local_path".to_string(),
             serde_json::Value::String(p.display().to_string()),
         );
     }
@@ -196,7 +342,7 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
         Some("plan_organizer"),
     );
 
-    // Inject context telling the user and Claude where the archived copies live.
+    // Inject context telling the user and Claude where the plan now lives.
     let repo_local_line = match &repo_local_path {
         Some(p) => format!(
             "\nRepo-local: {} (committed with the code via .sentinel/plans/)",
@@ -204,20 +350,27 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
         ),
         None => String::new(),
     };
+    let swept_line = if swept.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\nAlso swept {} loose plan file(s) from the plans root into folders.",
+            swept.len()
+        )
+    };
     let context = format!(
-        "[Plan Organizer] Plan archived for cross-session reference.\n\
+        "[Plan Organizer] Plan filed under a descriptive name.\n\
          \n\
          Project:  {}\n\
-         Original: {} (Claude Code's /plan reads from here)\n\
-         Archive:  {}{}\n\
+         Plan:     {}\n\
+         Pointer:  {} (Claude Code's /plan still resolves here){}{}\n\
          \n\
-         The archive is versioned — re-running ExitPlanMode auto-increments to -v2, -v3, etc.\n\
-         The repo-local archive lands only when `.sentinel/plans/` exists \
-         (run `sentinel project init` once per repo to opt in).",
+         Names collide-safe: a same-named plan auto-increments to -v2, -v3, etc.",
         project,
-        plan_path.display(),
         target_path.display(),
+        plan_path.display(),
         repo_local_line,
+        swept_line,
     );
 
     HookOutput::inject_context(HookEvent::PostToolUse, context)
@@ -506,5 +659,194 @@ mod tests {
             std::fs::read_to_string(plans.join("my-plan-v1.md")).unwrap(),
             "old version"
         );
+    }
+
+    // ─── descriptive naming + move + sweep ────────────────────────
+
+    #[test]
+    fn descriptive_slug_from_plan_title() {
+        assert_eq!(
+            descriptive_slug("## Plan: Force Plan Organization\n\nbody").as_deref(),
+            Some("force-plan-organization")
+        );
+        assert_eq!(
+            descriptive_slug("# Add User Auth (JWT)!\n").as_deref(),
+            Some("add-user-auth-jwt")
+        );
+        // Title-less → None (sweep falls back to the file stem).
+        assert_eq!(descriptive_slug("   \n\n").as_deref(), None);
+    }
+
+    #[test]
+    fn descriptive_slug_caps_length() {
+        let long = format!("# {}\n", "word ".repeat(40));
+        let slug = descriptive_slug(&long).unwrap();
+        assert!(slug.len() <= 60, "slug too long: {} ({})", slug, slug.len());
+        assert!(!slug.starts_with('-') && !slug.ends_with('-'));
+    }
+
+    #[test]
+    fn next_descriptive_path_prefers_bare_name() {
+        let tmp = TempDir::new().unwrap();
+        let p = next_descriptive_path(&RealFs, tmp.path(), "my-plan");
+        assert_eq!(p, tmp.path().join("my-plan.md"));
+    }
+
+    #[test]
+    fn next_descriptive_path_versions_on_collision() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("my-plan.md"), "").unwrap();
+        let p = next_descriptive_path(&RealFs, tmp.path(), "my-plan");
+        assert_eq!(p, tmp.path().join("my-plan-v1.md"));
+    }
+
+    #[test]
+    fn move_plan_writes_dest_and_pointer() {
+        let tmp = TempDir::new().unwrap();
+        let src = tmp.path().join("random-slug.md");
+        let dest = tmp.path().join("sentinel").join("real-name.md");
+        std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
+        std::fs::write(&src, "# Real Name\nbody").unwrap();
+
+        move_plan(&RealFs, &src, &dest, "# Real Name\nbody").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&dest).unwrap(),
+            "# Real Name\nbody"
+        );
+        // Original now holds a pointer.
+        let ptr = std::fs::read_to_string(&src).unwrap();
+        assert!(is_pointer(&ptr), "src should be a pointer: {ptr}");
+        assert!(ptr.contains("real-name.md"));
+    }
+
+    #[test]
+    fn sweep_moves_loose_root_files_into_general() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        // A loose random-slug plan with a title.
+        std::fs::write(
+            root.join("quirky-toasting-pelican.md"),
+            "# OSM Fleet Build State\n\nstuff",
+        )
+        .unwrap();
+        // A pointer file (must be skipped).
+        std::fs::write(root.join("already-moved.md"), "Moved to: /elsewhere\n").unwrap();
+        // A subdir (must be skipped).
+        std::fs::create_dir_all(root.join("sentinel")).unwrap();
+
+        let moved = sweep_plan_root(&RealFs, root);
+        assert_eq!(moved.len(), 1, "only the titled loose file should move");
+        let (from, to) = &moved[0];
+        assert!(from.ends_with("quirky-toasting-pelican.md"));
+        assert_eq!(to, &root.join("general").join("osm-fleet-build-state.md"));
+        assert!(to.exists());
+        // Original is now a pointer.
+        assert!(is_pointer(
+            &std::fs::read_to_string(root.join("quirky-toasting-pelican.md")).unwrap()
+        ));
+        // Pointer file untouched.
+        assert_eq!(
+            std::fs::read_to_string(root.join("already-moved.md")).unwrap(),
+            "Moved to: /elsewhere\n"
+        );
+    }
+
+    #[test]
+    fn sweep_falls_back_to_stem_for_titleless_files() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        std::fs::write(root.join("weird-name.md"), "   \n\n").unwrap(); // no title
+        let moved = sweep_plan_root(&RealFs, root);
+        assert_eq!(moved.len(), 1);
+        assert_eq!(
+            moved[0].1,
+            root.join("general").join("weird-name.md"),
+            "title-less file keeps its stem"
+        );
+    }
+
+    #[test]
+    fn process_moves_plan_to_descriptive_name() {
+        // End-to-end: a real plan file + ExitPlanMode result → moved under
+        // a descriptive name, pointer left behind. Uses a scoped-home FS so
+        // ~/.claude/plans/ resolves into the tempdir.
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path().to_path_buf();
+        let plan_src = home.join("plan-squishy-gathering-sundae.md");
+        std::fs::write(&plan_src, "## Plan: Add Caching Layer\n\nbody").unwrap();
+
+        struct ScopedFs {
+            home: PathBuf,
+        }
+        impl FileSystemPort for ScopedFs {
+            fn home_dir(&self) -> Option<PathBuf> {
+                Some(self.home.clone())
+            }
+            fn read_to_string(&self, p: &Path) -> anyhow::Result<String> {
+                Ok(std::fs::read_to_string(p)?)
+            }
+            fn write(&self, p: &Path, c: &[u8]) -> anyhow::Result<()> {
+                if let Some(par) = p.parent() {
+                    std::fs::create_dir_all(par)?;
+                }
+                Ok(std::fs::write(p, c)?)
+            }
+            fn create_dir_all(&self, p: &Path) -> anyhow::Result<()> {
+                Ok(std::fs::create_dir_all(p)?)
+            }
+            fn read_dir(&self, p: &Path) -> anyhow::Result<Vec<PathBuf>> {
+                Ok(std::fs::read_dir(p)?
+                    .filter_map(|e| e.ok().map(|e| e.path()))
+                    .collect())
+            }
+            fn exists(&self, p: &Path) -> bool {
+                p.exists()
+            }
+            fn is_dir(&self, p: &Path) -> bool {
+                p.is_dir()
+            }
+            fn metadata(&self, p: &Path) -> anyhow::Result<std::fs::Metadata> {
+                Ok(std::fs::metadata(p)?)
+            }
+            fn append(&self, _: &Path, _: &[u8]) -> anyhow::Result<()> {
+                Ok(())
+            }
+        }
+
+        let fs: &'static ScopedFs = Box::leak(Box::new(ScopedFs { home: home.clone() }));
+        let base = crate::hooks::test_support::stub_ctx();
+        let ctx = HookContext {
+            git: base.git,
+            vector_store: None,
+            fs,
+            process: base.process,
+            llm: None,
+            memory_mcp: base.memory_mcp,
+            env: base.env,
+        };
+        let input = HookInput {
+            tool_name: Some("ExitPlanMode".to_string()),
+            cwd: Some("/Users/x/Documents/GitHub/sentinel".to_string()),
+            tool_result: Some(serde_json::json!({
+                "filePath": plan_src.to_string_lossy()
+            })),
+            ..Default::default()
+        };
+
+        let out = process(&input, &ctx);
+        assert!(out.hook_specific_output.is_some(), "should inject context");
+        // Plan moved to ~/.claude/plans/sentinel/add-caching-layer.md
+        let dest = home
+            .join(".claude")
+            .join("plans")
+            .join("sentinel")
+            .join("add-caching-layer.md");
+        assert!(dest.exists(), "plan should be moved to {dest:?}");
+        assert_eq!(
+            std::fs::read_to_string(&dest).unwrap(),
+            "## Plan: Add Caching Layer\n\nbody"
+        );
+        // Original is now a pointer.
+        assert!(is_pointer(&std::fs::read_to_string(&plan_src).unwrap()));
     }
 }

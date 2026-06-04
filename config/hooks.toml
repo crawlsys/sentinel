@@ -144,6 +144,14 @@ depends_on = []
 has_api_call = false
 
 [[hooks]]
+id = "plan-title-gate"
+event = "PreToolUse"
+matcher = ["ExitPlanMode"]
+description = "Block ExitPlanMode only when the plan has no derivable title, so plan_organizer can always file it under a descriptive name. Fails open."
+depends_on = []
+has_api_call = false
+
+[[hooks]]
 id = "output-compressor"
 event = "PreToolUse"
 matcher = ["Bash"]

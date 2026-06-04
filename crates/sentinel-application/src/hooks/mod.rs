@@ -50,6 +50,7 @@ pub mod permission_denied;
 pub mod phase_gate;
 pub mod phase_validator;
 pub mod plan_organizer;
+pub mod plan_title_gate;
 pub mod post_compact;
 pub mod pr_auto_monitor;
 pub mod pr_merge_gate;
@@ -302,6 +303,7 @@ pub const HOOK_NAMES: &[&str] = &[
     "phase_gate",
     "phase_validator",
     "plan_organizer",
+    "plan_title_gate",
     "post_compact",
     "pr_auto_monitor",
     "pr_merge_gate",
