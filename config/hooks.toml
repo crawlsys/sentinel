@@ -12,6 +12,13 @@ description = "Initialize session state, generate CLAUDE.md"
 depends_on = []
 has_api_call = false
 
+[[hooks]]
+id = "upstream-freshness"
+event = "SessionStart"
+description = "Notify (never mutate) when local default branch is behind origin; names the one-click `git pull --ff-only`. Zero-network: compares against the already-fetched ref. Default branch only; fails silent otherwise. Also runs on CwdChanged."
+depends_on = []
+has_api_call = false
+
 # Note: `memory-verify` was removed from SessionStart on 2026-04 because
 # Qdrant HTTP calls blocked startup for 5–20s. It now runs on PreCompact
 # instead — see the PreCompact section below.
@@ -322,3 +329,19 @@ event = "PreCompact"
 description = "Re-check stored memories against ground truth (Qdrant scroll + claim verification, 24h cooldown, 3s wall-clock timeout)"
 depends_on = ["pre-compact"]
 has_api_call = true  # Qdrant scroll + Cerebras claim extraction
+
+# === CwdChanged ===
+
+[[hooks]]
+id = "cwd-changed"
+event = "CwdChanged"
+description = "Re-detect project context when the working directory changes"
+depends_on = []
+has_api_call = false
+
+[[hooks]]
+id = "upstream-freshness"
+event = "CwdChanged"
+description = "Notify when the repo just switched into has a local default branch behind origin (zero-network, notify-only one-click pull)"
+depends_on = []
+has_api_call = false

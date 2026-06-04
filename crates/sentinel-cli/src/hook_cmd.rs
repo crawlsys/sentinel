@@ -518,6 +518,14 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
                 hooks::dep_check::process(&input, &ctx)
             });
             output.merge(&dep_output);
+
+            // Upstream freshness — notify (never mutate) if local default
+            // branch is behind origin. Zero-network: compares against the
+            // already-fetched ref, so no latency/auth on the critical path.
+            let freshness_output = time_and_record(ctx.fs, &mk_ctx("upstream_freshness"), || {
+                hooks::upstream_freshness::process(&input, &ctx, HookEvent::SessionStart)
+            });
+            output.merge(&freshness_output);
         }
 
         HookEvent::PreCompact => {
@@ -722,6 +730,21 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
                 || hooks::cwd_changed::process(&input, &ctx),
             );
             output.merge(&cwd_output);
+
+            // Upstream freshness — notify if the repo we just switched into has
+            // a local default branch behind origin. Same zero-network check.
+            let freshness_output = time_and_record(
+                ctx.fs,
+                &InvocationContext {
+                    event: "CwdChanged",
+                    hook: "upstream_freshness",
+                    tool: None,
+                    session_id: input.session_id.as_deref(),
+                    repo_root: repo_root_for_metrics.as_deref(),
+                },
+                || hooks::upstream_freshness::process(&input, &ctx, HookEvent::CwdChanged),
+            );
+            output.merge(&freshness_output);
         }
 
         HookEvent::StopFailure => {
