@@ -460,20 +460,28 @@ pub fn process(
             HookOutput::allow()
         }
         crate::gate::GateDecision::Block {
+            skill,
             reason,
             next_phase,
             next_phase_file,
         } => {
-            let skill = state.active_skill.as_deref().unwrap_or("unknown");
+            // Use the skill the gate ACTUALLY evaluated (effective_skill), not
+            // state.active_skill. The two diverge when enforcement comes from an
+            // incomplete workflow found after the active skill was cleared or
+            // switched — in which case active_skill would be None/"unknown" and
+            // the remediation `Read("~/.claude/skills/unknown/phases/...")` would
+            // point at a path that doesn't exist. Progress is read from THIS
+            // skill's workflow state for the same reason.
             let completed = state
-                .active_workflow()
+                .workflows
+                .get(&skill)
                 .map_or(0, |w| w.completed_phases.len());
             let total = workflows
-                .get(skill)
+                .get(&skill)
                 .map_or(0, |w| w.phases.iter().filter(|p| p.required).count());
 
             let message = format_block_box(
-                skill,
+                &skill,
                 &reason,
                 &next_phase,
                 &next_phase_file,
@@ -1663,11 +1671,18 @@ mod tests {
     }
 
     #[test]
-    fn test_blocks_when_phase_files_exist() {
-        // Phase gate enforces when phase files exist on disk.
-        // Uses "linear" which has real phase files at ~/.claude/skills/linear/phases/
+    fn test_blocks_when_phase_files_exist_and_workflow_entered() {
+        // Phase gate enforces when phase files exist on disk AND the workflow has
+        // actually been ENTERED (a phase file was read). Uses "linear" which has
+        // real phase files at ~/.claude/skills/linear/phases/.
+        //
+        // NOTE: entry is simulated by record_phase_read("linear", "claim.md").
+        // Without entry, the never-entered downgrade (phantom-arming fix) applies
+        // and the gate ALLOWS — see test_never_entered_workflow_does_not_block.
         let mut state = SessionState::new("sess-1");
         state.set_active_skill("linear");
+        // Simulate workflow entry so enforcement is active (not a phantom arm).
+        state.record_phase_read("linear", "claim.md");
         let mut workflows = HashMap::new();
         workflows.insert("linear".to_string(), test_workflow());
 
@@ -1682,7 +1697,11 @@ mod tests {
             .unwrap_or_default()
             .join(".claude/skills/linear/phases/claim.md");
         if claim_path.exists() {
-            // Phase files exist → gate blocks (deny() puts reason in hook_specific_output)
+            // Phase files exist + workflow entered → gate blocks.
+            // (claim.md was "read" but the claim phase isn't COMPLETE — reading a
+            // phase file marks entry; completion needs the trusted-read advance in
+            // production process(), which the direct record_phase_read here doesn't
+            // trigger. So fetch/review etc. are still gated.)
             assert_eq!(output.blocked, Some(true));
             let reason = output
                 .hook_specific_output
@@ -1694,6 +1713,38 @@ mod tests {
         } else {
             // No phase files → gate allows (CI/other machines)
             assert!(output.blocked.is_none());
+        }
+    }
+
+    #[test]
+    fn test_never_entered_workflow_does_not_block() {
+        // REGRESSION (phantom-arming deadlock): a `linear` workflow that became
+        // "active" via a topical skill-router match — with ZERO phases completed
+        // and ZERO phase files read — must NOT hard-block unrelated tools. Before
+        // the fix, this trapped the entire session (every Bash/Write/Edit denied)
+        // with the only escape being to actually claim a Linear issue.
+        //
+        // This must hold REGARDLESS of whether linear/phases/*.md exist on disk
+        // (they DO on the dev box, which is exactly what triggered the original
+        // bug), so unlike the sibling test there is no exists() branch — the
+        // never-entered downgrade fires before the on-disk phase check.
+        let mut state = SessionState::new("sess-1");
+        state.set_active_skill("linear");
+        let mut workflows = HashMap::new();
+        workflows.insert("linear".to_string(), test_workflow());
+
+        // No record_phase_read, no completed phase → never entered.
+        for tool in ["Bash", "Write", "Edit"] {
+            let input = HookInput {
+                tool_name: Some((*tool).to_string()),
+                tool_input: Some(serde_json::json!({ "command": "echo hi", "file_path": "/tmp/x" })),
+                ..Default::default()
+            };
+            let output = process(&input, &mut state, &workflows, &test_fs());
+            assert!(
+                output.blocked.is_none(),
+                "never-entered `linear` workflow must not block `{tool}` (phantom-arming deadlock)"
+            );
         }
     }
 

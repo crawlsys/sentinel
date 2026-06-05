@@ -16,6 +16,14 @@ pub enum GateDecision {
 
     /// Block the tool call with reason
     Block {
+        /// The skill whose workflow actually produced this block. This is the
+        /// `effective_skill` the gate evaluated (which may be an incomplete
+        /// workflow found via `find_incomplete_workflow`), NOT necessarily
+        /// `state.active_skill` — the two diverge when a workflow is enforced
+        /// after the active skill was cleared/switched. The block message must
+        /// use THIS so its `Read("~/.claude/skills/{skill}/phases/{file}")`
+        /// remediation points at a real path, not `skills/unknown/...`.
+        skill: String,
         reason: String,
         next_phase: String,
         next_phase_file: String,
@@ -58,6 +66,7 @@ pub fn evaluate(
                     .map(|p| (p.id.clone(), p.file.clone()));
                 let (next_phase, next_file) = next.unwrap_or_default();
                 return GateDecision::Block {
+                    skill: wf_skill.clone(),
                     reason: format!(
                         "Workflow '{wf_skill}': tool '{tool_name}' is blocked (matches blocked prefix '{prefix}').\n\
                          Use the workflow's native tools instead of equivalent alternatives."
@@ -107,6 +116,40 @@ pub fn evaluate(
 
     // Check if workflow blocks this tool
     if let Some(block) = workflow_state.should_block(workflow, tool_name) {
+        // ── Never-entered workflow downgrade (phantom-arming fix) ──────────
+        // A phased hard-gate workflow (e.g. `linear`) can become "active" in a
+        // session merely because the skill-router matched the skill's TOPIC in a
+        // user prompt (e.g. "build me a linear doc") — without the user ever
+        // entering the workflow (no phase file read, no phase completed). In that
+        // state the gate would otherwise hard-deny EVERY non-exempt tool for the
+        // rest of the session, with the only escape being to actually perform the
+        // workflow's first phase (e.g. claim a Linear issue) — which was never the
+        // user's task. That traps unrelated work (writing a Desktop doc, editing
+        // an unrelated file) behind a workflow that was never really started.
+        //
+        // Fix: if the workflow has ZERO completed phases AND no phase file has
+        // been read for this skill, treat it as "armed but never entered" and
+        // downgrade the hard block to Allow (advisory). Enforcement is restored
+        // the instant the user demonstrably enters the workflow — reading any
+        // phase file (record_phase_read) or completing any phase. This preserves
+        // every skip/switch attack mitigation (Attacks #21/#24/#38/#55), which all
+        // assume the workflow was actually entered; it only relaxes the
+        // never-entered false-arm that caused whole-session deadlocks.
+        let entered_workflow = !workflow_state.completed_phases.is_empty()
+            || state
+                .phases_read
+                .get(&effective_skill)
+                .is_some_and(|files| !files.is_empty());
+        if !entered_workflow {
+            eprintln!(
+                "[sentinel] phase_gate: workflow '{effective_skill}' is active but never \
+                 entered (0 phases completed, 0 phase files read) — downgrading hard block to \
+                 advisory ALLOW for tool '{tool_name}'. Enforcement resumes once any phase file \
+                 is read or completed."
+            );
+            return GateDecision::Allow;
+        }
+
         let phases_dir = fs
             .home_dir()
             .expect("[sentinel] FATAL: Cannot determine home directory")
@@ -142,6 +185,7 @@ pub fn evaluate(
         }
 
         return GateDecision::Block {
+            skill: effective_skill,
             reason: block.reason,
             next_phase: block.next_phase,
             next_phase_file: block.next_phase_file,
