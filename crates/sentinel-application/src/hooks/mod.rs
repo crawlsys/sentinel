@@ -7,6 +7,7 @@
 pub mod account_cascade;
 pub mod activity_tracker;
 pub mod agent_revocation;
+pub mod ask_question_resync_nudge;
 pub mod audit_extract;
 pub mod autocron;
 mod block_context;
@@ -262,6 +263,7 @@ pub const HOOK_NAMES: &[&str] = &[
     "account_cascade",
     "activity_tracker",
     "agent_revocation",
+    "ask_question_resync_nudge",
     "audit_extract",
     "autocron",
     "bug_task_gate",

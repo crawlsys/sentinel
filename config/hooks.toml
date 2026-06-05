@@ -214,6 +214,14 @@ depends_on = []
 has_api_call = false
 
 [[hooks]]
+id = "ask-question-resync-nudge"
+event = "PostToolUse"
+matcher = ["AskUserQuestion"]
+description = "When an AskUserQuestion answer looks direction-changing, inject an advisory reminder to re-sync the affected task subtree (child subjects AND descriptions, delete superseded chains). Soft nudge only — never blocks."
+depends_on = []
+has_api_call = false
+
+[[hooks]]
 id = "account-cascade"
 event = "PostToolUse"
 description = "Auto-switch all MCP servers after account_switch/account_rotate/project_switch"

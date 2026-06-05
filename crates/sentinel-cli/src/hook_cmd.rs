@@ -1698,6 +1698,20 @@ async fn handle_post_tool_use(
     let nudge_output = hooks::prompt_injection_nudge::process(input, ctx);
     output.merge(&nudge_output);
 
+    // AskUserQuestion task-resync nudge — when a decision made via
+    // AskUserQuestion looks direction-changing, inject an advisory
+    // reminder to re-sync the affected task subtree (child subjects AND
+    // descriptions, plus deleting superseded chains) before the next
+    // unit of work. Soft nudge only — always allows; the signal is via
+    // additionalContext. Gated on the tool name so it's a no-op for
+    // everything else.
+    if matches!(input.tool_name.as_deref(), Some("AskUserQuestion")) {
+        let resync_output = time_and_record(ctx.fs, &mk_ctx("ask_question_resync_nudge"), || {
+            hooks::ask_question_resync_nudge::process(input, ctx)
+        });
+        output.merge(&resync_output);
+    }
+
     // Plan organizer — inject plan file organization instructions (ExitPlanMode only)
     if matches!(input.tool_name.as_deref(), Some("ExitPlanMode")) {
         let plan_output = time_and_record(ctx.fs, &mk_ctx("plan_organizer"), || {
