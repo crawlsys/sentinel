@@ -105,6 +105,14 @@ depends_on = ["skill-router"]
 has_api_call = false
 
 [[hooks]]
+id = "ticket-quality-gate"
+event = "PreToolUse"
+matcher = ["mcp__linear__create_issue", "mcp__linear__update_issue"]
+description = "ADVISORY: inject the Linear ticket-quality rubric + 95 score-gate reminder on ticket create/update (never blocks)"
+depends_on = []
+has_api_call = false
+
+[[hooks]]
 id = "git-hygiene-gate"
 event = "PreToolUse"
 matcher = ["Edit", "Write"]

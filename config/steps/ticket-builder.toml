@@ -1,0 +1,110 @@
+# Ticket Builder Skill — Step Definitions
+#
+# Trackable steps for the Linear ticket-quality rubric + score gate
+# (~/.claude/skills/linear/best-practices/ticket-quality.md). This is the
+# CREATE/GROOM path, distinct from the `linear` issue-PICKUP workflow.
+#
+# Each phase maps to a workflow phase in config/workflows.toml (ticket-builder).
+# These steps are TRACKING-ONLY — there are no phase files on disk and the
+# phase-gate never hard-blocks on them. Quality enforcement is advisory via the
+# `ticket-quality-gate` hook. Steps marked blocker = true represent the hard
+# binary gate conditions; they gate the score-gate phase's "done" verdict, not
+# arbitrary tool calls.
+
+# ============================================================================
+# Phase 1: Resolve team (estimation type + label taxonomy)
+# ============================================================================
+
+[[phases]]
+id = "resolve-team"
+
+[[phases.steps]]
+id = "1.1"
+description = "get_team — read issue_estimation_type (fibonacci/linear/exponential/tShirt/notUsed), allow_zero, default_issue_estimate"
+
+[[phases.steps]]
+id = "1.2"
+description = "list_labels(team) — resolve the team's REAL Type/Area/Scope taxonomy (layer- or domain-based); never assume Frontend/Backend"
+
+[[phases.steps]]
+id = "1.3"
+description = "list_workflow_states(team) — note state TYPEs (backlog/unstarted/started/…) so state is resolved by type, never name"
+
+# ============================================================================
+# Phase 2: Build the ticket
+# ============================================================================
+
+[[phases]]
+id = "build"
+
+[[phases.steps]]
+id = "2.1"
+description = "search — check for duplicates/related work before creating"
+
+[[phases.steps]]
+id = "2.2"
+description = "Size it — count distinct deliverables; map to the team's estimation type from step 1.1"
+
+[[phases.steps]]
+id = "2.3"
+description = "Write structured description — Context + Scope + Acceptance Criteria (>=3 testable checkboxes) + Out-of-scope"
+
+[[phases.steps]]
+id = "2.4"
+description = "create_issue — title, description, priority (1-4, never 0), labels, estimate, project, cycle, assignee in ONE call"
+
+[[phases.steps]]
+id = "2.5"
+description = "create_issue_relation — link related/blocking work found in 2.1"
+
+# ============================================================================
+# Phase 3: Verify (re-fetch — connectors silently drop fields)
+# ============================================================================
+
+[[phases]]
+id = "verify"
+
+[[phases.steps]]
+id = "3.1"
+description = "get_issue(returned_id) — RE-FETCH the saved ticket; never trust the create echo"
+blocker = true
+
+[[phases.steps]]
+id = "3.2"
+description = "Diff intended vs persisted — any dropped label/estimate/priority → re-apply with update_issue/add_issue_label, then re-fetch again"
+
+# ============================================================================
+# Phase 4: Score gate (rubric >= 95 AND all binary gates pass)
+# ============================================================================
+
+[[phases]]
+id = "score-gate"
+
+[[phases.steps]]
+id = "4.1"
+description = "Score the RE-FETCHED ticket on the 0-100 rubric (9 dimensions)"
+
+[[phases.steps]]
+id = "4.2"
+description = "GATE: Type label present (team's Type group)"
+blocker = true
+
+[[phases.steps]]
+id = "4.3"
+description = "GATE: Area label present (team's Area group)"
+blocker = true
+
+[[phases.steps]]
+id = "4.4"
+description = "GATE: estimate set in field (team's estimation type; waived if team = notUsed)"
+blocker = true
+
+[[phases.steps]]
+id = "4.5"
+description = "GATE: priority != 0/None; >= 3 testable AC checkboxes; description has Context+Scope+AC"
+blocker = true
+
+[[phases.steps]]
+id = "4.6"
+description = "DECISION — score >= 95 AND all gates pass → DONE (report 'ID — quality N/100, gate: PASS'); else repair lowest dimension + failed gates, return to verify (3.1), re-score"
+blocker = true

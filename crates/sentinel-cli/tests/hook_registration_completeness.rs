@@ -21,6 +21,11 @@ const KNOWN_NON_DISPATCHED_HELPERS: &[&str] = &[
     // pre_commit_verification to surface a local block upstream — it has no
     // `process()` entry point and is never dispatched directly.
     "upstream_block",
+    // `glass_break_gate` is a shared helper for the emergency-break override —
+    // it has no `process()` entry point and is called by git_hygiene,
+    // pre_commit_verification, and verification_gate to consult break state
+    // (e.g. is_break_active / clear_expired_break). Never dispatched directly.
+    "glass_break_gate",
 ];
 
 /// The hook command dispatcher source. Embedded at compile time so the test

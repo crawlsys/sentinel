@@ -76,6 +76,49 @@ required = false
 judge = "sonnet"
 description = "Remove worktree, update Linear status, close PR"
 
+# --- ticket-builder (4 phases) ---
+# TRACKING-ONLY workflow for the Linear ticket-quality rubric + score gate
+# (see ~/.claude/skills/linear/best-practices/ticket-quality.md). This is the
+# CREATE/GROOM path — distinct from the `linear` issue-PICKUP workflow above.
+#
+# IMPORTANT: there are intentionally NO phase files on disk for `ticket-builder`
+# (no ~/.claude/skills/ticket-builder/phases/*.md). Per the phase-gate's
+# "no phase system" rule, a workflow whose phases/ dir doesn't exist is
+# documentation/tracking only and NEVER hard-blocks tools. Quality enforcement
+# is advisory, delivered by the `ticket-quality-gate` hook (scoped to the Linear
+# create/update MCP tools) — NOT by phase-gating. This keeps ticket creation
+# from ever trapping a session the way a hard-gated phased workflow can.
+[[workflows]]
+skill = "ticket-builder"
+
+[[workflows.phases]]
+id = "resolve-team"
+file = "resolve-team.md"
+required = true
+judge = "sonnet"
+description = "Resolve team estimation type + real label taxonomy (get_team, list_labels) before sizing"
+
+[[workflows.phases]]
+id = "build"
+file = "build.md"
+required = true
+judge = "sonnet"
+description = "Search dups, size, write structured description, create_issue with all fields in one call"
+
+[[workflows.phases]]
+id = "verify"
+file = "verify.md"
+required = true
+judge = "sonnet"
+description = "Re-fetch the saved issue (get_issue) and confirm labels/estimate/priority actually persisted"
+
+[[workflows.phases]]
+id = "score-gate"
+file = "score-gate.md"
+required = true
+judge = "opus"
+description = "Score the re-fetched ticket against the 0-100 rubric; repair + re-fetch until score >= 95 and all binary gates pass"
+
 # --- deploy (6 phases) ---
 [[workflows]]
 skill = "deploy"

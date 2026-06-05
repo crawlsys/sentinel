@@ -87,6 +87,7 @@ pub mod task_rehydrate;
 pub mod tasks_md_guard;
 pub mod teammate_idle;
 pub mod test_evidence_recorder;
+pub mod ticket_quality_gate;
 pub mod todo_interceptor;
 pub mod todo_loader;
 pub mod tool_usage_gate;
@@ -341,6 +342,7 @@ pub const HOOK_NAMES: &[&str] = &[
     "tasks_md_guard",
     "teammate_idle",
     "test_evidence_recorder",
+    "ticket_quality_gate",
     "todo_interceptor",
     "todo_loader",
     "tool_usage_gate",

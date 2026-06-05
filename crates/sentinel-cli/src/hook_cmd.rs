@@ -1390,6 +1390,16 @@ fn handle_pre_tool_use(
         state.record_blocked();
     }
 
+    // Ticket quality gate — ADVISORY only. On a Linear create_issue/update_issue
+    // call, inject the ticket-quality rubric + score-gate reminder as context.
+    // Never blocks (it merely surfaces the gate so it isn't silently skipped),
+    // and is scoped to exactly those two MCP tools — so it can never gate
+    // discovery/read tools or non-Linear work.
+    let ticket_quality_output = time_and_record(ctx.fs, &mk_ctx("ticket_quality_gate"), || {
+        hooks::ticket_quality_gate::process(input)
+    });
+    output.merge(&ticket_quality_output);
+
     // BA1 provenance_validate — structural enforcement for citations.
     // Self-gates on input.extra.artifacts presence; non-BA tools
     // pass through silently. Mode-configurable via
