@@ -280,7 +280,16 @@ fn builtin_class(tool_name: &str) -> Option<ReversibilityClass> {
         | "CronList"
         // LSP query surface — reads symbol tables / hovers /
         // definitions. LSP-driven edits go through Edit/Write.
-        | "LSP" => Some(ReversibilityClass::TriviallyReversible),
+        | "LSP"
+        // Workflow return-value tool — a subagent's ONLY way to return
+        // its structured result to the parent workflow. It serializes a
+        // JSON value into the conversation; it commits NOTHING external
+        // (no file, no network, no infra). Without this arm it falls to
+        // `None` → conservative default → the A3 dry_run_then_commit gate
+        // blocks it as if it were irreversible, deadlocking every
+        // multi-agent Workflow ("subagent completed without calling
+        // StructuredOutput"). It is trivially reversible by definition.
+        | "StructuredOutput" => Some(ReversibilityClass::TriviallyReversible),
 
         // --- ReversibleWithEffort: in-conversation or local-tree
         // mutations the operator can undo with a known recovery path
@@ -382,6 +391,21 @@ mod tests {
                 "{t} should be TriviallyReversible"
             );
         }
+    }
+
+    #[test]
+    fn layer1_structured_output_is_trivially_reversible() {
+        // Regression guard: the Workflow harness's StructuredOutput return tool
+        // must classify TriviallyReversible. When it fell to the `Irreversible`
+        // default, the A3 dry_run_then_commit gate blocked it and deadlocked
+        // every multi-agent Workflow (the gate demands _intent/_reasoning/
+        // _expected_effect keys the StructuredOutput schema rejects).
+        let c = LayeredReversibilityClassifier::empty();
+        assert_eq!(
+            c.classify("StructuredOutput", &no_input()),
+            ReversibilityClass::TriviallyReversible,
+            "StructuredOutput must be TriviallyReversible (it only returns a JSON value to the parent workflow)"
+        );
     }
 
     #[test]
