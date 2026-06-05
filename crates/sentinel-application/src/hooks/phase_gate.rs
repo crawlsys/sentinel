@@ -1133,12 +1133,26 @@ fn check_protected_path_write(
         // The active skill's SKILL.md is always protected (prevents self-modification),
         // but non-active skills should remain editable during normal work.
         // Phase files (skills/*/phases/*.md) are ALWAYS protected regardless.
+        //
+        // **Phantom-active exception (same root cause as the gate never-entered
+        // downgrade):** the active skill's SKILL.md is only protected when that
+        // skill's workflow has actually been ENTERED (a phase completed or a phase
+        // file read). A skill that became `active_skill` merely via a topical
+        // skill-router match — without the user entering its workflow — must not
+        // lock its own SKILL.md, or routine skill-authoring edits get trapped the
+        // same way unrelated tool calls were (the whole-session deadlock). Once the
+        // workflow is genuinely entered, self-modification protection re-engages.
         if reason == "skill definition file" {
             if let Some(target_skill) = extract_skill_name_from_path(&normalized) {
-                if let Some(active) = state.active_skill.as_deref() {
-                    if target_skill != active {
-                        return None; // Allow: editing a non-active skill's SKILL.md
+                match state.active_skill.as_deref() {
+                    Some(active) if target_skill == active => {
+                        // Editing the ACTIVE skill's SKILL.md — only protect it if
+                        // that workflow was actually entered (not phantom-active).
+                        if !workflow_entered(state, active) {
+                            return None; // Allow: phantom-active skill, never entered
+                        }
                     }
+                    _ => return None, // Allow: editing a non-active skill's SKILL.md
                 }
             }
         }
@@ -1189,6 +1203,28 @@ fn check_protected_path_write(
 // with the safe-suffixes / safe-prefixes lists. The phase gate is still the
 // only consumer; the domain location makes the lists reviewable.
 use sentinel_domain::mcp_tool::is_dangerous_mcp_tool;
+
+/// Whether a skill's workflow has actually been ENTERED in this session.
+///
+/// "Entered" = the user demonstrably began the workflow, by either completing a
+/// phase or reading any of its phase files. A skill that is merely `active_skill`
+/// via a topical skill-router keyword match — with no phase completed and no phase
+/// file read — is "phantom-active" and returns false here.
+///
+/// Shared predicate for the phantom-arming fixes: the gate's never-entered
+/// block downgrade (`gate::evaluate`) and the SKILL.md self-modification guard
+/// both key off this so a phantom-active skill never traps the session.
+fn workflow_entered(state: &SessionState, skill: &str) -> bool {
+    let completed = state
+        .workflows
+        .get(skill)
+        .is_some_and(|w| !w.completed_phases.is_empty());
+    let read_any = state
+        .phases_read
+        .get(skill)
+        .is_some_and(|files| !files.is_empty());
+    completed || read_any
+}
 
 /// Extract the skill name from a normalized path like `.../skills/loom/SKILL.md`.
 /// Returns the skill directory name (e.g., "loom") or None if path doesn't match.
@@ -1746,6 +1782,43 @@ mod tests {
                 "never-entered `linear` workflow must not block `{tool}` (phantom-arming deadlock)"
             );
         }
+    }
+
+    #[test]
+    fn test_phantom_active_skill_can_edit_own_skill_md() {
+        // REGRESSION (phantom-arming, SKILL.md self-mod guard): when `linear` is
+        // active_skill only via a topical router match (never entered), editing
+        // ~/.claude/skills/linear/SKILL.md must be ALLOWED — phantom-active skills
+        // don't lock their own definition. (Authoring a skill's SKILL.md was getting
+        // trapped the same way unrelated tool calls were.)
+        let mut state = SessionState::new("sess-1");
+        state.set_active_skill("linear");
+        let mut workflows = HashMap::new();
+        workflows.insert("linear".to_string(), test_workflow());
+
+        let skill_md = dirs::home_dir()
+            .unwrap_or_default()
+            .join(".claude/skills/linear/SKILL.md");
+        let input = HookInput {
+            tool_name: Some("Edit".to_string()),
+            tool_input: Some(serde_json::json!({ "file_path": skill_md.to_string_lossy() })),
+            ..Default::default()
+        };
+        let output = process(&input, &mut state, &workflows, &test_fs());
+        assert!(
+            output.blocked.is_none(),
+            "phantom-active `linear` (never entered) must not lock its own SKILL.md"
+        );
+
+        // Once the workflow is ENTERED (a phase file read), self-modification
+        // protection re-engages and the same edit is blocked.
+        state.record_phase_read("linear", "claim.md");
+        let output2 = process(&input, &mut state, &workflows, &test_fs());
+        assert_eq!(
+            output2.blocked,
+            Some(true),
+            "entered `linear` workflow must protect its own SKILL.md (self-mod guard)"
+        );
     }
 
     #[test]
