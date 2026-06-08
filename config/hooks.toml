@@ -108,7 +108,7 @@ has_api_call = false
 id = "ticket-quality-gate"
 event = "PreToolUse"
 matcher = ["mcp__linear__create_issue", "mcp__linear__update_issue"]
-description = "ADVISORY: inject the Linear ticket-quality rubric + 95 score-gate reminder on ticket create/update (never blocks)"
+description = "ENFORCING: DENY a Linear ticket create/update that is not dev-ready (missing estimate/priority 1-4/Type+Area labels/substantive description), with a guided AskUserQuestion fix-path. Scoped to ticket writes only; non-Linear + read tools pass through. (Tier A of the bad-PM-is-bad-software factory.)"
 depends_on = []
 has_api_call = false
 
