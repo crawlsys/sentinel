@@ -269,6 +269,25 @@ pub async fn run(port: u16, legatus: LegatusOptions) -> Result<()> {
     // GET /legatus/inbox/next for hook clients.
     let legatus_handle = start_legatus_if_configured(legatus).await?;
 
+    // Tier B Linear enforcement spine. When SENTINEL_LINEAR_TOKEN is set, hold a
+    // live `graphql-transport-ws` subscription to Linear and react to every issue
+    // state-change in real time. Defaults to Shadow mode (log-only, zero
+    // mutations) unless SENTINEL_LINEAR_ENFORCE=live. Fire-and-forget: a detached
+    // task that logs and exits on permanent PAT rejection without taking the
+    // daemon down. Mirrors the legatus spawn pattern above.
+    if let Some(enforcer_cfg) = sentinel_infrastructure::linear_enforcer::EnforcerConfig::from_env()
+    {
+        info!(
+            mode = ?enforcer_cfg.mode,
+            "Linear enforcer enabled — starting real-time subscription"
+        );
+        tokio::spawn(async move {
+            sentinel_infrastructure::linear_enforcer::run_enforcer(enforcer_cfg).await;
+        });
+    } else {
+        info!("Linear enforcer disabled (SENTINEL_LINEAR_TOKEN not set)");
+    }
+
     // **Attack #130 fix**: Restrict CORS to localhost origins only.
     // The previous `Any` CORS policy allowed JavaScript from any origin to access
     // the dashboard API. Even though we bind to 127.0.0.1, a malicious website
