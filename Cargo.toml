@@ -40,7 +40,17 @@ futures-util = { version = "0.3", default-features = false, features = ["sink", 
 # consulate via the Consular Protocol (path-dep on the sibling
 # repo legatus-consul-agent). 0.24 matches the version pinned
 # in legatus-consul-agent's workspace.
-tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "handshake", "rustls-tls-webpki-roots"] }
+# `native-roots` (not `webpki-roots`) on purpose: this dev box runs Norton,
+# which MITMs TLS by injecting its own Root CA into the Windows trust store.
+# webpki-roots only trusts the standard CA bundle, so it rejects Norton's
+# re-signed certs with `UnknownIssuer` (e.g. the Linear wss handshake). Reading
+# the OS trust store via native-roots picks up Norton's root and connects.
+tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "handshake", "rustls-tls-native-roots"] }
+# rustls 0.23 (pulled transitively by tokio-tungstenite's rustls-tls) ships
+# BOTH the aws-lc-rs and ring providers, so it refuses to auto-select one and
+# panics at the first TLS handshake. We install the `ring` provider explicitly
+# at runtime (lighter, no aws-lc-rs C-toolchain surprises on Windows).
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }

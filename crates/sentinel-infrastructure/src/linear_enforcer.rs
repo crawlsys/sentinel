@@ -288,10 +288,22 @@ async fn sleep_backoff(idx: &mut usize) {
     tokio::time::sleep(Duration::from_secs(secs)).await;
 }
 
+/// Install the rustls `ring` `CryptoProvider` as the process default, once.
+///
+/// rustls 0.23 (pulled in by `tokio-tungstenite`'s `rustls-tls-webpki-roots`)
+/// compiles in BOTH the `aws-lc-rs` and `ring` providers, so it refuses to
+/// auto-select and panics at the first TLS handshake. Installing one explicitly
+/// fixes that. Idempotent: `install_default` errors if a provider is already
+/// set, which we ignore — any provider being present is the success condition.
+fn ensure_crypto_provider() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+}
+
 /// Run the live subscription forever, forwarding `IssueChanged` events on `tx`.
 /// Reconnects with backoff; gives up after `PAT_REJECTION_PERMANENT_THRESHOLD`
 /// consecutive auth rejections.
 pub async fn run_subscription(token: String, tx: mpsc::Sender<IssueChanged>) {
+    ensure_crypto_provider();
     let url = ws_url();
     let mut backoff = 0usize;
     let mut pat_rejections = 0u32;
