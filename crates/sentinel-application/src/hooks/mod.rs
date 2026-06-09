@@ -65,6 +65,7 @@ pub mod provenance_validate;
 pub mod requirements_traceability_gate;
 pub mod session_end;
 pub mod session_index;
+pub mod self_annealing;
 pub mod session_init;
 pub mod session_summary;
 pub mod setup;
@@ -319,6 +320,7 @@ pub const HOOK_NAMES: &[&str] = &[
     "provenance_validate",
     "requirements_traceability_gate",
     "spec_challenge_gate",
+    "self_annealing",
     "session_end",
     "session_index",
     "session_init",

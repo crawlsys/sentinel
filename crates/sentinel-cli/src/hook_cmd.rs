@@ -2029,6 +2029,15 @@ fn handle_stop(
     });
     output.merge(&reality_output);
 
+    // Self-annealing — when a phase gate fails repeatedly (the forensic
+    // failed_submissions record), surface a [Self-Annealing] remediation; when
+    // operator-armed (SENTINEL_ALLOW_SELF_ANNEAL=1), open a PR hardening the
+    // skill. Reads SessionState for the failure counts.
+    let anneal_output = time_and_record(ctx.fs, &mk_ctx("self_annealing"), || {
+        hooks::self_annealing::process(input, ctx, state)
+    });
+    output.merge(&anneal_output);
+
     // Good citizen observer — surface unaddressed warnings/findings
     // observed during the turn, prompt agent to file TaskCreate.
     let citizen_output = time_and_record(ctx.fs, &mk_ctx("good_citizen_observer"), || {
