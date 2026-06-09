@@ -15,6 +15,10 @@ tokio = { workspace = true }
 tokio-stream = { workspace = true }
 tokio-tungstenite = { workspace = true }
 rustls = { workspace = true }
+# LangGraph Rust port — powers the Tier B enforcement escalation graph
+# (enforcement_graph.rs): a checkpointed StateGraph encoding the
+# classify→judge→act decision with a durable, replayable audit trail.
+langgraph-core = { path = "../../../langgraph-python-to-rust/langgraph-core", default-features = false, features = ["sqlite"] }
 async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

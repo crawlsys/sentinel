@@ -19,6 +19,7 @@ pub mod evidence_browserbase;
 pub mod evidence_filesystem;
 pub mod filesystem;
 pub mod git;
+pub mod enforcement_graph;
 pub mod interceptor;
 pub mod ipc;
 pub mod linear_enforcer;

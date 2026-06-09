@@ -3406,6 +3406,7 @@ dependencies = [
  "getrandom 0.2.17",
  "glob",
  "hmac",
+ "langgraph-core",
  "regex",
  "reqwest 0.12.28",
  "rig-core",

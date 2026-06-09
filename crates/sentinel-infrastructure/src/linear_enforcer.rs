@@ -154,6 +154,13 @@ impl TicketReadiness {
         m
     }
 
+    /// The missing dev-ready dimensions as owned `String`s (for serializing
+    /// into the escalation graph's audit state).
+    #[must_use]
+    pub fn missing_owned(&self) -> Vec<String> {
+        self.missing().iter().map(|s| (*s).to_string()).collect()
+    }
+
     /// Should this ticket be reverted? Only when it has STARTED but is not ready.
     #[must_use]
     pub fn should_revert(&self) -> bool {
@@ -338,6 +345,7 @@ pub async fn run_subscription(token: String, tx: mpsc::Sender<IssueChanged>) {
             match frame {
                 Ok(Message::Text(t)) => {
                     let Ok(parsed) = serde_json::from_str::<ServerMsg>(&t) else {
+                        tracing::debug!(raw = %t, "linear enforcer: unparsed server frame");
                         continue;
                     };
                     match parsed {
@@ -362,8 +370,17 @@ pub async fn run_subscription(token: String, tx: mpsc::Sender<IssueChanged>) {
                 Ok(Message::Ping(p)) => {
                     let _ = sink.send(Message::Pong(p)).await;
                 }
-                Ok(Message::Close(_)) | Err(_) => break,
-                _ => {}
+                Ok(Message::Close(c)) => {
+                    tracing::debug!(close = ?c, "linear enforcer: server CLOSE frame");
+                    break;
+                }
+                Err(e) => {
+                    tracing::debug!(error = %e, "linear enforcer: ws read error");
+                    break;
+                }
+                other => {
+                    tracing::debug!(?other, "linear enforcer: other ws frame");
+                }
             }
         }
 
@@ -648,7 +665,11 @@ fn debounced(
 /// up permanently (PAT rejected) or the receiver is dropped.
 ///
 /// In `Shadow` mode it fetches readiness and logs what it *would* revert, with
-/// zero mutations. In `Live` mode it reverts + comments via [`enforce_ticket`].
+/// zero mutations. In `Live` mode an un-ready started ticket is routed through
+/// the `LangGraph` escalation graph ([`crate::enforcement_graph`]): an adversarial
+/// `Codex` judge must CONFIRM before the strict revert + comment fires. If the
+/// `OPENROUTER_API_KEY` isn't set, Live falls back to the direct
+/// [`enforce_ticket`] path (judge unavailable ⇒ readiness check alone).
 pub async fn run_enforcer(cfg: EnforcerConfig) {
     let (tx, mut rx) = mpsc::channel::<IssueChanged>(256);
     tokio::spawn(run_subscription(cfg.token.clone(), tx));
@@ -657,7 +678,23 @@ pub async fn run_enforcer(cfg: EnforcerConfig) {
     let mut seen: std::collections::HashMap<String, std::time::Instant> =
         std::collections::HashMap::new();
 
-    tracing::info!(mode = ?cfg.mode, "linear enforcer: driver started");
+    // Build the escalation graph + LLM judge once, for Live mode. Either being
+    // unavailable degrades Live to the direct readiness-only revert path.
+    let (llm, graph) = if matches!(cfg.mode, EnforcerMode::Live) {
+        let llm = crate::openrouter_llm::OpenRouterLlm::from_env().ok();
+        let graph = match crate::enforcement_graph::build_escalation_graph().await {
+            Ok(g) => Some(g),
+            Err(e) => {
+                tracing::warn!(error = %e, "linear enforcer: escalation graph unavailable; Live uses direct revert");
+                None
+            }
+        };
+        (llm, graph)
+    } else {
+        (None, None)
+    };
+
+    tracing::info!(mode = ?cfg.mode, judge = llm.is_some(), graph = graph.is_some(), "linear enforcer: driver started");
 
     while let Some(ev) = rx.recv().await {
         let id = &ev.linear_issue_id;
@@ -682,25 +719,39 @@ pub async fn run_enforcer(cfg: EnforcerConfig) {
                 }
             },
             EnforcerMode::Live => {
-                // Live respects the team filter: fetch first to learn the
-                // identifier, gate, then act. `enforce_ticket` re-fetches, but
-                // the double-fetch only happens for tickets that actually
-                // changed and is bounded by the debounce — fine for correctness.
-                match fetch_readiness(&client, &cfg.token, id).await {
+                // Fetch once to learn the identifier + readiness, and gate on team.
+                let readiness = match fetch_readiness(&client, &cfg.token, id).await {
                     Ok(r) if !cfg.team_allowed(&r.identifier) => continue,
-                    Ok(_) => {}
+                    Ok(r) => r,
                     Err(e) => {
                         tracing::debug!(error = %e, issue = %id, "linear enforcer [LIVE]: pre-check fetch failed");
                         continue;
                     }
-                }
-                match enforce_ticket(&client, &cfg.token, id).await {
-                    Ok(true) => {
-                        tracing::info!(issue = %id, "linear enforcer [LIVE]: reverted un-ready ticket");
+                };
+
+                // Preferred path: route through the LangGraph escalation graph
+                // so an adversarial judge confirms before a strict revert.
+                if let (Some(llm), Some(graph)) = (llm.as_ref(), graph.as_ref()) {
+                    match crate::enforcement_graph::evaluate_ticket(llm, graph, &readiness).await {
+                        Ok(state)
+                            if state.decision == crate::enforcement_graph::Decision::Revert =>
+                        {
+                            match enforce_ticket(&client, &cfg.token, id).await {
+                                Ok(_) => tracing::info!(ticket = %readiness.identifier, "linear enforcer [LIVE]: reverted (judge-confirmed)"),
+                                Err(e) => tracing::warn!(error = %e, ticket = %readiness.identifier, "linear enforcer [LIVE]: revert failed"),
+                            }
+                        }
+                        Ok(_) => { /* Clear — judge refuted or ticket ready; no action. */ }
+                        Err(e) => {
+                            tracing::warn!(error = %e, ticket = %readiness.identifier, "linear enforcer [LIVE]: escalation graph failed");
+                        }
                     }
-                    Ok(false) => {}
-                    Err(e) => {
-                        tracing::warn!(error = %e, issue = %id, "linear enforcer [LIVE]: enforcement failed");
+                } else if readiness.should_revert() {
+                    // Fallback (no judge/graph): direct readiness-only revert.
+                    match enforce_ticket(&client, &cfg.token, id).await {
+                        Ok(true) => tracing::info!(ticket = %readiness.identifier, "linear enforcer [LIVE]: reverted (readiness-only)"),
+                        Ok(false) => {}
+                        Err(e) => tracing::warn!(error = %e, ticket = %readiness.identifier, "linear enforcer [LIVE]: enforcement failed"),
                     }
                 }
             }
