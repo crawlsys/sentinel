@@ -797,21 +797,24 @@ pub async fn run_enforcer(cfg: EnforcerConfig) {
 
     // Build the escalation graph + LLM judge once, for Live mode. Either being
     // unavailable degrades Live to the direct readiness-only revert path.
-    let (llm, graph) = if matches!(cfg.mode, EnforcerMode::Live) {
+    let (llm, remediation_graph) = if matches!(cfg.mode, EnforcerMode::Live) {
         let llm = crate::openrouter_llm::OpenRouterLlm::from_env().ok();
-        let graph = match crate::enforcement_graph::build_escalation_graph().await {
+        // The self-heal graph: remediate-first, escalate the gaps, revert last.
+        // (Supersedes the bare escalation graph as the Live decision path; the
+        // judge-gated `enforcement_graph` remains available for direct use.)
+        let remediation_graph = match crate::remediation::build_remediation_graph().await {
             Ok(g) => Some(g),
             Err(e) => {
-                tracing::warn!(error = %e, "linear enforcer: escalation graph unavailable; Live uses direct revert");
+                tracing::warn!(error = %e, "linear enforcer: remediation graph unavailable; Live falls back to readiness-only revert");
                 None
             }
         };
-        (llm, graph)
+        (llm, remediation_graph)
     } else {
         (None, None)
     };
 
-    tracing::info!(mode = ?cfg.mode, judge = llm.is_some(), graph = graph.is_some(), "linear enforcer: driver started");
+    tracing::info!(mode = ?cfg.mode, judge = llm.is_some(), heal = remediation_graph.is_some(), "linear enforcer: driver started");
 
     while let Some(ev) = rx.recv().await {
         let id = &ev.linear_issue_id;
@@ -845,28 +848,67 @@ pub async fn run_enforcer(cfg: EnforcerConfig) {
                         continue;
                     }
                 };
+                if !readiness.should_revert() {
+                    continue; // dev-ready or not started — nothing to do
+                }
 
-                // Preferred path: route through the LangGraph escalation graph
-                // so an adversarial judge confirms before a strict revert.
-                if let (Some(llm), Some(graph)) = (llm.as_ref(), graph.as_ref()) {
-                    match crate::enforcement_graph::evaluate_ticket(llm, graph, &readiness).await {
-                        Ok(state)
-                            if state.decision == crate::enforcement_graph::Decision::Revert =>
-                        {
+                // ASSISTANT, not bouncer: remediate-first. Heal as many gaps as
+                // we can confidently infer; the ticket stays in progress. Only
+                // escalate the gaps we can't fill, and revert as a last resort.
+                if let (Some(llm), Some(rgraph)) = (llm.as_ref(), remediation_graph.as_ref()) {
+                    let missing = readiness.missing_owned();
+                    let catalog = crate::remediation::fetch_label_catalog(&client, &cfg.token, id).await;
+                    let (title, desc) = crate::remediation::fetch_ticket_text(&client, &cfg.token, id).await;
+                    let plan = crate::remediation::propose_remediation(
+                        llm, &readiness.identifier, &title, &desc, &missing, &catalog,
+                    )
+                    .await;
+                    let applied =
+                        crate::remediation::apply_remediation(&client, &cfg.token, id, &plan, &catalog).await;
+
+                    // Re-fetch to learn what's STILL missing after the heal.
+                    let still_missing = match fetch_readiness(&client, &cfg.token, id).await {
+                        Ok(r) => r.missing_owned(),
+                        Err(_) => plan.unfillable.clone(),
+                    };
+                    let state = crate::remediation::RemediationState {
+                        identifier: readiness.identifier.clone(),
+                        missing_before: missing,
+                        applied_count: applied.len(),
+                        still_missing: still_missing.clone(),
+                        outcome: crate::remediation::RemediationOutcome::Clear,
+                    };
+                    match crate::remediation::run_remediation_decision(rgraph, state).await {
+                        Ok(crate::remediation::RemediationOutcome::Clear) => {
+                            if !applied.is_empty() {
+                                crate::remediation::post_comment(&client, &cfg.token, id, &format!(
+                                    "## 🩺 Auto-remediated to dev-ready\n\nThe enforcer filled: {}. Ticket stays in progress. ({})",
+                                    applied.join(", "), plan.rationale,
+                                )).await;
+                            }
+                            tracing::info!(ticket = %readiness.identifier, healed = %applied.join(", "), "linear enforcer [LIVE]: healed in place (Clear)");
+                        }
+                        Ok(crate::remediation::RemediationOutcome::Escalate) => {
+                            crate::remediation::post_comment(&client, &cfg.token, id, &format!(
+                                "## 🩺 Partially auto-remediated — needs your input\n\nFilled: {}. Still needs a human decision: **{}**. Please set these so the ticket is dev-ready.",
+                                if applied.is_empty() { "(nothing)".into() } else { applied.join(", ") },
+                                still_missing.join(", "),
+                            )).await;
+                            tracing::info!(ticket = %readiness.identifier, gaps = %still_missing.join(", "), "linear enforcer [LIVE]: escalated remaining gaps (stays in progress)");
+                        }
+                        Ok(crate::remediation::RemediationOutcome::Revert) => {
+                            // Last resort: nothing could be healed.
                             match enforce_ticket(&client, &cfg.token, id).await {
-                                Ok(_) => tracing::info!(ticket = %readiness.identifier, "linear enforcer [LIVE]: reverted (judge-confirmed)"),
+                                Ok(_) => tracing::info!(ticket = %readiness.identifier, "linear enforcer [LIVE]: reverted (last resort — unhealable)"),
                                 Err(e) => tracing::warn!(error = %e, ticket = %readiness.identifier, "linear enforcer [LIVE]: revert failed"),
                             }
                         }
-                        Ok(_) => { /* Clear — judge refuted or ticket ready; no action. */ }
-                        Err(e) => {
-                            tracing::warn!(error = %e, ticket = %readiness.identifier, "linear enforcer [LIVE]: escalation graph failed");
-                        }
+                        Err(e) => tracing::warn!(error = %e, ticket = %readiness.identifier, "linear enforcer [LIVE]: remediation graph failed"),
                     }
-                } else if readiness.should_revert() {
-                    // Fallback (no judge/graph): direct readiness-only revert.
+                } else {
+                    // No LLM/heal graph available: direct readiness-only revert.
                     match enforce_ticket(&client, &cfg.token, id).await {
-                        Ok(true) => tracing::info!(ticket = %readiness.identifier, "linear enforcer [LIVE]: reverted (readiness-only)"),
+                        Ok(true) => tracing::info!(ticket = %readiness.identifier, "linear enforcer [LIVE]: reverted (readiness-only, no heal available)"),
                         Ok(false) => {}
                         Err(e) => tracing::warn!(error = %e, ticket = %readiness.identifier, "linear enforcer [LIVE]: enforcement failed"),
                     }
