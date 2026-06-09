@@ -93,6 +93,11 @@ pub enum AnomalyDimension {
     CostSpike,
     RiskEscalation,
     SessionBurst,
+    /// 10th dimension (Praetorian-inspired): the step's output is
+    /// near-identical to recent prior runs of the same step — a
+    /// token-burning "stuck loop" where the agent re-emits the same
+    /// result without making progress.
+    OutputSimilarity,
 }
 
 /// Aggregate of every anomaly fired for a single step run. Empty
@@ -430,6 +435,121 @@ impl AnomalyDetector for DurationOutlierDetector {
     }
 }
 
+/// Detector for [`AnomalyDimension::OutputSimilarity`] — the stuck-loop
+/// catcher. Compares the current step's output against recent prior runs
+/// of the same `(skill, phase_id, step_id)`; if the output is ≥90%
+/// similar (line-level Jaccard) to a recent run, the agent is likely
+/// spinning — re-emitting the same result without progress. Severity
+/// scales with how many recent runs collide.
+pub struct OutputSimilarityDetector;
+
+/// Read a step's output payload from `evidence.custom`. Outputs are stored
+/// under `step_tool_result` (the seal-time convention); fall back to
+/// `step_tool_output` for forward-compat. Returns the serialized JSON
+/// string so the comparison is over a stable textual form.
+fn step_output_text(evidence: &Evidence) -> Option<String> {
+    evidence
+        .custom
+        .get("step_tool_result")
+        .or_else(|| evidence.custom.get("step_tool_output"))
+        .map(|v| serde_json::to_string(v).unwrap_or_default())
+        .filter(|s| !s.is_empty() && s != "null")
+}
+
+/// Line-level Jaccard similarity of two texts: |A∩B| / |A∪B| over the
+/// SET of non-blank trimmed lines. 1.0 = identical line sets, 0.0 =
+/// disjoint. Cheap, dependency-free, and robust to reordering — the
+/// right grain for "did the agent just repeat itself".
+fn line_jaccard(a: &str, b: &str) -> f64 {
+    use std::collections::BTreeSet;
+    let set_a: BTreeSet<&str> = a.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    let set_b: BTreeSet<&str> = b.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    if set_a.is_empty() && set_b.is_empty() {
+        return 1.0; // two empty outputs ARE identical
+    }
+    let inter = set_a.intersection(&set_b).count();
+    let union = set_a.union(&set_b).count();
+    if union == 0 {
+        0.0
+    } else {
+        inter as f64 / union as f64
+    }
+}
+
+/// How many recent prior runs to compare against (the "loop window").
+const SIMILARITY_WINDOW: usize = 3;
+/// Similarity at/above which two outputs count as "the same".
+const SIMILARITY_THRESHOLD: f64 = 0.90;
+
+impl AnomalyDetector for OutputSimilarityDetector {
+    fn dimension(&self) -> AnomalyDimension {
+        AnomalyDimension::OutputSimilarity
+    }
+
+    fn detect(
+        &self,
+        skill: &str,
+        phase_id: &str,
+        step_id: &str,
+        current_evidence: &Evidence,
+        _current_duration_ms: u64,
+        history: &ProofChain,
+    ) -> Option<Anomaly> {
+        let current = step_output_text(current_evidence)?;
+
+        // Most-recent-first prior outputs for the same step.
+        let mut prior: Vec<String> = history
+            .entries
+            .iter()
+            .rev()
+            .filter_map(|e| match e {
+                ProofEntry::Step(s)
+                    if s.skill == skill && s.phase_id == phase_id && s.step_id == step_id =>
+                {
+                    step_output_text(&s.evidence)
+                }
+                _ => None,
+            })
+            .collect();
+        prior.truncate(SIMILARITY_WINDOW);
+        if prior.is_empty() {
+            return None; // first run — no baseline
+        }
+
+        // Count how many of the recent window are ≥ threshold-similar.
+        let collisions = prior
+            .iter()
+            .filter(|p| line_jaccard(&current, p) >= SIMILARITY_THRESHOLD)
+            .count();
+        if collisions == 0 {
+            return None;
+        }
+
+        let max_sim = prior
+            .iter()
+            .map(|p| line_jaccard(&current, p))
+            .fold(0.0_f64, f64::max);
+        // Severity ramps with the number of colliding recent runs: a single
+        // repeat is a nudge (≈2.0), the whole window repeating is a hard
+        // stuck-loop signal (→5.0).
+        let severity = (collisions as f64).mul_add(1.5, 1.0).clamp(2.0, 5.0);
+
+        Some(Anomaly {
+            dimension: AnomalyDimension::OutputSimilarity,
+            severity,
+            reasoning: format!(
+                "step output is {:.0}% similar to {collisions} of the last \
+                 {} run(s) — likely a stuck loop re-emitting the same result \
+                 without progress",
+                max_sim * 100.0,
+                prior.len(),
+            ),
+            observed: serde_json::json!({"max_similarity": max_sim, "collisions": collisions}),
+            baseline: serde_json::json!({"threshold": SIMILARITY_THRESHOLD, "window": prior.len()}),
+        })
+    }
+}
+
 // ─── Composite hook entry point ────────────────────────────────────────
 
 /// Return the default set of detectors the hook ships with.
@@ -444,6 +564,7 @@ pub fn default_detectors() -> Vec<Box<dyn AnomalyDetector>> {
         Box::new(ArgumentShapeDriftDetector),
         Box::new(PayloadSizeDetector),
         Box::new(DurationOutlierDetector),
+        Box::new(OutputSimilarityDetector),
     ]
 }
 
@@ -719,5 +840,88 @@ mod tests {
             json.contains(r#""dimension":"argument-shape-drift""#),
             "got: {json}"
         );
+    }
+
+    // ─── OutputSimilarity (stuck-loop) detector ───────────────────────────
+
+    fn evidence_with_output(out: serde_json::Value) -> Evidence {
+        let mut e = Evidence::default();
+        e.custom = serde_json::json!({ "step_tool_result": out });
+        e
+    }
+
+    /// Seed a chain where the same step emits the SAME output `n` times.
+    fn seeded_chain_repeated_output(
+        skill: &str,
+        phase_id: &str,
+        step_id: &str,
+        out: &serde_json::Value,
+        n: usize,
+    ) -> ProofChain {
+        let mut chain = ProofChain::new(skill, "test");
+        let mut prev = GENESIS_HASH.to_string();
+        for _ in 0..n {
+            let custom = serde_json::json!({ "step_tool_result": out });
+            let proof = historical_step(skill, phase_id, step_id, &prev, custom, 100);
+            prev = proof.combined_hash.clone();
+            chain.entries.push(ProofEntry::Step(proof));
+        }
+        chain
+    }
+
+    #[test]
+    fn line_jaccard_basics() {
+        assert!((line_jaccard("a\nb\nc", "a\nb\nc") - 1.0).abs() < f64::EPSILON);
+        assert!((line_jaccard("a\nb\nc\nd", "a\nb\nc\ne") - 0.6).abs() < 1e-9); // 3∩ / 5∪
+        assert!((line_jaccard("x\ny", "p\nq") - 0.0).abs() < f64::EPSILON);
+        assert!((line_jaccard("", "") - 1.0).abs() < f64::EPSILON);
+        // Whitespace/blank-line robust.
+        assert!((line_jaccard("a\n\n b ", "a\nb") - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn output_similarity_silent_on_first_run() {
+        let chain = ProofChain::new("linear", "test");
+        let ev = evidence_with_output(serde_json::json!({"msg": "doing the thing"}));
+        let res = OutputSimilarityDetector.detect("linear", "p", "1", &ev, 100, &chain);
+        assert!(res.is_none(), "first run has no baseline");
+    }
+
+    #[test]
+    fn output_similarity_fires_on_repeated_output() {
+        // Prior 3 runs all emitted the same multi-line output; current run
+        // emits the same again → stuck loop.
+        let out = serde_json::json!({"log": "line one\nline two\nline three\nstill stuck"});
+        let chain = seeded_chain_repeated_output("linear", "p", "1", &out, 3);
+        let ev = evidence_with_output(out.clone());
+        let res = OutputSimilarityDetector.detect("linear", "p", "1", &ev, 100, &chain);
+        let anomaly = res.expect("identical repeated output must fire");
+        assert_eq!(anomaly.dimension, AnomalyDimension::OutputSimilarity);
+        assert!(anomaly.severity >= 5.0, "whole window colliding → max severity");
+        assert!(anomaly.reasoning.contains("stuck loop"), "{}", anomaly.reasoning);
+    }
+
+    #[test]
+    fn output_similarity_silent_on_varied_output() {
+        // Each prior run emitted a DIFFERENT output; current is different too.
+        let mut chain = ProofChain::new("linear", "test");
+        let mut prev = GENESIS_HASH.to_string();
+        for i in 0..3 {
+            let custom = serde_json::json!({
+                "step_tool_result": {"log": format!("unique result number {i} with its own lines\nrow-{i}-a\nrow-{i}-b")}
+            });
+            let proof = historical_step("linear", "p", "1", &prev, custom, 100);
+            prev = proof.combined_hash.clone();
+            chain.entries.push(ProofEntry::Step(proof));
+        }
+        let ev = evidence_with_output(serde_json::json!({"log": "brand new distinct output\nfresh-a\nfresh-b"}));
+        let res = OutputSimilarityDetector.detect("linear", "p", "1", &ev, 100, &chain);
+        assert!(res.is_none(), "varied outputs must not flag a loop");
+    }
+
+    #[test]
+    fn output_similarity_registered_in_defaults() {
+        let dims: Vec<AnomalyDimension> = default_detectors().iter().map(|d| d.dimension()).collect();
+        assert!(dims.contains(&AnomalyDimension::OutputSimilarity));
     }
 }
