@@ -730,6 +730,7 @@ mod tests {
                 required: true,
                 judge: crate::judge::JudgeModel::Sonnet,
                 description: "Claim".to_string(),
+                required_dyad: None,
             }],
             blocked_tool_prefixes: Vec::new(),
             blocked_bash_patterns: Vec::new(),
@@ -777,6 +778,7 @@ mod tests {
                     required: true,
                     judge: JudgeModel::Sonnet,
                     description: String::new(),
+                    required_dyad: None,
                 },
                 WorkflowPhase {
                     id: "fetch".to_string(),
@@ -784,6 +786,7 @@ mod tests {
                     required: true,
                     judge: JudgeModel::Sonnet,
                     description: String::new(),
+                    required_dyad: None,
                 },
                 WorkflowPhase {
                     id: "cleanup".to_string(),
@@ -791,6 +794,7 @@ mod tests {
                     required: false,
                     judge: JudgeModel::Sonnet,
                     description: String::new(),
+                    required_dyad: None,
                 },
             ],
             blocked_tool_prefixes: Vec::new(),

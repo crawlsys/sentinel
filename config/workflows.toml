@@ -61,6 +61,9 @@ file = "review.md"
 required = true
 judge = "opus"
 description = "Code review — multi-layer pipeline including Codex"
+# Role-dyad: review cannot complete until a SEPARATE reviewer signs off
+# (the implementer cannot self-approve their own code review).
+required_dyad = { reviewer = true, tester = false }
 
 [[workflows.phases]]
 id = "qa-handoff"
@@ -68,6 +71,9 @@ file = "qa-handoff.md"
 required = true
 judge = "opus"
 description = "QA testing on staging, Browserbase smoke test"
+# Role-dyad: QA cannot complete until a SEPARATE tester records tests_passed
+# AND a separate reviewer signs off — two pairs of eyes before "done".
+required_dyad = { reviewer = true, tester = true }
 
 [[workflows.phases]]
 id = "cleanup"

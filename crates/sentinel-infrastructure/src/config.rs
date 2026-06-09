@@ -73,6 +73,10 @@ struct PhaseToml {
     judge: String,
     #[serde(default)]
     description: String,
+    /// Optional role-dyad requirement (Praetorian-inspired). Deserializes
+    /// directly into the domain type. Absent → `None` (no dyad gating).
+    #[serde(default)]
+    required_dyad: Option<sentinel_domain::workflow::RoleDyad>,
 }
 
 const fn default_true() -> bool {
@@ -179,6 +183,7 @@ pub fn load_workflows(config_path: &Path) -> Result<Vec<SkillWorkflow>> {
                     _ => JudgeModel::Sonnet,
                 },
                 description: p.description,
+                required_dyad: p.required_dyad,
             })
             .collect();
 
