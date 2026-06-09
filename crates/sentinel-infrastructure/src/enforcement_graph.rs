@@ -207,15 +207,23 @@ pub async fn evaluate_ticket(
         max_tokens: 256,
     };
     let verdict = match delegate(llm, &req).await {
-        Ok(res) => parse_judge_verdict(&res.output),
+        Ok(res) => {
+            let v = parse_judge_verdict(&res.output);
+            tracing::debug!(ticket = %state.identifier, confirmed = v, reply = %res.output.lines().next().unwrap_or(""), "linear enforcer: judge verdict");
+            v
+        }
         // Fail-safe: if the judge is unreachable, REFUTE (do not revert) — a
         // missed enforcement is far cheaper than a wrongful one.
-        Err(_) => false,
+        Err(e) => {
+            tracing::warn!(ticket = %state.identifier, error = %e, "linear enforcer: judge call failed — refuting (no revert)");
+            false
+        }
     };
     state.judge_confirmed = Some(verdict);
 
     let decision = run_decision(compiled, state.clone()).await?;
     state.decision = decision;
+    tracing::debug!(ticket = %state.identifier, ?decision, "linear enforcer: escalation decision");
     Ok(state)
 }
 
