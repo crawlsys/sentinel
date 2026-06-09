@@ -1604,6 +1604,7 @@ mod tests {
                     required: true,
                     judge: JudgeModel::Sonnet,
                     description: "Claim the issue".to_string(),
+                    required_dyad: None,
                 },
                 WorkflowPhase {
                     id: "fetch".to_string(),
@@ -1611,6 +1612,7 @@ mod tests {
                     required: true,
                     judge: JudgeModel::Sonnet,
                     description: "Fetch details".to_string(),
+                    required_dyad: None,
                 },
                 WorkflowPhase {
                     id: "review".to_string(),
@@ -1618,6 +1620,7 @@ mod tests {
                     required: true,
                     judge: JudgeModel::Opus,
                     description: "Code review".to_string(),
+                    required_dyad: None,
                 },
                 WorkflowPhase {
                     id: "qa-handoff".to_string(),
@@ -1625,6 +1628,7 @@ mod tests {
                     required: true,
                     judge: JudgeModel::Opus,
                     description: "QA handoff".to_string(),
+                    required_dyad: None,
                 },
             ],
             blocked_tool_prefixes: Vec::new(),
@@ -1687,6 +1691,7 @@ mod tests {
                 required: true,
                 judge: JudgeModel::Sonnet,
                 description: "Setup".to_string(),
+                required_dyad: None,
             }],
             blocked_tool_prefixes: Vec::new(),
             blocked_bash_patterns: Vec::new(),

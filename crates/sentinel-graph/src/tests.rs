@@ -20,6 +20,7 @@ fn phase(id: &str) -> WorkflowPhase {
         required: true,
         judge: JudgeModel::Sonnet,
         description: format!("{id} phase"),
+        required_dyad: None,
     }
 }
 

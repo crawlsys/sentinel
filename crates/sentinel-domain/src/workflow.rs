@@ -3,6 +3,8 @@
 //! Defines ordered phases for skills like Linear.
 //! Enforces sequential phase execution with proof requirements.
 
+use std::collections::BTreeMap;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -366,6 +368,37 @@ pub struct WorkflowPhase {
     /// Human-readable description of what this phase does
     #[serde(default)]
     pub description: String,
+
+    /// Optional role-dyad requirement (Praetorian-inspired): when set, this
+    /// phase cannot complete until a SEPARATE reviewer and/or tester record a
+    /// passing sub-verdict — the editor agent that did the work cannot
+    /// self-approve. `None` (the default) means no dyad gating, so existing
+    /// phases are unaffected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub required_dyad: Option<RoleDyad>,
+}
+
+/// A per-phase "two pairs of eyes" requirement. The work cannot be marked
+/// complete until the required sub-verdicts are recorded by agents OTHER than
+/// the one that produced the work (the "dirty bit" the editor can't clear
+/// itself). Either slot can be required independently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoleDyad {
+    /// Require a separate reviewer to record verdict = PASS.
+    #[serde(default)]
+    pub reviewer: bool,
+    /// Require a separate tester to record `tests_passed = true`.
+    #[serde(default)]
+    pub tester: bool,
+}
+
+impl RoleDyad {
+    /// Given which sub-verdicts have been recorded, is the dyad satisfied?
+    /// A slot that isn't required is treated as satisfied.
+    #[must_use]
+    pub const fn satisfied(self, reviewer_passed: bool, tester_passed: bool) -> bool {
+        (!self.reviewer || reviewer_passed) && (!self.tester || tester_passed)
+    }
 }
 
 const fn default_true() -> bool {
@@ -430,6 +463,48 @@ pub struct WorkflowState {
     /// Currently active step ID
     #[serde(default)]
     pub current_step: Option<String>,
+
+    /// Recorded role-dyad sub-verdicts, keyed by phase id. Populated by
+    /// `record_reviewer_pass` / `record_tester_pass`, consulted by
+    /// `advance_sequential` when a phase declares `required_dyad`.
+    #[serde(default)]
+    pub dyad_verdicts: BTreeMap<String, DyadVerdicts>,
+}
+
+/// The reviewer/tester sub-verdicts recorded for one phase, each tagged with
+/// WHO recorded it so the gate can enforce that the reviewer/tester is a
+/// different agent than the implementer (no self-approval).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DyadVerdicts {
+    /// The agent that produced the work for this phase (the implementer).
+    /// Used to reject a reviewer/tester verdict recorded by the same agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub implementer: Option<String>,
+    /// Reviewer recorded a PASS, and by whom.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reviewer_pass_by: Option<String>,
+    /// Tester recorded `tests_passed=true`, and by whom.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tester_pass_by: Option<String>,
+}
+
+impl DyadVerdicts {
+    /// Did a separate reviewer pass (recorded, and not by the implementer)?
+    #[must_use]
+    pub fn reviewer_passed(&self) -> bool {
+        match &self.reviewer_pass_by {
+            Some(who) => self.implementer.as_deref() != Some(who.as_str()),
+            None => false,
+        }
+    }
+    /// Did a separate tester pass (recorded, and not by the implementer)?
+    #[must_use]
+    pub fn tester_passed(&self) -> bool {
+        match &self.tester_pass_by {
+            Some(who) => self.implementer.as_deref() != Some(who.as_str()),
+            None => false,
+        }
+    }
 }
 
 /// Runtime state of a single step within a phase
@@ -480,6 +555,47 @@ impl WorkflowState {
             complete: false,
             step_states: Vec::new(),
             current_step: None,
+            dyad_verdicts: BTreeMap::new(),
+        }
+    }
+
+    /// Record which agent produced the work for a phase (the implementer).
+    /// Used so a later reviewer/tester verdict by the SAME agent is rejected.
+    pub fn record_implementer(&mut self, phase_id: &str, agent: impl Into<String>) {
+        self.dyad_verdicts
+            .entry(phase_id.to_string())
+            .or_default()
+            .implementer = Some(agent.into());
+    }
+
+    /// Record a reviewer PASS for a phase, by `agent`.
+    pub fn record_reviewer_pass(&mut self, phase_id: &str, agent: impl Into<String>) {
+        self.dyad_verdicts
+            .entry(phase_id.to_string())
+            .or_default()
+            .reviewer_pass_by = Some(agent.into());
+    }
+
+    /// Record a tester pass (`tests_passed=true`) for a phase, by `agent`.
+    pub fn record_tester_pass(&mut self, phase_id: &str, agent: impl Into<String>) {
+        self.dyad_verdicts
+            .entry(phase_id.to_string())
+            .or_default()
+            .tester_pass_by = Some(agent.into());
+    }
+
+    /// Is the role-dyad for `phase` satisfied given the recorded sub-verdicts?
+    /// Phases without a `required_dyad` are trivially satisfied.
+    #[must_use]
+    pub fn dyad_satisfied(&self, phase: &WorkflowPhase) -> bool {
+        match phase.required_dyad {
+            None => true,
+            Some(dyad) => {
+                let v = self.dyad_verdicts.get(&phase.id);
+                let reviewer = v.is_some_and(DyadVerdicts::reviewer_passed);
+                let tester = v.is_some_and(DyadVerdicts::tester_passed);
+                dyad.satisfied(reviewer, tester)
+            }
         }
     }
 
@@ -515,6 +631,23 @@ impl WorkflowState {
                     "[sentinel] Sequential enforcement: refusing to advance '{}' because \
                      prior required phase '{}' is not yet complete.",
                     completed_phase_id, phase.id
+                );
+                return false;
+            }
+        }
+
+        // **Role-dyad gate**: if this phase declares a required_dyad, the work
+        // cannot be marked complete until a SEPARATE reviewer (and/or tester)
+        // recorded a passing sub-verdict. The implementer cannot self-approve
+        // (enforced in DyadVerdicts::{reviewer,tester}_passed). This is the
+        // "dirty bit the editor can't clear itself" — refuse to advance until
+        // the second pair of eyes signs off.
+        if let Some(phase) = workflow.phases.get(target_idx) {
+            if !self.dyad_satisfied(phase) {
+                eprintln!(
+                    "[sentinel] Role-dyad gate: refusing to complete '{completed_phase_id}' \
+                     until a separate reviewer/tester records a passing sub-verdict \
+                     (the implementer cannot self-approve)."
                 );
                 return false;
             }
@@ -945,6 +1078,7 @@ mod tests {
                     required: true,
                     judge: JudgeModel::Sonnet,
                     description: "Claim the issue".to_string(),
+                    required_dyad: None,
                 },
                 WorkflowPhase {
                     id: "fetch".to_string(),
@@ -952,6 +1086,7 @@ mod tests {
                     required: true,
                     judge: JudgeModel::Sonnet,
                     description: "Fetch issue details".to_string(),
+                    required_dyad: None,
                 },
                 WorkflowPhase {
                     id: "review".to_string(),
@@ -959,6 +1094,7 @@ mod tests {
                     required: true,
                     judge: JudgeModel::Opus,
                     description: "Code review".to_string(),
+                    required_dyad: None,
                 },
             ],
             blocked_tool_prefixes: Vec::new(),
@@ -1082,5 +1218,124 @@ mod tests {
         // Trying to use tools without completing "fetch" (skipping to review territory)
         // Gap is 0 here (fetch is the very next one), so it should NOT block
         assert!(state.should_block(&wf, "Bash").is_none());
+    }
+
+    // ─── Role-dyad gating ─────────────────────────────────────────────────
+
+    /// A 2-phase workflow whose 2nd phase ("review") requires a reviewer dyad.
+    fn dyad_workflow() -> SkillWorkflow {
+        SkillWorkflow {
+            skill: "linear".to_string(),
+            phases: vec![
+                WorkflowPhase {
+                    id: "claim".to_string(),
+                    file: "claim.md".to_string(),
+                    required: true,
+                    judge: JudgeModel::Sonnet,
+                    description: "Claim".to_string(),
+                    required_dyad: None,
+                },
+                WorkflowPhase {
+                    id: "review".to_string(),
+                    file: "review.md".to_string(),
+                    required: true,
+                    judge: JudgeModel::Opus,
+                    description: "Review".to_string(),
+                    required_dyad: Some(RoleDyad { reviewer: true, tester: false }),
+                },
+            ],
+            blocked_tool_prefixes: Vec::new(),
+            blocked_bash_patterns: Vec::new(),
+            bash_allowlist: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn dyad_satisfied_logic() {
+        let both = RoleDyad { reviewer: true, tester: true };
+        assert!(!both.satisfied(false, false));
+        assert!(!both.satisfied(true, false));
+        assert!(!both.satisfied(false, true));
+        assert!(both.satisfied(true, true));
+        // Only-reviewer required: tester state is irrelevant.
+        let rev = RoleDyad { reviewer: true, tester: false };
+        assert!(rev.satisfied(true, false));
+        assert!(!rev.satisfied(false, false));
+    }
+
+    #[test]
+    fn dyad_blocks_completion_until_reviewer_signs_off() {
+        let wf = dyad_workflow();
+        let mut state = WorkflowState::new("linear", "sess-1");
+        assert!(state.advance_sequential("claim", &wf));
+
+        // No reviewer verdict yet → review phase refuses to complete.
+        assert!(
+            !state.advance_sequential("review", &wf),
+            "review must not complete without a reviewer sub-verdict"
+        );
+        assert!(!state.is_phase_complete("review"));
+
+        // A separate reviewer signs off → now it completes.
+        state.record_implementer("review", "dev-agent");
+        state.record_reviewer_pass("review", "reviewer-agent");
+        assert!(state.advance_sequential("review", &wf));
+        assert!(state.is_phase_complete("review"));
+        assert!(state.complete);
+    }
+
+    #[test]
+    fn dyad_rejects_self_approval_by_implementer() {
+        let wf = dyad_workflow();
+        let mut state = WorkflowState::new("linear", "sess-1");
+        assert!(state.advance_sequential("claim", &wf));
+
+        // The SAME agent that did the work records the reviewer verdict →
+        // must NOT satisfy the dyad (no self-approval).
+        state.record_implementer("review", "dev-agent");
+        state.record_reviewer_pass("review", "dev-agent");
+        assert!(
+            !state.advance_sequential("review", &wf),
+            "implementer cannot self-approve the reviewer slot"
+        );
+        assert!(!state.is_phase_complete("review"));
+
+        // A genuinely separate reviewer fixes it.
+        state.record_reviewer_pass("review", "someone-else");
+        assert!(state.advance_sequential("review", &wf));
+    }
+
+    #[test]
+    fn phase_without_dyad_unaffected() {
+        // The plain linear_workflow has no dyads — completes normally.
+        let wf = linear_workflow();
+        let mut state = WorkflowState::new("linear", "sess-1");
+        assert!(state.advance_sequential("claim", &wf));
+        assert!(state.advance_sequential("fetch", &wf));
+        assert!(state.advance_sequential("review", &wf));
+        assert!(state.complete);
+    }
+
+    #[test]
+    fn workflow_phase_serde_roundtrips_with_and_without_dyad() {
+        // Without the field (back-compat): deserializes to None.
+        let no_dyad: WorkflowPhase = serde_json::from_str(
+            r#"{"id":"claim","file":"claim.md","required":true,"judge":"sonnet","description":"x"}"#,
+        )
+        .unwrap();
+        assert!(no_dyad.required_dyad.is_none());
+
+        // With the field: round-trips.
+        let with_dyad = WorkflowPhase {
+            id: "review".into(),
+            file: "review.md".into(),
+            required: true,
+            judge: JudgeModel::Opus,
+            description: "r".into(),
+            required_dyad: Some(RoleDyad { reviewer: true, tester: true }),
+        };
+        let json = serde_json::to_string(&with_dyad).unwrap();
+        let back: WorkflowPhase = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.required_dyad, Some(RoleDyad { reviewer: true, tester: true }));
     }
 }

@@ -249,6 +249,7 @@ mod tests {
                     required: true,
                     judge: JudgeModel::Sonnet,
                     description: "Claim the issue".to_string(),
+                    required_dyad: None,
                 },
                 WorkflowPhase {
                     id: "fetch".to_string(),
@@ -256,6 +257,7 @@ mod tests {
                     required: true,
                     judge: JudgeModel::Sonnet,
                     description: "Fetch details".to_string(),
+                    required_dyad: None,
                 },
                 WorkflowPhase {
                     id: "intelligence".to_string(),
@@ -263,6 +265,7 @@ mod tests {
                     required: true,
                     judge: JudgeModel::Sonnet,
                     description: "Research codebase".to_string(),
+                    required_dyad: None,
                 },
                 WorkflowPhase {
                     id: "cleanup".to_string(),
@@ -270,6 +273,7 @@ mod tests {
                     required: false,
                     judge: JudgeModel::Sonnet,
                     description: "Cleanup".to_string(),
+                    required_dyad: None,
                 },
             ],
             blocked_tool_prefixes: Vec::new(),
