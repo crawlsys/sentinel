@@ -40,6 +40,11 @@ fn extract_linear_id(subject: &str) -> Option<&str> {
 /// Detected purely from the task text (subject + description). Each variant is
 /// a *claim of completed work* whose truth we can try to corroborate against
 /// the working tree before letting the teammate mark the task ✅.
+// Four independent claim signals, each a presence flag scanned from task text.
+// These are orthogonal observations (not states of one machine), so a flat
+// bool-per-signal bag is the correct shape — a "two-variant enum" refactor
+// would obscure, not clarify.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ClaimSignals {
     /// Text claims a commit/push happened ("committed", "pushed", a sha, ✅).
@@ -48,12 +53,40 @@ pub(crate) struct ClaimSignals {
     pub(crate) pr: bool,
     /// Text claims a build/test outcome ("build clean", "tests pass", "N passed").
     pub(crate) build_test: bool,
+    /// Text emitted an explicit completion-promise terminal string
+    /// (`ALL_TESTS_PASSING`, `IMPLEMENTATION_COMPLETE`, …). Praetorian-style
+    /// "no fuzzy interpretation" done-signal: the agent must say the exact word.
+    /// On its own a promise proves nothing — it is the STRONGEST done-claim, so
+    /// an emitted promise with zero corroborating ground truth is a hard
+    /// mismatch (see `verify_claims`).
+    pub(crate) completion_promise: bool,
 }
 
 impl ClaimSignals {
     pub(crate) fn any(self) -> bool {
-        self.commit || self.pr || self.build_test
+        self.commit || self.pr || self.build_test || self.completion_promise
     }
+}
+
+/// The exact terminal strings sentinel treats as an explicit completion
+/// promise. Matched case-insensitively as substrings of the task text. Kept
+/// deliberately small and unambiguous — these are protocol tokens an agent
+/// emits to assert "done", not natural-language phrases.
+pub(crate) const COMPLETION_PROMISE_MARKERS: &[&str] = &[
+    "all_tests_passing",
+    "implementation_complete",
+    "all_checks_passed",
+    "verification_complete",
+];
+
+/// Return the first completion-promise marker found in the (already-lowercased)
+/// text, if any. Used both to set the `completion_promise` signal and to name
+/// the specific marker in the mismatch warning.
+fn extract_completion_promise(lower: &str) -> Option<&'static str> {
+    COMPLETION_PROMISE_MARKERS
+        .iter()
+        .find(|m| lower.contains(*m))
+        .copied()
 }
 
 /// Scan a task's subject + description for concrete-artifact claim signals.
@@ -88,10 +121,13 @@ pub(crate) fn detect_claims(text: &str) -> ClaimSignals {
         || lower.contains("passed")
         || lower.contains("passing");
 
+    let completion_promise = extract_completion_promise(&lower).is_some();
+
     ClaimSignals {
         commit,
         pr,
         build_test,
+        completion_promise,
     }
 }
 
@@ -244,6 +280,11 @@ pub(crate) fn verify_claims(
 
     let lower = text.to_lowercase();
 
+    // Track whether any GROUND-TRUTH corroboration actually fired this pass.
+    // A completion-promise (the strongest done-claim) with zero corroboration
+    // is a hard mismatch — see the completion-promise check below.
+    let mut corroborated = false;
+
     // --- Commit/push claim: the KEY high-value check ---
     if claims.commit {
         // If a SPECIFIC sha is named, do the REAL reachability check: is it an
@@ -258,7 +299,10 @@ pub(crate) fn verify_claims(
                 &["merge-base", "--is-ancestor", &sha, "HEAD"],
                 cwd,
             ) {
-                Some(out) if out.success => true, // reachable → claim corroborated
+                Some(out) if out.success => {
+                    corroborated = true; // sha reachable from HEAD → real ground truth
+                    true
+                }
                 Some(out) => {
                     // Exit non-zero. Distinguish "not an ancestor" (the bad
                     // case) from "bad object / unknown rev" (can't verify).
@@ -334,7 +378,7 @@ pub(crate) fn verify_claims(
 
                     if claims_merged(&lower) {
                         match merged {
-                            Some(true) => { /* claim corroborated → no warn */ }
+                            Some(true) => corroborated = true, // PR really merged → ground truth
                             _ => warnings.push(format!(
                                 "PR #{n} is claimed MERGED but gh shows it is \
                                  {state} (merged=false) — do NOT ✅ until the PR \
@@ -344,6 +388,9 @@ pub(crate) fn verify_claims(
                     }
                     // Non-merge PR claims (just "opened PR #N") are corroborated
                     // by gh finding the PR at all → no warning.
+                    else {
+                        corroborated = true; // gh found the PR → the reference is real
+                    }
                 }
                 Some(out) => {
                     // gh ran but failed (PR not found, no repo, auth). Soft note.
@@ -381,6 +428,23 @@ pub(crate) fn verify_claims(
              (not assumed) before ✅"
                 .to_string(),
         );
+    }
+
+    // --- Completion promise: an explicit terminal string MUST be backed by
+    // ground truth. The promise is the strongest done-claim ("no fuzzy
+    // interpretation") — so emitting it while NOTHING verifiable corroborated
+    // the work (no reachable commit, no found/merged PR) is a hard mismatch,
+    // not a soft note. A passing-build claim alone does NOT count: sentinel
+    // can't re-run it, so it can't corroborate a promise. ---
+    if claims.completion_promise && !corroborated {
+        let marker = extract_completion_promise(&lower).unwrap_or("a completion promise");
+        warnings.push(format!(
+            "emitted completion promise `{}` but NO corroborating ground truth \
+             verified (no reachable commit, no found/merged PR) — an explicit \
+             done-signal with nothing to back it is exactly the false-done \
+             pattern; do NOT ✅ until the work is verifiable",
+            marker.to_uppercase()
+        ));
     }
 
     // --- Suspiciously-fast done: first in_progress hop + a concrete claim ---
@@ -921,6 +985,87 @@ mod tests {
         // No concrete-artifact claim.
         let none = detect_claims("Investigate the slow query");
         assert!(!none.any());
+    }
+
+    #[test]
+    fn detect_claims_finds_completion_promise() {
+        assert!(detect_claims("ALL_TESTS_PASSING").completion_promise);
+        assert!(detect_claims("done — IMPLEMENTATION_COMPLETE").completion_promise);
+        assert!(detect_claims("all_checks_passed").completion_promise); // case-insensitive
+        assert!(detect_claims("VERIFICATION_COMPLETE ✅").completion_promise);
+        // A natural-language "all tests pass" is NOT the protocol token.
+        assert!(!detect_claims("all the tests are passing now").completion_promise);
+        // any() must now also fire on a lone promise.
+        assert!(detect_claims("IMPLEMENTATION_COMPLETE").any());
+    }
+
+    #[test]
+    fn completion_promise_without_corroboration_is_hard_mismatch() {
+        // Promise emitted, clean tree, NO sha / NO PR → nothing corroborates it.
+        let input = claim_input("IMPLEMENTATION_COMPLETE — shipped the feature");
+        let git = FakeGit {
+            dirty: false,
+            ..FakeGit::default()
+        };
+        let ctx = ctx_with_git(&git);
+        let out = process(&input, &ctx);
+        let text = injected(&out);
+        assert!(text.contains("emitted completion promise"), "{text}");
+        assert!(text.contains("IMPLEMENTATION_COMPLETE"), "{text}");
+        // (The Stop-sweep hard-mismatch keying on this phrase is covered by
+        // `claim_reality_check::tests::is_hard_mismatch_discriminates`.)
+    }
+
+    #[test]
+    fn completion_promise_with_reachable_sha_is_clean() {
+        // Promise + a sha that IS reachable from HEAD → corroborated, no promise warning.
+        let input = claim_input("ALL_TESTS_PASSING at abc1234");
+        let git = FakeGit::default();
+        let proc = FakeProcess {
+            merge_base_ancestor: Some(true), // sha reachable
+            ..FakeProcess::default()
+        };
+        let ctx = ctx_with(&git, &proc);
+        let out = process(&input, &ctx);
+        let text = injected(&out);
+        assert!(
+            !text.contains("emitted completion promise"),
+            "reachable sha must corroborate the promise: {text}"
+        );
+    }
+
+    #[test]
+    fn completion_promise_with_merged_pr_is_clean() {
+        // Promise + a PR gh confirms MERGED → corroborated, no promise warning.
+        let input = claim_input("VERIFICATION_COMPLETE — merged PR #42");
+        let git = FakeGit::default();
+        let proc = FakeProcess {
+            gh_success: true,
+            gh_stdout: r#"{"number":42,"state":"MERGED","merged":true}"#.to_string(),
+            ..FakeProcess::default()
+        };
+        let ctx = ctx_with(&git, &proc);
+        let out = process(&input, &ctx);
+        let text = injected(&out);
+        assert!(
+            !text.contains("emitted completion promise"),
+            "merged PR must corroborate the promise: {text}"
+        );
+    }
+
+    #[test]
+    fn completion_promise_with_only_buildtest_claim_still_mismatches() {
+        // A passing-build CLAIM is a soft note — it cannot corroborate a promise
+        // (sentinel can't re-run it), so the promise is still a hard mismatch.
+        let input = claim_input("ALL_TESTS_PASSING — tests pass, build clean");
+        let git = FakeGit::default();
+        let ctx = ctx_with_git(&git);
+        let out = process(&input, &ctx);
+        let text = injected(&out);
+        assert!(
+            text.contains("emitted completion promise"),
+            "build/test claim must not corroborate a promise: {text}"
+        );
     }
 
     #[test]

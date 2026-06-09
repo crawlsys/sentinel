@@ -173,6 +173,8 @@ fn is_hard_mismatch(warning: &str) -> bool {
         || warning.contains("is claimed MERGED")
         // "committed" but the working tree is still dirty.
         || warning.contains("UNCOMMITTED")
+        // Explicit completion promise with zero corroborating ground truth.
+        || warning.contains("emitted completion promise")
 }
 
 /// Render the per-task reality-check warning block.
@@ -724,6 +726,9 @@ mod tests {
         assert!(is_hard_mismatch("claimed commit deadbe1f is NOT on HEAD's history"));
         assert!(is_hard_mismatch("PR #42 is claimed MERGED but gh shows OPEN"));
         assert!(is_hard_mismatch("still has UNCOMMITTED changes"));
+        assert!(is_hard_mismatch(
+            "emitted completion promise `ALL_TESTS_PASSING` but NO corroborating ground truth"
+        ));
         // Soft notes must NOT count as hard mismatches.
         assert!(!is_hard_mismatch("could not verify PR #42 (gh: not found)"));
         assert!(!is_hard_mismatch("claims a passing build/test — sentinel can't re-run it"));
