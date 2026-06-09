@@ -168,5 +168,29 @@ The product is the **EDR/OPA topology applied to work-assurance**, not "every ho
 
 ---
 
+## 7. Praetorian "Deterministic AI Orchestration" — the one architectural twin (and what we took)
+
+Praetorian's [Deterministic AI Orchestration](https://www.praetorian.com/blog/deterministic-ai-orchestration-a-platform-architecture-for-autonomous-development/)
+is the single candidate that survived adversarial verification as a *direct* match — but it is a
+published **whitepaper, not a product** (Praetorian sells Chariot, offensive security). It independently
+re-derived sentinel's core philosophy ("the LLM as a nondeterministic kernel wrapped in a deterministic
+runtime"), which validates the thesis. We absorbed four of its execution mechanics — **all shipped to
+`main` 2026-06-09**:
+
+| Mechanic | Sentinel implementation | Status |
+|---|---|---|
+| **Completion promise** — exact terminal string, "no fuzzy interpretation" | `task_completed.rs` completion-promise claim, verified against git/gh ground truth (uncorroborated promise = hard mismatch, reopened by `claim_reality_check`) | ✅ shipped (`34b9c43`) |
+| **Loop detection** (>90% output similarity) + layered redundant enforcement | `step_anomaly.rs` 10th dimension `OutputSimilarity` (line-Jaccard ≥0.90); false-done sweep now also runs on `SubagentStop` | ✅ shipped (`2b803e6`) |
+| **Role-dyad serialization** (editor can't self-approve) | `workflow.rs` `RoleDyad`/`DyadVerdicts`; `advance_sequential` blocks until a *separate* reviewer/tester signs off; applied to `review` + `qa-handoff` | ✅ shipped (`ac1bcbe`) |
+| **Self-annealing meta-agent** (patches the rule the agent rationalized past) | `self_annealing.rs` Stop hook: detect (always) + operator-armed (`SENTINEL_ALLOW_SELF_ANNEAL=1`) skill-patch + PR; default-deny guard never touches protected paths even when armed | ✅ shipped (`2b63460`) |
+
+Where **sentinel stays ahead** of the twin: (1) a **cryptographic proof-of-work chain** carrying per-phase
+judge verdicts (Praetorian has a mutable `MANIFEST.yaml`, no attestation); (2) **claim-vs-ground-truth
+false-done detection** against real git/gh (Praetorian trusts its own tester-agent's verdict). We
+deliberately did **not** adopt its state-file-trust model — that's the gameable surface our reality-check
+defends against.
+
+---
+
 *Next review: fold into the quarterly cadence in `competitive-intelligence.md`, or split work-assurance
 competitors (eval/CI/code-review lineage) from the gateway/attestation tracking there.*
