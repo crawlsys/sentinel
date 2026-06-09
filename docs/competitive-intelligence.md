@@ -4,6 +4,14 @@
 **Cadence:** Quarterly. Next review: **end Q3 2026** (target: 2026-09-30).
 **Origin:** Task #80. See [CONTRIBUTING.md](../CONTRIBUTING.md) for sentinel's own positioning principles.
 
+> **Reframe note (2026-06-09):** A market-research session repositioned sentinel's *primary* category
+> from "federated agent gateway with cryptographic execution proofs" to **AI work-assurance / agent
+> correctness verification** (the proof chain is the audit substrate, not the value proposition; the
+> buyer is the engineering leader, not the CISO). See
+> [`work-assurance-positioning.md`](./work-assurance-positioning.md). This CI doc still validly tracks
+> the *gateway/attestation* neighbors (Apollo, IBM, Microsoft, EQTY) — but the work-assurance
+> competitive set (eval / CI-gate / code-review lineage) is tracked in that doc.
+
 ## Why this exists
 
 The category sentinel sits in — **federated agent gateways with cryptographic execution proofs** — formed during 2025-2026 and is still in motion. Apollo, IBM, Microsoft, EQTY Lab, and the AEGIS policy library each ship overlapping primitives; whichever combination wins on enterprise adoption will set the de facto standard. Sentinel's positioning depends on knowing what's shipped in the others *and* what's announced for the next quarter.

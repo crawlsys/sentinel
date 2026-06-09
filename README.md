@@ -2,7 +2,7 @@
 
 **Proof-of-Work Hook Engine for Claude Code**
 
-Sentinel is a Rust-based hook engine that enforces workflow compliance for Claude Code sessions. It powers 27 lifecycle hooks covering skill routing, phase gates, commit hygiene, Steel browser testing, MCP health checks, and more — all backed by cryptographic proof chains.
+Sentinel is a Rust-based hook engine that enforces workflow compliance for Claude Code sessions. It powers ~90 lifecycle hooks covering skill routing, phase gates, commit hygiene, browser testing, MCP health checks, and more — all backed by cryptographic proof chains.
 
 ## Quick Install
 
@@ -16,7 +16,7 @@ Re-run-safe (skips anything already present). Override paths with `SENTINEL_GH_D
 
 ## Architecture
 
-Sentinel follows DDD / Hexagonal Architecture with 5 crates:
+Sentinel follows DDD / Hexagonal Architecture with 7 crates:
 
 ```
 crates/
@@ -40,7 +40,7 @@ crates/
 │   ├── scanner.rs           Marketplace scanner
 │   ├── verifier.rs          Proof chain verifier
 │   ├── mcp_handler.rs       MCP tool handlers
-│   └── hooks/               27 hook modules
+│   └── hooks/               ~90 hook modules
 │
 ├── sentinel-infrastructure  IO adapters
 │   ├── config.rs            TOML/JSON config loading
@@ -56,14 +56,21 @@ crates/
 │   ├── transcript.rs        Session transcript reader
 │   └── ipc.rs               Daemon IPC
 │
-├── sentinel-cli             CLI binary
-│   ├── main.rs              7 subcommands
-│   ├── steel_test_cmd.rs    Steel browser test management
+├── sentinel-cli             CLI binary (`sentinel`)
+│   ├── main.rs              CLI subcommands
+│   ├── mcp_cmd.rs           In-repo MCP host (`sentinel mcp`, stdio)
 │   └── api/                 Dashboard REST API (axum)
 │
-└── sentinel-mcp             Standalone MCP server (Vulcan SDK)
-    └── main.rs              MCP tools for proof chains & workflows
+├── sentinel-legatus         Legatus integration (consul peers, federation client)
+│
+├── sentinel-git-interceptor Git shim that routes commits through sentinel gates
+│
+└── sentinel-npx-interceptor npx shim that routes installs through sentinel gates
 ```
+
+> **Note:** the standalone MCP server binary (`sentinel-mcp`, Vulcan SDK) lives in a **separate repo**
+> (`sentinel-mcp-rust`), not in this workspace. The in-repo MCP surface is hosted by `sentinel-cli`
+> (`mcp_cmd.rs` + `sentinel-application/mcp_handler.rs`), reachable via `sentinel mcp`.
 
 ## CLI Commands
 
@@ -107,17 +114,19 @@ The `sentinel daemon` exposes a REST API on port 3001:
 | `POST /api/store/install` | Install skill from GitHub |
 | `DELETE /api/store/uninstall/:name` | Remove skill |
 
-## 27 Hooks
+## Hooks (~90 modules)
 
-| Category | Hooks |
+The categories below are **representative, not exhaustive** — a sampling of each category, not all ~90.
+
+| Category | Hooks (representative) |
 |----------|-------|
-| **Blocking** | `phase_gate`, `pre_push_steel_test`, `commit_message_validator`, `git_hygiene`, `pre_commit_verification`, `wrangler_guard` |
+| **Blocking** | `phase_gate`, `pre_push_browser_test`, `commit_message_validator`, `git_hygiene`, `pre_commit_verification`, `wrangler_guard`, `spec_challenge_gate`, `db_ops_gate`, `pr_merge_gate` |
 | **Observational** | `commit_hygiene`, `mcp_health`, `error_reporter`, `verification_gate`, `evidence_collector`, `context_monitor` |
+| **Reality-check** | `claim_reality_check`, `step_anomaly`, `requirements_traceability_gate`, `provenance_validate`, `good_citizen_observer` |
 | **Routing** | `skill_router` (with activation banners), `skill_telemetry` |
 | **Session** | `session_init`, `pre_compact`, `activity_tracker`, `execution_log` |
 | **Workflow** | `phase_validator`, `plan_organizer`, `hygiene_override`, `task_completed`, `teammate_idle` |
-| **Docs** | `doc_drift`, `doc_cleanup` |
-| **Todos** | `todo_interceptor`, `todo_loader` |
+| **Docs/Todos** | `doc_drift`, `doc_cleanup`, `todo_interceptor`, `todo_loader` |
 
 ## Configuration
 
