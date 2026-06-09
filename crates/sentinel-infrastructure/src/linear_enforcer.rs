@@ -392,6 +392,115 @@ pub async fn run_subscription(token: String, tx: mpsc::Sender<IssueChanged>) {
     }
 }
 
+// ----- poll source (the reliable realtime feed) ------------------------
+//
+// Linear's wss `subscribe` op refuses a personal API key with a 4002 close
+// even though the same key authenticates REST + the `connection_init` ack —
+// this is expected Linear behavior, and legatus-desktop (the reference impl)
+// handles it by falling back to REST polling (`LinearPollActor`: "bump to 30s
+// when the WS auth is rejected"). Our spine omitted that fallback; this is it.
+// It feeds the SAME `IssueChanged` channel, so the whole `run_enforcer`
+// pipeline (debounce, team filter, shadow/live, escalation graph) is unchanged.
+
+/// Poll cadence for the realtime feed (matches legatus' WS-rejected fallback).
+const POLL_INTERVAL: Duration = Duration::from_secs(30);
+/// Default poll cursor lower bound when `SENTINEL_LINEAR_POLL_SINCE` is unset.
+/// A fixed recent date keeps the first poll bounded (started-state issues only)
+/// without this module reading the clock; the cursor then advances live.
+const DEFAULT_POLL_SINCE: &str = "2026-06-01T00:00:00Z";
+
+/// Build the GraphQL body for one poll: issues in a *started* state updated at
+/// or after `since_rfc3339`, returning just `id` + `identifier` + `updatedAt`.
+/// Pure (no I/O) so the filter shape is unit-testable.
+#[must_use]
+fn poll_query_body(since_rfc3339: &str) -> String {
+    let filter = serde_json::json!({
+        "updatedAt": { "gte": since_rfc3339 },
+        "state": { "type": { "in": ["started"] } }
+    });
+    serde_json::json!({
+        "query": "query($f:IssueFilter){ issues(filter:$f, first:50){ nodes { id identifier updatedAt } } }",
+        "variables": { "f": filter }
+    })
+    .to_string()
+}
+
+/// Pick the next cursor: the lexicographically-greatest RFC3339 `updatedAt`
+/// across `nodes`, or `prev` if none is newer. (RFC3339 UTC strings sort
+/// chronologically, so a string `max` is a correct timestamp `max`.) Pure +
+/// unit-testable; keeps the cursor-advance logic out of the I/O loop.
+#[must_use]
+fn next_cursor(prev: &str, nodes: &[Value]) -> String {
+    let mut newest = prev.to_string();
+    for n in nodes {
+        if let Some(ts) = n.get("updatedAt").and_then(Value::as_str) {
+            if ts > newest.as_str() {
+                newest = ts.to_string();
+            }
+        }
+    }
+    newest
+}
+
+/// One poll round: fetch started issues updated since `since`, emit an
+/// `IssueChanged` for each, and return the next cursor. Errors are logged and
+/// swallowed (the loop keeps polling); returns `None` only when the receiver
+/// is gone so the caller can stop.
+async fn poll_once(
+    client: &reqwest::Client,
+    token: &str,
+    since_rfc3339: &str,
+    tx: &mpsc::Sender<IssueChanged>,
+) -> Option<String> {
+    let body = poll_query_body(since_rfc3339);
+    let resp = client
+        .post(LINEAR_GRAPHQL_URL)
+        .header("Authorization", token)
+        .header("Content-Type", "application/json")
+        .body(body)
+        .send()
+        .await
+        .ok()?
+        .json::<Value>()
+        .await
+        .ok()?;
+    let nodes = resp.get("data")?.get("issues")?.get("nodes")?.as_array()?;
+    if !nodes.is_empty() {
+        tracing::debug!(count = nodes.len(), since = %since_rfc3339, "linear enforcer: poll round — started issues to check");
+    }
+    for n in nodes {
+        if let Some(id) = n.get("id").and_then(Value::as_str) {
+            if tx.send(IssueChanged { linear_issue_id: id.to_string() }).await.is_err() {
+                return None; // receiver gone — stop polling
+            }
+        }
+    }
+    Some(next_cursor(since_rfc3339, nodes))
+}
+
+/// Run the REST poll source forever, forwarding `IssueChanged` events on `tx`.
+/// This is the reliable feed that does NOT depend on the wss subscription —
+/// the legatus fallback pattern. `cursor` seeds the first `updatedAt` lower
+/// bound (the daemon passes a recent timestamp so a fresh start still catches
+/// very recent transitions). Stops when the receiver is dropped.
+pub async fn run_poll_source(token: String, tx: mpsc::Sender<IssueChanged>, mut cursor: String) {
+    let client = reqwest::Client::new();
+    tracing::info!(interval_secs = POLL_INTERVAL.as_secs(), "linear enforcer: poll source started");
+    let mut ticker = tokio::time::interval(POLL_INTERVAL);
+    loop {
+        ticker.tick().await;
+        if tx.is_closed() {
+            tracing::warn!("linear enforcer: poll source stopped (receiver gone)");
+            return;
+        }
+        match poll_once(&client, &token, &cursor, &tx).await {
+            Some(next) => cursor = next,
+            None if tx.is_closed() => return,
+            None => tracing::debug!("linear enforcer: poll round failed; retrying next tick"),
+        }
+    }
+}
+
 // ----- Linear REST GraphQL: fetch readiness + enforce ------------------
 
 const LINEAR_GRAPHQL_URL: &str = "https://api.linear.app/graphql";
@@ -672,7 +781,15 @@ fn debounced(
 /// [`enforce_ticket`] path (judge unavailable ⇒ readiness check alone).
 pub async fn run_enforcer(cfg: EnforcerConfig) {
     let (tx, mut rx) = mpsc::channel::<IssueChanged>(256);
-    tokio::spawn(run_subscription(cfg.token.clone(), tx));
+    // Two feeds into the one channel: the wss subscription (optimization — may
+    // 4002 on a PAT) and the REST poll source (the reliable backstop, the
+    // legatus-desktop pattern). The poll cursor seeds from `SENTINEL_LINEAR_POLL_SINCE`
+    // if set (RFC3339), else from a recent fixed lower bound so a fresh daemon
+    // still catches current transitions without replaying all history.
+    tokio::spawn(run_subscription(cfg.token.clone(), tx.clone()));
+    let poll_cursor = std::env::var("SENTINEL_LINEAR_POLL_SINCE")
+        .unwrap_or_else(|_| DEFAULT_POLL_SINCE.to_string());
+    tokio::spawn(run_poll_source(cfg.token.clone(), tx, poll_cursor));
 
     let client = reqwest::Client::new();
     let mut seen: std::collections::HashMap<String, std::time::Instant> =
@@ -926,5 +1043,35 @@ mod tests {
             std::time::Instant::now() - (DEBOUNCE + Duration::from_secs(1)),
         );
         assert!(!debounced(&mut seen, "issue-1"), "allowed again after the window");
+    }
+
+    // ----- poll source --------------------------------------------------
+
+    #[test]
+    fn poll_query_filters_started_and_since() {
+        let body = poll_query_body("2026-06-01T00:00:00Z");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let f = &v["variables"]["f"];
+        assert_eq!(f["updatedAt"]["gte"], "2026-06-01T00:00:00Z");
+        assert_eq!(f["state"]["type"]["in"][0], "started");
+        assert!(v["query"].as_str().unwrap().contains("issues(filter:$f"));
+    }
+
+    #[test]
+    fn next_cursor_picks_newest_updatedat() {
+        let nodes = vec![
+            serde_json::json!({ "id": "a", "updatedAt": "2026-06-09T10:00:00Z" }),
+            serde_json::json!({ "id": "b", "updatedAt": "2026-06-09T12:00:00Z" }), // newest
+            serde_json::json!({ "id": "c", "updatedAt": "2026-06-09T11:00:00Z" }),
+        ];
+        assert_eq!(next_cursor("2026-06-01T00:00:00Z", &nodes), "2026-06-09T12:00:00Z");
+    }
+
+    #[test]
+    fn next_cursor_keeps_prev_when_nothing_newer() {
+        // Empty round, or all older than the cursor → cursor unchanged.
+        assert_eq!(next_cursor("2026-06-09T12:00:00Z", &[]), "2026-06-09T12:00:00Z");
+        let older = vec![serde_json::json!({ "id": "a", "updatedAt": "2026-06-08T00:00:00Z" })];
+        assert_eq!(next_cursor("2026-06-09T12:00:00Z", &older), "2026-06-09T12:00:00Z");
     }
 }
