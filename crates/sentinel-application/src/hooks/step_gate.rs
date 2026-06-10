@@ -345,7 +345,6 @@ mod tests {
             started_at: chrono::Utc::now(),
             completed_at: chrono::Utc::now(),
             duration_ms: 5,
-            actor: None,
         }
     }
 

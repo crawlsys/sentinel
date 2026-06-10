@@ -31,17 +31,12 @@ pub mod issue_suggest;
 pub mod judge_enforcement;
 pub mod judge_service;
 pub mod lead_time;
-pub mod legatus_client;
 pub mod memory_telemetry;
 pub mod master_dashboard;
 pub mod mcp_handler;
 pub mod paths;
 pub mod pr_review;
-/// Sentinel-side Praefectus client surface (Fabrica ADR-001 §1 + ADR-002 §3).
-/// Trait + in-memory stub; production HTTP/IPC adapter deferred.
-pub mod praefectus_client;
 pub mod project_init;
-pub mod witness_verifier_adapter;
 pub mod proof_archive;
 pub mod proof_engine;
 pub mod reversibility_classifier;

@@ -14,12 +14,10 @@ mod block_context;
 pub mod bug_task_gate;
 pub mod build_auto_monitor;
 pub mod build_notify;
-pub mod catastrophic_escalation;
 pub mod claim_reality_check;
 pub mod commit_hygiene;
 pub mod commit_message_validator;
 pub mod constitution_gate;
-pub mod consul_inbox;
 pub mod context_monitor;
 pub mod cwd_changed;
 pub mod db_ops_gate;
@@ -91,7 +89,6 @@ pub mod ticket_quality_gate;
 pub mod todo_interceptor;
 pub mod todo_loader;
 pub mod tool_usage_gate;
-pub mod upstream_block;
 pub mod upstream_freshness;
 pub mod verification_gate;
 pub mod worktree_reminder;
@@ -270,12 +267,10 @@ pub const HOOK_NAMES: &[&str] = &[
     "bug_task_gate",
     "build_auto_monitor",
     "build_notify",
-    "catastrophic_escalation",
     "claim_reality_check",
     "commit_hygiene",
     "commit_message_validator",
     "constitution_gate",
-    "consul_inbox",
     "context_monitor",
     "cwd_changed",
     "db_ops_gate",
@@ -346,7 +341,6 @@ pub const HOOK_NAMES: &[&str] = &[
     "todo_interceptor",
     "todo_loader",
     "tool_usage_gate",
-    "upstream_block",
     "upstream_freshness",
     "verification_gate",
     "worktree_reminder",

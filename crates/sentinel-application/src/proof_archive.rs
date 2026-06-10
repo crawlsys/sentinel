@@ -403,7 +403,6 @@ mod tests {
             started_at: now,
             completed_at: now,
             duration_ms: 1,
-            actor: None,
         }
     }
 

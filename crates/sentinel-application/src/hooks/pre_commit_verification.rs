@@ -214,10 +214,6 @@ fn process_with_override(
     );
 
     let full = super::block_context::append_block_context(message, input);
-    // Surface the block upstream so operators on remote surfaces
-    // see their agent stuck waiting on verification. Fire-and-
-    // forget; daemon outage is a silent no-op.
-    super::upstream_block::signal_upstream("pre_commit_verification", &full);
     HookOutput::block(full)
 }
 

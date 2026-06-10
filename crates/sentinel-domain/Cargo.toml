@@ -21,11 +21,6 @@ rand_core = { workspace = true }
 hex = { workspace = true }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
-# Republic-of-Agents identity types (RoleBinding etc.) per Fabrica ADR-003.
-# Pure value-type import; no I/O surface introduced — sentinel-domain's
-# I/O-purity claim (per workspace CLAUDE.md "Domain purity" rule) is
-# preserved because consul-domain itself is also pure-domain.
-consul-domain = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

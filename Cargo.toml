@@ -7,7 +7,6 @@ members = [
     "crates/sentinel-cli",
     "crates/sentinel-git-interceptor",
     "crates/sentinel-npx-interceptor",
-    "crates/sentinel-legatus",
     "crates/sentinel-graph",
 ]
 exclude = [
@@ -36,10 +35,8 @@ async-trait = "0.1"
 futures = "0.3"
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 
-# WebSocket client — used by sentinel-legatus to connect to a
-# consulate via the Consular Protocol (path-dep on the sibling
-# repo legatus-consul-agent). 0.24 matches the version pinned
-# in legatus-consul-agent's workspace.
+# WebSocket client — used by the Linear enforcer (linear_enforcer.rs) for the
+# real-time issue subscription.
 # `native-roots` (not `webpki-roots`) on purpose: this dev box runs Norton,
 # which MITMs TLS by injecting its own Root CA into the Windows trust store.
 # webpki-roots only trusts the standard CA bundle, so it rejects Norton's
@@ -106,20 +103,6 @@ colored = "3"
 glob = "0.3"
 fs2 = "0.4"
 getrandom = "0.2"
-
-# Path deps on the sister repo legatus-consul-agent (used by
-# sentinel-legatus only). Sentinel and legatus-consul-agent live
-# side-by-side in ~/firefly/gitrepos/ on dev machines; if the
-# layout ever changes, only these two paths need to update.
-consul-protocol = { path = "../legatus-consul-agent/crates/consul-protocol" }
-consul-domain = { path = "../legatus-consul-agent/crates/consul-domain" }
-# Additional path deps used only by sentinel-legatus dev-dependencies
-# for the in-process round-trip integration test. Consulate is the
-# server half; consul-storage/consul-transport supply the in-memory
-# sqlite session store and the WebSocket transport adapter.
-consulate = { path = "../legatus-consul-agent/consulate" }
-consul-storage = { path = "../legatus-consul-agent/crates/consul-storage" }
-consul-transport = { path = "../legatus-consul-agent/crates/consul-transport" }
 
 # Dev
 tempfile = "3"

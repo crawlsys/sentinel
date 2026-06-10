@@ -8,17 +8,6 @@ use sentinel_domain::state::PhaseCollectionState;
 
 /// Process evidence collection for a tool result
 pub fn process(input: &HookInput, collection: Option<&mut PhaseCollectionState>) -> HookOutput {
-    // Tool-call trace for the legatus per-instruction Result
-    // (Item E): every PostToolUse — even those with no active
-    // phase — gets recorded so the Stop hook can attribute the
-    // tool list to the operator-relayed instructions for this
-    // turn. Cheap append; legatus_client::take_tool_calls drains.
-    if let (Some(session_id), Some(tool_name)) =
-        (input.session_id.as_deref(), input.tool_name.as_deref())
-    {
-        crate::legatus_client::note_tool_call(session_id, tool_name);
-    }
-
     let collection = match collection {
         Some(c) => c,
         None => return HookOutput::allow(), // No active phase collection

@@ -5,7 +5,6 @@
 //! creating a tamper-evident chain — same trust model as blockchain.
 
 use chrono::{DateTime, Utc};
-use consul_domain::identity::republic::RoleBinding;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -53,23 +52,6 @@ pub struct PhaseProof {
     pub started_at: DateTime<Utc>,
     pub completed_at: DateTime<Utc>,
     pub duration_ms: u64,
-
-    // ── Republic-of-Agents actor binding (Fabrica ADR-001, ADR-003) ──
-    //
-    // The Praefectus-issued `RoleBinding` that authorized the action this
-    // proof attests. `None` until Praefectus is wired into Sentinel
-    // (Fabrica task #24 phase 2c); once wired, every PhaseProof carries
-    // the named operator + business + constitution version + spec contract
-    // ref + miles/auxilium/centurion identity.
-    //
-    // `#[serde(default)]` so existing on-disk proof chains parse cleanly
-    // as `actor: None` — backward compatible per ADR-003 §Implementation.
-    //
-    // **Not yet part of `combined_hash`** — adding the actor to the hash
-    // would invalidate every pre-actor proof on disk. Migration to a
-    // hash-included actor is tracked separately (post-Praefectus-wiring).
-    #[serde(default)]
-    pub actor: Option<RoleBinding>,
 }
 
 impl PhaseProof {
@@ -575,79 +557,7 @@ mod tests {
             started_at: Utc::now(),
             completed_at: Utc::now(),
             duration_ms: 100,
-            actor: None,
         }
-    }
-
-    // ── Actor backward-compat (Fabrica ADR-003) ─────────────────────
-
-    #[test]
-    fn actor_defaults_to_none_when_field_absent_in_json() {
-        // Old on-disk proof shape (pre-ADR-003) had no `actor` field.
-        // The #[serde(default)] attribute means deserializing such a
-        // proof must yield `actor: None` rather than failing.
-        //
-        // Construct via serialization of a real proof (handles whatever
-        // Evidence's shape happens to be), then strip the actor field
-        // from the JSON to simulate an old on-disk record.
-        let with_actor = make_proof("claim", "linear", GENESIS_HASH);
-        let mut as_value: serde_json::Value = serde_json::to_value(&with_actor).unwrap();
-        as_value
-            .as_object_mut()
-            .expect("PhaseProof serializes as object")
-            .remove("actor");
-        assert!(
-            !as_value.to_string().contains("\"actor\""),
-            "actor field must be absent for backward-compat test setup"
-        );
-
-        let parsed: PhaseProof = serde_json::from_value(as_value)
-            .expect("old-shape proof must parse cleanly with actor defaulting to None");
-        assert!(parsed.actor.is_none());
-    }
-
-    #[test]
-    fn actor_roundtrip_when_populated() {
-        use consul_domain::identity::republic::{
-            AuxiliumId, BusinessId, CenturionId, ConstitutionVersion, MilesId, OperatorId, ProofId,
-            RoleBinding, SpecContractRef,
-        };
-
-        let proof_with_actor = PhaseProof {
-            phase_id: "claim".into(),
-            skill: "linear".into(),
-            session_id: "test-session".into(),
-            evidence: Evidence::default(),
-            evidence_hash: "0".repeat(64),
-            previous_hash: GENESIS_HASH.into(),
-            combined_hash: "0".repeat(64),
-            judge_model: "sonnet-4.6".into(),
-            judge_verdict: JudgeVerdict::pass(0.95, "ok"),
-            started_at: Utc::now(),
-            completed_at: Utc::now(),
-            duration_ms: 1,
-            actor: Some(RoleBinding {
-                miles: MilesId::new(),
-                auxilium: AuxiliumId::new("support-auxilium"),
-                centurion: CenturionId::new(),
-                spec_contract: SpecContractRef::new("support-auxilium.refund-miles@1.0.0"),
-                constitution_version: ConstitutionVersion::new("1.0.0"),
-                operator: OperatorId::new(),
-                business: BusinessId::new(),
-                authorized_at: Utc::now(),
-                authorized_by_proof: ProofId::new(),
-            }),
-        };
-
-        let json = serde_json::to_string(&proof_with_actor).unwrap();
-        assert!(
-            json.contains("\"actor\""),
-            "actor field must be present in serialized form"
-        );
-        let parsed: PhaseProof = serde_json::from_str(&json).unwrap();
-        let actor = parsed.actor.expect("actor must round-trip as Some");
-        assert_eq!(actor.auxilium.as_str(), "support-auxilium");
-        assert_eq!(actor.constitution_version.as_str(), "1.0.0");
     }
 
     #[test]
@@ -766,7 +676,6 @@ mod tests {
             started_at: now,
             completed_at: now - chrono::Duration::seconds(60),
             duration_ms: 100,
-            actor: None,
         };
 
         assert!(
@@ -836,7 +745,6 @@ mod tests {
             started_at: Utc::now(),
             completed_at: Utc::now(),
             duration_ms: 5,
-            actor: None,
         }
     }
 
