@@ -17,7 +17,6 @@ pub mod build_notify;
 pub mod claim_reality_check;
 pub mod commit_hygiene;
 pub mod commit_message_validator;
-pub mod constitution_gate;
 pub mod context_monitor;
 pub mod cwd_changed;
 pub mod db_ops_gate;
@@ -270,7 +269,6 @@ pub const HOOK_NAMES: &[&str] = &[
     "claim_reality_check",
     "commit_hygiene",
     "commit_message_validator",
-    "constitution_gate",
     "context_monitor",
     "cwd_changed",
     "db_ops_gate",

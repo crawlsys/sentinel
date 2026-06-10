@@ -13,7 +13,6 @@ pub mod capability_router;
 pub mod change_failure;
 pub mod channel_events;
 pub mod classifier;
-pub mod constitution_gate_runtime;
 pub mod cost_per_point;
 pub mod cycle_time;
 pub mod cycle_time_analytics;

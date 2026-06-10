@@ -168,35 +168,6 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
             LayeredReversibilityClassifier::empty()
         });
 
-    // Constitution gate rule list — operator-authored TOML at
-    // ~/.claude/sentinel/config/constitution-gate.toml. Missing file
-    // or parse failure -> empty rule list -> hook is a no-op (the
-    // documented opt-in semantics). Loaded once per invocation so
-    // the read happens off the hot path inside each hook fire.
-    let constitution_rules: Vec<sentinel_application::constitution_gate_runtime::Rule> =
-        dirs::home_dir()
-            .map(|h| {
-                h.join(".claude")
-                    .join("sentinel")
-                    .join("config")
-                    .join("constitution-gate.toml")
-            })
-            .and_then(|path| std::fs::read_to_string(&path).ok())
-            .and_then(|s| {
-                sentinel_application::constitution_gate_runtime::ConstitutionGateConfig::from_toml_str(
-                    &s,
-                )
-                .map_err(|err| {
-                    tracing::warn!(
-                        ?err,
-                        "failed to parse constitution-gate.toml; gate inert"
-                    );
-                })
-                .ok()
-            })
-            .map(|cfg| cfg.rules)
-            .unwrap_or_default();
-
     // A2 Phase 4: construct the capability router from shipped
     // defaults + optional operator overrides at
     // `~/.claude/sentinel/config/agents.toml`. Load failures degrade
@@ -426,7 +397,6 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
                 spec_challenge_scorer.as_deref(),
                 spec_challenge_config,
                 &ba_enforcement,
-                &constitution_rules,
                 repo_root_for_metrics.as_deref(),
                 &workflows,
                 &step_configs,
@@ -1301,7 +1271,6 @@ fn handle_pre_tool_use(
     spec_challenge_scorer: Option<&LlmSpecChallengeScorer>,
     spec_challenge_config: SpecChallengeConfig,
     ba_enforcement: &BaEnforcementConfig,
-    constitution_rules: &[sentinel_application::constitution_gate_runtime::Rule],
     repo_root: Option<&str>,
     workflows: &HashMap<String, SkillWorkflow>,
     step_configs: &HashMap<String, SkillSteps>,
@@ -1515,16 +1484,6 @@ fn handle_pre_tool_use(
         hooks::step_gate::process(input, state, step_configs)
     });
     output.merge(&step_output);
-
-    // Constitution gate — block Write/Edit/MultiEdit/NotebookEdit
-    // when the new content introduces a banned pattern into a
-    // protected path. Empty rule list = no-op (operators opt
-    // in by authoring `~/.claude/sentinel/config/
-    // constitution-gate.toml`).
-    let constitution_output = time_and_record(ctx.fs, &mk_ctx("constitution_gate"), || {
-        hooks::constitution_gate::process(input, constitution_rules)
-    });
-    output.merge(&constitution_output);
 
     // Pre-commit verification — block git commit/push without test evidence (Bash only)
     if matches!(input.tool_name.as_deref(), Some("Bash")) {
