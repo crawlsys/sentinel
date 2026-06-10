@@ -99,8 +99,7 @@ fn default_judge_str() -> String {
 /// enforcement, and sentinel loads it as the real config.
 #[must_use]
 pub fn config_dir() -> PathBuf {
-    dirs::home_dir()
-        .expect("[sentinel] FATAL: Cannot determine home directory. HOME/USERPROFILE must be set.")
+    crate::paths::home_root_or_fatal()
         .join(".claude")
         .join("sentinel")
         .join("config")
