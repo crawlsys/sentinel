@@ -128,7 +128,7 @@ struct BearerToken(String);
 ///
 /// **Why:** `tracing_subscriber` defaults to `warn` filter, so every
 /// `info!` in the daemon startup path is silenced unless the operator
-/// remembers `RUST_LOG=info`. Operators following the consul↔sentinel
+/// remembers `RUST_LOG=info`. Operators following the sentinel
 /// runbook need *some* signal that the daemon started cleanly and where
 /// to find the bearer token — without this banner, Terminal 2 is
 /// completely silent and the integration appears broken.

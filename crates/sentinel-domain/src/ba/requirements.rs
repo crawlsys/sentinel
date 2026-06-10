@@ -1,7 +1,7 @@
 //! BA3 — Requirements traceability domain types.
 //!
 //! Per `docs/ba1-ba3-sentinel-enforcement.md` §2.3 + §9. Defines the
-//! wire-format type consul ADR-017 specifies for requirement
+//! wire-format type for requirement
 //! references (`RequirementRef`) plus the sentinel-side check +
 //! finding enums the `requirements_traceability_gate` hook (future
 //! phase) emits.
@@ -14,13 +14,12 @@
 use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
-// Wire-format type (consul ADR-017).
+// Wire-format type.
 // ---------------------------------------------------------------------------
 
 /// Requirement-matrix reference embedded in BA-orchestrator outputs.
 ///
-/// Carried by `RelayInstruction` and `InstructionResult` per consul
-/// ADR-017. Sentinel's `requirements_traceability_gate` hook (future
+/// Sentinel's `requirements_traceability_gate` hook (future
 /// phase) reads `Vec<RequirementRef>` from the output and validates
 /// each against the orchestrator's published requirement matrix.
 ///

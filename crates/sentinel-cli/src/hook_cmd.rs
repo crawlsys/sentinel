@@ -1255,7 +1255,7 @@ async fn handle_user_prompt_submit(
 }
 
 /// Handle `PreToolUse`: all blocking gates (phase, hygiene, dry-run, BA,
-/// constitution, commit, …).
+/// commit, …).
 #[allow(clippy::too_many_arguments)]
 fn handle_pre_tool_use(
     input: &sentinel_domain::events::HookInput,

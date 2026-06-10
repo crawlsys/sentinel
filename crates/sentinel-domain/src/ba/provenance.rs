@@ -1,7 +1,7 @@
 //! BA1 — Citation provenance domain types.
 //!
 //! Per `docs/ba1-ba3-sentinel-enforcement.md` §2.2 + §9. Defines the
-//! wire-format types consul ADR-017 specifies for artifact citations
+//! wire-format types for artifact citations
 //! (`ArtifactReference`, `ProvenanceClass`) plus the sentinel-side
 //! check + finding enums the `provenance_validate` hook (future
 //! phase) emits.
@@ -14,7 +14,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
-// Wire-format types (consul ADR-017).
+// Wire-format types.
 // ---------------------------------------------------------------------------
 
 /// Coarse classification of where a cited artifact came from.
@@ -46,8 +46,7 @@ pub enum ProvenanceClass {
 
 /// Citation reference embedded in BA-orchestrator outputs.
 ///
-/// Carried by `RelayInstruction` and `InstructionResult` per consul
-/// ADR-017. Sentinel's `provenance_validate` hook (future phase)
+/// Sentinel's `provenance_validate` hook (future phase)
 /// reads `Vec<ArtifactReference>` from the output and validates each
 /// against the connector audit chain.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
