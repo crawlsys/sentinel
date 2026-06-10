@@ -150,23 +150,19 @@ pub fn parse_plan(reply: &str, missing: &[String]) -> RemediationPlan {
     }
 }
 
-/// Extract the first balanced `{...}` JSON object from a possibly-fenced reply.
+/// Extract the first JSON object from a possibly-fenced reply.
+///
+/// Uses serde's streaming deserializer (which correctly ignores braces that
+/// appear INSIDE string values — e.g. `${VAR}` or `{ }` in an acceptance-
+/// criteria string) rather than a naive brace counter, which mis-terminated
+/// the object early and silently dropped fields like `type_label`.
 fn extract_json(reply: &str) -> Option<Value> {
     let start = reply.find('{')?;
-    let mut depth = 0usize;
-    for (i, c) in reply[start..].char_indices() {
-        match c {
-            '{' => depth += 1,
-            '}' => {
-                depth -= 1;
-                if depth == 0 {
-                    return serde_json::from_str(&reply[start..=start + i]).ok();
-                }
-            }
-            _ => {}
-        }
+    let mut stream = serde_json::Deserializer::from_str(&reply[start..]).into_iter::<Value>();
+    match stream.next() {
+        Some(Ok(v @ Value::Object(_))) => Some(v),
+        _ => None,
     }
-    None
 }
 
 /// Fetch a ticket's team label catalog (Type + Area groups) so the remediator
@@ -279,17 +275,27 @@ pub async fn propose_remediation(
 ) -> RemediationPlan {
     let req = DelegationRequest {
         worker: Worker::Codex,
+        // gpt-5.5-pro is a reasoning model: max_tokens caps reasoning + output
+        // combined. Give generous headroom so the JSON proposal lands after the
+        // model reasons (a tight cap is fully consumed by reasoning → empty).
         task: propose_prompt(identifier, title, description, missing, catalog),
         context: String::new(),
-        max_tokens: 700,
+        max_tokens: 3000,
     };
+    tracing::debug!(ticket = %identifier, "linear enforcer: requesting remediation proposal (Codex)");
     match delegate(llm, &req).await {
-        Ok(res) => parse_plan(&res.output, missing),
-        Err(e) => RemediationPlan {
-            unfillable: missing.to_vec(),
-            rationale: format!("proposal failed ({e}) — escalating all gaps"),
-            ..Default::default()
-        },
+        Ok(res) => {
+            tracing::debug!(ticket = %identifier, raw = %res.output.chars().take(300).collect::<String>(), "linear enforcer: remediation proposal received");
+            parse_plan(&res.output, missing)
+        }
+        Err(e) => {
+            tracing::warn!(ticket = %identifier, error = %e, "linear enforcer: remediation proposal failed — escalating");
+            RemediationPlan {
+                unfillable: missing.to_vec(),
+                rationale: format!("proposal failed ({e}) — escalating all gaps"),
+                ..Default::default()
+            }
+        }
     }
 }
 
@@ -304,13 +310,23 @@ pub async fn apply_remediation(
     catalog: &LabelCatalog,
 ) -> Vec<String> {
     let mut applied = Vec::new();
+    tracing::debug!(
+        issue = %issue_id,
+        type_label = ?plan.type_label, area_label = ?plan.area_label,
+        catalog_types = catalog.type_labels.len(), catalog_areas = catalog.area_labels.len(),
+        "linear enforcer: applying remediation plan"
+    );
 
     // Labels: map the chosen NAME -> real labelId, then issueAddLabel.
     if let Some(name) = &plan.type_label {
         if let Some(id) = LabelCatalog::resolve(&catalog.type_labels, name) {
-            if add_label(client, token, issue_id, &id).await {
+            let ok = add_label(client, token, issue_id, &id).await;
+            tracing::debug!(label = %name, %id, ok, "linear enforcer: add Type label");
+            if ok {
                 applied.push(format!("Type label -> {name}"));
             }
+        } else {
+            tracing::warn!(label = %name, "linear enforcer: Type label not in catalog — cannot apply");
         }
     }
     if let Some(name) = &plan.area_label {
@@ -318,6 +334,8 @@ pub async fn apply_remediation(
             if add_label(client, token, issue_id, &id).await {
                 applied.push(format!("Area label -> {name}"));
             }
+        } else {
+            tracing::warn!(label = %name, "linear enforcer: Area label not in catalog — cannot apply");
         }
     }
 
@@ -543,6 +561,20 @@ mod tests {
     fn parse_plan_clamps_bad_priority() {
         let plan = parse_plan("{\"priority\":9,\"unfillable\":[]}", &[]);
         assert_eq!(plan.priority, None, "out-of-range priority dropped, not applied");
+    }
+
+    #[test]
+    fn parse_plan_handles_braces_inside_string_values() {
+        // Regression: a naive brace-counter terminated the object early when a
+        // STRING value contained `{`/`}` (e.g. a `${VAR}` snippet in the
+        // acceptance criteria), silently dropping `type_label`. The serde
+        // streaming extractor must read the whole object regardless.
+        let reply = "{\"type_label\":\"Bug\",\"area_label\":null,\
+                     \"acceptance_criteria\":\"- [ ] set env ${TEST_DATABASE_URL} = {isolated}\",\
+                     \"unfillable\":[],\"rationale\":\"x\"}";
+        let plan = parse_plan(reply, &["Type label".into()]);
+        assert_eq!(plan.type_label.as_deref(), Some("Bug"), "type_label must survive braces in a later string");
+        assert!(plan.acceptance_criteria.unwrap().contains("${TEST_DATABASE_URL}"));
     }
 
     #[test]

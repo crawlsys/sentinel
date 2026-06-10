@@ -28,6 +28,13 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 reqwest = { workspace = true }
 rig-core = { workspace = true }
+# rig-core uses its OWN reqwest 0.13 instance to call OpenRouter. OpenRouter
+# gzip-compresses responses (Content-Encoding: gzip); without the matching
+# decompression feature reqwest fails the body read with "error decoding
+# response body" — which manifested as the self-heal LLM call hanging/failing
+# on gpt-5.5-pro. Declaring reqwest 0.13 with gzip+brotli here unifies those
+# features onto rig's instance so it decompresses the response.
+reqwest_13_decompress = { package = "reqwest", version = "0.13", default-features = false, features = ["gzip", "brotli", "deflate"] }
 futures = { workspace = true }
 chrono = { workspace = true }
 dirs = { workspace = true }
