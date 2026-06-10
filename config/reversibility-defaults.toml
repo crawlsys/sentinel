@@ -669,6 +669,33 @@ class = "TriviallyReversible"
 # Built-in / shell-internal commands that don't touch state.
 
 # ---------------------------------------------------------------------------
+# Layer 3.5: file-path patterns for Write / Edit / NotebookEdit
+# ---------------------------------------------------------------------------
+#
+# Matched against the edited file's path (normalized to forward slashes, so
+# one pattern covers Windows + POSIX). First-match wins; an unmatched edit
+# falls through to the Layer-1 builtin default (ReversibleWithEffort).
+#
+# Why: the four-check `tool_usage_gate` (sequential-thinking + task + PLAN
+# MODE + active task) treats every Edit/Write as ReversibleWithEffort, which
+# forces Plan Mode even for a one-line memory-atom note or a `plans/*.md`
+# scratch file. Those writes are local, recoverable, and explicitly NOT
+# implementation work — the gate's own docstring already says memory writes
+# *should* be TriviallyReversible. These patterns make that real.
+
+[[path.pattern]]
+match = "(?i)/\\.claude/projects/[^/]+/memory/"
+class = "TriviallyReversible"
+# Memory-atom store: ~/.claude/projects/<project-key>/memory/*.md (incl.
+# MEMORY.md, which lives in that dir). Pure local recall notes.
+
+[[path.pattern]]
+match = "(?i)/plans/[^/]+\\.md$"
+class = "TriviallyReversible"
+# Plan scratch files under any `plans/` dir (the gate's own resumed-session
+# fallback writes here; authoring one shouldn't itself require Plan Mode).
+
+# ---------------------------------------------------------------------------
 # Layer 4: operator overrides (empty in the shipped defaults file —
 # operators add their own in a sibling config/reversibility.toml)
 # ---------------------------------------------------------------------------

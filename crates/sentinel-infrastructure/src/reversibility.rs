@@ -50,6 +50,13 @@ pub struct ReversibilityConfigToml {
     #[serde(default)]
     pub bash: BashRulesToml,
 
+    /// `[path] pattern = [[ ... ]]` — ordered file-path pattern rules for
+    /// `Write`/`Edit`/`NotebookEdit`. First-match wins. Lets the operator
+    /// classify edits by *where* they land (e.g. memory-atom files and
+    /// `plans/*.md` are trivially reversible) rather than only by tool name.
+    #[serde(default)]
+    pub path: PathRulesToml,
+
     /// `[overrides] "<tool_name>" = "Class"` — operator overrides.
     #[serde(default)]
     pub overrides: HashMap<String, ReversibilityClass>,
@@ -73,6 +80,25 @@ pub struct BashPatternRuleToml {
     pub class: ReversibilityClass,
 }
 
+#[derive(Debug, Default, Deserialize)]
+pub struct PathRulesToml {
+    /// `[[path.pattern]] match = "<regex>" class = "..."` — first-match
+    /// wins, same array-of-tables ordering contract as bash patterns.
+    #[serde(default)]
+    pub pattern: Vec<PathPatternRuleToml>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct PathPatternRuleToml {
+    /// Regular expression matched against the edited file path. The path is
+    /// normalized to forward slashes before matching, so a single pattern
+    /// works for both Windows (`C:\Users\...`) and POSIX paths.
+    #[serde(rename = "match")]
+    pub pattern: String,
+    /// Class assigned when `pattern` matches.
+    pub class: ReversibilityClass,
+}
+
 // ---------------------------------------------------------------------------
 // Compiled classifier
 // ---------------------------------------------------------------------------
@@ -87,6 +113,10 @@ pub struct LayeredReversibilityClassifier {
     mcp: HashMap<String, HashMap<String, ReversibilityClass>>,
     /// Compiled Layer-3 Bash patterns, evaluation order preserved.
     bash_patterns: Vec<(Regex, ReversibilityClass)>,
+    /// Compiled file-path patterns for Write/Edit/NotebookEdit, evaluation
+    /// order preserved. Consulted before the Layer-1 builtin so a matched
+    /// path (e.g. a memory-atom file) can override the default RWE class.
+    path_patterns: Vec<(Regex, ReversibilityClass)>,
     /// `overrides[<tool_name>] = class` — Layer 4.
     overrides: HashMap<String, ReversibilityClass>,
 }
@@ -101,6 +131,7 @@ impl LayeredReversibilityClassifier {
         Self {
             mcp: HashMap::new(),
             bash_patterns: Vec::new(),
+            path_patterns: Vec::new(),
             overrides: HashMap::new(),
         }
     }
@@ -186,6 +217,24 @@ impl LayeredReversibilityClassifier {
             bash_patterns.push((regex, rule.class));
         }
 
+        // Path patterns (Write/Edit/NotebookEdit). Same concatenate-defaults-
+        // first contract as bash patterns so operators can append refinements
+        // without losing the shipped entries' precedence.
+        let mut path_patterns = Vec::with_capacity(
+            defaults.path.pattern.len() + overrides_config.path.pattern.len(),
+        );
+        for rule in defaults
+            .path
+            .pattern
+            .into_iter()
+            .chain(overrides_config.path.pattern)
+        {
+            let regex = Regex::new(&rule.pattern).with_context(|| {
+                format!("failed to compile path pattern regex `{}`", rule.pattern)
+            })?;
+            path_patterns.push((regex, rule.class));
+        }
+
         // Layer 4: operator overrides. Defaults-table merges; overrides
         // file wins on conflict.
         let mut overrides = defaults.overrides;
@@ -194,6 +243,7 @@ impl LayeredReversibilityClassifier {
         Ok(Self {
             mcp,
             bash_patterns,
+            path_patterns,
             overrides,
         })
     }
@@ -211,6 +261,30 @@ impl LayeredReversibilityClassifier {
         // Bash default when no pattern matches: ReversibleWithEffort.
         // Conservative — assume any unrecognized command is mutating.
         ReversibilityClass::ReversibleWithEffort
+    }
+
+    /// Classify a `Write`/`Edit`/`NotebookEdit` by the path it targets.
+    /// Returns `Some(class)` on the first matching path pattern, `None` when
+    /// no pattern matches (caller then falls through to the Layer-1 builtin
+    /// `ReversibleWithEffort` default for edit tools).
+    ///
+    /// The path is normalized to forward slashes before matching so a single
+    /// pattern covers Windows (`C:\Users\...`) and POSIX inputs alike.
+    fn classify_path(&self, tool_input: &Value) -> Option<ReversibilityClass> {
+        if self.path_patterns.is_empty() {
+            return None;
+        }
+        let raw = tool_input
+            .get("file_path")
+            .or_else(|| tool_input.get("notebook_path"))
+            .and_then(|v| v.as_str())?;
+        let normalized = raw.replace('\\', "/");
+        for (regex, class) in &self.path_patterns {
+            if regex.is_match(&normalized) {
+                return Some(*class);
+            }
+        }
+        None
     }
 
     fn classify_mcp(&self, tool_name: &str) -> ReversibilityClass {
@@ -355,6 +429,14 @@ impl ReversibilityClassifierPort for LayeredReversibilityClassifier {
         // `builtin_class` doc comment describes for Skill/ToolSearch/AskUserQuestion.
         match tool_name {
             "Bash" | "PowerShell" => self.classify_bash(tool_input),
+            // Edit tools consult the path-pattern layer first: a matched path
+            // (e.g. a memory-atom file or a `plans/*.md`) classifies by its
+            // location. No match → fall through to the Layer-1 builtin
+            // (ReversibleWithEffort), preserving prior behavior for source edits.
+            "Write" | "Edit" | "NotebookEdit" => self
+                .classify_path(tool_input)
+                .or_else(|| builtin_class(tool_name))
+                .unwrap_or(ReversibilityClass::Irreversible),
             t if t.starts_with("mcp__") => self.classify_mcp(t),
             other => builtin_class(other).unwrap_or(ReversibilityClass::Irreversible),
         }
@@ -1398,5 +1480,128 @@ mod tests {
             c.classify("mcp__neon__delete_project", &no_input()),
             ReversibilityClass::Catastrophic
         );
+    }
+
+    // ---- Layer 3.5: file-path patterns for Write/Edit ----
+
+    fn edit_path(p: &str) -> Value {
+        json!({ "file_path": p })
+    }
+
+    #[test]
+    fn path_pattern_classifies_write_by_target() {
+        let toml_src = r#"
+            [[path.pattern]]
+            match = "/memory/"
+            class = "TriviallyReversible"
+        "#;
+        let c = LayeredReversibilityClassifier::from_str(toml_src, None).unwrap();
+        assert_eq!(
+            c.classify("Write", &edit_path("/home/u/.claude/projects/x/memory/note.md")),
+            ReversibilityClass::TriviallyReversible
+        );
+        // Non-matching path falls through to the builtin RWE default.
+        assert_eq!(
+            c.classify("Write", &edit_path("/home/u/code/src/main.rs")),
+            ReversibilityClass::ReversibleWithEffort
+        );
+    }
+
+    #[test]
+    fn path_pattern_normalizes_windows_backslashes() {
+        // TOML literal string (single quotes) so the regex backslash reaches
+        // the engine verbatim — a basic ("...") TOML string would reject `\.`
+        // as an invalid escape, which is exactly the trap the shipped file
+        // avoids by writing `\\.`.
+        let toml_src = r#"
+            [[path.pattern]]
+            match = '(?i)/\.claude/projects/[^/]+/memory/'
+            class = "TriviallyReversible"
+        "#;
+        let c = LayeredReversibilityClassifier::from_str(toml_src, None).unwrap();
+        // A real Windows path with backslashes must still match the
+        // forward-slash pattern after normalization.
+        assert_eq!(
+            c.classify(
+                "Write",
+                &edit_path("C:\\Users\\garys\\.claude\\projects\\C--Users-garys\\memory\\foo.md")
+            ),
+            ReversibilityClass::TriviallyReversible
+        );
+    }
+
+    #[test]
+    fn path_pattern_applies_to_edit_and_notebookedit() {
+        let toml_src = r#"
+            [[path.pattern]]
+            match = "/memory/"
+            class = "TriviallyReversible"
+        "#;
+        let c = LayeredReversibilityClassifier::from_str(toml_src, None).unwrap();
+        assert_eq!(
+            c.classify("Edit", &edit_path("/x/memory/a.md")),
+            ReversibilityClass::TriviallyReversible
+        );
+        // NotebookEdit uses `notebook_path` rather than `file_path`.
+        assert_eq!(
+            c.classify("NotebookEdit", &json!({ "notebook_path": "/x/memory/nb.ipynb" })),
+            ReversibilityClass::TriviallyReversible
+        );
+    }
+
+    #[test]
+    fn path_pattern_absent_preserves_builtin_edit_default() {
+        // No path layer configured → Edit/Write keep their Layer-1 RWE class.
+        let c = LayeredReversibilityClassifier::empty();
+        assert_eq!(
+            c.classify("Write", &edit_path("/anything/at/all.md")),
+            ReversibilityClass::ReversibleWithEffort
+        );
+    }
+
+    #[test]
+    fn shipped_defaults_memory_writes_are_trivially_reversible() {
+        let c = shipped();
+        // The motivating case: writing a memory atom must not require Plan Mode.
+        assert_eq!(
+            c.classify(
+                "Write",
+                &edit_path("C:\\Users\\garys\\.claude\\projects\\C--Users-garys\\memory\\claude_switcher_check_handler.md")
+            ),
+            ReversibilityClass::TriviallyReversible
+        );
+        assert_eq!(
+            c.classify(
+                "Edit",
+                &edit_path("/home/u/.claude/projects/proj/memory/MEMORY.md")
+            ),
+            ReversibilityClass::TriviallyReversible
+        );
+    }
+
+    #[test]
+    fn shipped_defaults_plan_md_is_trivially_reversible() {
+        let c = shipped();
+        assert_eq!(
+            c.classify("Write", &edit_path("/repo/plans/some-plan.md")),
+            ReversibilityClass::TriviallyReversible
+        );
+    }
+
+    #[test]
+    fn shipped_defaults_source_edits_stay_reversible_with_effort() {
+        let c = shipped();
+        // Regression guard: the path layer must NOT loosen ordinary code edits.
+        for p in [
+            "/repo/src/main.rs",
+            "C:\\Users\\garys\\code\\app\\index.ts",
+            "/home/u/.claude/settings.json", // .claude but NOT a memory/ path
+        ] {
+            assert_eq!(
+                c.classify("Write", &edit_path(p)),
+                ReversibilityClass::ReversibleWithEffort,
+                "{p} should remain ReversibleWithEffort"
+            );
+        }
     }
 }
