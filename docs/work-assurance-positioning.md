@@ -129,7 +129,7 @@ The product is the **EDR/OPA topology applied to work-assurance**, not "every ho
                               ▼  signed policy bundle                         │ (batched, near-real-time)
    ────────────────────────── LOCAL DATA PLANE (sentinel as resident daemon) ──────────────────────────
    hooks resolve from a cached, signed policy bundle in sub-ms (named-pipe to the daemon, no per-call
-   process spawn). Cloud-latency-tolerant decisions (AI judges, glass-break, prod-override) route up
+   process spawn). Cloud-latency-tolerant decisions (AI judges, prod-override) route up
    synchronously; everything else is local + works offline.
 ```
 

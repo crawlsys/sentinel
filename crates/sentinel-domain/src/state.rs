@@ -68,11 +68,6 @@ pub struct SessionState {
     #[serde(default)]
     pub state_generation: u64,
 
-    /// Glass break emergency override — temporarily suspends workflow enforcement.
-    /// When active (and not expired), phase gate allows all tools through.
-    #[serde(default)]
-    pub glass_break: Option<GlassBreak>,
-
     /// Session-wide **production override**. When `Some`, the operator has
     /// armed prod work by saying "production override"; prod actions (deploys,
     /// prod Doppler/Auth0, destructive prod, prod DB ops/migrations) are
@@ -174,53 +169,10 @@ impl BaselineCounter {
     }
 }
 
-/// Glass break emergency override state.
-///
-/// Initiated via `sentinel break --reason "..."` from an interactive terminal.
-/// Suspends all workflow restrictions (bash allowlist, phase gate, blocked tool prefixes)
-/// for a limited duration. All tool calls during the break are recorded for audit.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GlassBreak {
-    /// Human-readable reason for the break
-    pub reason: String,
-
-    /// When the break was initiated
-    pub started_at: DateTime<Utc>,
-
-    /// When the break expires (auto-reengage)
-    pub expires_at: DateTime<Utc>,
-
-    /// Duration in minutes (for display/logging)
-    pub duration_minutes: u32,
-
-    /// Optional: specific workflow being broken (None = all workflows)
-    pub workflow: Option<String>,
-
-    /// The 6-digit challenge code that was confirmed
-    pub challenge_code: String,
-
-    /// All tool calls made during the break (audit trail)
-    pub tools_used: Vec<BreakToolUse>,
-}
-
-/// A tool call made during an active glass break (audit record).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BreakToolUse {
-    /// Tool name (e.g., "Bash", "Edit", "Write")
-    pub tool: String,
-
-    /// Detail — command for Bash, `file_path` for Edit/Write
-    pub detail: String,
-
-    /// ISO 8601 timestamp
-    pub ts: String,
-}
-
 /// Session-wide production-override grant. Armed by the operator saying
 /// "production override"; cleared by "production lock" or session end.
 /// Deliberately simple (no challenge code / expiry) — it's an operator-
-/// driven, session-scoped grant surfaced via a dual-display notice, not a
-/// cryptographically-gated break like [`GlassBreak`].
+/// driven, session-scoped grant surfaced via a dual-display notice.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProductionOverride {
     /// When the operator armed prod work (RFC3339 UTC).
@@ -272,7 +224,6 @@ impl SessionState {
             failed_submissions: HashMap::new(),
             phase_file_hashes: HashMap::new(),
             state_generation: 0,
-            glass_break: None,
             production_override: None,
             step_baselines: HashMap::new(),
             independent_verdicts: HashMap::new(),
@@ -524,25 +475,6 @@ impl SessionState {
             }
         }
         None
-    }
-
-    /// Check if a glass break is currently active (not expired).
-    #[must_use]
-    pub fn is_break_active(&self) -> bool {
-        self.glass_break
-            .as_ref()
-            .is_some_and(|gb| Utc::now() < gb.expires_at)
-    }
-
-    /// Clear the glass break if it has expired. Preserves break data for
-    /// audit purposes until explicitly cleared — the `is_break_active()`
-    /// check handles expiry semantically.
-    pub fn clear_expired_break(&mut self) {
-        if let Some(ref gb) = self.glass_break {
-            if Utc::now() >= gb.expires_at {
-                self.glass_break = None;
-            }
-        }
     }
 
     /// Record a tool call (increments counter)

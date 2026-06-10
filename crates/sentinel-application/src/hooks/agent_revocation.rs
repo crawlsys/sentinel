@@ -16,8 +16,8 @@
 //!   doesn't recognize
 //!
 //! Revocation is **agent-id scoped**, not session-wide. Other agents in
-//! the same session keep working. Glass break is the right tool for
-//! "kill everything"; this hook is the surgical version.
+//! the same session keep working; this hook is the surgical version of
+//! "kill everything".
 //!
 //! # Provenance
 //!

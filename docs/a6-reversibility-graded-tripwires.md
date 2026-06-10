@@ -349,7 +349,7 @@ Future: the existing `git_hygiene` hook can consult the classifier for git opera
 Every reversibility-gated action has an operator override path. The mechanism is the existing `hygiene_override` hook (signed token, 60s TTL, audited). What changes with A6:
 
 - The override is **per-class-jump**, not per-action. An override for "act despite Irreversible classification" is one thing; "act despite Catastrophic" is another — they require separate explicit confirmation.
-- Catastrophic overrides require **explicit reason** logged with the override token; sentinel-cli's `sentinel break` command prompts for it interactively.
+- Catastrophic overrides require **explicit reason** logged with the override token.
 - Override frequency is **tracked per-classification**. Sentinel emits a health warning if overrides on Catastrophic exceed a threshold (default: more than 3 per week per session) — high override rates on the strictest class are a signal the classifier is calibrated wrong or the operator is in an unsafe pattern.
 
 ---

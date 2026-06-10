@@ -35,9 +35,9 @@ sentinel mcp                           Start MCP server over stdio
 | Crate | Binary | Purpose |
 |-------|--------|---------|
 | `sentinel-domain` | — | Pure business logic: proofs, workflows, evidence, hooks, routing |
-| `sentinel-application` | — | Use cases: engine, classifier, gate, 91 hook modules |
+| `sentinel-application` | — | Use cases: engine, classifier, gate, 90 hook modules |
 | `sentinel-infrastructure` | — | IO adapters: config, state store, git, MCP transport, AI judge |
-| `sentinel-cli` | `sentinel` | CLI (34 top-level subcommands) + dashboard REST API (axum) + in-repo MCP host (stdio) |
+| `sentinel-cli` | `sentinel` | CLI (33 top-level subcommands) + dashboard REST API (axum) + in-repo MCP host (stdio) |
 | `sentinel-legatus` | — | Legatus integration (consul peers, federation client) |
 | `sentinel-git-interceptor` | `sentinel-git-interceptor` | Git shim that routes commits through sentinel gates |
 | `sentinel-npx-interceptor` | `sentinel-npx-interceptor` | npx shim that routes installs through sentinel gates |
@@ -83,7 +83,7 @@ Hooks are invoked by Claude Code's runtime via `sentinel hook --event <Event>`:
 - `Stop` — when Claude finishes responding
 - `SessionStart` / `PreCompact` — session lifecycle
 
-91 hook modules (one `.rs` file per hook in `hooks/`). The categories below are **representative, not exhaustive** — they show a sampling of each category, not all 91:
+90 hook modules (one `.rs` file per hook in `hooks/`). The categories below are **representative, not exhaustive** — they show a sampling of each category, not all 90:
 
 | Category | Hooks (representative) |
 |----------|-------|
@@ -96,7 +96,7 @@ Hooks are invoked by Claude Code's runtime via `sentinel hook --event <Event>`:
 
 ## Key Paths
 
-- `crates/sentinel-application/src/hooks/` — all hook implementations (one file per hook; 91 modules)
+- `crates/sentinel-application/src/hooks/` — all hook implementations (one file per hook; 90 modules)
 - `crates/sentinel-application/src/hooks/mod.rs` — `HOOK_NAMES` const, `GitStatusPort` trait
 - `crates/sentinel-domain/src/workflow.rs` — `SkillWorkflow`, `WorkflowPhase` definitions
 - `crates/sentinel-domain/src/proof.rs` — `ProofChain`, `PhaseProof`

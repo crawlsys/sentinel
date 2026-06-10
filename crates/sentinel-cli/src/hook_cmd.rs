@@ -29,20 +29,6 @@ use sentinel_infrastructure::spec_challenge_store::FilesystemSpecChallengeStore;
 use std::sync::Arc;
 
 pub async fn run(event: &str, matcher: Option<&str>, standalone: bool) -> Result<()> {
-    // ── Glass break emergency override ───────────────────────────────────
-    // Two-layer design:
-    //   1. Active token (~/.claude/sentinel/.glass-break-token) — fast path,
-    //      checked on every hook invocation. Contains expiry + HMAC.
-    //   2. Trigger file (~/.claude/sentinel/.glass-break) — slow path,
-    //      detected once, launches a native Windows dialog requiring human
-    //      confirmation. On success, writes a time-limited token and deletes
-    //      the trigger file. AI cannot complete the dialog.
-    if check_glass_break_override() {
-        eprintln!("[sentinel] GLASS BREAK ACTIVE — all enforcement bypassed");
-        println!("{{}}");
-        return Ok(());
-    }
-
     // Always run inline — the supervisor (spawn child + pipe stdin/stdout)
     // added 5-15s overhead on Windows due to process creation, pipe inheritance,
     // and stdin read timing issues. Inline execution is instant.
@@ -50,13 +36,6 @@ pub async fn run(event: &str, matcher: Option<&str>, standalone: bool) -> Result
 }
 
 pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) -> Result<()> {
-    // ── Glass break emergency override (same check as supervisor) ─────────
-    if check_glass_break_override() {
-        eprintln!("[sentinel] GLASS BREAK ACTIVE — all enforcement bypassed");
-        println!("{{}}");
-        return Ok(());
-    }
-
     let start_time = std::time::Instant::now();
     debug!(event, ?matcher, standalone, "Processing hook event");
 
@@ -1792,9 +1771,8 @@ async fn handle_post_tool_use(
         let mode = sentinel_application::judge_enforcement::Mode::from_env();
         let judge = sentinel_infrastructure::rig_judge::MultiModelJudge::from_env();
         if judge.has_any_provider() {
-            let glass_break = check_glass_break_override();
             let (sj_output, outcome) =
-                hooks::step_judge::process(input, state, step_configs, &judge, glass_break).await;
+                hooks::step_judge::process(input, state, step_configs, &judge).await;
             output.merge(&sj_output);
 
             use sentinel_application::hooks::step_judge::StepJudgeOutcome;
@@ -2282,179 +2260,6 @@ fn get_parent_process_name() -> Option<String> {
         None
     } else {
         Some(name)
-    }
-}
-
-/// Glass break directory — all glass break files live here.
-fn glass_break_dir() -> Option<std::path::PathBuf> {
-    dirs::home_dir().map(|h| h.join(".claude").join("sentinel"))
-}
-
-/// Compute the integrity signature for a glass-break token over its
-/// `expiry` field. `SHA256(salt || "glass-break-token-v1:" || expiry)` — the
-/// salt is compiled into the binary and not observable, so a process that can
-/// write `.glass-break-token` (e.g. the agent) still cannot forge a valid
-/// signature. Mirrors the signed-override-token approach in
-/// `hooks::hygiene_override`. Returns lowercase hex.
-fn glass_break_token_sig(expiry: &str) -> String {
-    use sha2::{Digest, Sha256};
-    let mut hasher = Sha256::new();
-    // Salt is per-build; rotating it invalidates outstanding tokens, which is
-    // the desired fail-closed behavior across an engine upgrade.
-    hasher.update(b"sentinel-glass-break-token-sig-v1:");
-    hasher.update(expiry.as_bytes());
-    let digest = hasher.finalize();
-    use std::fmt::Write as _;
-    digest.iter().fold(String::new(), |mut s, b| {
-        let _ = write!(s, "{b:02x}");
-        s
-    })
-}
-
-/// Check if a glass break override is active.
-///
-/// Two-layer design:
-///   1. **Token check (fast path):** If `.glass-break-token` exists and contains
-///      a valid, non-expired timestamp, return true immediately. This is the
-///      common path after initial confirmation.
-///   2. **Trigger check (slow path):** If `.glass-break` file exists (user created
-///      it manually), launch a native Windows dialog requiring human confirmation.
-///      On success, write a time-limited token and delete the trigger file.
-///      On failure/cancel, delete the trigger file and return false.
-///
-/// The dialog prevents AI from self-activating the override. The token prevents
-/// the dialog from appearing on every subsequent hook invocation.
-fn check_glass_break_override() -> bool {
-    let dir = match glass_break_dir() {
-        Some(d) => d,
-        None => return false,
-    };
-
-    // Fast path: check for a valid, SIGNED, non-expired token. The token is
-    // `{expiry_rfc3339}:{sig}` where `sig` is keyed on a binary-embedded salt
-    // (see `glass_break_token_sig`). An unsigned/forged file — e.g. one the
-    // agent writes itself via `Write`/`Bash` to bypass enforcement — fails
-    // signature verification and is rejected + deleted. This closes the
-    // forgery hole: only `check_glass_break_override`'s own confirmed-dialog
-    // path (which an AI cannot complete) can mint a valid token.
-    let token_path = dir.join(".glass-break-token");
-    if token_path.exists() {
-        if let Ok(contents) = std::fs::read_to_string(&token_path) {
-            if let Some(line) = contents.lines().next() {
-                if let Some((expiry_str, sig)) = line.trim().rsplit_once(':') {
-                    let expected = glass_break_token_sig(expiry_str);
-                    if sig == expected {
-                        if let Ok(expiry) =
-                            chrono::DateTime::parse_from_rfc3339(expiry_str)
-                        {
-                            if expiry > chrono::Utc::now() {
-                                return true; // Valid signature + not expired
-                            }
-                        }
-                    } else {
-                        eprintln!(
-                            "[sentinel] SECURITY: .glass-break-token has an invalid signature \
-                             (forged or tampered). Rejecting + removing."
-                        );
-                    }
-                }
-            }
-        }
-        // Expired, unsigned, forged, or malformed — clean up.
-        let _ = std::fs::remove_file(&token_path);
-    }
-
-    // Slow path: check for trigger file
-    let trigger_path = dir.join(".glass-break");
-    if !trigger_path.exists() {
-        return false;
-    }
-
-    // Trigger exists — require human confirmation via native dialog
-    let confirmed = show_glass_break_dialog();
-
-    // Always delete the trigger file (one-shot)
-    let _ = std::fs::remove_file(&trigger_path);
-
-    if confirmed {
-        // Write a 15-minute SIGNED token: `{expiry}:{sig}`. The signature is
-        // keyed on a binary-embedded salt so the token cannot be forged by
-        // anything that lacks the salt (i.e. the agent writing the file).
-        let expiry = chrono::Utc::now() + chrono::Duration::minutes(15);
-        let expiry_str = expiry.to_rfc3339();
-        let sig = glass_break_token_sig(&expiry_str);
-        let _ = std::fs::write(&token_path, format!("{expiry_str}:{sig}"));
-
-        // Audit log
-        let _ = sentinel_infrastructure::security_log::log_security_event(
-            "glass_break_activated",
-            "unknown",
-            "Glass break confirmed via dialog — enforcement bypassed for 15 minutes",
-        );
-
-        eprintln!(
-            "[sentinel] Glass break confirmed. Enforcement bypassed until {}",
-            expiry.format("%H:%M:%S")
-        );
-        true
-    } else {
-        eprintln!("[sentinel] Glass break DENIED — dialog cancelled or timed out");
-        let _ = sentinel_infrastructure::security_log::log_security_event(
-            "glass_break_denied",
-            "unknown",
-            "Glass break trigger file found but dialog was cancelled or timed out",
-        );
-        false
-    }
-}
-
-/// Show a native Windows dialog requiring human confirmation.
-/// Returns true only if the user types the correct confirmation phrase.
-/// Cannot be completed by AI — requires interactive desktop input.
-fn show_glass_break_dialog() -> bool {
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x08000000;
-
-        // Generate a 4-digit challenge code
-        let mut code_bytes = [0u8; 2];
-        let _ = getrandom::getrandom(&mut code_bytes);
-        let code = u16::from_le_bytes(code_bytes) % 10000;
-        let code_str = format!("{code:04}");
-
-        // Use PowerShell to show an InputBox dialog (works on all Windows versions)
-        // The dialog is modal and blocks until the user responds
-        let ps_script = format!(
-            r#"Add-Type -AssemblyName Microsoft.VisualBasic; $result = [Microsoft.VisualBasic.Interaction]::InputBox("SENTINEL EMERGENCY OVERRIDE`n`nThis will disable ALL security enforcement for 15 minutes.`n`nTo confirm, type the code: {code_str}`n`nThis action is audited.", "Glass Break", ""); if ($result -eq "{code_str}") {{ Write-Output "CONFIRMED" }} else {{ Write-Output "DENIED" }}"#
-        );
-
-        // Note: do NOT use -NonInteractive — InputBox requires interactive mode.
-        // CREATE_NO_WINDOW hides the PowerShell console but the InputBox dialog
-        // still appears on the interactive desktop.
-        let output = std::process::Command::new("powershell")
-            .args(["-NoProfile", "-Command", &ps_script])
-            .creation_flags(CREATE_NO_WINDOW)
-            .output();
-
-        match output {
-            Ok(o) => {
-                let stdout = String::from_utf8_lossy(&o.stdout);
-                stdout.trim() == "CONFIRMED"
-            }
-            Err(e) => {
-                eprintln!("[sentinel] Failed to show glass break dialog: {e}");
-                false
-            }
-        }
-    }
-
-    #[cfg(not(windows))]
-    {
-        // On non-Windows, fall back to terminal challenge
-        eprintln!("[sentinel] Glass break requires interactive confirmation.");
-        eprintln!("[sentinel] Use `sentinel break --reason \"...\"` from a terminal.");
-        false
     }
 }
 

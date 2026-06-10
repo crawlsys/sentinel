@@ -12,7 +12,6 @@ use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
 mod api;
-mod break_cmd;
 mod cache_cmd;
 mod claude_md_cmd;
 mod cleanup_cmd;
@@ -371,45 +370,6 @@ enum Commands {
 
     /// Touch every mcp-router-wrapped MCP binary to trigger mass restart
     RestartAllMcps,
-
-    /// Glass break — emergency workflow override (interactive terminal only)
-    Break {
-        /// Reason for the break (required for initiation)
-        #[arg(long)]
-        reason: Option<String>,
-
-        /// Duration in minutes (default: 5, max: 30)
-        #[arg(long)]
-        duration: Option<u32>,
-
-        /// Specific workflow to break (default: all)
-        #[arg(long)]
-        workflow: Option<String>,
-
-        /// Show active break status
-        #[arg(long)]
-        status: bool,
-
-        /// Cancel active break (re-engage enforcement)
-        #[arg(long)]
-        cancel: bool,
-
-        /// Show break history (last 30 days)
-        #[arg(long)]
-        history: bool,
-
-        /// List break state across all known sessions (use with --json for stdout JSON)
-        #[arg(long)]
-        list: bool,
-
-        /// Target a specific session ID (for --status / --cancel)
-        #[arg(long)]
-        session: Option<String>,
-
-        /// Output as JSON on stdout (applies to --status, --list, --history)
-        #[arg(long)]
-        json: bool,
-    },
 
     /// External-benchmark eval corpus management (A12).
     ///
@@ -1195,22 +1155,6 @@ async fn main() -> anyhow::Result<()> {
             let result = claude_md_cmd::restart_all_mcps()?;
             println!("{}", serde_json::to_string_pretty(&result)?);
             Ok(())
-        }
-        Commands::Break {
-            reason,
-            duration,
-            workflow,
-            status,
-            cancel,
-            history,
-            list,
-            session,
-            json,
-        } => {
-            break_cmd::run(
-                reason, duration, workflow, status, cancel, history, list, session, json,
-            )
-            .await
         }
     }
 }

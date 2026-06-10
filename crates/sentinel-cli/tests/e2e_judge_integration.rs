@@ -86,7 +86,7 @@ async fn step_judge_produces_verdict_end_to_end() {
     let configs = demo_step_configs();
 
     let (output, outcome) =
-        step_judge::process(&input, &mut state, &configs, &judge, false).await;
+        step_judge::process(&input, &mut state, &configs, &judge).await;
 
     assert!(
         output.blocked.is_none(),
@@ -140,7 +140,7 @@ async fn non_step_tool_is_noop_end_to_end() {
     let configs = demo_step_configs();
 
     let (output, outcome) =
-        step_judge::process(&input, &mut state, &configs, &judge, false).await;
+        step_judge::process(&input, &mut state, &configs, &judge).await;
     assert!(output.blocked.is_none());
     assert!(
         matches!(outcome, StepJudgeOutcome::NotAStepTool),

@@ -50,15 +50,13 @@
 //! OpenRouter-routed Kimi/Codex/etc. The hook itself stays model-agnostic;
 //! it picks the right tier from the step config and lets the trait route.
 //!
-//! # Glass break + sentinel authority
+//! # Sentinel authority
 //!
-//! Same break semantics as the other gates: an active break short-circuits
-//! and emits `Outcome::Skipped` so the chain doesn't get a fake verdict
-//! during emergency bypass. The hook never blocks via `HookOutput::deny`
-//! — failed verdicts surface as a non-sufficient `JudgeVerdict` that
-//! `submit_step_complete` will refuse to seal. `PostToolUse` blocking is
-//! the wrong layer for "this step didn't pass"; the chain itself is the
-//! enforcement substrate, not this hook's allow/deny return.
+//! The hook never blocks via `HookOutput::deny` — failed verdicts surface
+//! as a non-sufficient `JudgeVerdict` that `submit_step_complete` will
+//! refuse to seal. `PostToolUse` blocking is the wrong layer for "this step
+//! didn't pass"; the chain itself is the enforcement substrate, not this
+//! hook's allow/deny return.
 
 use std::collections::HashMap;
 
@@ -104,7 +102,7 @@ pub enum StepJudgeOutcome {
     /// Skill has a step config but the specific `step_id` wasn't found in any
     /// phase. Possible misconfig or stale tool name.
     UnknownStep { skill: String, step_id: String },
-    /// Glass break was active — judge skipped, no verdict.
+    /// The judge was skipped for this invocation — no verdict produced.
     Skipped,
     /// Judge ran, here's the verdict + the resolved coordinates so M1.5 can
     /// build the `StepProof` without reparsing the tool name.
@@ -258,7 +256,6 @@ pub async fn process(
     state: &mut SessionState,
     step_configs: &HashMap<String, SkillSteps>,
     judge: &dyn JudgeService,
-    glass_break_active: bool,
 ) -> (HookOutput, StepJudgeOutcome) {
     let tool_name = match &input.tool_name {
         Some(name) => name.as_str(),
@@ -269,10 +266,6 @@ pub async fn process(
         Some(r) => r,
         None => return (HookOutput::allow(), StepJudgeOutcome::NotAStepTool),
     };
-
-    if glass_break_active {
-        return (HookOutput::allow(), StepJudgeOutcome::Skipped);
-    }
 
     let skill_steps = match step_configs.get(&step_ref.skill) {
         Some(s) => s,
@@ -510,7 +503,6 @@ mod tests {
             &mut state,
             &linear_step_config(),
             &judge,
-            false,
         )
         .await;
         assert!(matches!(outcome, StepJudgeOutcome::NotAStepTool));
@@ -519,26 +511,6 @@ mod tests {
             judge.calls.load(Ordering::SeqCst),
             0,
             "judge must NOT fire on non-step tools"
-        );
-    }
-
-    #[tokio::test]
-    async fn skipped_during_glass_break() {
-        let judge = RecordingJudge::passing();
-        let mut state = fresh_state();
-        let (_, outcome) = process(
-            &step_input("mcp__skills__linear__step_1"),
-            &mut state,
-            &linear_step_config(),
-            &judge,
-            true, // glass_break_active
-        )
-        .await;
-        assert!(matches!(outcome, StepJudgeOutcome::Skipped));
-        assert_eq!(
-            judge.calls.load(Ordering::SeqCst),
-            0,
-            "judge must NOT fire during glass break"
         );
     }
 
@@ -552,7 +524,6 @@ mod tests {
             &mut state,
             &configs,
             &judge,
-            false,
         )
         .await;
         assert!(matches!(outcome, StepJudgeOutcome::NoStepConfig));
@@ -568,7 +539,6 @@ mod tests {
             &mut state,
             &linear_step_config(),
             &judge,
-            false,
         )
         .await;
         match outcome {
@@ -590,7 +560,6 @@ mod tests {
             &mut state,
             &linear_step_config(),
             &judge,
-            false,
         )
         .await;
         match outcome {
@@ -633,7 +602,6 @@ mod tests {
             &mut state,
             &linear_step_config(),
             &judge,
-            false,
         )
         .await;
         match outcome {
@@ -654,7 +622,6 @@ mod tests {
             &mut state,
             &linear_step_config(),
             &judge,
-            false,
         )
         .await;
         match outcome {
@@ -719,7 +686,6 @@ mod tests {
             &mut state,
             &config_with_threshold(3),
             &judge,
-            false,
         )
         .await;
         match outcome {
@@ -752,7 +718,6 @@ mod tests {
             &mut state,
             &configs,
             &judge,
-            false,
         )
         .await;
         assert!(matches!(outcome1, StepJudgeOutcome::JudgedWarmup { .. }));
@@ -763,7 +728,6 @@ mod tests {
             &mut state,
             &configs,
             &judge,
-            false,
         )
         .await;
         assert!(matches!(outcome2, StepJudgeOutcome::JudgedWarmup { .. }));
@@ -775,7 +739,6 @@ mod tests {
             &mut state,
             &configs,
             &judge,
-            false,
         )
         .await;
         match outcome3 {
@@ -801,7 +764,6 @@ mod tests {
             &mut state,
             &config_with_threshold(0),
             &judge,
-            false,
         )
         .await;
         assert!(
@@ -824,7 +786,6 @@ mod tests {
             &mut state,
             &config_with_threshold(3),
             &judge,
-            false,
         )
         .await;
         match outcome {

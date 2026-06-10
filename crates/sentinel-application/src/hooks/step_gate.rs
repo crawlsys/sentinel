@@ -36,11 +36,10 @@
 //! 4. Blocks with a `[Sentinel-Authority]` deny message naming the missing
 //!    prerequisite if not.
 //!
-//! # Glass break + sentinel authority
+//! # Sentinel authority
 //!
-//! Same glass-break semantics as `phase_gate`: an active break bypasses
-//! enforcement (with the tool call logged for audit). Block messages carry
-//! the `[Sentinel-Authority]` provenance prefix consumed by Claude Code.
+//! Block messages carry the `[Sentinel-Authority]` provenance prefix
+//! consumed by Claude Code.
 
 use std::collections::HashMap;
 
@@ -142,13 +141,6 @@ pub fn process(
         Some(name) => name.as_str(),
         None => return HookOutput::allow(),
     };
-
-    // ── Glass break emergency override (same semantics as phase_gate) ─────
-    // We only *read* state here; clearing expired breaks is phase_gate's job
-    // since both hooks share state and clearing twice is idempotent.
-    if state.is_break_active() {
-        return HookOutput::allow();
-    }
 
     // Only step tools are step-gated. Everything else falls through.
     let step_ref = match StepToolRef::parse(tool_name) {

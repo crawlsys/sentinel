@@ -121,16 +121,11 @@ fn is_path_inside_repo(
 /// Checks:
 /// 1. Warn if editing directly on main/master (not in a worktree)
 /// 2. Block if too many uncommitted files
-///
-/// An active first-class glass break (scoped to `git_hygiene` or unscoped)
-/// suppresses both blocking checks — see [`super::glass_break_gate`]. This is
-/// additive to the coarse `hygiene_override` (which this hook never consulted
-/// directly; that path is the dispatcher's responsibility).
 pub fn process(
     input: &HookInput,
     git: &dyn GitStatusPort,
     fs: &dyn super::FileSystemPort,
-    state: &SessionState,
+    _state: &SessionState,
 ) -> HookOutput {
     let tool = match &input.tool_name {
         Some(t) => t.as_str(),
@@ -139,12 +134,6 @@ pub fn process(
 
     // Only gate Edit and Write
     if tool != "Edit" && tool != "Write" {
-        return HookOutput::allow();
-    }
-
-    // First-class glass break short-circuit: an audited `sentinel break`
-    // (scoped to `git_hygiene` or unscoped) suspends git hygiene enforcement.
-    if super::glass_break_gate::active_glass_break(state, "git_hygiene") {
         return HookOutput::allow();
     }
 
@@ -246,8 +235,7 @@ pub fn process(
 mod tests {
     use super::*;
 
-    /// No-break session state — the default for every test that doesn't
-    /// exercise the glass-break suppression path.
+    /// Default session state for tests.
     fn nb() -> SessionState {
         SessionState::new("git-hygiene-test")
     }
@@ -485,65 +473,6 @@ mod tests {
         };
         let output = process(&input, &git, &crate::hooks::test_support::StubFs, &nb());
         assert_eq!(output.blocked, Some(true));
-    }
-
-    /// An active first-class glass break suppresses the over-threshold block.
-    #[test]
-    fn test_glass_break_suppresses_over_threshold_block() {
-        use chrono::{Duration, Utc};
-        use sentinel_domain::state::GlassBreak;
-
-        let files: Vec<String> = (0..(MAX_UNCOMMITTED_FILES + 1))
-            .map(|i| format!("file{i}.rs"))
-            .collect();
-        let git = StubGit::default_with(true, files);
-        let input = HookInput {
-            tool_name: Some("Edit".to_string()),
-            cwd: Some(".".to_string()),
-            ..Default::default()
-        };
-
-        // Without a break: blocked.
-        assert_eq!(
-            process(&input, &git, &crate::hooks::test_support::StubFs, &nb()).blocked,
-            Some(true)
-        );
-
-        // With an active unscoped break: allowed.
-        let mut state = nb();
-        let now = Utc::now();
-        state.glass_break = Some(GlassBreak {
-            reason: "emergency".to_string(),
-            started_at: now,
-            expires_at: now + Duration::minutes(5),
-            duration_minutes: 5,
-            workflow: None,
-            challenge_code: "BREAK-000000".to_string(),
-            tools_used: Vec::new(),
-        });
-        assert!(
-            process(&input, &git, &crate::hooks::test_support::StubFs, &state)
-                .blocked
-                .is_none(),
-            "active glass break must suppress the git_hygiene over-threshold block"
-        );
-
-        // A break scoped to a DIFFERENT workflow must NOT suppress git_hygiene.
-        let mut other = nb();
-        other.glass_break = Some(GlassBreak {
-            reason: "emergency".to_string(),
-            started_at: now,
-            expires_at: now + Duration::minutes(5),
-            duration_minutes: 5,
-            workflow: Some("verification".to_string()),
-            challenge_code: "BREAK-000001".to_string(),
-            tools_used: Vec::new(),
-        });
-        assert_eq!(
-            process(&input, &git, &crate::hooks::test_support::StubFs, &other).blocked,
-            Some(true),
-            "a verification-scoped break must not suppress git_hygiene"
-        );
     }
 
     #[test]

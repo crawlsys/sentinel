@@ -202,28 +202,6 @@ pub fn process(
         None => return HookOutput::allow(),
     };
 
-    // ── Glass break emergency override ────────────────────────────────────
-    // If a glass break is active, bypass all workflow enforcement and log
-    // the tool call for audit. Check expiry first so expired breaks are
-    // cleaned up before the next gate check.
-    state.clear_expired_break();
-    if state.is_break_active() {
-        if let Some(ref mut gb) = state.glass_break {
-            gb.tools_used.push(sentinel_domain::state::BreakToolUse {
-                tool: tool_name.to_string(),
-                detail: input
-                    .tool_input
-                    .as_ref()
-                    .and_then(|v| v.get("command").or_else(|| v.get("file_path")))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string(),
-                ts: chrono::Utc::now().to_rfc3339(),
-            });
-        }
-        return HookOutput::allow();
-    }
-
     // **Attack #100/#114 defense-in-depth**: Validate tool name format.
     // Claude Code sends PascalCase (Read, Bash, Edit) or mcp__prefix (mcp__linear__*).
     // If we see unexpected casing, log a warning. This catches potential bypass

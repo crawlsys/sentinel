@@ -181,7 +181,7 @@ pub enum AuditorDecision {
         /// Operator-facing explanation for the block. Should be specific
         /// enough that the operator can either fix the proposed action,
         /// challenge the auditor's reasoning, or invoke the
-        /// `hygiene_override` glass-break.
+        /// `hygiene_override`.
         reason: String,
     },
 }
