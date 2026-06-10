@@ -125,6 +125,12 @@ pub struct TicketReadiness {
     pub state_name: String,
     pub has_type_label: bool,
     pub has_area_label: bool,
+    /// Actor attribution (for the agent-vs-human differential). `true` when the
+    /// ticket was created by a bot/integration (`botActor` present or
+    /// `integrationSourceType` set) — i.e. an agent's own ticket, safe to heal
+    /// silently. `false` for human-created tickets, where we escalate via
+    /// comment instead of silently rewriting the operator's ticket.
+    pub created_by_agent: bool,
 }
 
 impl TicketReadiness {
@@ -515,7 +521,7 @@ pub async fn fetch_readiness(
     issue_id: &str,
 ) -> Result<TicketReadiness, EnforcerError> {
     let query = format!(
-        r#"{{"query":"query{{issue(id:\"{issue_id}\"){{identifier estimate state{{name type}} labels{{nodes{{name parent{{name}}}}}}}}}}"}}"#
+        r#"{{"query":"query{{issue(id:\"{issue_id}\"){{identifier estimate state{{name type}} labels{{nodes{{name parent{{name}}}}}} botActor{{id}} integrationSourceType}}}}"}}"#
     );
     let resp = client
         .post(LINEAR_GRAPHQL_URL)
@@ -554,6 +560,14 @@ fn parse_readiness(issue: &Value) -> Option<TicketReadiness> {
                 == Some(group)
         })
     };
+    // Agent-vs-human attribution: a bot actor OR a non-null integration source
+    // means an agent/integration created this ticket — safe to heal silently.
+    // Absent both ⇒ human-authored ⇒ escalate via comment instead.
+    let created_by_agent = !issue.get("botActor").unwrap_or(&Value::Null).is_null()
+        || !issue
+            .get("integrationSourceType")
+            .unwrap_or(&Value::Null)
+            .is_null();
     Some(TicketReadiness {
         identifier,
         estimate,
@@ -561,6 +575,7 @@ fn parse_readiness(issue: &Value) -> Option<TicketReadiness> {
         state_name,
         has_type_label: has_parent("Type"),
         has_area_label: has_parent("Area"),
+        created_by_agent,
     })
 }
 
@@ -852,6 +867,20 @@ pub async fn run_enforcer(cfg: EnforcerConfig) {
                     continue; // dev-ready or not started — nothing to do
                 }
 
+                // Actor differential (L2): a HUMAN-authored ticket is the
+                // operator's own — we ask via comment rather than silently
+                // rewriting their fields. Only AGENT/integration-authored
+                // tickets get the silent heal-first treatment below.
+                if !readiness.created_by_agent {
+                    crate::remediation::post_comment(&client, &cfg.token, id, &format!(
+                        "## 🩺 Not dev-ready — please complete before starting\n\nThis ticket entered **{}** while still missing: **{}**. \
+                         Set these so it meets the Definition of Ready (the enforcer leaves human-authored tickets for you to fill rather than rewriting them).",
+                        readiness.state_name, readiness.missing_owned().join(", "),
+                    )).await;
+                    tracing::info!(ticket = %readiness.identifier, missing = %readiness.missing_owned().join(", "), "linear enforcer [LIVE]: human-authored — escalated via comment (no auto-heal)");
+                    continue;
+                }
+
                 // ASSISTANT, not bouncer: remediate-first. Heal as many gaps as
                 // we can confidently infer; the ticket stays in progress. Only
                 // escalate the gaps we can't fill, and revert as a last resort.
@@ -932,12 +961,45 @@ mod tests {
             state_name: "x".into(),
             has_type_label: true,
             has_area_label: true,
+            created_by_agent: true,
         }
     }
 
     #[test]
     fn dev_ready_started_is_not_reverted() {
         assert!(!ready("started").should_revert());
+    }
+
+    #[test]
+    fn parse_readiness_attributes_actor_for_the_differential() {
+        let base = |actor: serde_json::Value| {
+            let mut issue = serde_json::json!({
+                "identifier": "FPCRM-9",
+                "estimate": null,
+                "state": { "name": "In Progress", "type": "started" },
+                "labels": { "nodes": [] },
+                "integrationSourceType": null,
+            });
+            issue.as_object_mut().unwrap().insert("botActor".into(), actor);
+            parse_readiness(&issue).expect("parses")
+        };
+        // botActor present ⇒ agent-authored (silent heal path).
+        assert!(base(serde_json::json!({ "id": "bot-1" })).created_by_agent);
+        // botActor absent + no integration source ⇒ human-authored (ask path).
+        assert!(!base(serde_json::Value::Null).created_by_agent);
+
+        // integrationSourceType present (no botActor) also ⇒ agent/integration.
+        let mut issue = serde_json::json!({
+            "identifier": "FPCRM-9",
+            "estimate": null,
+            "state": { "name": "In Progress", "type": "started" },
+            "labels": { "nodes": [] },
+            "botActor": null,
+            "integrationSourceType": "github",
+        });
+        assert!(parse_readiness(&issue).unwrap().created_by_agent);
+        issue["integrationSourceType"] = serde_json::Value::Null;
+        assert!(!parse_readiness(&issue).unwrap().created_by_agent);
     }
 
     #[test]

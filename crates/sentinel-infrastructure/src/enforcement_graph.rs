@@ -239,6 +239,7 @@ mod tests {
             state_name: "X".into(),
             has_type_label: ty,
             has_area_label: area,
+            created_by_agent: true,
         }
     }
 
