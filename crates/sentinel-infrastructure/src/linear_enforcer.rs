@@ -117,6 +117,10 @@ struct NextPayload {
 // ----- the dev-ready bar (shared with Tier A / Tier C) ------------------
 
 /// A ticket's enforcement-relevant fields, fetched via the Linear REST GraphQL.
+// Each bool is an independent, named readiness/discipline dimension read
+// straight off the Linear payload — a flat record is the clearest shape; a
+// bitfield/sub-struct would obscure them for no benefit.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone)]
 pub struct TicketReadiness {
     pub identifier: String,
@@ -137,6 +141,17 @@ pub struct TicketReadiness {
     pub sla_started_at: Option<String>,
     /// RFC3339 timestamp the SLA breaches at (None ⇒ no SLA running).
     pub sla_breaches_at: Option<String>,
+    /// ≥3 testable acceptance criteria — heuristically, the description carries
+    /// at least 3 checklist/numbered lines. A dev-ready dimension (heal can
+    /// draft AC), so it joins `missing()`.
+    pub has_acceptance_criteria: bool,
+    /// A human/agent is assigned. Extended-discipline check (comment-only):
+    /// a started ticket with no assignee is flagged, not auto-filled.
+    pub assignee_present: bool,
+    /// Ticket is in a cycle. Extended-discipline (comment-only).
+    pub in_cycle: bool,
+    /// Ticket is attached to a project. Extended-discipline (comment-only).
+    pub in_project: bool,
 }
 
 /// Outcome of the SLA health check (Tier-3 SLA discipline).
@@ -214,6 +229,9 @@ impl TicketReadiness {
         if self.state_type == "triage" {
             m.push("still in Triage");
         }
+        if !self.has_acceptance_criteria {
+            m.push("acceptance criteria");
+        }
         m
     }
 
@@ -229,6 +247,45 @@ impl TicketReadiness {
     pub fn should_revert(&self) -> bool {
         self.is_started() && !self.missing().is_empty()
     }
+
+    /// Extended workflow-discipline gaps for a STARTED ticket — softer than the
+    /// dev-ready set (these are flagged via comment, never auto-filled or
+    /// reverted): no assignee, not in a cycle, no project. Empty unless started.
+    #[must_use]
+    pub fn extended_discipline(&self) -> Vec<&'static str> {
+        let mut d = Vec::new();
+        if !self.is_started() {
+            return d;
+        }
+        if !self.assignee_present {
+            d.push("no assignee");
+        }
+        if !self.in_cycle {
+            d.push("not in a cycle");
+        }
+        if !self.in_project {
+            d.push("no project");
+        }
+        d
+    }
+}
+
+/// Heuristic: does the description carry ≥3 acceptance-criteria lines? Counts
+/// checklist (`- [ ]` / `- [x]`) and numbered (`1.`, `2)`) list items. Pure +
+/// testable.
+#[must_use]
+pub fn has_acceptance_criteria(description: &str) -> bool {
+    let count = description
+        .lines()
+        .map(str::trim_start)
+        .filter(|l| {
+            l.starts_with("- [")
+                || l.starts_with("* [")
+                || l.chars().next().is_some_and(|c| c.is_ascii_digit())
+                    && (l.contains(". ") || l.contains(") "))
+        })
+        .count();
+    count >= 3
 }
 
 // ----- the wss subscription client --------------------------------------
@@ -578,7 +635,7 @@ pub async fn fetch_readiness(
     issue_id: &str,
 ) -> Result<TicketReadiness, EnforcerError> {
     let query = format!(
-        r#"{{"query":"query{{issue(id:\"{issue_id}\"){{identifier estimate priority slaStartedAt slaBreachesAt state{{name type}} labels{{nodes{{name parent{{name}}}}}} botActor{{id}} integrationSourceType}}}}"}}"#
+        r#"{{"query":"query{{issue(id:\"{issue_id}\"){{identifier estimate priority slaStartedAt slaBreachesAt description state{{name type}} labels{{nodes{{name parent{{name}}}}}} botActor{{id}} integrationSourceType assignee{{id}} cycle{{id}} project{{id}}}}}}"}}"#
     );
     let resp = client
         .post(LINEAR_GRAPHQL_URL)
@@ -634,6 +691,11 @@ fn parse_readiness(issue: &Value) -> Option<TicketReadiness> {
         .get("slaBreachesAt")
         .and_then(serde_json::Value::as_str)
         .map(str::to_string);
+    let description = issue
+        .get("description")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    let present = |k: &str| !issue.get(k).unwrap_or(&Value::Null).is_null();
     Some(TicketReadiness {
         identifier,
         estimate,
@@ -645,6 +707,10 @@ fn parse_readiness(issue: &Value) -> Option<TicketReadiness> {
         priority,
         sla_started_at,
         sla_breaches_at,
+        has_acceptance_criteria: has_acceptance_criteria(description),
+        assignee_present: present("assignee"),
+        in_cycle: present("cycle"),
+        in_project: present("project"),
     })
 }
 
@@ -960,6 +1026,19 @@ pub async fn run_enforcer(cfg: EnforcerConfig) {
                     SlaVerdict::Ok => {}
                 }
 
+                // Extended workflow discipline (comment-only): a started ticket
+                // with no assignee / not in a cycle / no project. Flagged, never
+                // auto-filled or reverted — these need a human/planning call.
+                let discipline = readiness.extended_discipline();
+                if !discipline.is_empty() {
+                    crate::remediation::post_comment(&client, &cfg.token, id, &format!(
+                        "## 📋 Workflow discipline\n\nThis started ticket has loose ends: **{}**. \
+                         Tidy these so the board stays trustworthy (the enforcer flags but won't auto-fill them).",
+                        discipline.join(", "),
+                    )).await;
+                    tracing::info!(ticket = %readiness.identifier, gaps = %discipline.join(", "), "linear enforcer [LIVE]: extended-discipline flags — commented");
+                }
+
                 if !readiness.should_revert() {
                     continue; // dev-ready or not started — nothing to do
                 }
@@ -1062,6 +1141,10 @@ mod tests {
             priority: Some(3),
             sla_started_at: None,
             sla_breaches_at: None,
+            has_acceptance_criteria: true,
+            assignee_present: true,
+            in_cycle: true,
+            in_project: true,
         }
     }
 
@@ -1128,6 +1211,40 @@ mod tests {
         // Non-urgent with no SLA is fine.
         assert_eq!(evaluate_sla(Some(3), None, None, now), SlaVerdict::Ok);
         assert_eq!(evaluate_sla(None, None, None, now), SlaVerdict::Ok);
+    }
+
+    #[test]
+    fn acceptance_criteria_needs_three_checklist_or_numbered_items() {
+        assert!(has_acceptance_criteria("## AC\n- [ ] one\n- [ ] two\n- [ ] three"));
+        assert!(has_acceptance_criteria("1. first\n2. second\n3) third"));
+        assert!(!has_acceptance_criteria("- [ ] only one\n- [ ] two"));
+        assert!(!has_acceptance_criteria("just prose, no list at all"));
+        assert!(!has_acceptance_criteria(""));
+    }
+
+    #[test]
+    fn extended_discipline_flags_started_loose_ends_only() {
+        let mut t = ready("started");
+        assert!(t.extended_discipline().is_empty(), "fully tidy ⇒ no flags");
+        t.assignee_present = false;
+        t.in_cycle = false;
+        t.in_project = false;
+        let d = t.extended_discipline();
+        assert!(d.contains(&"no assignee") && d.contains(&"not in a cycle") && d.contains(&"no project"));
+        // Not started ⇒ discipline checks don't fire (only enforce on active work).
+        let mut backlog = ready("backlog");
+        backlog.assignee_present = false;
+        backlog.in_cycle = false;
+        backlog.in_project = false;
+        assert!(backlog.extended_discipline().is_empty());
+    }
+
+    #[test]
+    fn missing_acceptance_criteria_triggers_revert_when_started() {
+        let mut t = ready("started");
+        t.has_acceptance_criteria = false;
+        assert!(t.should_revert());
+        assert!(t.missing().contains(&"acceptance criteria"));
     }
 
     #[test]

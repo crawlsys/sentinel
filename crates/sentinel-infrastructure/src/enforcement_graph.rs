@@ -243,6 +243,10 @@ mod tests {
             priority: Some(3),
             sla_started_at: None,
             sla_breaches_at: None,
+            has_acceptance_criteria: true,
+            assignee_present: true,
+            in_cycle: true,
+            in_project: true,
         }
     }
 
