@@ -16,12 +16,7 @@ use sentinel_application::hooks::HOOK_NAMES;
 /// from `hook_cmd.rs` — they're shared helper modules other hooks call, not
 /// standalone dispatched hooks. Keep this list tiny and justified; a new
 /// entry here is a deliberate "this is a helper, not a dormant hook" claim.
-const KNOWN_NON_DISPATCHED_HELPERS: &[&str] = &[
-    // `upstream_block` is a helper used by git_hygiene / phase_gate /
-    // pre_commit_verification to surface a local block upstream — it has no
-    // `process()` entry point and is never dispatched directly.
-    "upstream_block",
-];
+const KNOWN_NON_DISPATCHED_HELPERS: &[&str] = &[];
 
 /// The hook command dispatcher source. Embedded at compile time so the test
 /// reads exactly the dispatcher that ships, not a runtime-resolved path.

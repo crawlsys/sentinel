@@ -27,7 +27,6 @@ mod manifest_cmd;
 mod policy_cmd;
 mod hook_cmd;
 mod init_cmd;
-mod legatus_cmd;
 mod mcp_cmd;
 mod pr_review_cmd;
 mod project_cmd;
@@ -58,82 +57,6 @@ enum Commands {
         /// Dashboard API port
         #[arg(long, default_value = "3001")]
         port: u16,
-
-        /// Optional consulate URL — when set, the daemon hosts a
-        /// long-running legatus WS connection alongside the
-        /// dashboard API, and exposes `POST /legatus/escalate` +
-        /// `GET /legatus/inbox/next` for hook clients to use.
-        /// Without it, daemon runs with no legatus (pre-B
-        /// behavior).
-        #[arg(long, value_name = "URL")]
-        legatus_consulate_url: Option<String>,
-
-        /// Additional consulate URL(s) to try after
-        /// `--legatus-consulate-url` fails on the current attempt.
-        /// Repeatable; URLs are tried in order. Empty by default.
-        /// The reconnect wrapper restarts every attempt from the
-        /// primary URL — failover order is not persisted across
-        /// attempts so a transient primary outage doesn't
-        /// permanently demote the primary.
-        #[arg(long = "legatus-consulate-failover-url", value_name = "URL", action = clap::ArgAction::Append)]
-        legatus_consulate_failover_urls: Vec<String>,
-
-        /// 32-byte bootstrap secret as 64 hex chars. Required
-        /// when `--legatus-consulate-url` is set.
-        #[arg(long, value_name = "HEX64", env = "CONSULATE_BOOTSTRAP_SECRET", hide_env_values = true)]
-        legatus_bootstrap_secret: Option<String>,
-
-        /// Session-name hint sent in the legatus registration.
-        #[arg(long, default_value = "sentinel")]
-        legatus_suggested_name: String,
-
-        /// Working directory the legatus's session is anchored
-        /// to (default: daemon's cwd).
-        #[arg(long)]
-        legatus_working_dir: Option<String>,
-
-        /// Heartbeat interval in seconds for the hosted legatus.
-        #[arg(long, default_value_t = 20)]
-        legatus_heartbeat_secs: u64,
-
-        /// Witness verification mode for inbound `CatastrophicAck`
-        /// messages.
-        ///
-        /// - `none` (default): no verifier installed; the daemon
-        ///   trusts every ack on receipt. Matches the v0.1
-        ///   daemon-local trust model.
-        /// - `in-memory`: wraps an `InMemoryPraefectusClient`.
-        ///   Dev / demo mode -- exercises the verification surface
-        ///   end-to-end without a real Praefectus.
-        /// - `http`: wraps an `HttpPraefectusClient` pointing at the
-        ///   operator's reachable Praefectus. Requires
-        ///   --legatus-praefectus-url + --legatus-praefectus-token
-        ///   (or `LEGATUS_PRAEFECTUS_TOKEN` in env). Production
-        ///   cryptographic verification path.
-        #[arg(long, default_value = "none", value_parser = ["none", "in-memory", "http"])]
-        legatus_witness_verify: String,
-
-        /// Praefectus HTTP endpoint base URL. Required when
-        /// --legatus-witness-verify=http.
-        #[arg(long)]
-        legatus_praefectus_url: Option<String>,
-
-        /// Bearer token for the Praefectus HTTP endpoint. Reads
-        /// `LEGATUS_PRAEFECTUS_TOKEN` from env so it's not exposed
-        /// in process listings. Required when
-        /// --legatus-witness-verify=http.
-        #[arg(long, env = "LEGATUS_PRAEFECTUS_TOKEN", hide_env_values = true)]
-        legatus_praefectus_token: Option<String>,
-
-        /// Single-operator binding scaffold (v0.1). When set, the
-        /// daemon logs the binding at startup so operators can
-        /// confirm the daemon is bound to them. Multi-operator
-        /// routing (per-session operator lookup, identity flowing
-        /// through `RegisterSession` metadata) is consul-side
-        /// coordination work; for now this is a declarative
-        /// breadcrumb.
-        #[arg(long)]
-        legatus_operator_id: Option<uuid::Uuid>,
     },
 
     /// Stop a running sentinel daemon by reading its PID file from
@@ -209,13 +132,6 @@ enum Commands {
 
     /// Start the MCP server over stdio (Claude Code connects here)
     Mcp,
-
-    /// Legatus — connect this sentinel as an agent-side endpoint
-    /// to a consul supervisor (Consular Protocol WebSocket).
-    Legatus {
-        #[command(subcommand)]
-        action: LegatusAction,
-    },
 
     /// Scan marketplace and output snapshot as JSON
     Scan {
@@ -605,68 +521,6 @@ enum PolicyAction {
     },
 }
 
-/// `sentinel legatus` subcommands.
-#[derive(Subcommand)]
-enum LegatusAction {
-    /// Connect to a consul supervisor and run a legatus session
-    /// loop. Opens the Consular Protocol WebSocket, registers
-    /// this sentinel as a session, sends heartbeats, logs any
-    /// inbound `RelayInstructions`, and emits `SessionCompleted` on
-    /// Ctrl-C. No Claude Code injection yet — that's the next
-    /// commit in this series.
-    Connect {
-        /// Consulate WebSocket URL.
-        #[arg(long, default_value = "ws://127.0.0.1:9000")]
-        consulate_url: String,
-        /// 32-byte bootstrap secret as 64 hex chars.
-        #[arg(long, value_name = "HEX64", env = "CONSULATE_BOOTSTRAP_SECRET", hide_env_values = true)]
-        bootstrap_secret: String,
-        /// Operator-chosen session name hint.
-        #[arg(long, default_value = "sentinel")]
-        suggested_name: String,
-        /// Working directory absolute path (default: current).
-        #[arg(long)]
-        working_dir: Option<String>,
-        /// Optional branch name for collision-suffix
-        /// disambiguation.
-        #[arg(long)]
-        branch: Option<String>,
-        /// Optional initial task description.
-        #[arg(long)]
-        task_description: Option<String>,
-        /// Heartbeat interval in seconds.
-        #[arg(long, default_value_t = 20)]
-        heartbeat_secs: u64,
-    },
-    /// Generate a 32-byte bootstrap secret (64 hex chars), suitable
-    /// for use as `--legatus-bootstrap-secret` / consulate's
-    /// `--bootstrap-secret`. Prints to stdout by default; with
-    /// `--output <path>` writes the secret to the file (mode 0600)
-    /// instead. Uses the OS CSPRNG (`OsRng`).
-    Init {
-        /// Optional path to write the secret to. The file is
-        /// created with mode `0600`. Parent directories are
-        /// created if they don't already exist. When omitted, the
-        /// secret is printed to stdout and no file is written.
-        #[arg(long, value_name = "PATH")]
-        output: Option<String>,
-        /// Overwrite the output file if it already exists. Default
-        /// is to refuse — secrets shouldn't be silently rotated.
-        #[arg(long)]
-        force: bool,
-    },
-    /// Query the running daemon's `/legatus/health` endpoint and
-    /// pretty-print the current connection state (and pending
-    /// outbox depth). Reads the daemon port + bearer token from
-    /// `~/.claude/sentinel/daemon-token`.
-    Status {
-        /// Emit the raw JSON instead of the pretty-printed
-        /// summary. Useful for piping into `jq` / dashboards.
-        #[arg(long)]
-        json: bool,
-    },
-}
-
 /// `sentinel project` subcommands.
 #[derive(Subcommand)]
 enum ProjectAction {
@@ -898,57 +752,7 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Daemon {
-            port,
-            legatus_consulate_url,
-            legatus_consulate_failover_urls,
-            legatus_bootstrap_secret,
-            legatus_suggested_name,
-            legatus_working_dir,
-            legatus_heartbeat_secs,
-            legatus_witness_verify,
-            legatus_praefectus_url,
-            legatus_praefectus_token,
-            legatus_operator_id,
-        } => {
-            let witness_verify = match legatus_witness_verify.as_str() {
-                "in-memory" => daemon_cmd::WitnessVerifyMode::InMemory,
-                "http" => {
-                    let base_url = legatus_praefectus_url.ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "--legatus-witness-verify=http requires \
-                             --legatus-praefectus-url <URL>"
-                        )
-                    })?;
-                    let bearer_token = legatus_praefectus_token.ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "--legatus-witness-verify=http requires \
-                             --legatus-praefectus-token <TOKEN> \
-                             (or LEGATUS_PRAEFECTUS_TOKEN env)"
-                        )
-                    })?;
-                    daemon_cmd::WitnessVerifyMode::Http {
-                        base_url,
-                        bearer_token,
-                    }
-                }
-                _ => daemon_cmd::WitnessVerifyMode::None,
-            };
-            daemon_cmd::run(
-                port,
-                daemon_cmd::LegatusOptions {
-                    consulate_url: legatus_consulate_url,
-                    failover_urls: legatus_consulate_failover_urls,
-                    bootstrap_secret_hex: legatus_bootstrap_secret,
-                    suggested_name: legatus_suggested_name,
-                    working_dir: legatus_working_dir,
-                    heartbeat_secs: legatus_heartbeat_secs,
-                    witness_verify,
-                    operator_id: legatus_operator_id,
-                },
-            )
-            .await
-        },
+        Commands::Daemon { port } => daemon_cmd::run(port).await,
         Commands::Stop { wait_secs } => daemon_cmd::run_stop(wait_secs),
         Commands::Hook {
             event,
@@ -1010,30 +814,6 @@ async fn main() -> anyhow::Result<()> {
             let code = compress_cmd::run(&cmd)?;
             std::process::exit(code);
         }
-        Commands::Legatus { action } => match action {
-            LegatusAction::Connect {
-                consulate_url,
-                bootstrap_secret,
-                suggested_name,
-                working_dir,
-                branch,
-                task_description,
-                heartbeat_secs,
-            } => {
-                legatus_cmd::run_connect(
-                    &consulate_url,
-                    &bootstrap_secret,
-                    &suggested_name,
-                    working_dir.as_deref(),
-                    branch,
-                    task_description,
-                    heartbeat_secs,
-                )
-                .await
-            },
-            LegatusAction::Init { output, force } => legatus_cmd::run_init(output, force),
-            LegatusAction::Status { json } => legatus_cmd::run_status(json).await,
-        },
         Commands::Scan {
             counts_only,
             validate,

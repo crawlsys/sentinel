@@ -1209,14 +1209,6 @@ async fn handle_user_prompt_submit(
     });
     output.merge(&worktree_output);
 
-    // Consul inbox — drain any operator-relayed instructions
-    // the daemon-hosted legatus has buffered for this
-    // session and inject them with PRIMARY-ASK framing.
-    let inbox_output = time_and_record(ctx.fs, &mk_ctx("consul_inbox"), || {
-        hooks::consul_inbox::process(input, ctx)
-    });
-    output.merge(&inbox_output);
-
     // Orchestration nudge — suggest agent teams / Explore subagents /
     // skill invocation based on prompt heuristics.
     let orchestration_output = time_and_record(ctx.fs, &mk_ctx("orchestration_nudge"), || {
@@ -1507,22 +1499,6 @@ fn handle_pre_tool_use(
         hooks::production_action_notice::process(input, state)
     });
     output.merge(&prod_action_output);
-
-    // Catastrophic escalation — for any tool call classified as
-    // Catastrophic, deny locally AND emit SessionBlocked
-    // upstream so the consul-side voice gate can run. On retry
-    // after operator voice-approval, the daemon's approval
-    // cache lets the same action_class through exactly once.
-    // Wired here (not just declared in HOOK_NAMES) so the
-    // voice-attested catastrophic loop is actually live.
-    let catastrophic_output = time_and_record(ctx.fs, &mk_ctx("catastrophic_escalation"), || {
-        hooks::catastrophic_escalation::process(
-            input,
-            reversibility_classifier,
-            &hooks::catastrophic_escalation::DaemonApprovalChecker,
-        )
-    });
-    output.merge(&catastrophic_output);
 
     // Agent revocation kill switch — deny tool calls carrying
     // a revoked agent_id. No-op for the main session (no

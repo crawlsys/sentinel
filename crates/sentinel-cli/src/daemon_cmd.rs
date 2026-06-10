@@ -6,93 +6,14 @@
 //! - Per-instance bearer token auth (Attack #daemon-auth)
 
 use std::sync::Arc;
-use std::time::Duration;
 
-use anyhow::{Context, Result};
-use axum::extract::{Request, State};
-use axum::http::StatusCode;
+use anyhow::Result;
+use axum::extract::Request;
 use axum::middleware::Next;
-use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
-use axum::{Json, Router};
+use axum::response::Response;
 use sentinel_domain::state::SessionState;
-use sentinel_legatus::{
-    default_inbox_path, default_outbox_path, make_pair, make_pair_with_persistence,
-    ConnectConfig, ConnectionEventLog, ConnectionStatus, EscalationKind, LegatusHandle,
-    PersistentEscalationOutbox, PersistentInbox, RuntimeKind, BOOTSTRAP_SECRET_LEN,
-};
-use tokio::sync::{Notify, RwLock};
-use tracing::{info, warn};
-
-/// Optional legatus configuration the daemon hosts alongside the
-/// dashboard API. Constructed from the `--legatus-*` CLI flags;
-/// when [`Self::consulate_url`] is `None`, the daemon runs with no
-/// legatus (pre-commit-B behavior).
-#[derive(Clone, Debug)]
-pub struct LegatusOptions {
-    /// `--legatus-consulate-url`.
-    pub consulate_url: Option<String>,
-    /// `--legatus-consulate-failover-url` (repeatable). URLs tried
-    /// in order after `consulate_url` fails on the current attempt.
-    /// Empty by default.
-    pub failover_urls: Vec<String>,
-    /// `--legatus-bootstrap-secret` / `CONSULATE_BOOTSTRAP_SECRET`.
-    pub bootstrap_secret_hex: Option<String>,
-    /// `--legatus-suggested-name`.
-    pub suggested_name: String,
-    /// `--legatus-working-dir` (default: daemon's cwd).
-    pub working_dir: Option<String>,
-    /// `--legatus-heartbeat-secs`.
-    pub heartbeat_secs: u64,
-    /// `--legatus-witness-verify` (one of `none`, `in-memory`).
-    /// Controls how inbound `CatastrophicAck` witnesses are verified
-    /// before recording an approval in the daemon's cache:
-    ///
-    /// - `none` (default): no verifier installed; the daemon trusts
-    ///   the ack on receipt. Matches v0.1 daemon-local trust model.
-    /// - `in-memory`: wraps an `InMemoryPraefectusClient`. Useful
-    ///   for dev / tests / demo flows where there's no real
-    ///   Praefectus running but you still want the verification
-    ///   surface exercised end-to-end.
-    ///
-    /// `http` (production HTTP-backed Praefectus) is the next add:
-    /// requires a Praefectus URL + bearer token, both of which are
-    /// consul-side config the consul agent owns surfacing.
-    pub witness_verify: WitnessVerifyMode,
-    /// `--legatus-operator-id <UUID>` — operator identity scaffold
-    /// for single-operator deployments. When set, the daemon logs
-    /// the binding at startup so operators can confirm the daemon
-    /// is talking to "their" Praefectus. v0.2 will propagate this
-    /// through `RegisterSession` metadata so the consulate can route
-    /// per-operator (multi-operator support); for now it's a
-    /// declarative breadcrumb that records intent + surfaces in
-    /// the startup banner.
-    pub operator_id: Option<uuid::Uuid>,
-}
-
-/// Verifier wiring mode for inbound `CatastrophicAck` witnesses.
-/// Surfaced through `--legatus-witness-verify`.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub enum WitnessVerifyMode {
-    /// No verifier installed; daemon trusts on receipt. Default.
-    #[default]
-    None,
-    /// Wrap an `InMemoryPraefectusClient`. Dev / test mode -- the
-    /// in-memory client accepts every witness unless test toggles
-    /// force a fail.
-    InMemory,
-    /// Wrap an `HttpPraefectusClient` pointing at the operator's
-    /// reachable Praefectus. Production mode -- every inbound
-    /// `CatastrophicAck` witness is verified cryptographically
-    /// against a live Praefectus before the approval is recorded.
-    Http {
-        /// Base URL of the Praefectus HTTP endpoint
-        /// (e.g. `http://127.0.0.1:9001`).
-        base_url: String,
-        /// Bearer token used to authenticate every request.
-        bearer_token: String,
-    },
-}
+use tokio::sync::RwLock;
+use tracing::info;
 
 /// Generate a random bearer token for this daemon instance.
 fn generate_bearer_token() -> String {
@@ -211,12 +132,7 @@ struct BearerToken(String);
 /// runbook need *some* signal that the daemon started cleanly and where
 /// to find the bearer token — without this banner, Terminal 2 is
 /// completely silent and the integration appears broken.
-fn print_daemon_banner(
-    port: u16,
-    token_path: &std::path::Path,
-    token: &str,
-    legatus: &LegatusOptions,
-) {
+fn print_daemon_banner(port: u16, token_path: &std::path::Path, token: &str) {
     eprintln!();
     eprintln!("============================================================");
     eprintln!("  Sentinel daemon ready");
@@ -224,22 +140,11 @@ fn print_daemon_banner(
     eprintln!("  Dashboard:     http://127.0.0.1:{port}");
     eprintln!("  Token path:    {} (file format: {{port}}:{{token}})", token_path.display());
     eprintln!("  Auth header:   Authorization: Bearer {token}");
-    if let Some(url) = &legatus.consulate_url {
-        eprintln!("  Legatus mode:  ON");
-        eprintln!("  Consulate URL: {url}");
-        eprintln!("  Display name:  {}", legatus.suggested_name);
-        if let Some(wd) = &legatus.working_dir {
-            eprintln!("  Working dir:   {wd}");
-        }
-        eprintln!("  Heartbeat:     {}s", legatus.heartbeat_secs);
-    } else {
-        eprintln!("  Legatus mode:  OFF (no --legatus-consulate-url)");
-    }
     eprintln!("============================================================");
     eprintln!();
 }
 
-pub async fn run(port: u16, legatus: LegatusOptions) -> Result<()> {
+pub async fn run(port: u16) -> Result<()> {
     info!("Sentinel daemon starting on port {port}");
 
     // Generate per-instance bearer token for API auth
@@ -259,22 +164,17 @@ pub async fn run(port: u16, legatus: LegatusOptions) -> Result<()> {
     // every info! the daemon emits). Operators following a runbook need
     // to see *some* sign of life from Terminal 2 — without this, the
     // daemon log appears silent and the round-trip looks broken.
-    print_daemon_banner(port, &token_path, &token, &legatus);
+    print_daemon_banner(port, &token_path, &token);
 
     let state = Arc::new(RwLock::new(SessionState::new("daemon")));
     let app_state = crate::api::AppState { session: state };
-
-    // Optionally host a legatus connection alongside the dashboard
-    // API. When configured, expose POST /legatus/escalate +
-    // GET /legatus/inbox/next for hook clients.
-    let legatus_handle = start_legatus_if_configured(legatus).await?;
 
     // Tier B Linear enforcement spine. When SENTINEL_LINEAR_TOKEN is set, hold a
     // live `graphql-transport-ws` subscription to Linear and react to every issue
     // state-change in real time. Defaults to Shadow mode (log-only, zero
     // mutations) unless SENTINEL_LINEAR_ENFORCE=live. Fire-and-forget: a detached
     // task that logs and exits on permanent PAT rejection without taking the
-    // daemon down. Mirrors the legatus spawn pattern above.
+    // daemon down.
     if let Some(enforcer_cfg) = sentinel_infrastructure::linear_enforcer::EnforcerConfig::from_env()
     {
         info!(
@@ -315,15 +215,10 @@ pub async fn run(port: u16, legatus: LegatusOptions) -> Result<()> {
         }
     });
 
-    let api_app = crate::api::router(app_state);
-    let app = if let Some(legatus_state) = &legatus_handle {
-        api_app.merge(legatus_routes(legatus_state.clone()))
-    } else {
-        api_app
-    }
-    .layer(axum::middleware::from_fn(bearer_auth))
-    .layer(inject_token)
-    .layer(cors);
+    let app = crate::api::router(app_state)
+        .layer(axum::middleware::from_fn(bearer_auth))
+        .layer(inject_token)
+        .layer(cors);
 
     // CRITICAL: Always bind to localhost only. Never 0.0.0.0.
     let bind_addr = format!("127.0.0.1:{port}");
@@ -473,415 +368,4 @@ pub fn run_stop(wait_secs: u64) -> Result<()> {
 #[cfg(not(unix))]
 pub fn run_stop(_wait_secs: u64) -> Result<()> {
     anyhow::bail!("sentinel stop is only implemented on Unix today")
-}
-
-/// Bundle returned by [`start_legatus_if_configured`] -- the handle
-/// (for outbound escalations) plus the approval cache that the
-/// inbound `CatastrophicAck` handler writes to and the new HTTP
-/// route reads from.
-#[derive(Clone)]
-pub struct LegatusRouteState {
-    pub handle: LegatusHandle,
-    pub approval_cache: Arc<sentinel_legatus::CatastrophicApprovalCache>,
-    /// Lock-free observable handle on the reconnect wrapper's
-    /// current state. Cloned from the canonical one constructed at
-    /// daemon startup; the wrapper task writes, the
-    /// `GET /legatus/health` handler reads.
-    pub connection_status: ConnectionStatus,
-}
-
-// The function spawns a tokio task with `.await` inside the async block, but has
-// no top-level `.await` itself. Keeping `async` so the call site can use `.await?`.
-#[allow(clippy::unused_async)]
-async fn start_legatus_if_configured(
-    options: LegatusOptions,
-) -> Result<Option<LegatusRouteState>> {
-    let Some(consulate_url) = options.consulate_url else {
-        return Ok(None);
-    };
-    let secret_hex = options.bootstrap_secret_hex.ok_or_else(|| {
-        anyhow::anyhow!(
-            "--legatus-consulate-url requires --legatus-bootstrap-secret (or CONSULATE_BOOTSTRAP_SECRET)",
-        )
-    })?;
-    let secret_bytes = hex::decode(secret_hex.trim())
-        .with_context(|| "--legatus-bootstrap-secret must be hex-encoded bytes")?;
-    let bootstrap_secret: [u8; BOOTSTRAP_SECRET_LEN] =
-        secret_bytes.as_slice().try_into().map_err(|_| {
-            anyhow::anyhow!(
-                "--legatus-bootstrap-secret must decode to exactly {BOOTSTRAP_SECRET_LEN} bytes; got {}",
-                secret_bytes.len(),
-            )
-        })?;
-    let working_dir = match options.working_dir {
-        Some(d) => d,
-        None => std::env::current_dir()
-            .context("failed to read current working directory")?
-            .to_string_lossy()
-            .into_owned(),
-    };
-    let config = ConnectConfig {
-        consulate_url: consulate_url.clone(),
-        // Operator-supplied failover URLs (repeatable
-        // --legatus-consulate-failover-url). Empty by default.
-        // The reconnect wrapper tries primary first, then each
-        // failover in order, before backing off.
-        failover_urls: options.failover_urls.clone(),
-        bootstrap_secret,
-        suggested_name: options.suggested_name,
-        working_dir,
-        branch: None,
-        task_description: None,
-        runtime: RuntimeKind::ClaudeCode,
-        heartbeat_interval: Duration::from_secs(options.heartbeat_secs.max(1)),
-        // Carry operator identity in the RegisterSession so the
-        // consulate populates Session.owner and the voice-attested
-        // gate's resolver can route per-session escalations to the
-        // correct operator. `None` (the default) keeps the v0.1
-        // single-operator-as-ROOT scaffold semantics intact.
-        operator_id: options
-            .operator_id
-            .map(sentinel_legatus::OperatorId::from_uuid),
-    };
-
-    // Persistent inbox + outbox at ~/.claude/sentinel/state/.
-    // - Inbox (legatus-inbox.jsonl): operator instructions
-    //   incoming from consul — survives daemon crash so the
-    //   hook still gets them on next prompt.
-    // - Outbox (legatus-escalations.jsonl): escalations outgoing
-    //   to consul — survives daemon crash so the
-    //   `InstructionResult { Declined }` emitted on cancel
-    //   (and other lifecycle events) actually reaches consul on
-    //   the next start.
-    //
-    // If we can't resolve $HOME (degenerate, but possible in
-    // chroots / some CI containers), fall back to an in-memory
-    // pair so the daemon still runs — both directions just
-    // don't survive a daemon crash in that mode.
-    let (handle, runtime) = if let (Some(inbox_path), Some(outbox_path)) =
-        (default_inbox_path(), default_outbox_path())
-    {
-        let inbox = PersistentInbox::new(inbox_path);
-        let outbox = PersistentEscalationOutbox::new(outbox_path);
-        let queued_in = inbox.len();
-        let queued_out = outbox.len();
-        if queued_in > 0 {
-            info!(
-                queued = queued_in,
-                path = ?inbox.path(),
-                "rehydrated persistent inbox at startup",
-            );
-        }
-        if queued_out > 0 {
-            info!(
-                queued = queued_out,
-                path = ?outbox.path(),
-                "rehydrated persistent outbox at startup — replaying on connect",
-            );
-        }
-        make_pair_with_persistence(inbox, outbox)
-    } else {
-        warn!("no resolvable home dir; legatus inbox + outbox are in-memory only");
-        make_pair()
-    };
-    // Approval cache: shared between the inbound CatastrophicAck
-    // handler (writes when an ack arrives) and the
-    // /legatus/catastrophic-acks HTTP route (reads on hook retry).
-    // v0.2: persistent JSONL snapshot under
-    // ~/.claude/sentinel/state/legatus-catastrophic-approvals.json
-    // so pending approvals survive daemon restart. Falls back to
-    // in-memory-only if HOME is unresolvable (degenerate hosts).
-    let approval_cache = Arc::new(
-        sentinel_legatus::CatastrophicApprovalCache::default_persistent()
-            .unwrap_or_default(),
-    );
-    if let Some(path) = sentinel_legatus::default_approval_cache_path() {
-        let count = approval_cache.len();
-        if count > 0 {
-            info!(
-                queued = count,
-                path = %path.display(),
-                "rehydrated persistent approval cache at startup",
-            );
-        }
-    }
-    // `--legatus-operator-id` flows into `ConnectConfig.operator_id`
-    // above; the consulate uses it on `RegisterSession` to populate
-    // `Session.owner`, and the voice-attested gate's
-    // `OperatorResolverPort` then routes per-session escalations to
-    // the correct operator's voice gate. Logged at startup so the
-    // operator can confirm the daemon thinks it's bound to them.
-    if let Some(op_id) = options.operator_id {
-        info!(operator_id = %op_id, "daemon bound to operator");
-        eprintln!("[daemon] operator binding: {op_id}");
-    } else {
-        info!("no --legatus-operator-id set; sessions register as OperatorId::ROOT");
-    }
-    let runtime = runtime.with_approval_cache(approval_cache.clone());
-    // Spent-nonce log: replay protection on inbound CatastrophicAcks.
-    // Persistent JSONL snapshot so a witness stashed and replayed
-    // after a daemon restart still hits the spent set. Always
-    // installed in the daemon path (the cost is minimal and the
-    // security property is non-optional).
-    let spent_nonces = Arc::new(
-        sentinel_legatus::SpentNonceLog::default_persistent()
-            .unwrap_or_default(),
-    );
-    let runtime = runtime.with_spent_nonce_log(spent_nonces);
-    // Optional witness verifier per --legatus-witness-verify. None
-    // mode preserves the v0.1 daemon-local trust model; InMemory
-    // mode wraps an InMemoryPraefectusClient via the
-    // sentinel-application adapter -- useful for dev / demo flows
-    // that want to exercise the verification surface without a real
-    // Praefectus.
-    let runtime = match options.witness_verify {
-        WitnessVerifyMode::None => {
-            info!("witness verifier: NOT installed (daemon-local trust)");
-            runtime
-        }
-        WitnessVerifyMode::InMemory => {
-            use sentinel_application::praefectus_client::InMemoryPraefectusClient;
-            use sentinel_application::witness_verifier_adapter::PraefectusClientWitnessVerifier;
-            info!("witness verifier: InMemoryPraefectusClient (dev/demo mode)");
-            let client = Arc::new(InMemoryPraefectusClient::new());
-            let verifier = Arc::new(PraefectusClientWitnessVerifier::new(client));
-            runtime.with_witness_verifier(verifier)
-        }
-        WitnessVerifyMode::Http {
-            base_url,
-            bearer_token,
-        } => {
-            use sentinel_application::praefectus_client::{
-                HttpPraefectusClient, HttpPraefectusConfig,
-            };
-            use sentinel_application::witness_verifier_adapter::PraefectusClientWitnessVerifier;
-            info!(
-                base_url = %base_url,
-                "witness verifier: HttpPraefectusClient (production mode)"
-            );
-            let cfg = HttpPraefectusConfig {
-                base_url,
-                bearer_token,
-                timeout: std::time::Duration::from_secs(5),
-            };
-            let client = HttpPraefectusClient::new(cfg).map_err(|e| {
-                anyhow::anyhow!("failed to build HttpPraefectusClient: {e}")
-            })?;
-            let verifier = Arc::new(PraefectusClientWitnessVerifier::new(Arc::new(client)));
-            runtime.with_witness_verifier(verifier)
-        }
-    };
-    let cancel = Arc::new(Notify::new());
-    info!(url = %consulate_url, "daemon hosting legatus");
-    // Canonical connection-status handle, with the persistent
-    // JSONL event log attached when we can resolve a home dir.
-    // One clone goes to the reconnect wrapper (writer); another to
-    // LegatusRouteState (read by GET /legatus/health). Cheap to
-    // clone — internally Arc<AtomicU8> + Arc<AtomicU64> +
-    // Option<ConnectionEventLog>.
-    let connection_status = if let Some(p) = ConnectionEventLog::default_path() { ConnectionStatus::new().with_event_log(ConnectionEventLog::at_path(p)) } else {
-        warn!("no resolvable home dir; legatus connection-event log disabled");
-        ConnectionStatus::new()
-    };
-    let status_for_wrapper = connection_status.clone();
-    tokio::spawn(async move {
-        // Reconnect wrapper: transient transport / heartbeat failures
-        // trigger exponential backoff (1s → 30s cap) with cancel-honor.
-        // VersionMismatch surfaces as fatal — restarting won't help.
-        if let Err(err) = sentinel_legatus::client::run_connect_hosted_with_reconnect(
-            config,
-            cancel,
-            runtime,
-            status_for_wrapper,
-        )
-        .await
-        {
-            warn!(?err, "hosted legatus reconnect loop exited with fatal error");
-        }
-    });
-    Ok(Some(LegatusRouteState {
-        handle,
-        approval_cache,
-        connection_status,
-    }))
-}
-
-fn legatus_routes(state: LegatusRouteState) -> Router {
-    // Three layered routers because each set of routes is stated on
-    // a different cheaply-cloneable handle. axum supports merging
-    // routers with different State types as long as nothing depends
-    // across the seam.
-    let handle_state = state.handle.clone();
-    let cache_state = state.approval_cache.clone();
-    let status_state = state.connection_status.clone();
-    let handle_routes: Router = Router::new()
-        .route("/legatus/escalate", post(handle_legatus_escalate))
-        .route("/legatus/inbox/next", get(handle_legatus_inbox_next))
-        .route("/legatus/pending", get(handle_legatus_pending))
-        .with_state(handle_state);
-    let cache_routes: Router = Router::new()
-        .route(
-            "/legatus/catastrophic-acks/{session_id}/{action_class}",
-            get(handle_consume_catastrophic_ack),
-        )
-        .with_state(cache_state);
-    let health_routes: Router = Router::new()
-        .route("/legatus/health", get(handle_legatus_health))
-        .with_state(status_state);
-    // /legatus/metrics serves the same data in Prometheus text
-    // exposition format. State is the full LegatusRouteState so
-    // the handler can read both connection_status (state + attempt
-    // counter) and handle.outbox (queue depth).
-    let metrics_routes: Router = Router::new()
-        .route("/legatus/metrics", get(handle_legatus_metrics))
-        .with_state(state);
-    handle_routes
-        .merge(cache_routes)
-        .merge(health_routes)
-        .merge(metrics_routes)
-}
-
-/// `GET /legatus/metrics` — Prometheus text-format exposition for
-/// the legatus connection. No external scrape-format crate needed:
-/// 3 metric families, hand-written. Scraping cadence is fine at
-/// any rate (atomic loads + a single Arc<Mutex<Vec>>.`len()` call).
-async fn handle_legatus_metrics(State(state): State<LegatusRouteState>) -> Response {
-    let connection_state = state.connection_status.get();
-    let state_num = connection_state as u8;
-    let attempt = state.connection_status.attempt();
-    // outbox.len() acquires a Mutex; offload to a blocking task so
-    // we don't stall the axum runtime if the lock is contended.
-    let handle = state.handle.clone();
-    let outbox_depth = tokio::task::spawn_blocking(move || {
-        handle.persistent_outbox().map_or(0, sentinel_legatus::PersistentEscalationOutbox::len)
-    })
-    .await
-    .unwrap_or(0);
-
-    let body = format!(
-        "# HELP legatus_connection_state Current legatus connection state \
-         (0=disconnected, 1=connecting, 2=connected, 3=reconnecting).\n\
-         # TYPE legatus_connection_state gauge\n\
-         legatus_connection_state {state_num}\n\
-         # HELP legatus_connection_attempts_total Total connection attempts \
-         since daemon startup; increments on every entry into run_connect_hosted.\n\
-         # TYPE legatus_connection_attempts_total counter\n\
-         legatus_connection_attempts_total {attempt}\n\
-         # HELP legatus_outbox_pending Escalations queued on the persistent \
-         outbox awaiting an acknowledged WS send.\n\
-         # TYPE legatus_outbox_pending gauge\n\
-         legatus_outbox_pending {outbox_depth}\n"
-    );
-
-    Response::builder()
-        .status(axum::http::StatusCode::OK)
-        .header(axum::http::header::CONTENT_TYPE, "text/plain; version=0.0.4")
-        .body(axum::body::Body::from(body))
-        .unwrap_or_else(|_| Response::new(axum::body::Body::empty()))
-}
-
-/// `GET /legatus/health`
-///
-/// Reports the reconnect wrapper's current connection state to
-/// operators / dashboards / smoke tests. Lock-free read on an
-/// `AtomicU8` — safe to poll at any rate.
-///
-/// Response shape:
-/// ```json
-/// { "status": "connected" | "connecting" | "reconnecting" | "disconnected" }
-/// ```
-async fn handle_legatus_health(State(status): State<ConnectionStatus>) -> Json<serde_json::Value> {
-    Json(serde_json::json!({
-        "status": status.get().as_str(),
-        "attempt": status.attempt(),
-    }))
-}
-
-/// `GET /legatus/catastrophic-acks/:session_id/:action_class`
-///
-/// Single-use approval check for the `catastrophic_escalation`
-/// hook. Returns 200 with a JSON body containing the captured
-/// transcript when an approval is present (and consumes it). 404
-/// when no approval is present. Bearer-auth + localhost-bind +
-/// single-use semantics mean replay across retries is structurally
-/// blocked.
-async fn handle_consume_catastrophic_ack(
-    State(cache): State<Arc<sentinel_legatus::CatastrophicApprovalCache>>,
-    axum::extract::Path((session_id, action_class)): axum::extract::Path<(String, String)>,
-) -> Response {
-    let Ok(uuid) = uuid::Uuid::parse_str(&session_id) else {
-        return (StatusCode::BAD_REQUEST, "session_id must be a UUID").into_response();
-    };
-    let sid = sentinel_legatus::SessionId::from_uuid(uuid);
-    match cache.consume(sid, &action_class) {
-        Some(approval) => {
-            let body = serde_json::json!({
-                "transcript": approval.transcript,
-                "age_seconds": approval.age.as_secs(),
-            });
-            (StatusCode::OK, Json(body)).into_response()
-        }
-        None => StatusCode::NOT_FOUND.into_response(),
-    }
-}
-
-async fn handle_legatus_escalate(
-    State(handle): State<LegatusHandle>,
-    Json(event): Json<EscalationKind>,
-) -> Result<StatusCode, (StatusCode, String)> {
-    handle
-        .escalate(event)
-        .map_err(|err| (StatusCode::SERVICE_UNAVAILABLE, err.to_string()))?;
-    Ok(StatusCode::ACCEPTED)
-}
-
-async fn handle_legatus_inbox_next(State(handle): State<LegatusHandle>) -> Response {
-    match handle.try_pop_inbox().await {
-        Some(instr) => match serde_json::to_value(&instr) {
-            Ok(v) => (StatusCode::OK, Json(v)).into_response(),
-            Err(err) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("instruction serialize: {err}"),
-            )
-                .into_response(),
-        },
-        None => StatusCode::NO_CONTENT.into_response(),
-    }
-}
-
-/// `GET /legatus/pending` — operator-visible "what's in flight"
-/// snapshot. Returns counts for the daemon's persistent inbox
-/// (operator instructions queued for the next Claude Code
-/// prompt) and persistent outbox (outbound escalations queued
-/// for WS send). Useful for `consul status`-style operator
-/// tooling and demo dashboards.
-///
-/// Response shape:
-/// ```json
-/// {"inbox_pending": 0, "outbox_pending": 3}
-/// ```
-///
-/// File I/O is wrapped in `tokio::task::spawn_blocking` so the
-/// HTTP handler never stalls on the advisory lock. Returns
-/// `0`-counts for whichever direction lacks a persistent store
-/// (e.g. standalone-CLI legatus with no daemon-hosted disk
-/// state).
-async fn handle_legatus_pending(State(handle): State<LegatusHandle>) -> Response {
-    let inbox_pending = match handle.persistent_inbox().cloned() {
-        Some(inbox) => tokio::task::spawn_blocking(move || inbox.len())
-            .await
-            .unwrap_or(0),
-        None => 0,
-    };
-    let outbox_pending = match handle.persistent_outbox().cloned() {
-        Some(outbox) => tokio::task::spawn_blocking(move || outbox.len())
-            .await
-            .unwrap_or(0),
-        None => 0,
-    };
-    let body = serde_json::json!({
-        "inbox_pending": inbox_pending,
-        "outbox_pending": outbox_pending,
-    });
-    (StatusCode::OK, Json(body)).into_response()
 }
