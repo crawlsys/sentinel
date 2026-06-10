@@ -156,6 +156,16 @@ pub struct TicketReadiness {
     /// not completed/canceled. A started ticket that's actively blocked is a
     /// workflow smell (work can't really proceed) — extended-discipline flag.
     pub actively_blocked: bool,
+    /// Linear's NATIVE SLA high-risk threshold (`slaHighRiskAt`, RFC3339) — when
+    /// present, `evaluate_sla` uses it instead of the 80%-elapsed heuristic so
+    /// the warning fires exactly when Linear's own SLA config says it should.
+    pub sla_high_risk_at: Option<String>,
+    /// Issue due date (`dueDate`, "YYYY-MM-DD"). Distinct from SLA — an open
+    /// ticket past its due date is flagged (extended-discipline).
+    pub due_date: Option<String>,
+    /// Attached to a project milestone (`projectMilestone`). Extended-discipline:
+    /// a ticket in a project but with no milestone is a planning gap.
+    pub has_milestone: bool,
 }
 
 /// Outcome of the SLA health check (Tier-3 SLA discipline).
@@ -172,13 +182,15 @@ pub enum SlaVerdict {
 }
 
 /// Pure SLA evaluation — `now` is injected so this stays testable and free of
-/// `Utc::now()` in domain-ish logic. `HighRisk` fires once ≥80% of the
-/// started→breaches window has elapsed.
+/// `Utc::now()` in domain-ish logic. Prefers Linear's NATIVE `slaHighRiskAt`
+/// threshold when present (fires `HighRisk` once `now >= slaHighRiskAt`);
+/// falls back to the ≥80%-elapsed heuristic when Linear doesn't supply one.
 #[must_use]
 pub fn evaluate_sla(
     priority: Option<i64>,
     sla_started_at: Option<&str>,
     sla_breaches_at: Option<&str>,
+    sla_high_risk_at: Option<&str>,
     now: chrono::DateTime<chrono::Utc>,
 ) -> SlaVerdict {
     use chrono::DateTime;
@@ -192,7 +204,12 @@ pub fn evaluate_sla(
             if now >= breach {
                 return SlaVerdict::Breached;
             }
-            if let Some(start) = sla_started_at.and_then(parse) {
+            // Prefer Linear's native high-risk threshold; else the 80% fallback.
+            if let Some(hr) = sla_high_risk_at.and_then(parse) {
+                if now >= hr {
+                    return SlaVerdict::HighRisk;
+                }
+            } else if let Some(start) = sla_started_at.and_then(parse) {
                 let total = (breach - start).num_seconds();
                 if total > 0 {
                     let elapsed = (now - start).num_seconds().max(0);
@@ -207,6 +224,15 @@ pub fn evaluate_sla(
         None if priority == Some(1) => SlaVerdict::UrgentNoSla,
         None => SlaVerdict::Ok,
     }
+}
+
+/// Is this issue past its `dueDate`? `due_date` is a plain `YYYY-MM-DD`; overdue
+/// when that date is strictly before `today`. Pure + testable.
+#[must_use]
+pub fn is_overdue(due_date: Option<&str>, today: chrono::NaiveDate) -> bool {
+    due_date
+        .and_then(|s| chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").ok())
+        .is_some_and(|d| d < today)
 }
 
 impl TicketReadiness {
@@ -270,6 +296,9 @@ impl TicketReadiness {
         if !self.in_project {
             d.push("no project");
         }
+        if self.in_project && !self.has_milestone {
+            d.push("no project milestone");
+        }
         if self.actively_blocked {
             d.push("started but actively blocked");
         }
@@ -296,7 +325,7 @@ pub fn has_live_blocker(issue: &Value) -> bool {
                     .and_then(|i| i.get("state"))
                     .and_then(|s| s.get("type"))
                     .and_then(Value::as_str),
-                Some("completed") | Some("canceled")
+                Some("completed" | "canceled")
             )
     })
 }
@@ -666,7 +695,7 @@ pub async fn fetch_readiness(
     issue_id: &str,
 ) -> Result<TicketReadiness, EnforcerError> {
     let query = format!(
-        r#"{{"query":"query{{issue(id:\"{issue_id}\"){{identifier estimate priority slaStartedAt slaBreachesAt description state{{name type}} labels{{nodes{{name parent{{name}}}}}} botActor{{id}} integrationSourceType assignee{{id}} cycle{{id}} project{{id}} inverseRelations{{nodes{{type issue{{state{{type}}}}}}}}}}}}"}}"#
+        r#"{{"query":"query{{issue(id:\"{issue_id}\"){{identifier estimate priority slaStartedAt slaBreachesAt slaHighRiskAt dueDate description state{{name type}} labels{{nodes{{name parent{{name}}}}}} botActor{{id}} integrationSourceType assignee{{id}} cycle{{id}} project{{id}} projectMilestone{{id}} inverseRelations{{nodes{{type issue{{state{{type}}}}}}}}}}}}"}}"#
     );
     let resp = client
         .post(LINEAR_GRAPHQL_URL)
@@ -722,6 +751,14 @@ fn parse_readiness(issue: &Value) -> Option<TicketReadiness> {
         .get("slaBreachesAt")
         .and_then(serde_json::Value::as_str)
         .map(str::to_string);
+    let sla_high_risk_at = issue
+        .get("slaHighRiskAt")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
+    let due_date = issue
+        .get("dueDate")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
     let description = issue
         .get("description")
         .and_then(serde_json::Value::as_str)
@@ -743,6 +780,9 @@ fn parse_readiness(issue: &Value) -> Option<TicketReadiness> {
         in_cycle: present("cycle"),
         in_project: present("project"),
         actively_blocked: has_live_blocker(issue),
+        sla_high_risk_at,
+        due_date,
+        has_milestone: present("projectMilestone"),
     })
 }
 
@@ -1034,11 +1074,13 @@ pub async fn run_enforcer(cfg: EnforcerConfig) {
                 // SLA gate (Tier 3) — orthogonal to dev-readiness, comment-only,
                 // runs on every team-allowed event: escalate breached/high-risk
                 // SLAs and flag Urgent tickets that have no SLA clock at all.
+                let now = chrono::Utc::now();
                 match evaluate_sla(
                     readiness.priority,
                     readiness.sla_started_at.as_deref(),
                     readiness.sla_breaches_at.as_deref(),
-                    chrono::Utc::now(),
+                    readiness.sla_high_risk_at.as_deref(),
+                    now,
                 ) {
                     SlaVerdict::Breached => {
                         crate::remediation::post_comment(&client, &cfg.token, id,
@@ -1047,7 +1089,7 @@ pub async fn run_enforcer(cfg: EnforcerConfig) {
                     }
                     SlaVerdict::HighRisk => {
                         crate::remediation::post_comment(&client, &cfg.token, id,
-                            "## ⏳ SLA at risk\n\n≥80% of this ticket's SLA window has elapsed and it isn't done. Prioritize it before it breaches.").await;
+                            "## ⏳ SLA at risk\n\nThis ticket's SLA is in its high-risk window and it isn't done. Prioritize it before it breaches.").await;
                         tracing::info!(ticket = %readiness.identifier, "linear enforcer [LIVE]: SLA high-risk — escalated");
                     }
                     SlaVerdict::UrgentNoSla => {
@@ -1058,9 +1100,21 @@ pub async fn run_enforcer(cfg: EnforcerConfig) {
                     SlaVerdict::Ok => {}
                 }
 
+                // Due-date gate (comment-only): an open ticket past its dueDate
+                // (distinct from SLA). Completed/canceled tickets are exempt.
+                if !matches!(readiness.state_type.as_str(), "completed" | "canceled")
+                    && is_overdue(readiness.due_date.as_deref(), now.date_naive())
+                {
+                    crate::remediation::post_comment(&client, &cfg.token, id, &format!(
+                        "## 📅 Past due date\n\nThis ticket's due date ({}) has passed and it isn't done. Re-date it or push to close.",
+                        readiness.due_date.as_deref().unwrap_or(""),
+                    )).await;
+                    tracing::info!(ticket = %readiness.identifier, due = ?readiness.due_date, "linear enforcer [LIVE]: overdue — flagged");
+                }
+
                 // Extended workflow discipline (comment-only): a started ticket
-                // with no assignee / not in a cycle / no project. Flagged, never
-                // auto-filled or reverted — these need a human/planning call.
+                // with no assignee / not in a cycle / no project / no milestone /
+                // actively blocked. Flagged, never auto-filled or reverted.
                 let discipline = readiness.extended_discipline();
                 if !discipline.is_empty() {
                     crate::remediation::post_comment(&client, &cfg.token, id, &format!(
@@ -1178,6 +1232,9 @@ mod tests {
             in_cycle: true,
             in_project: true,
             actively_blocked: false,
+            sla_high_risk_at: None,
+            due_date: None,
+            has_milestone: true,
         }
     }
 
@@ -1226,24 +1283,54 @@ mod tests {
 
         // Breached: deadline in the past.
         let past = rfc(now - Duration::hours(1));
-        assert_eq!(evaluate_sla(Some(2), None, Some(&past), now), SlaVerdict::Breached);
+        assert_eq!(evaluate_sla(Some(2), None, Some(&past), None, now), SlaVerdict::Breached);
 
-        // HighRisk: 90% of a 10h window elapsed (started 9h ago, breaches in 1h).
+        // HighRisk via 80% fallback: 90% of a 10h window elapsed, no native threshold.
         let start = rfc(now - Duration::hours(9));
         let breach = rfc(now + Duration::hours(1));
-        assert_eq!(evaluate_sla(Some(2), Some(&start), Some(&breach), now), SlaVerdict::HighRisk);
+        assert_eq!(evaluate_sla(Some(2), Some(&start), Some(&breach), None, now), SlaVerdict::HighRisk);
 
-        // Ok: only 10% elapsed (started 1h ago, breaches in 9h).
+        // Ok: only 10% elapsed (started 1h ago, breaches in 9h), no native threshold.
         let start2 = rfc(now - Duration::hours(1));
         let breach2 = rfc(now + Duration::hours(9));
-        assert_eq!(evaluate_sla(Some(2), Some(&start2), Some(&breach2), now), SlaVerdict::Ok);
+        assert_eq!(evaluate_sla(Some(2), Some(&start2), Some(&breach2), None, now), SlaVerdict::Ok);
+
+        // NATIVE high-risk takes precedence: high-risk-at already passed → HighRisk
+        // even though only 10% of the window has elapsed by the 80% heuristic.
+        let hr_past = rfc(now - Duration::minutes(5));
+        assert_eq!(evaluate_sla(Some(2), Some(&start2), Some(&breach2), Some(&hr_past), now), SlaVerdict::HighRisk);
+        // Native high-risk in the future → still Ok despite being well into the window.
+        let hr_future = rfc(now + Duration::hours(8));
+        assert_eq!(evaluate_sla(Some(2), Some(&start), Some(&breach), Some(&hr_future), now), SlaVerdict::Ok);
 
         // UrgentNoSla: priority 1, no SLA clock.
-        assert_eq!(evaluate_sla(Some(1), None, None, now), SlaVerdict::UrgentNoSla);
+        assert_eq!(evaluate_sla(Some(1), None, None, None, now), SlaVerdict::UrgentNoSla);
 
         // Non-urgent with no SLA is fine.
-        assert_eq!(evaluate_sla(Some(3), None, None, now), SlaVerdict::Ok);
-        assert_eq!(evaluate_sla(None, None, None, now), SlaVerdict::Ok);
+        assert_eq!(evaluate_sla(Some(3), None, None, None, now), SlaVerdict::Ok);
+        assert_eq!(evaluate_sla(None, None, None, None, now), SlaVerdict::Ok);
+    }
+
+    #[test]
+    fn is_overdue_compares_due_date_to_today() {
+        use chrono::NaiveDate;
+        let today = NaiveDate::from_ymd_opt(2026, 6, 10).unwrap();
+        assert!(is_overdue(Some("2026-06-09"), today), "yesterday ⇒ overdue");
+        assert!(!is_overdue(Some("2026-06-10"), today), "today ⇒ not overdue");
+        assert!(!is_overdue(Some("2026-06-11"), today), "tomorrow ⇒ not overdue");
+        assert!(!is_overdue(None, today), "no due date ⇒ not overdue");
+        assert!(!is_overdue(Some("garbage"), today), "unparseable ⇒ not overdue");
+    }
+
+    #[test]
+    fn extended_discipline_flags_missing_milestone_in_a_project() {
+        let mut t = ready("started");
+        t.has_milestone = false; // but in_project is true
+        assert!(t.extended_discipline().contains(&"no project milestone"));
+        // no project at all ⇒ flag the project, not the milestone
+        t.in_project = false;
+        let d = t.extended_discipline();
+        assert!(d.contains(&"no project") && !d.contains(&"no project milestone"));
     }
 
     #[test]

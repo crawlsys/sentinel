@@ -248,6 +248,9 @@ mod tests {
             in_cycle: true,
             in_project: true,
             actively_blocked: false,
+            sla_high_risk_at: None,
+            due_date: None,
+            has_milestone: true,
         }
     }
 
