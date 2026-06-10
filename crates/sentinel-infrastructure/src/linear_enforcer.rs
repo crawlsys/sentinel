@@ -152,6 +152,10 @@ pub struct TicketReadiness {
     pub in_cycle: bool,
     /// Ticket is attached to a project. Extended-discipline (comment-only).
     pub in_project: bool,
+    /// Has a LIVE blocker: an inbound `blocks` relation whose blocking issue is
+    /// not completed/canceled. A started ticket that's actively blocked is a
+    /// workflow smell (work can't really proceed) — extended-discipline flag.
+    pub actively_blocked: bool,
 }
 
 /// Outcome of the SLA health check (Tier-3 SLA discipline).
@@ -266,8 +270,35 @@ impl TicketReadiness {
         if !self.in_project {
             d.push("no project");
         }
+        if self.actively_blocked {
+            d.push("started but actively blocked");
+        }
         d
     }
+}
+
+/// Does this issue have a LIVE blocker? Scans `inverseRelations` for a `blocks`
+/// relation whose blocking issue's state is not completed/canceled. Pure +
+/// testable; tolerant of missing/partial JSON.
+#[must_use]
+pub fn has_live_blocker(issue: &Value) -> bool {
+    let Some(nodes) = issue
+        .get("inverseRelations")
+        .and_then(|r| r.get("nodes"))
+        .and_then(Value::as_array)
+    else {
+        return false;
+    };
+    nodes.iter().any(|n| {
+        n.get("type").and_then(Value::as_str) == Some("blocks")
+            && !matches!(
+                n.get("issue")
+                    .and_then(|i| i.get("state"))
+                    .and_then(|s| s.get("type"))
+                    .and_then(Value::as_str),
+                Some("completed") | Some("canceled")
+            )
+    })
 }
 
 /// Heuristic: does the description carry ≥3 acceptance-criteria lines? Counts
@@ -635,7 +666,7 @@ pub async fn fetch_readiness(
     issue_id: &str,
 ) -> Result<TicketReadiness, EnforcerError> {
     let query = format!(
-        r#"{{"query":"query{{issue(id:\"{issue_id}\"){{identifier estimate priority slaStartedAt slaBreachesAt description state{{name type}} labels{{nodes{{name parent{{name}}}}}} botActor{{id}} integrationSourceType assignee{{id}} cycle{{id}} project{{id}}}}}}"}}"#
+        r#"{{"query":"query{{issue(id:\"{issue_id}\"){{identifier estimate priority slaStartedAt slaBreachesAt description state{{name type}} labels{{nodes{{name parent{{name}}}}}} botActor{{id}} integrationSourceType assignee{{id}} cycle{{id}} project{{id}} inverseRelations{{nodes{{type issue{{state{{type}}}}}}}}}}}}"}}"#
     );
     let resp = client
         .post(LINEAR_GRAPHQL_URL)
@@ -711,6 +742,7 @@ fn parse_readiness(issue: &Value) -> Option<TicketReadiness> {
         assignee_present: present("assignee"),
         in_cycle: present("cycle"),
         in_project: present("project"),
+        actively_blocked: has_live_blocker(issue),
     })
 }
 
@@ -1145,6 +1177,7 @@ mod tests {
             assignee_present: true,
             in_cycle: true,
             in_project: true,
+            actively_blocked: false,
         }
     }
 
@@ -1237,6 +1270,31 @@ mod tests {
         backlog.in_cycle = false;
         backlog.in_project = false;
         assert!(backlog.extended_discipline().is_empty());
+    }
+
+    #[test]
+    fn has_live_blocker_detects_unresolved_inbound_blocks() {
+        let blocked_by = |state: &str| serde_json::json!({
+            "inverseRelations": { "nodes": [
+                { "type": "blocks", "issue": { "state": { "type": state } } }
+            ] }
+        });
+        assert!(has_live_blocker(&blocked_by("started")), "blocked by active issue ⇒ live");
+        assert!(has_live_blocker(&blocked_by("backlog")));
+        assert!(!has_live_blocker(&blocked_by("completed")), "blocker done ⇒ not live");
+        assert!(!has_live_blocker(&blocked_by("canceled")));
+        // 'related' (not 'blocks') is not a blocker.
+        let related = serde_json::json!({"inverseRelations":{"nodes":[{"type":"related","issue":{"state":{"type":"started"}}}]}});
+        assert!(!has_live_blocker(&related));
+        // No relations at all.
+        assert!(!has_live_blocker(&serde_json::json!({})));
+    }
+
+    #[test]
+    fn extended_discipline_flags_active_blocker_on_started() {
+        let mut t = ready("started");
+        t.actively_blocked = true;
+        assert!(t.extended_discipline().contains(&"started but actively blocked"));
     }
 
     #[test]

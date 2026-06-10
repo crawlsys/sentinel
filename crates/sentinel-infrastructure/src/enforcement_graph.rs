@@ -247,6 +247,7 @@ mod tests {
             assignee_present: true,
             in_cycle: true,
             in_project: true,
+            actively_blocked: false,
         }
     }
 
