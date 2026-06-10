@@ -75,8 +75,12 @@ hex = "0.4"
 # use to POST escalations to the local sentinel daemon).
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots", "blocking", "http2", "charset", "macos-system-configuration"] }
 
-# LLM framework (adversarial Codex judge + Opus skill router)
-rig-core = { version = "0.35", package = "rig-core" }
+# LLM framework (adversarial Codex judge + Opus skill router).
+# 0.38.1 (latest) — uses reqwest 0.13; OpenRouter gzip-compresses responses, so
+# sentinel-infrastructure declares reqwest 0.13 with gzip/brotli to unify the
+# decompression feature onto rig's instance (else the body read fails with
+# "error decoding response body" — the self-heal LLM hang on gpt-5.5-pro).
+rig-core = { version = "0.38", package = "rig-core" }
 
 # HTTP server (dashboard API)
 axum = { version = "0.8", features = ["ws"] }
