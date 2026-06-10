@@ -131,6 +131,63 @@ pub struct TicketReadiness {
     /// silently. `false` for human-created tickets, where we escalate via
     /// comment instead of silently rewriting the operator's ticket.
     pub created_by_agent: bool,
+    /// Linear priority: 0=none, 1=urgent, 2=high, 3=medium, 4=low.
+    pub priority: Option<i64>,
+    /// RFC3339 timestamp the SLA clock started (None ⇒ no SLA running).
+    pub sla_started_at: Option<String>,
+    /// RFC3339 timestamp the SLA breaches at (None ⇒ no SLA running).
+    pub sla_breaches_at: Option<String>,
+}
+
+/// Outcome of the SLA health check (Tier-3 SLA discipline).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SlaVerdict {
+    /// No SLA concern.
+    Ok,
+    /// SLA clock running and ≥80% elapsed but not yet breached.
+    HighRisk,
+    /// SLA deadline has passed.
+    Breached,
+    /// Urgent (priority 1) ticket with no SLA clock running at all.
+    UrgentNoSla,
+}
+
+/// Pure SLA evaluation — `now` is injected so this stays testable and free of
+/// `Utc::now()` in domain-ish logic. `HighRisk` fires once ≥80% of the
+/// started→breaches window has elapsed.
+#[must_use]
+pub fn evaluate_sla(
+    priority: Option<i64>,
+    sla_started_at: Option<&str>,
+    sla_breaches_at: Option<&str>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> SlaVerdict {
+    use chrono::DateTime;
+    let parse =
+        |s: &str| DateTime::parse_from_rfc3339(s).ok().map(|d| d.with_timezone(&chrono::Utc));
+    match sla_breaches_at {
+        Some(breach_s) => {
+            let Some(breach) = parse(breach_s) else {
+                return SlaVerdict::Ok;
+            };
+            if now >= breach {
+                return SlaVerdict::Breached;
+            }
+            if let Some(start) = sla_started_at.and_then(parse) {
+                let total = (breach - start).num_seconds();
+                if total > 0 {
+                    let elapsed = (now - start).num_seconds().max(0);
+                    if elapsed * 100 >= total * 80 {
+                        return SlaVerdict::HighRisk;
+                    }
+                }
+            }
+            SlaVerdict::Ok
+        }
+        // No SLA clock at all — only a problem if the ticket is Urgent.
+        None if priority == Some(1) => SlaVerdict::UrgentNoSla,
+        None => SlaVerdict::Ok,
+    }
 }
 
 impl TicketReadiness {
@@ -521,7 +578,7 @@ pub async fn fetch_readiness(
     issue_id: &str,
 ) -> Result<TicketReadiness, EnforcerError> {
     let query = format!(
-        r#"{{"query":"query{{issue(id:\"{issue_id}\"){{identifier estimate state{{name type}} labels{{nodes{{name parent{{name}}}}}} botActor{{id}} integrationSourceType}}}}"}}"#
+        r#"{{"query":"query{{issue(id:\"{issue_id}\"){{identifier estimate priority slaStartedAt slaBreachesAt state{{name type}} labels{{nodes{{name parent{{name}}}}}} botActor{{id}} integrationSourceType}}}}"}}"#
     );
     let resp = client
         .post(LINEAR_GRAPHQL_URL)
@@ -568,6 +625,15 @@ fn parse_readiness(issue: &Value) -> Option<TicketReadiness> {
             .get("integrationSourceType")
             .unwrap_or(&Value::Null)
             .is_null();
+    let priority = issue.get("priority").and_then(serde_json::Value::as_i64);
+    let sla_started_at = issue
+        .get("slaStartedAt")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
+    let sla_breaches_at = issue
+        .get("slaBreachesAt")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
     Some(TicketReadiness {
         identifier,
         estimate,
@@ -576,6 +642,9 @@ fn parse_readiness(issue: &Value) -> Option<TicketReadiness> {
         has_type_label: has_parent("Type"),
         has_area_label: has_parent("Area"),
         created_by_agent,
+        priority,
+        sla_started_at,
+        sla_breaches_at,
     })
 }
 
@@ -863,6 +932,34 @@ pub async fn run_enforcer(cfg: EnforcerConfig) {
                         continue;
                     }
                 };
+
+                // SLA gate (Tier 3) — orthogonal to dev-readiness, comment-only,
+                // runs on every team-allowed event: escalate breached/high-risk
+                // SLAs and flag Urgent tickets that have no SLA clock at all.
+                match evaluate_sla(
+                    readiness.priority,
+                    readiness.sla_started_at.as_deref(),
+                    readiness.sla_breaches_at.as_deref(),
+                    chrono::Utc::now(),
+                ) {
+                    SlaVerdict::Breached => {
+                        crate::remediation::post_comment(&client, &cfg.token, id,
+                            "## ⏰ SLA breached\n\nThis ticket's SLA deadline has passed. Escalate or re-scope now.").await;
+                        tracing::info!(ticket = %readiness.identifier, "linear enforcer [LIVE]: SLA breached — escalated");
+                    }
+                    SlaVerdict::HighRisk => {
+                        crate::remediation::post_comment(&client, &cfg.token, id,
+                            "## ⏳ SLA at risk\n\n≥80% of this ticket's SLA window has elapsed and it isn't done. Prioritize it before it breaches.").await;
+                        tracing::info!(ticket = %readiness.identifier, "linear enforcer [LIVE]: SLA high-risk — escalated");
+                    }
+                    SlaVerdict::UrgentNoSla => {
+                        crate::remediation::post_comment(&client, &cfg.token, id,
+                            "## 🚨 Urgent without an SLA\n\nThis ticket is **Urgent** but has no SLA clock running. Apply an SLA so urgent work is time-bound.").await;
+                        tracing::info!(ticket = %readiness.identifier, "linear enforcer [LIVE]: urgent-without-SLA — flagged");
+                    }
+                    SlaVerdict::Ok => {}
+                }
+
                 if !readiness.should_revert() {
                     continue; // dev-ready or not started — nothing to do
                 }
@@ -962,6 +1059,9 @@ mod tests {
             has_type_label: true,
             has_area_label: true,
             created_by_agent: true,
+            priority: Some(3),
+            sla_started_at: None,
+            sla_breaches_at: None,
         }
     }
 
@@ -1000,6 +1100,34 @@ mod tests {
         assert!(parse_readiness(&issue).unwrap().created_by_agent);
         issue["integrationSourceType"] = serde_json::Value::Null;
         assert!(!parse_readiness(&issue).unwrap().created_by_agent);
+    }
+
+    #[test]
+    fn evaluate_sla_covers_breach_risk_and_urgent_no_sla() {
+        use chrono::{Duration, Utc};
+        let now = Utc::now();
+        let rfc = |dt: chrono::DateTime<Utc>| dt.to_rfc3339();
+
+        // Breached: deadline in the past.
+        let past = rfc(now - Duration::hours(1));
+        assert_eq!(evaluate_sla(Some(2), None, Some(&past), now), SlaVerdict::Breached);
+
+        // HighRisk: 90% of a 10h window elapsed (started 9h ago, breaches in 1h).
+        let start = rfc(now - Duration::hours(9));
+        let breach = rfc(now + Duration::hours(1));
+        assert_eq!(evaluate_sla(Some(2), Some(&start), Some(&breach), now), SlaVerdict::HighRisk);
+
+        // Ok: only 10% elapsed (started 1h ago, breaches in 9h).
+        let start2 = rfc(now - Duration::hours(1));
+        let breach2 = rfc(now + Duration::hours(9));
+        assert_eq!(evaluate_sla(Some(2), Some(&start2), Some(&breach2), now), SlaVerdict::Ok);
+
+        // UrgentNoSla: priority 1, no SLA clock.
+        assert_eq!(evaluate_sla(Some(1), None, None, now), SlaVerdict::UrgentNoSla);
+
+        // Non-urgent with no SLA is fine.
+        assert_eq!(evaluate_sla(Some(3), None, None, now), SlaVerdict::Ok);
+        assert_eq!(evaluate_sla(None, None, None, now), SlaVerdict::Ok);
     }
 
     #[test]

@@ -240,6 +240,9 @@ mod tests {
             has_type_label: ty,
             has_area_label: area,
             created_by_agent: true,
+            priority: Some(3),
+            sla_started_at: None,
+            sla_breaches_at: None,
         }
     }
 

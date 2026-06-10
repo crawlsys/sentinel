@@ -7,6 +7,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 ## [Unreleased]
 
 ### Added
+- **Linear enforcer — SLA gates (Tier 3)** (2026-06-10). The enforcer now evaluates SLA health on every team-allowed issue event (comment-only, orthogonal to the dev-ready revert): **breached** (`slaBreachesAt` in the past) and **high-risk** (≥80% of the `slaStartedAt`→`slaBreachesAt` window elapsed) SLAs get an escalation comment, and **Urgent** tickets (priority 1) with no SLA clock running at all are flagged ("urgent ⇒ has-SLA"). Pure `evaluate_sla(priority, started, breaches, now)` → `SlaVerdict {Ok, HighRisk, Breached, UrgentNoSla}` (now injected, fully unit-tested); `TicketReadiness` + `fetch_readiness` extended with `priority`/`slaStartedAt`/`slaBreachesAt`. 418 infra tests; clippy clean.
+
+### Added
 - **Linear enforcer — actor-type differential (L2 agent-vs-human)** (2026-06-10). The enforcer now fetches each ticket's `botActor` + `integrationSourceType` and branches the Live path on authorship: **agent/integration-created** un-ready started tickets get the silent heal-first treatment (remediate → escalate gaps → revert last); **human-authored** tickets are *never silently rewritten* — the enforcer posts a "please complete before starting" comment listing the missing dev-ready fields and leaves the ticket for the operator. `TicketReadiness` gains `created_by_agent`; `parse_readiness` derives it (botActor present OR integrationSourceType set). 417 infra tests (incl. the actor-attribution test); clippy clean. (The Hookdeck-primary-feed half of this task is external webhook-gateway config — the poll+wss feeds already deliver the IssueChanged events the differential consumes.)
 
 ### Fixed
