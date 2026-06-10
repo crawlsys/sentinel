@@ -982,6 +982,12 @@ Sentinel just demonstrated it can drive your real `EnterPlanMode` permission sta
      prompt: "Run TaskList. Report any tasks that are in_progress but appear stale (no recent activity). Remind Gary of pending work.")
    ```
 
+4. **Linear Portfolio Health (Tier-5 factory audit)** — weekly Mon at 9:07am
+   ```
+   CronCreate(cron: "7 9 * * 1", recurring: true,
+     prompt: "[factory:portfolio-health] Linear Tier-5 portfolio audit (firefly-pro). Query the Linear GraphQL API for projects (first 50): name, state, health, targetDate, lead. For each project with state in (started, planned), flag: NO LEAD (lead null), no target date (targetDate null), target date PAST (targetDate < today), or health != onTrack (atRisk/offTrack). Also query issues with state type 'started' and flag any with updatedAt older than 14 days (stale), plus report per-team WIP counts (started issues per team) flagging any team with >10 in-flight. Summarize to Gary grouped by category (no-lead / no-date / past-date / unhealthy / stale / WIP-overload); say 'portfolio healthy' if zero flags. Read-only — never mutate. Use the firefly-pro Linear token from your project config / Doppler; do not hardcode it.")
+   ```
+
 ### Sentinel Channel Events (push — no cron needed)
 
 These push into the session automatically via sentinel's Vulcan channel system:
