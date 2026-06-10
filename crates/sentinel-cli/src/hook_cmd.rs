@@ -976,7 +976,16 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
         | HookEvent::ElicitationResult
         | HookEvent::CwdChanged
         | HookEvent::FileChanged
-        | HookEvent::WorktreeCreate => {
+        | HookEvent::WorktreeCreate
+        // Stop / SubagentStop carry context-injection from the reality-check,
+        // self-annealing, good-citizen and hygiene-reminder hooks via
+        // `hookSpecificOutput.additionalContext` (Claude Code surfaces it on the
+        // next turn). They were previously absent here, so the `_ =>` arm below
+        // STRIPPED that context — silently dropping every Stop-time reminder.
+        // (Found by the E2E hook harness; this was the real reason a false-done
+        // reality-check never reached the agent.)
+        | HookEvent::Stop
+        | HookEvent::SubagentStop => {
             // These events support hookSpecificOutput natively
         }
         _ => {

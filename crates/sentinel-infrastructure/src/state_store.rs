@@ -68,8 +68,7 @@ pub fn sanitize_session_id(session_id: &str) -> Result<()> {
 /// The `"."` fallback writes state files to CWD (attacker-controlled project dir),
 /// letting an attacker plant forged state files that sentinel will load as real session state.
 pub fn state_dir() -> PathBuf {
-    dirs::home_dir()
-        .expect("[sentinel] FATAL: Cannot determine home directory. HOME/USERPROFILE must be set.")
+    crate::paths::home_root_or_fatal()
         .join(".claude")
         .join("sentinel")
         .join("state")
@@ -97,8 +96,7 @@ fn from_hex(s: &str) -> Option<Vec<u8>> {
 
 /// Base directory for HMAC secret files.
 fn hmac_secret_dir() -> PathBuf {
-    dirs::home_dir()
-        .expect("[sentinel] FATAL: Cannot determine home directory. HOME/USERPROFILE must be set.")
+    crate::paths::home_root_or_fatal()
         .join(".claude")
         .join("sentinel")
 }

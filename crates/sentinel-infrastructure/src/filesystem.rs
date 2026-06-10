@@ -14,7 +14,11 @@ pub struct RealFileSystem;
 
 impl FileSystemPort for RealFileSystem {
     fn home_dir(&self) -> Option<PathBuf> {
-        dirs::home_dir()
+        // Routes through `paths::home_root()` so the whole engine (and all 100+
+        // `home_dir().join(".claude")` hook call sites) can be redirected to an
+        // isolated root via `SENTINEL_HOME` — required for cross-platform test
+        // isolation, since `dirs::home_dir()` ignores HOME/USERPROFILE on Windows.
+        crate::paths::home_root()
     }
 
     fn claude_dir(&self) -> PathBuf {
@@ -366,8 +370,7 @@ mod tests {
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0),
+                .map_or(0, |d| d.as_nanos()),
         ));
         std::fs::create_dir_all(&dir).unwrap();
         // path NOT under sentinel/metrics — rotation must not touch it
@@ -413,7 +416,7 @@ mod tests {
         assert!(!path.exists(), "oversized metrics file should be renamed");
         let archives: Vec<_> = std::fs::read_dir(&dir)
             .unwrap()
-            .filter_map(|e| e.ok())
+            .filter_map(std::result::Result::ok)
             .filter(|e| {
                 e.file_name()
                     .to_string_lossy()
@@ -437,11 +440,10 @@ mod tests {
 
     // ── trace_id stamping ───────────────────────────────────────────
 
-    /// All these tests use the pure-function variants
-    /// (`stamp_trace_id_if_missing_with` / `current_trace_id_from`) that
-    /// take an injected id-generator instead of touching real env vars.
-    /// This keeps the workspace `unsafe_code = forbid` lint clean.
-
+    // All these tests use the pure-function variants
+    // (`stamp_trace_id_if_missing_with` / `current_trace_id_from`) that
+    // take an injected id-generator instead of touching real env vars.
+    // This keeps the workspace `unsafe_code = forbid` lint clean.
     fn fixed_id(s: &'static str) -> impl Fn() -> String {
         move || s.to_string()
     }

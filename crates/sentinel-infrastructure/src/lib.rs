@@ -27,6 +27,7 @@ pub mod llm_scorer_runtime;
 pub mod mcp_transport;
 pub mod memory_mcp_client;
 pub mod openrouter_llm;
+pub mod paths;
 pub mod reconciliation_graph;
 pub mod remediation;
 pub mod process;
