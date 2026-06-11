@@ -514,9 +514,9 @@ fn pr_merge_gate_asks_confirmation_when_not_autopilot() {
 fn readonly_bash_in_real_repo_is_allowed() {
     // A read-only Bash (`git status`) in a real repo must NOT be blocked: it's
     // not a mutating tool, so the task_decomposition_gate allows it and no
-    // blocking hook denies/asks. (The decision may be a non-empty `allow` —
-    // the output-compression hook rewrites the command via `updatedInput` — so
-    // we assert "permitted", not bare `{}`.) Exercises seed_git_repo end to end.
+    // blocking hook denies/asks. We assert "permitted" (allow), not a specific
+    // bare `{}`, to stay robust to other allow-with-context hooks. Exercises
+    // seed_git_repo end to end.
     let t = HookTest::new();
     let repo = t.seed_git_repo("proj", "main", "README.md", false);
     let res = t.run(

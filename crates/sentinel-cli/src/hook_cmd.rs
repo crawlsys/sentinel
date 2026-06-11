@@ -1534,16 +1534,10 @@ fn handle_pre_tool_use(
         });
         output.merge(&plan_title_output);
 
-        // Output compressor (LAST, Bash only) — rewrite noisy commands
-        // to route through `sentinel compress`. Runs only if no gate
-        // above blocked the call (never rewrite a command that's about
-        // to be denied) and there's no pending input rewrite to clobber.
-        if output.blocked != Some(true) {
-            let compress_output = time_and_record(ctx.fs, &mk_ctx("output_compressor"), || {
-                hooks::output_compressor::process(input, ctx.env)
-            });
-            output.merge(&compress_output);
-        }
+        // NOTE: the output_compressor ("RTK") hook was REMOVED — it rewrote
+        // every noisy Bash command through `sentinel compress`, which echoed a
+        // `[sentinel][compress] …` annotation on every call for ~0–2% savings
+        // while eating captured output. Net negative; the dispatch is gone.
     }
 
     output
