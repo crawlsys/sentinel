@@ -90,10 +90,9 @@ fn write_token_file(token: &str, port: u16) -> std::path::PathBuf {
 /// Axum middleware that validates the bearer token on every request.
 /// The /api/health endpoint is exempt (used for liveness checks).
 async fn bearer_auth(req: Request, next: Next) -> Result<Response, axum::http::StatusCode> {
-    // Allow health checks and CCAM dashboard HTML without auth
-    // (dashboard JS reads token from URL param and stores in localStorage)
+    // Allow health checks without auth (used for liveness checks).
     let path = req.uri().path();
-    if path == "/api/health" || path == "/api/ccam" {
+    if path == "/api/health" {
         return Ok(next.run(req).await);
     }
 

@@ -3,7 +3,6 @@
 //! Full REST API for the Sentinel dashboard.
 //! Provides endpoints for proof chains, workflows, and hook stats.
 
-pub mod ccam;
 pub mod hooks;
 pub mod logs;
 pub mod memories;
@@ -39,7 +38,6 @@ pub fn router(state: AppState) -> Router {
         .nest("/api", scan::router())
         .nest("/api", logs::router())
         .nest("/api", store::router())
-        .nest("/api", ccam::router())
         .with_state(state)
 }
 

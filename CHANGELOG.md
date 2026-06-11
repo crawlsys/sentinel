@@ -6,6 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Removed
+- **`ccam` dashboard (dead/legacy)** (2026-06-11): removed the old "CCAM HQ" HTML dashboard served at `/api/ccam` (`crates/sentinel-cli/src/api/ccam.rs` + `ccam_dashboard.html`, ~28 KB) — stale junk, rendered empty (its data endpoints were gone). Dropped the `pub mod ccam`, the `/api` nest, and the `/api/ccam` auth-bypass clause in `daemon_cmd.rs`. The daemon still serves the JSON API (`/api/health`, proofs, workflows, hooks, memory, …). Builds clean; zero remaining references.
+
 ### Added
 - **Linear enforcer — due-date gate, native SLA threshold, milestone check (Linear-API-docs audit)** (2026-06-10). A GraphQL-schema introspection of the Issue/Team types (vs. our coverage) surfaced enforceable fields we weren't using; built the high-value ones: (1) **due-date gate** — `is_overdue(dueDate, today)` flags an open (non-completed/canceled) ticket past its `dueDate` via comment (distinct from SLA); (2) **native SLA high-risk** — `evaluate_sla` now takes `slaHighRiskAt` and prefers Linear's own high-risk threshold over the 80%-elapsed heuristic, falling back to 80% only when Linear supplies none; (3) **project-milestone** — `extended_discipline()` flags a ticket in a project but with no `projectMilestone`. `TicketReadiness` + `fetch_readiness` gain `sla_high_risk_at`/`due_date`/`has_milestone`. 432 infra tests (+9); clippy clean. Confirmed NON-gaps from the audit: Linear has no `requireEstimate` team toggle (our L1/L2 estimate enforcement is value-add); `needs`/Asks-required-fields are a separate customer-request domain; audit-metadata fields aren't policy.
 
