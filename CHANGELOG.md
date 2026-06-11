@@ -7,6 +7,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 ## [Unreleased]
 
 ### Removed
+- **viz extracted to its own repo + old `apps/dashboard` deleted** (2026-06-11): The activity-graph viz (`tools/sentinel-viz-api` Rust backend + `tools/sentinel-viz-next` Next.js frontend, a coupled pair) moved out to a standalone repo (**garysomerhalder/sentinel-viz**) — both were already detached from the cargo workspace (`exclude`d), so this is a clean lift-and-shift; the `exclude` entries are dropped from the root `Cargo.toml`. Separately, the legacy **`apps/dashboard`** (`@sentinel/dashboard`, old enterprise dashboard) was deleted as dead/superseded — it had zero code references (only stale doc comments). 222 files removed; `cargo build --workspace` clean.
+
+### Removed
 - **`ccam` dashboard (dead/legacy)** (2026-06-11): removed the old "CCAM HQ" HTML dashboard served at `/api/ccam` (`crates/sentinel-cli/src/api/ccam.rs` + `ccam_dashboard.html`, ~28 KB) — stale junk, rendered empty (its data endpoints were gone). Dropped the `pub mod ccam`, the `/api` nest, and the `/api/ccam` auth-bypass clause in `daemon_cmd.rs`. The daemon still serves the JSON API (`/api/health`, proofs, workflows, hooks, memory, …). Builds clean; zero remaining references.
 
 ### Added
