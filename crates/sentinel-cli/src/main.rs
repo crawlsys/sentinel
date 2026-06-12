@@ -35,6 +35,7 @@ mod linear_audit_cmd;
 mod linear_code_audit_cmd;
 mod linear_health_cmd;
 mod roi_cmd;
+mod severity_cmd;
 mod token_cost_cmd;
 mod rotate_key_cmd;
 mod scan_cmd;
@@ -233,6 +234,16 @@ enum Commands {
     LinearAudit {
         #[command(subcommand)]
         action: LinearAuditAction,
+    },
+
+    /// Auto-severity — LLM-judged Linear ticket priority. Asks BOTH Opus 4.8
+    /// and GPT-5.5 to rate each cached ticket's severity (1-4) from its
+    /// title+description and reconciles the two verdicts. Shadow by default
+    /// (read-only); --apply gap-fills untriaged tickets via issueUpdate.
+    /// Writes ~/.claude/sentinel/metrics/severity.{json,jsonl}.
+    Severity {
+        #[command(subcommand)]
+        action: SeverityAction,
     },
 
     /// Per-developer scorecards — joins git delivery stats with the Linear
@@ -737,6 +748,20 @@ enum LinearAuditAction {
 }
 
 #[derive(Subcommand)]
+enum SeverityAction {
+    /// Classify each cached ticket's severity (Opus 4.8 + GPT-5.5, reconciled)
+    /// and write ~/.claude/sentinel/metrics/severity.{json,jsonl}.
+    Scan {
+        /// Arm the gap-fill: set the proposed priority on untriaged tickets
+        /// (no current priority) via Linear's issueUpdate. Suggestions for
+        /// tickets that already have a priority are reported, never auto-posted
+        /// (they require human review). Omit for a read-only shadow run.
+        #[arg(long)]
+        apply: bool,
+    },
+}
+
+#[derive(Subcommand)]
 enum DevScorecardAction {
     /// Compute per-developer scorecards from
     /// ~/.claude/sentinel/dev-git-stats.json + the Linear cache and write
@@ -924,6 +949,9 @@ async fn main() -> anyhow::Result<()> {
             LinearAuditAction::Scan { velocity, weeks } => {
                 linear_audit_cmd::run(velocity, weeks)
             }
+        },
+        Commands::Severity { action } => match action {
+            SeverityAction::Scan { apply } => severity_cmd::run(apply).await,
         },
         Commands::DevScorecard { action } => match action {
             DevScorecardAction::Scan => dev_scorecard_cmd::run(),

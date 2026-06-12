@@ -143,6 +143,12 @@ pub struct McpHandler {
     /// adapter receipt at QA-handoff steps so the proof chain
     /// can't lie about smoke-test passes.
     step_verifiers: Vec<sentinel_domain::step_verifier::StepVerifierRequirement>,
+    /// Optional LLM port for tools that need a completion (`severity_scan`).
+    /// Wired by the CLI's `mcp_cmd` with the `OpenRouterLlm` adapter (the
+    /// application layer stays infrastructure-free by holding only the domain
+    /// port). `None` ⇒ LLM-backed tools return an error result rather than
+    /// crashing — keeps every existing caller back-compat.
+    llm: Option<Arc<dyn sentinel_domain::ports::LlmPort>>,
 }
 
 /// Configuration for cross-session proof corpus reads. Holds the home
@@ -162,7 +168,17 @@ impl McpHandler {
             archive: None,
             evidence_adapters: None,
             step_verifiers: Vec::new(),
+            llm: None,
         }
+    }
+
+    /// Wire an LLM port (for `sentinel__severity_scan`). The CLI's `mcp_cmd`
+    /// injects the `OpenRouterLlm` adapter here. Without it, the severity tool
+    /// returns an error result (no panic).
+    #[must_use]
+    pub fn with_llm(mut self, llm: Arc<dyn sentinel_domain::ports::LlmPort>) -> Self {
+        self.llm = Some(llm);
+        self
     }
 
     /// Register one or more step-level verifier requirements
@@ -217,6 +233,7 @@ impl McpHandler {
             // ── Proof corpus query (M4.3) ────────────────────────────
             "sentinel__query_proof_corpus" => self.query_proof_corpus(call.arguments).await,
             "sentinel__linear_pm_audit" => self.linear_pm_audit(call.arguments),
+            "sentinel__severity_scan" => self.severity_scan().await,
             "sentinel__dev_scorecard" => self.dev_scorecard(call.arguments),
             "sentinel__linear_code_audit" => self.linear_code_audit(call.arguments),
             "sentinel__linear_health" => self.linear_health(call.arguments),
@@ -300,6 +317,37 @@ impl McpHandler {
                 Err(e) => McpToolResult::err(format!("Serialization error: {e}")),
             },
             Err(e) => McpToolResult::err(format!("PM audit failed: {e}")),
+        }
+    }
+
+    /// `sentinel__severity_scan` — LLM-judge each cached ticket's priority
+    /// (Opus 4.8 + GPT-5.5, reconciled) and return the summary. Runs in SHADOW
+    /// only — an MCP tool must be safe/read-only, so it never applies a Linear
+    /// mutation (no `--apply` equivalent is exposed). Requires an LLM port wired
+    /// via [`Self::with_llm`]; absent ⇒ an error result.
+    async fn severity_scan(&self) -> McpToolResult {
+        use crate::severity::scan_severity;
+
+        let Some(llm) = self.llm.as_ref() else {
+            return McpToolResult::err(
+                "severity_scan needs an LLM port (set OPENROUTER_API_KEY so the MCP server wires \
+                 OpenRouterLlm)",
+            );
+        };
+        let Some(home) = dirs::home_dir() else {
+            return McpToolResult::err("could not resolve home directory");
+        };
+        let sentinel_dir = home.join(".claude").join("sentinel");
+        let linear_cache = sentinel_dir.join("linear-assigned.json");
+        let output = sentinel_dir.join("metrics").join("severity.json");
+
+        // Shadow only: apply=false, no token — never mutates Linear from MCP.
+        match scan_severity(&linear_cache, &output, llm.as_ref(), false, None).await {
+            Ok(summary) => match serde_json::to_value(&summary) {
+                Ok(v) => McpToolResult::ok(v),
+                Err(e) => McpToolResult::err(format!("Serialization error: {e}")),
+            },
+            Err(e) => McpToolResult::err(format!("Severity scan failed: {e}")),
         }
     }
 

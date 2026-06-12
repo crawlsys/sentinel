@@ -107,7 +107,7 @@ impl MultiModelJudge {
         if judge.is_none() {
             eprintln!(
                 "[sentinel] WARNING: No AI judge available. \
-                 Set OPENROUTER_API_KEY for adversarial Kimi K2-Thinking / GPT-5.5 / Opus 4.7 judge. \
+                 Set OPENROUTER_API_KEY for adversarial Kimi K2-Thinking / GPT-5.5 / Opus 4.8 judge. \
                  All proof submissions will fail until configured."
             );
         }

@@ -46,6 +46,7 @@ pub mod reversibility_classifier;
 pub mod roi;
 pub mod sandboxed_judge;
 pub mod scanner;
+pub mod severity;
 pub mod sla;
 pub mod throughput;
 pub mod token_cost;

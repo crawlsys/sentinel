@@ -599,6 +599,14 @@ fn tool_definitions() -> serde_json::Value {
                 }
             },
             {
+                "name": "sentinel__severity_scan",
+                "description": "LLM-judge each cached Linear ticket's severity/priority (1=urgent .. 4=low) from its title+description, running BOTH Opus 4.8 and GPT-5.5 and reconciling (on disagreement, the more-urgent verdict wins). Classifies each ticket as `set` (no current priority — a gap-fill candidate), `suggest` (priority exists but the proposal differs), or `agree`. SHADOW ONLY — this MCP tool never mutates Linear; it writes the proposals to ~/.claude/sentinel/metrics/severity.{json,jsonl} and returns the summary. Requires OPENROUTER_API_KEY to be set when the MCP server started. Read-only.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {}
+                }
+            },
+            {
                 "name": "sentinel__dev_scorecard",
                 "description": "Compute per-developer scorecards from ~/.claude/sentinel/dev-git-stats.json (precomputed git delivery: commits, active_days, merged_prs, delivered_tickets) joined with the Linear cache. Scores each dev on throughput, first-pass QA, and consistency (composite 0-100), and runs an attribution-divergence check that flags devs with real git delivery (>=5 delivered tickets) but ~0 current Linear-assignee completions — the merge-reassign bug that hides real contributors. Returns the summary JSON. Read-only.",
                 "inputSchema": {
@@ -689,6 +697,12 @@ pub async fn run() -> Result<()> {
         )
     } else {
         McpHandler::new(state.clone(), proof_engine.clone())
+    };
+    // Wire the OpenRouter LLM for `sentinel__severity_scan` when the key is
+    // present. Absent key ⇒ the tool returns an error result (no panic).
+    let handler = match sentinel_infrastructure::openrouter_llm::OpenRouterLlm::from_env() {
+        Ok(llm) => handler.with_llm(Arc::new(llm)),
+        Err(_) => handler,
     };
 
     let stdin = tokio::io::stdin();
