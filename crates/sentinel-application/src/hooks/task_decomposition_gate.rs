@@ -240,27 +240,33 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
         return HookOutput::allow();
     }
 
-    // Best-effort task-state check. FAIL OPEN on None (unreadable state).
-    match has_live_task_list(ctx.fs, input.session_id.as_deref()) {
-        Some(true) => HookOutput::allow(),
-        None => {
-            tracing::debug!(
-                tool = tool_name,
-                "task_decomposition_gate: task state unreadable — failing open (allow)"
-            );
-            HookOutput::allow()
-        }
-        Some(false) => {
-            let envelope = HookEnvelope::block(
-                "Task Decomposition Gate",
-                format!(
-                    "No live decomposed task list found for this session, but you are \
-                     about to use a mutating tool (`{tool_name}`). {DECOMPOSITION_GUIDANCE}"
-                ),
-            );
-            HookOutput::block(envelope.render())
-        }
+    // Task-state check. FAIL CLOSED: the gate must fire for every mutating
+    // tool unless we can positively confirm a decomposed task list is live.
+    // `Some(true)` (a list exists or the session decomposed earlier) is the
+    // ONLY allow path; both `Some(false)` (readable, no decomposition) and
+    // `None` (state unreadable — no session id / no home / read error) block.
+    // Previously `None` failed *open*, which is exactly why the gate skipped
+    // intermittently; an unreadable task store is not evidence of compliance.
+    let state = has_live_task_list(ctx.fs, input.session_id.as_deref());
+    if state == Some(true) {
+        return HookOutput::allow();
     }
+    // Both Some(false) and None block. Distinguish the message so an
+    // unreadable store is diagnosable.
+    let prefix = if state.is_none() {
+        "Task state could not be read (no session id, home dir, or readable \
+         task store), so a decomposed task list cannot be confirmed. "
+    } else {
+        ""
+    };
+    let envelope = HookEnvelope::block(
+        "Task Decomposition Gate",
+        format!(
+            "{prefix}No live decomposed task list found for this session, but you are \
+             about to use a mutating tool (`{tool_name}`). {DECOMPOSITION_GUIDANCE}"
+        ),
+    );
+    HookOutput::block(envelope.render())
 }
 
 #[cfg(test)]
@@ -531,15 +537,23 @@ mod tests {
     }
 
     #[test]
-    fn fails_open_when_no_session_id() {
-        // StubFs returns a home dir, but with no session id we can't locate
-        // the task dir → None → fail open (allow).
+    fn fails_closed_when_no_session_id() {
+        // No session id → has_live_task_list returns None → the gate must FAIL
+        // CLOSED (block). An unreadable task store is not evidence of
+        // compliance; the gate must fire for every mutating tool.
         let ctx = stub_ctx();
         let out = process(&input("Edit", None), &ctx);
-        assert!(
-            out.blocked.is_none(),
-            "missing session id must fail open (allow), never brick the session"
+        assert_eq!(
+            out.blocked,
+            Some(true),
+            "missing session id must FAIL CLOSED (block) — the gate must always fire"
         );
+        // The block message should explain the unreadable-state case.
+        assert!(out
+            .reason
+            .as_deref()
+            .unwrap_or("")
+            .contains("could not be read"));
     }
 
     #[test]
