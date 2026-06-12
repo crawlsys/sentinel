@@ -597,6 +597,30 @@ fn tool_definitions() -> serde_json::Value {
                         }
                     }
                 }
+            },
+            {
+                "name": "sentinel__dev_scorecard",
+                "description": "Compute per-developer scorecards from ~/.claude/sentinel/dev-git-stats.json (precomputed git delivery: commits, active_days, merged_prs, delivered_tickets) joined with the Linear cache. Scores each dev on throughput, first-pass QA, and consistency (composite 0-100), and runs an attribution-divergence check that flags devs with real git delivery (>=5 delivered tickets) but ~0 current Linear-assignee completions — the merge-reassign bug that hides real contributors. Returns the summary JSON. Read-only.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {}
+                }
+            },
+            {
+                "name": "sentinel__linear_code_audit",
+                "description": "Cross-check every Completed ticket in the Linear cache against a precomputed code-evidence map at ~/.claude/sentinel/ticket-code-evidence.json (ticket -> {commits, files}). A Completed ticket with zero commits AND zero touched files (or no entry at all) is flagged 'done-no-evidence' — a potential false-done. Non-Completed tickets are ignored. Returns the summary JSON. Read-only.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {}
+                }
+            },
+            {
+                "name": "sentinel__linear_health",
+                "description": "Compute a composite 0-100 Linear health score over the cache across four weighted dimensions: hygiene (max 30, fraction with a valid Fibonacci estimate), structure (max 20, fraction with a non-empty state), data_quality (max 15, penalized per QA-Failed issue beyond a free allowance — a heuristic rework proxy), and flow (max 35, penalizing QA-lane congestion among open points). Returns total score, per-dimension scores, and a grade band (>=85 healthy, 70-84 ok, <70 needs-work). Read-only.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {}
+                }
             }
         ]
     })

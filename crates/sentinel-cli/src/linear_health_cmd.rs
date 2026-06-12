@@ -1,0 +1,63 @@
+//! `sentinel linear-health scan` — compute the composite 0-100 Linear health
+//! score (hygiene + structure + data-quality + flow) over the Linear issue
+//! cache. See `sentinel-application::linear_health_score`.
+
+use anyhow::{Context, Result};
+use colored::Colorize;
+use std::path::PathBuf;
+
+use sentinel_application::linear_health_score::scan_health_score;
+
+pub fn run() -> Result<()> {
+    let home =
+        dirs::home_dir().ok_or_else(|| anyhow::anyhow!("could not resolve home directory"))?;
+    let sentinel_dir: PathBuf = home.join(".claude").join("sentinel");
+    let linear_cache = sentinel_dir.join("linear-assigned.json");
+    let output_summary = sentinel_dir.join("metrics").join("linear-health.json");
+
+    println!("{}", "Sentinel Linear Health Score".bold());
+    println!("Linear cache:   {}", linear_cache.display());
+    println!("Output summary: {}", output_summary.display());
+    println!();
+
+    let summary = scan_health_score(&linear_cache, &output_summary)
+        .context("scan_health_score failed")?;
+
+    if summary.issues_total == 0 {
+        println!(
+            "{}",
+            "No issues found in linear-assigned.json. Populate the cache (the \
+             portfolio-health cron writes it) and rescan."
+                .yellow()
+        );
+        return Ok(());
+    }
+
+    let band = match summary.grade.as_str() {
+        "healthy" => summary.grade.green().bold(),
+        "ok" => summary.grade.yellow().bold(),
+        _ => summary.grade.red().bold(),
+    };
+
+    println!("{}", "==== LINEAR HEALTH ====".bold());
+    println!(
+        "  {} issues · score {} / 100 → {band}",
+        summary.issues_total,
+        summary.total_score.to_string().bold()
+    );
+    println!();
+    println!("  {:14} {:.1} / 30", "hygiene", summary.hygiene_score);
+    println!("  {:14} {:.1} / 20", "structure", summary.structure_score);
+    println!(
+        "  {:14} {:.1} / 15  ({} QA-failed)",
+        "data_quality", summary.data_quality_score, summary.qa_failed_count
+    );
+    println!(
+        "  {:14} {:.1} / 35  ({:.0}% open pts in QA lanes)",
+        "flow",
+        summary.flow_score,
+        summary.qa_congestion_fraction * 100.0
+    );
+
+    Ok(())
+}

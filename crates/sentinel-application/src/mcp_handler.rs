@@ -217,6 +217,9 @@ impl McpHandler {
             // ── Proof corpus query (M4.3) ────────────────────────────
             "sentinel__query_proof_corpus" => self.query_proof_corpus(call.arguments).await,
             "sentinel__linear_pm_audit" => self.linear_pm_audit(call.arguments),
+            "sentinel__dev_scorecard" => self.dev_scorecard(call.arguments),
+            "sentinel__linear_code_audit" => self.linear_code_audit(call.arguments),
+            "sentinel__linear_health" => self.linear_health(call.arguments),
             _ => McpToolResult::err(format!("Unknown tool: {}", call.name)),
         }
     }
@@ -296,6 +299,77 @@ impl McpHandler {
                 Err(e) => McpToolResult::err(format!("Serialization error: {e}")),
             },
             Err(e) => McpToolResult::err(format!("PM audit failed: {e}")),
+        }
+    }
+
+    /// `sentinel__dev_scorecard` — compute per-developer scorecards from the
+    /// git-stats input + the Linear cache, including the attribution-
+    /// divergence check. Read-only; writes the metrics artifact as a side
+    /// effect (idempotent overwrite).
+    fn dev_scorecard(&self, _args: serde_json::Value) -> McpToolResult {
+        use crate::dev_scorecard::scan_dev_scorecard;
+
+        let Some(home) = dirs::home_dir() else {
+            return McpToolResult::err("could not resolve home directory");
+        };
+        let sentinel_dir = home.join(".claude").join("sentinel");
+        let git_stats = sentinel_dir.join("dev-git-stats.json");
+        let linear_cache = sentinel_dir.join("linear-assigned.json");
+        let output_summary = sentinel_dir.join("metrics").join("dev-scorecard.json");
+
+        match scan_dev_scorecard(&git_stats, &linear_cache, &output_summary) {
+            Ok(summary) => match serde_json::to_value(&summary) {
+                Ok(v) => McpToolResult::ok(v),
+                Err(e) => McpToolResult::err(format!("Serialization error: {e}")),
+            },
+            Err(e) => McpToolResult::err(format!("Dev scorecard failed: {e}")),
+        }
+    }
+
+    /// `sentinel__linear_code_audit` — cross-check every Completed ticket in
+    /// the Linear cache against the precomputed code-evidence map, flagging
+    /// `done-no-evidence` false-dones. Read-only; writes the metrics
+    /// artifact as a side effect (idempotent overwrite).
+    fn linear_code_audit(&self, _args: serde_json::Value) -> McpToolResult {
+        use crate::linear_code_audit::scan_code_audit;
+
+        let Some(home) = dirs::home_dir() else {
+            return McpToolResult::err("could not resolve home directory");
+        };
+        let sentinel_dir = home.join(".claude").join("sentinel");
+        let linear_cache = sentinel_dir.join("linear-assigned.json");
+        let evidence_map = sentinel_dir.join("ticket-code-evidence.json");
+        let output_summary = sentinel_dir.join("metrics").join("linear-code-audit.json");
+
+        match scan_code_audit(&linear_cache, &evidence_map, &output_summary) {
+            Ok(summary) => match serde_json::to_value(&summary) {
+                Ok(v) => McpToolResult::ok(v),
+                Err(e) => McpToolResult::err(format!("Serialization error: {e}")),
+            },
+            Err(e) => McpToolResult::err(format!("Code audit failed: {e}")),
+        }
+    }
+
+    /// `sentinel__linear_health` — compute the composite 0-100 Linear health
+    /// score (hygiene + structure + data-quality + flow) over the Linear
+    /// cache. Read-only; writes the metrics artifact as a side effect
+    /// (idempotent overwrite).
+    fn linear_health(&self, _args: serde_json::Value) -> McpToolResult {
+        use crate::linear_health_score::scan_health_score;
+
+        let Some(home) = dirs::home_dir() else {
+            return McpToolResult::err("could not resolve home directory");
+        };
+        let sentinel_dir = home.join(".claude").join("sentinel");
+        let linear_cache = sentinel_dir.join("linear-assigned.json");
+        let output_summary = sentinel_dir.join("metrics").join("linear-health.json");
+
+        match scan_health_score(&linear_cache, &output_summary) {
+            Ok(summary) => match serde_json::to_value(&summary) {
+                Ok(v) => McpToolResult::ok(v),
+                Err(e) => McpToolResult::err(format!("Serialization error: {e}")),
+            },
+            Err(e) => McpToolResult::err(format!("Health score failed: {e}")),
         }
     }
 

@@ -20,6 +20,7 @@ mod ba_cmd;
 mod cost_per_point_cmd;
 mod daemon_cmd;
 mod deploy_freq_cmd;
+mod dev_scorecard_cmd;
 mod eval_cmd;
 mod federation_cmd;
 mod manifest_cmd;
@@ -31,6 +32,8 @@ mod pr_review_cmd;
 mod project_cmd;
 mod resign_cmd;
 mod linear_audit_cmd;
+mod linear_code_audit_cmd;
+mod linear_health_cmd;
 mod roi_cmd;
 mod rotate_key_cmd;
 mod scan_cmd;
@@ -221,6 +224,33 @@ enum Commands {
     LinearAudit {
         #[command(subcommand)]
         action: LinearAuditAction,
+    },
+
+    /// Per-developer scorecards — joins git delivery stats with the Linear
+    /// cache to score each dev on throughput, first-pass QA, and consistency
+    /// (composite 0-100), plus an attribution-divergence check that surfaces
+    /// the merge-reassign bug (git delivery with ~0 Linear-assignee
+    /// completions). Writes ~/.claude/sentinel/metrics/dev-scorecard.{json,jsonl}.
+    DevScorecard {
+        #[command(subcommand)]
+        action: DevScorecardAction,
+    },
+
+    /// Linear false-done audit — cross-checks every Completed ticket against
+    /// a precomputed code-evidence map and flags `done-no-evidence` tickets
+    /// (marked Completed but no commits or touched files). Writes
+    /// ~/.claude/sentinel/metrics/linear-code-audit.{json,jsonl}.
+    LinearCodeAudit {
+        #[command(subcommand)]
+        action: LinearCodeAuditAction,
+    },
+
+    /// Composite Linear health score — a single 0-100 gauge across hygiene,
+    /// structure, data-quality, and flow dimensions (mirrors the by-hand
+    /// 72/100). Writes ~/.claude/sentinel/metrics/linear-health.json.
+    LinearHealth {
+        #[command(subcommand)]
+        action: LinearHealthAction,
     },
 
     /// Manage browser test (used by browserbase-tester skill) state
@@ -690,6 +720,29 @@ enum LinearAuditAction {
 }
 
 #[derive(Subcommand)]
+enum DevScorecardAction {
+    /// Compute per-developer scorecards from
+    /// ~/.claude/sentinel/dev-git-stats.json + the Linear cache and write
+    /// ~/.claude/sentinel/metrics/dev-scorecard.{json,jsonl}.
+    Scan,
+}
+
+#[derive(Subcommand)]
+enum LinearCodeAuditAction {
+    /// Cross-check Completed tickets against
+    /// ~/.claude/sentinel/ticket-code-evidence.json and write
+    /// ~/.claude/sentinel/metrics/linear-code-audit.{json,jsonl}.
+    Scan,
+}
+
+#[derive(Subcommand)]
+enum LinearHealthAction {
+    /// Compute the composite Linear health score over the cache and write
+    /// ~/.claude/sentinel/metrics/linear-health.json.
+    Scan,
+}
+
+#[derive(Subcommand)]
 enum SlaAction {
     /// Apply rules against a subjects JSONL; record breaches.
     Check {
@@ -851,6 +904,15 @@ async fn main() -> anyhow::Result<()> {
             LinearAuditAction::Scan { velocity, weeks } => {
                 linear_audit_cmd::run(velocity, weeks)
             }
+        },
+        Commands::DevScorecard { action } => match action {
+            DevScorecardAction::Scan => dev_scorecard_cmd::run(),
+        },
+        Commands::LinearCodeAudit { action } => match action {
+            LinearCodeAuditAction::Scan => linear_code_audit_cmd::run(),
+        },
+        Commands::LinearHealth { action } => match action {
+            LinearHealthAction::Scan => linear_health_cmd::run(),
         },
         Commands::DeployFreq { action } => match action {
             DeployFreqAction::Aggregate => deploy_freq_cmd::run_aggregate(),

@@ -1,0 +1,79 @@
+//! `sentinel linear-code-audit scan` — cross-check every Completed ticket in
+//! the Linear cache against a precomputed code-evidence map, flagging
+//! `done-no-evidence` false-dones. See
+//! `sentinel-application::linear_code_audit`.
+
+use anyhow::{Context, Result};
+use colored::Colorize;
+use std::path::PathBuf;
+
+use sentinel_application::linear_code_audit::scan_code_audit;
+
+pub fn run() -> Result<()> {
+    let home =
+        dirs::home_dir().ok_or_else(|| anyhow::anyhow!("could not resolve home directory"))?;
+    let sentinel_dir: PathBuf = home.join(".claude").join("sentinel");
+    let linear_cache = sentinel_dir.join("linear-assigned.json");
+    let evidence_map = sentinel_dir.join("ticket-code-evidence.json");
+    let output_summary = sentinel_dir.join("metrics").join("linear-code-audit.json");
+
+    println!("{}", "Sentinel Linear Code Audit".bold());
+    println!("Linear cache:   {}", linear_cache.display());
+    println!("Evidence map:   {}", evidence_map.display());
+    println!("Output summary: {}", output_summary.display());
+    println!();
+
+    let summary = scan_code_audit(&linear_cache, &evidence_map, &output_summary)
+        .context("scan_code_audit failed")?;
+
+    if summary.completed_total == 0 {
+        println!(
+            "{}",
+            "No Completed tickets found in linear-assigned.json. Populate the cache \
+             (the portfolio-health cron writes it) and rescan."
+                .yellow()
+        );
+        return Ok(());
+    }
+
+    println!("{}", "==== CODE AUDIT ====".bold());
+    println!(
+        "  {} completed · {} with evidence · {} without evidence",
+        summary.completed_total, summary.with_evidence, summary.without_evidence
+    );
+    println!();
+
+    if summary.flags.is_empty() {
+        println!(
+            "{}",
+            "✓ Every Completed ticket has code evidence (commits or touched files).".green()
+        );
+        return Ok(());
+    }
+
+    println!(
+        "{}",
+        "Done-but-no-code (possible false-done):".red().bold()
+    );
+    for f in &summary.flags {
+        println!(
+            "  {} [{}]  {} commits · {} files",
+            f.identifier.bold(),
+            f.state.dimmed(),
+            f.commits,
+            f.files,
+        );
+    }
+    println!();
+    println!(
+        "{}",
+        format!(
+            "⚠ {} Completed ticket(s) shipped no detectable code — verify they aren't false-dones.",
+            summary.without_evidence
+        )
+        .red()
+        .bold()
+    );
+
+    Ok(())
+}
