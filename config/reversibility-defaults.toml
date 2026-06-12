@@ -348,6 +348,14 @@ list_environments = "TriviallyReversible"
 get_me = "TriviallyReversible"
 current_account = "TriviallyReversible"
 list_accounts = "TriviallyReversible"
+# Browser-OAuth login flow. `login` only returns an auth URL + display code;
+# `login_poll` only reads the pending-flow status and, on success, writes a
+# token to the LOCAL accounts.json — no remote secret read/write, no prod
+# impact. Without these the unknown-tool default (Irreversible) routes the
+# two-call login through the auditor, which can hard-block with no reachable
+# `hygiene_override` — a deadlock on a benign, operator-initiated auth step.
+login = "TriviallyReversible"
+login_poll = "TriviallyReversible"
 get_settings = "TriviallyReversible"
 get_activity = "TriviallyReversible"
 list_integrations = "TriviallyReversible"

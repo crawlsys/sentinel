@@ -6,6 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Fixed
+- **Doppler `login`/`login_poll` no longer dead-lock the dry-run auditor** (2026-06-11): the browser-OAuth login flow's two tools weren't in `config/reversibility-defaults.toml`'s `[mcp.doppler]` block, so they fell to the conservative unknown-tool default (`Irreversible`) and got routed through the blast-radius auditor — which could hard-block with no reachable `hygiene_override`, dead-ending a benign operator-initiated auth step. Classified both as `TriviallyReversible` (they only return an auth URL / write a token to the local accounts.json — no remote secret read/write, no prod impact). Same deadlock class as the earlier MCP-default fixes. 11 reversibility tests green.
+
 ### Removed
 - **viz extracted to its own repo + old `apps/dashboard` deleted** (2026-06-11): The activity-graph viz (`tools/sentinel-viz-api` Rust backend + `tools/sentinel-viz-next` Next.js frontend, a coupled pair) moved out to a standalone repo (**garysomerhalder/sentinel-viz**) — both were already detached from the cargo workspace (`exclude`d), so this is a clean lift-and-shift; the `exclude` entries are dropped from the root `Cargo.toml`. Separately, the legacy **`apps/dashboard`** (`@sentinel/dashboard`, old enterprise dashboard) was deleted as dead/superseded — it had zero code references (only stale doc comments). 222 files removed; `cargo build --workspace` clean.
 
