@@ -220,6 +220,7 @@ impl McpHandler {
             "sentinel__dev_scorecard" => self.dev_scorecard(call.arguments),
             "sentinel__linear_code_audit" => self.linear_code_audit(call.arguments),
             "sentinel__linear_health" => self.linear_health(call.arguments),
+            "sentinel__token_cost" => self.token_cost(),
             _ => McpToolResult::err(format!("Unknown tool: {}", call.name)),
         }
     }
@@ -370,6 +371,28 @@ impl McpHandler {
                 Err(e) => McpToolResult::err(format!("Serialization error: {e}")),
             },
             Err(e) => McpToolResult::err(format!("Health score failed: {e}")),
+        }
+    }
+
+    /// `sentinel__token_cost` — price SEN-7 token aggregates at per-model
+    /// API rates and report the cached-vs-uncached cost + cache savings.
+    /// Read-only; writes the metrics artifact as a side effect.
+    fn token_cost(&self) -> McpToolResult {
+        use crate::token_cost::scan_token_cost;
+
+        let Some(home) = dirs::home_dir() else {
+            return McpToolResult::err("could not resolve home directory");
+        };
+        let metrics = home.join(".claude").join("sentinel").join("metrics");
+        let tokens_input = metrics.join("tokens-per-ticket.jsonl");
+        let output_summary = metrics.join("token-cost.json");
+
+        match scan_token_cost(&tokens_input, &output_summary) {
+            Ok(summary) => match serde_json::to_value(&summary) {
+                Ok(v) => McpToolResult::ok(v),
+                Err(e) => McpToolResult::err(format!("Serialization error: {e}")),
+            },
+            Err(e) => McpToolResult::err(format!("Token cost failed: {e}")),
         }
     }
 

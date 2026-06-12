@@ -35,6 +35,7 @@ mod linear_audit_cmd;
 mod linear_code_audit_cmd;
 mod linear_health_cmd;
 mod roi_cmd;
+mod token_cost_cmd;
 mod rotate_key_cmd;
 mod scan_cmd;
 mod schema_validator;
@@ -215,6 +216,14 @@ enum Commands {
     Roi {
         #[command(subcommand)]
         action: RoiAction,
+    },
+
+    /// Per-model token cost with the cached-vs-uncached split — prices
+    /// SEN-7 token aggregates at each model's API rate and reports what
+    /// prompt caching saved (SEN-16).
+    TokenCost {
+        #[command(subcommand)]
+        action: TokenCostAction,
     },
 
     /// Linear PM-enforcement audit — estimate hygiene, oversized tickets,
@@ -704,6 +713,14 @@ enum RoiAction {
 }
 
 #[derive(Subcommand)]
+enum TokenCostAction {
+    /// Price SEN-7 token aggregates at per-model API rates, compute the
+    /// cached-vs-uncached cost + cache savings, write
+    /// ~/.claude/sentinel/metrics/token-cost.{json,jsonl}.
+    Scan,
+}
+
+#[derive(Subcommand)]
 enum LinearAuditAction {
     /// Audit the Linear issue cache for PM discipline and write
     /// ~/.claude/sentinel/metrics/linear-pm-audit.{json,jsonl}.
@@ -899,6 +916,9 @@ async fn main() -> anyhow::Result<()> {
         },
         Commands::Roi { action } => match action {
             RoiAction::Scan => roi_cmd::run(),
+        },
+        Commands::TokenCost { action } => match action {
+            TokenCostAction::Scan => token_cost_cmd::run(),
         },
         Commands::LinearAudit { action } => match action {
             LinearAuditAction::Scan { velocity, weeks } => {

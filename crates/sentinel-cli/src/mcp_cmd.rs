@@ -621,6 +621,14 @@ fn tool_definitions() -> serde_json::Value {
                     "type": "object",
                     "properties": {}
                 }
+            },
+            {
+                "name": "sentinel__token_cost",
+                "description": "Price the SEN-7 token aggregate (tokens-per-ticket.jsonl) at each model's published Anthropic API rate and report the cached-vs-uncached cost split: total cost WITH prompt caching (real metered), the cost WITHOUT caching (cache tokens re-priced as full input), the cache savings ($ and %), and a per-model breakdown. Read-only.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {}
+                }
             }
         ]
     })

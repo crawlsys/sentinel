@@ -48,6 +48,7 @@ pub mod sandboxed_judge;
 pub mod scanner;
 pub mod sla;
 pub mod throughput;
+pub mod token_cost;
 pub mod tokens;
 pub mod tracing_service;
 pub mod trust;
