@@ -7,6 +7,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 ## [Unreleased]
 
 ### Fixed
+- **Linear enforcer no longer spams duplicate comments** (2026-06-11): `post_comment` (the single choke point for every enforcer comment — dev-ready, workflow-discipline, SLA, due-date) is now **idempotent** — it fetches the ticket's recent comments and skips posting when an identical body already exists. Previously the enforcer re-posted the same comment on every repeat `IssueChanged` event AND on every daemon restart (the in-memory per-issue debounce resets on restart, and re-seeds the poll cursor from a recent lower bound, so each restart re-swept the backlog). That piled up dozens of identical copies per ticket (1,366 duplicates across 56 firefly tickets in one session). Body-exact match, so genuinely-new content still posts. clippy clean; infra tests green.
+
+### Fixed
 - **Doppler `login`/`login_poll` no longer dead-lock the dry-run auditor** (2026-06-11): the browser-OAuth login flow's two tools weren't in `config/reversibility-defaults.toml`'s `[mcp.doppler]` block, so they fell to the conservative unknown-tool default (`Irreversible`) and got routed through the blast-radius auditor — which could hard-block with no reachable `hygiene_override`, dead-ending a benign operator-initiated auth step. Classified both as `TriviallyReversible` (they only return an auth URL / write a token to the local accounts.json — no remote secret read/write, no prod impact). Same deadlock class as the earlier MCP-default fixes. 11 reversibility tests green.
 
 ### Removed

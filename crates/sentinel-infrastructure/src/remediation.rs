@@ -253,14 +253,63 @@ pub async fn fetch_ticket_text(
     (title, desc)
 }
 
-/// Post a comment on a ticket (the audit trail / escalation channel). Best-effort.
+/// Post a comment on a ticket (the audit trail / escalation channel). Best-effort
+/// and IDEMPOTENT: if a comment with the same body already exists in the ticket's
+/// recent history, it is skipped. Without this the enforcer re-posts the same
+/// dev-ready / discipline / SLA comment on every repeat `IssueChanged` event AND
+/// on every daemon restart (the in-memory debounce resets), which spammed tickets
+/// with dozens of identical copies. The dedup is body-exact, so genuinely new
+/// content (e.g. a different missing-field set) still posts.
 pub async fn post_comment(client: &reqwest::Client, token: &str, issue_id: &str, body: &str) {
+    if comment_exists(client, token, issue_id, body).await {
+        return;
+    }
     let mutation = serde_json::json!({
         "query": "mutation($id:String!,$b:String!){ commentCreate(input:{issueId:$id,body:$b}){ success } }",
         "variables": { "id": issue_id, "b": body }
     })
     .to_string();
     let _ = post_ok(client, token, mutation, "commentCreate").await;
+}
+
+/// Does an identical comment body already exist in the ticket's recent comments?
+/// Best-effort: on any fetch error returns `false` (so a transient read failure
+/// doesn't suppress a legitimately-needed comment). Checks the most recent 50.
+async fn comment_exists(
+    client: &reqwest::Client,
+    token: &str,
+    issue_id: &str,
+    body: &str,
+) -> bool {
+    let query = format!(
+        r#"{{"query":"query{{issue(id:\"{issue_id}\"){{comments(first:50){{nodes{{body}}}}}}}}"}}"#
+    );
+    let val: Option<Value> = async {
+        client
+            .post(LINEAR_GRAPHQL_URL)
+            .header("Authorization", token)
+            .header("Content-Type", "application/json")
+            .body(query)
+            .send()
+            .await
+            .ok()?
+            .json::<Value>()
+            .await
+            .ok()
+    }
+    .await;
+    val.as_ref()
+        .and_then(|v| v.get("data"))
+        .and_then(|d| d.get("issue"))
+        .and_then(|i| i.get("comments"))
+        .and_then(|c| c.get("nodes"))
+        .and_then(Value::as_array)
+        .is_some_and(|nodes| {
+            nodes
+                .iter()
+                .filter_map(|n| n.get("body").and_then(Value::as_str))
+                .any(|existing| existing == body)
+        })
 }
 
 /// Run the `Codex` proposal for a ticket. Errors (or an unreachable model) yield
