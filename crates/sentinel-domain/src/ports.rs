@@ -478,6 +478,19 @@ pub trait AuditorPort: Send + Sync {
         &self,
         dry_run: &crate::dry_run::DryRunRequest,
     ) -> Result<crate::dry_run::AuditorVerdict, crate::dry_run::AuditorError>;
+
+    /// Cross-vendor DUAL audit for the highest-stakes (Irreversible /
+    /// Catastrophic) actions: score with two frontier models and reconcile
+    /// conservatively (block if either dissents). The default delegates to
+    /// [`score`](Self::score) — implementors with a real second model (e.g.
+    /// the OpenRouter `RigAuditor`) override it. Used by the dry-run gate when
+    /// the action's reversibility class is Irreversible or Catastrophic.
+    fn score_dual(
+        &self,
+        dry_run: &crate::dry_run::DryRunRequest,
+    ) -> Result<crate::dry_run::AuditorVerdict, crate::dry_run::AuditorError> {
+        self.score(dry_run)
+    }
 }
 
 // ---------------------------------------------------------------------------

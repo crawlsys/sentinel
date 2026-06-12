@@ -391,8 +391,19 @@ fn auditor_sidecar() -> Option<&'static tokio::runtime::Runtime> {
     sidecar(&SIDECAR, "sentinel-auditor-sidecar")
 }
 
-impl AuditorPort for RigAuditor {
-    fn score(&self, dry_run: &DryRunRequest) -> Result<AuditorVerdict, AuditorError> {
+/// Second frontier model for the cross-vendor dual audit of production
+/// actions. Paired with the default Opus 4.8 so an Anthropic blind spot is
+/// caught by OpenAI and vice versa. Overridable via `SENTINEL_AUDITOR_MODEL_2`.
+pub const DUAL_SECOND_MODEL: &str = "openai/gpt-5.5-pro";
+
+impl RigAuditor {
+    /// Run the single-model audit against an explicit `model_id`. Factored out
+    /// of the `AuditorPort::score` impl so `score_dual` can drive two models.
+    fn score_with_model(
+        &self,
+        dry_run: &DryRunRequest,
+        model_id: &str,
+    ) -> Result<AuditorVerdict, AuditorError> {
         let system_prompt = build_system_prompt();
         let user_prompt = build_user_prompt(dry_run);
 
@@ -401,7 +412,10 @@ impl AuditorPort for RigAuditor {
         })?;
 
         let prompt_fn = self.prompt_fn.clone();
-        let model_id = self.model_id.clone();
+        let model_id = model_id.to_string();
+        // Build the attribution string before `model_id` is moved into the
+        // prompt call below.
+        let auditor_model = format!("{}:{}", self.provider_prefix, model_id);
         let timeout = self.timeout;
         // `score` is sync but is called from inside the CLI's `#[tokio::main]`
         // multi-thread runtime (the PreToolUse hook dispatch). Calling
@@ -422,13 +436,106 @@ impl AuditorPort for RigAuditor {
             || AuditorError::Other("auditor worker thread panicked".to_string()),
         )?;
 
-        let auditor_model = format!("{}:{}", self.provider_prefix, self.model_id);
         debug!(
             auditor_model = %auditor_model,
             response_len = response_text.len(),
             "auditor returned"
         );
         parse_verdict(&response_text, &auditor_model)
+    }
+}
+
+impl AuditorPort for RigAuditor {
+    /// Single-model audit against this auditor's configured model. For
+    /// production / irreversible actions prefer [`RigAuditor::score_dual`],
+    /// which cross-checks with a second frontier model and fails safe.
+    fn score(&self, dry_run: &DryRunRequest) -> Result<AuditorVerdict, AuditorError> {
+        let model_id = self.model_id.clone();
+        self.score_with_model(dry_run, &model_id)
+    }
+
+    /// Cross-vendor DUAL audit: score with BOTH this auditor's model (default
+    /// Opus 4.8) and a second frontier model (GPT-5.5-pro), reconciling
+    /// CONSERVATIVELY — block if EITHER dissents or can't confirm safety. For
+    /// irreversible / production actions a wrong "safe" is the most expensive
+    /// error sentinel can make, so a single dissenting frontier opinion holds
+    /// the action. The verdict's `auditor_model` names both models.
+    fn score_dual(&self, dry_run: &DryRunRequest) -> Result<AuditorVerdict, AuditorError> {
+        let second = std::env::var("SENTINEL_AUDITOR_MODEL_2")
+            .unwrap_or_else(|_| DUAL_SECOND_MODEL.to_string());
+
+        let v1 = self.score_with_model(dry_run, &self.model_id);
+        let v2 = self.score_with_model(dry_run, &second);
+
+        match (v1, v2) {
+            (Ok(a), Ok(b)) => Ok(reconcile_conservative(a, b, &self.model_id, &second)),
+            // One judge errored: a surviving BLOCK stays block; a surviving
+            // PASS is downgraded to an inconclusive block — we can't confirm
+            // safety with only one frontier opinion on a prod action.
+            (Ok(a), Err(_)) | (Err(_), Ok(a)) => {
+                if a.decision.is_block() {
+                    Ok(a)
+                } else {
+                    Ok(block_for_inconclusive(&self.model_id, &second))
+                }
+            }
+            // Both errored — propagate the first error.
+            (Err(e), Err(_)) => Err(e),
+        }
+    }
+}
+
+/// Reconcile two auditor verdicts CONSERVATIVELY: block if EITHER blocks.
+/// On agreement, keep the more-confident verdict; on a pass/block split, the
+/// block wins (fail safe for prod). The merged `auditor_model` names both.
+fn reconcile_conservative(
+    a: AuditorVerdict,
+    b: AuditorVerdict,
+    model_a: &str,
+    model_b: &str,
+) -> AuditorVerdict {
+    let merged_model = format!("dual:{model_a} + {model_b}");
+    // If either blocks, the result blocks — surface the blocking reason.
+    if a.decision.is_block() {
+        return AuditorVerdict {
+            auditor_model: merged_model,
+            ..a
+        };
+    }
+    if b.decision.is_block() {
+        return AuditorVerdict {
+            auditor_model: merged_model,
+            ..b
+        };
+    }
+    // Both pass — keep the lower-confidence (more cautious) one, naming both.
+    let mut keep = if a.confidence <= b.confidence { a } else { b };
+    keep.auditor_model = merged_model;
+    keep
+}
+
+/// A block verdict for when only one frontier opinion is available on a prod
+/// action and it didn't block — we can't confirm safety, so we hold.
+fn block_for_inconclusive(model_a: &str, model_b: &str) -> AuditorVerdict {
+    let msg = "Dual prod audit inconclusive: only one of the two frontier auditors \
+               returned, and it did not affirmatively confirm safety. Holding the \
+               irreversible action — re-run when both auditors are reachable, or \
+               override deliberately.";
+    AuditorVerdict {
+        decision: sentinel_domain::dry_run::AuditorDecision::Block {
+            reason: msg.to_string(),
+        },
+        confidence: 0.5,
+        // All axes 0.0 — worst score, reflecting that safety could not be
+        // affirmatively established.
+        axes: sentinel_domain::dry_run::AuditorAxes {
+            correctness: 0.0,
+            intent_alignment: 0.0,
+            safety: 0.0,
+            unstated_assumptions: 0.0,
+        },
+        reasoning: msg.to_string(),
+        auditor_model: format!("dual-inconclusive:{model_a} + {model_b}"),
     }
 }
 
@@ -741,6 +848,49 @@ mod tests {
         let auditor = RigAuditor::with_prompt_fn(stub, "test/model");
         let verdict = auditor.score(&fixture_dry_run()).unwrap();
         assert!(verdict.decision.is_block());
+    }
+
+    #[test]
+    fn dual_blocks_if_either_judge_blocks() {
+        // First call (model 1) passes, second (model 2) blocks → BLOCK.
+        let stub = make_stub(vec![Ok(make_pass_response()), Ok(make_block_response())]);
+        let auditor = RigAuditor::with_prompt_fn(stub, "test/model");
+        let v = auditor.score_dual(&fixture_dry_run()).unwrap();
+        assert!(v.decision.is_block(), "a single dissent must block a prod action");
+        assert!(v.auditor_model.starts_with("dual:"));
+    }
+
+    #[test]
+    fn dual_passes_only_when_both_pass() {
+        let stub = make_stub(vec![Ok(make_pass_response()), Ok(make_pass_response())]);
+        let auditor = RigAuditor::with_prompt_fn(stub, "test/model");
+        let v = auditor.score_dual(&fixture_dry_run()).unwrap();
+        assert!(v.decision.is_pass());
+        assert!(v.auditor_model.starts_with("dual:"));
+    }
+
+    #[test]
+    fn dual_one_errors_and_other_passes_is_inconclusive_block() {
+        // Model 1 passes, model 2 errors → can't confirm safety → BLOCK.
+        let stub = make_stub(vec![
+            Ok(make_pass_response()),
+            Err(anyhow::anyhow!("connection refused")),
+        ]);
+        let auditor = RigAuditor::with_prompt_fn(stub, "test/model");
+        let v = auditor.score_dual(&fixture_dry_run()).unwrap();
+        assert!(v.decision.is_block());
+        assert!(v.auditor_model.starts_with("dual-inconclusive:"));
+    }
+
+    #[test]
+    fn dual_one_errors_and_other_blocks_stays_block() {
+        let stub = make_stub(vec![
+            Ok(make_block_response()),
+            Err(anyhow::anyhow!("timeout")),
+        ]);
+        let auditor = RigAuditor::with_prompt_fn(stub, "test/model");
+        let v = auditor.score_dual(&fixture_dry_run()).unwrap();
+        assert!(v.decision.is_block());
     }
 
     #[test]

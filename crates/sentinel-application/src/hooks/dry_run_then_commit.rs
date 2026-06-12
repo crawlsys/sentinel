@@ -349,8 +349,12 @@ pub fn process(
         ));
     }
 
-    // Step 4 — auditor scoring.
-    let verdict = match auditor.score(&dry_run) {
+    // Step 4 — auditor scoring. This hook only reaches here for Irreversible
+    // / Catastrophic actions, so use the cross-vendor DUAL audit (Opus 4.8 +
+    // GPT-5.5, block if either dissents) — a wrong "safe" here is the most
+    // expensive error sentinel can make. Auditors without a real second model
+    // fall back to single-model via the trait default.
+    let verdict = match auditor.score_dual(&dry_run) {
         Ok(v) => v,
         Err(err) => return handle_auditor_error(class, &err),
     };

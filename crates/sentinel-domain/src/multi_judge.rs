@@ -72,6 +72,13 @@ pub enum JudgeTrustTier {
     /// Kimi + Sonnet + Opus trio. Highest-stakes work; majority
     /// vote when judges disagree.
     CriticalStrict,
+    /// Opus 4.8 + GPT-5.5-pro — the two strongest CLOSED frontier models,
+    /// one from each vendor. Reserved for the decisions where being WRONG is
+    /// most expensive: false-done / completion verdicts (Sentinel's whole
+    /// thesis is "shipped ≠ done") and production reversibility/blast-radius
+    /// audits (a wrong "safe" = data loss). Two top-tier adversarial opinions,
+    /// cross-vendor so one family's blind spot is caught by the other.
+    DualFrontier,
     /// Single Kimi judge BUT records `OpenRouter`'s resolved
     /// `model_id` + `provider` in the `StepProof` for audit-replay.
     /// EU AI Act Article 12 compliance: "prove which model judged
@@ -91,6 +98,8 @@ impl JudgeTrustTier {
             Self::CriticalStrict => {
                 vec![JudgeModel::Kimi, JudgeModel::Sonnet, JudgeModel::Opus]
             }
+            // Opus 4.8 + GPT-5.5-pro — cross-vendor frontier pair.
+            Self::DualFrontier => vec![JudgeModel::Opus, JudgeModel::Codex],
         }
     }
 
