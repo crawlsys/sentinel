@@ -12,7 +12,7 @@
 //!
 //! - **Shipped defaults** — `config/agents-defaults.toml` baked in via
 //!   `include_str!` at compile time. Contains a small set of common
-//!   frontier model profiles (Claude Opus 4.7, Kimi K2.6 on Ollama
+//!   frontier model profiles (Claude Opus 4.8, Kimi K2.6 on Ollama
 //!   Cloud, GPT 5.5) so a fresh install has a router that can route.
 //! - **Operator overrides** — `~/.claude/sentinel/config/agents.toml`
 //!   (optional, runtime-loaded). Operators register their own
@@ -328,9 +328,9 @@ data_zones = []
 
 [[agent]]
 agent_id = "opus"
-display_name = "Claude Opus 4.7"
+display_name = "Claude Opus 4.8"
 vendor = "Anthropic"
-model_id = "claude-opus-4.7"
+model_id = "claude-opus-4.8"
 declared = [
     { Reasoning = "deep" },
     { StructuredOutput = "AuditorVerdict" },

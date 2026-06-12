@@ -11,7 +11,7 @@
 //!
 //! Selected by `SENTINEL_EVAL_SCORER_PROVIDER` (default `openrouter`):
 //! - `openrouter` — `OPENROUTER_API_KEY` required; default model
-//!   `anthropic/claude-opus-4.7` (override via
+//!   `anthropic/claude-opus-4.8` (override via
 //!   `SENTINEL_EVAL_SCORER_MODEL`).
 //! - `ollama` — auto-detects local vs cloud by `OLLAMA_API_KEY`
 //!   presence; `SENTINEL_EVAL_SCORER_MODEL` required.
@@ -39,7 +39,7 @@ use crate::llm_scorer_runtime::{
 };
 
 pub const DEFAULT_SCORER_PROVIDER: &str = "openrouter";
-pub const DEFAULT_SCORER_OPENROUTER_MODEL: &str = "anthropic/claude-opus-4.7";
+pub const DEFAULT_SCORER_OPENROUTER_MODEL: &str = "anthropic/claude-opus-4.8";
 pub const DEFAULT_SCORER_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Rig-backed `EvalScorerPort` implementation.

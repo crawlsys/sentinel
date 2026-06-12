@@ -7,7 +7,7 @@
 //!
 //! `LlmModel` tiers map to `OpenRouter` model IDs via
 //! [`JudgeModel::openrouter_model_id`]:
-//!   - `Opus`   → `anthropic/claude-opus-4.7`
+//!   - `Opus`   → `anthropic/claude-opus-4.8`
 //!   - `Sonnet` → `openai/gpt-5.5`
 //!   - `Haiku`  → `openai/gpt-5.4-nano`
 
@@ -40,17 +40,17 @@ impl OpenRouterLlm {
 
     /// Map a domain `LlmModel` tier to its `OpenRouter` model ID.
     ///
-    /// The memory/judge stack is standardized on **Opus 4.7 + Codex** over
+    /// The memory/judge stack is standardized on **Opus 4.8 + Codex** over
     /// `OpenRouter`, so every tier resolves to one of those two (no Anthropic
     /// Haiku, no Sonnet, no Cerebras). The cheap tier maps to Codex
-    /// (`gpt-5.5-pro`), heavy tiers to Opus 4.7. Returned as literal IDs to
+    /// (`gpt-5.5-pro`), heavy tiers to Opus 4.8. Returned as literal IDs to
     /// keep this adapter decoupled from the churning `JudgeModel` enum.
     const fn model_id(model: LlmModel) -> &'static str {
         match model {
             // Haiku tier historically maps to Codex; the explicit `Codex`
             // delegation tier resolves to the same pinned model.
             LlmModel::Haiku | LlmModel::Codex => "openai/gpt-5.5-pro",
-            LlmModel::Sonnet | LlmModel::Opus => "anthropic/claude-opus-4.7", // no Sonnet in policy → Opus
+            LlmModel::Sonnet | LlmModel::Opus => "anthropic/claude-opus-4.8", // no Sonnet in policy → Opus
             // Kimi delegation tier — large-context, low-cost worker.
             LlmModel::Kimi => "moonshotai/kimi-k2.6",
         }
@@ -84,16 +84,16 @@ mod tests {
     fn maps_opus_to_openrouter_id() {
         assert_eq!(
             OpenRouterLlm::model_id(LlmModel::Opus),
-            "anthropic/claude-opus-4.7"
+            "anthropic/claude-opus-4.8"
         );
     }
 
     #[test]
     fn maps_all_tiers_to_opus_or_codex_only() {
-        // Policy: only Opus 4.7 + Codex on OpenRouter — no Haiku/Sonnet/Cerebras.
+        // Policy: only Opus 4.8 + Codex on OpenRouter — no Haiku/Sonnet/Cerebras.
         assert_eq!(OpenRouterLlm::model_id(LlmModel::Haiku), "openai/gpt-5.5-pro");
-        assert_eq!(OpenRouterLlm::model_id(LlmModel::Sonnet), "anthropic/claude-opus-4.7");
-        assert_eq!(OpenRouterLlm::model_id(LlmModel::Opus), "anthropic/claude-opus-4.7");
+        assert_eq!(OpenRouterLlm::model_id(LlmModel::Sonnet), "anthropic/claude-opus-4.8");
+        assert_eq!(OpenRouterLlm::model_id(LlmModel::Opus), "anthropic/claude-opus-4.8");
     }
 
     #[test]

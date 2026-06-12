@@ -1299,7 +1299,7 @@ mod step_tools_tests {
         );
         assert_eq!(
             proof.get("judge_model").and_then(|v| v.as_str()),
-            Some("anthropic/claude-opus-4.7"),
+            Some("anthropic/claude-opus-4.8"),
         );
     }
 

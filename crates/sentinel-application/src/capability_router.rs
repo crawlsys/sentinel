@@ -436,9 +436,9 @@ mod tests {
     fn opus() -> AgentCapabilityProfile {
         AgentCapabilityProfile {
             agent_id: id("opus"),
-            display_name: "Opus 4.7".into(),
+            display_name: "Opus 4.8".into(),
             vendor: VendorClass::Anthropic,
-            model_id: "claude-opus-4.7".into(),
+            model_id: "claude-opus-4.8".into(),
             declared: vec![
                 Capability::Reasoning(ReasoningLevel::Deep),
                 Capability::StructuredOutput(SchemaRef::AuditorVerdict),

@@ -481,9 +481,9 @@ mod tests {
     fn opus_profile() -> AgentCapabilityProfile {
         AgentCapabilityProfile {
             agent_id: AgentId::new("claude-opus-4-7-strong").unwrap(),
-            display_name: "Claude Opus 4.7".to_string(),
+            display_name: "Claude Opus 4.8".to_string(),
             vendor: VendorClass::Anthropic,
-            model_id: "claude-opus-4.7".to_string(),
+            model_id: "claude-opus-4.8".to_string(),
             declared: vec![
                 Capability::Reasoning(ReasoningLevel::Deep),
                 Capability::ToolUse(vec![ToolKind::Edit, ToolKind::Write, ToolKind::Bash]),

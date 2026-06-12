@@ -12,7 +12,7 @@
 //!
 //! - **`openrouter`** — hosted, single auth surface, broad model
 //!   catalog. Reads `OPENROUTER_API_KEY`. Default model
-//!   `anthropic/claude-opus-4.7`.
+//!   `anthropic/claude-opus-4.8`.
 //! - **`ollama`** — auto-detects local vs cloud at construction time:
 //!     - If `OLLAMA_API_KEY` is set → **Ollama Cloud** mode. Reads
 //!       `OLLAMA_API_KEY` + `OLLAMA_BASE_URL` (default
@@ -77,7 +77,7 @@ pub use llm_scorer_runtime::{DEFAULT_OLLAMA_CLOUD_BASE_URL, DEFAULT_OLLAMA_LOCAL
 /// Used when `SENTINEL_AUDITOR_MODEL` is unset. Anthropic is chosen as
 /// a sensible default different-vendor pick when the acting agent is
 /// `OpenAI` / Google. Operator overrides per workflow.
-pub const DEFAULT_OPENROUTER_MODEL: &str = "anthropic/claude-opus-4.7";
+pub const DEFAULT_OPENROUTER_MODEL: &str = "anthropic/claude-opus-4.8";
 
 /// Legacy alias for back-compat with Phase 3b callers.
 #[deprecated(note = "use DEFAULT_OPENROUTER_MODEL — name disambiguates per-provider defaults")]
@@ -98,7 +98,7 @@ pub const DEFAULT_AUDITOR_PROVIDER: &str = "openrouter";
 pub struct RigAuditor {
     prompt_fn: PromptFn,
     /// Model identifier passed to the provider client (e.g.
-    /// `"anthropic/claude-opus-4.7"` for openrouter; `"moonshotai/kimi-k2"`
+    /// `"anthropic/claude-opus-4.8"` for openrouter; `"moonshotai/kimi-k2"`
     /// or `"qwen3:8b"` for ollama).
     model_id: String,
     /// Provider-attribution prefix recorded into
@@ -509,7 +509,7 @@ fn build_user_prompt(dry_run: &DryRunRequest) -> String {
 /// Parse the auditor's JSON response into a typed verdict. The
 /// `auditor_model` argument is taken verbatim and recorded into the
 /// verdict as the full attribution string (e.g.
-/// `"openrouter:anthropic/claude-opus-4.7"` or
+/// `"openrouter:anthropic/claude-opus-4.8"` or
 /// `"ollama-cloud:moonshotai/kimi-k2"`).
 fn parse_verdict(text: &str, auditor_model: &str) -> Result<AuditorVerdict, AuditorError> {
     // Strip markdown code-fence if the model wraps its JSON despite
@@ -663,10 +663,10 @@ mod tests {
     #[test]
     fn parses_pass_verdict() {
         let verdict =
-            parse_verdict(&make_pass_response(), "openrouter:anthropic/claude-opus-4.7").unwrap();
+            parse_verdict(&make_pass_response(), "openrouter:anthropic/claude-opus-4.8").unwrap();
         assert!(verdict.decision.is_pass());
         assert!((verdict.confidence - 0.92).abs() < 1e-5);
-        assert_eq!(verdict.auditor_model, "openrouter:anthropic/claude-opus-4.7");
+        assert_eq!(verdict.auditor_model, "openrouter:anthropic/claude-opus-4.8");
     }
 
     #[test]
@@ -969,7 +969,7 @@ mod tests {
     fn openrouter_opus_profile() -> AgentCapabilityProfile {
         AgentCapabilityProfile {
             agent_id: AgentId::new("claude-opus-4-7").unwrap(),
-            display_name: "Claude Opus 4.7".into(),
+            display_name: "Claude Opus 4.8".into(),
             vendor: VendorClass::Anthropic,
             model_id: "claude-opus-4-7".into(),
             declared: vec![

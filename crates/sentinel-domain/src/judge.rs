@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 /// - `Kimi` → `moonshotai/kimi-k2.6` (Moonshot; OSS frontier, Eastern
 ///   training distribution for adversarial diversity)
 /// - `Sonnet` → `anthropic/claude-sonnet-4.6` (Anthropic; balanced daily tier)
-/// - `Opus` → `anthropic/claude-opus-4.7` (Anthropic; deepest reasoning,
+/// - `Opus` → `anthropic/claude-opus-4.8` (Anthropic; deepest reasoning,
 ///   highest-stakes work)
 ///
 /// Step configs declare the tier; multi-judge dispatch is a runtime concern
@@ -40,7 +40,7 @@ pub enum JudgeModel {
     /// trust tier so disagreement signals are real (different model families,
     /// different blind spots). Was the stale `gpt-5.4`.
     Sonnet,
-    /// Critical-strict tier — Anthropic Claude Opus 4.7 via `OpenRouter`. Third
+    /// Critical-strict tier — Anthropic Claude Opus 4.8 via `OpenRouter`. Third
     /// leg of the trio for highest-stakes audit-grade work.
     Opus,
 }
@@ -51,7 +51,7 @@ impl std::fmt::Display for JudgeModel {
             Self::Codex => write!(f, "openai/gpt-5.5-pro"),
             Self::Kimi => write!(f, "moonshotai/kimi-k2.6"),
             Self::Sonnet => write!(f, "anthropic/claude-sonnet-4.6"),
-            Self::Opus => write!(f, "anthropic/claude-opus-4.7"),
+            Self::Opus => write!(f, "anthropic/claude-opus-4.8"),
         }
     }
 }
@@ -75,7 +75,7 @@ impl JudgeModel {
             Self::Codex => "openai/gpt-5.5-pro",
             Self::Kimi => "moonshotai/kimi-k2.6",
             Self::Sonnet => "anthropic/claude-sonnet-4.6",
-            Self::Opus => "anthropic/claude-opus-4.7",
+            Self::Opus => "anthropic/claude-opus-4.8",
         }
     }
 }
@@ -169,7 +169,7 @@ mod tests {
             JudgeModel::Sonnet.to_string(),
             "anthropic/claude-sonnet-4.6"
         );
-        assert_eq!(JudgeModel::Opus.to_string(), "anthropic/claude-opus-4.7");
+        assert_eq!(JudgeModel::Opus.to_string(), "anthropic/claude-opus-4.8");
     }
 
     #[test]
