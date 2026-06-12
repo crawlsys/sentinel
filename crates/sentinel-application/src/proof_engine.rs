@@ -81,6 +81,7 @@ impl ProofEngine {
         judge_model: JudgeModel,
         started_at: chrono::DateTime<Utc>,
         workflow: Option<&sentinel_domain::workflow::SkillWorkflow>,
+        dual: bool,
     ) -> Result<PhaseProof> {
         // Check resubmission rate limit. Cooldown logic + state inspection
         // both live on `SessionState` — we just ask whether a wait is needed.
@@ -99,10 +100,12 @@ impl ProofEngine {
             }
         }
 
-        // Ask AI judge to evaluate the evidence
+        // Ask AI judge to evaluate the evidence. For high-stakes (`dual`)
+        // phases the verdict comes from the cross-vendor DualFrontier tier
+        // (Opus 4.8 + GPT-5.5), folded conservatively into a single verdict;
+        // otherwise the single configured `judge_model` runs.
         let verdict = self
-            .judge
-            .evaluate(skill, phase_id, phase_objectives, &evidence, judge_model)
+            .judge_verdict_for(skill, phase_id, phase_objectives, &evidence, judge_model, dual)
             .await?;
 
         info!(
@@ -212,6 +215,60 @@ impl ProofEngine {
         );
 
         Ok(proof)
+    }
+
+    /// Obtain the completion verdict for a phase. When `dual` is set, run the
+    /// cross-vendor [`JudgeTrustTier::DualFrontier`] (Opus 4.8 + GPT-5.5) via
+    /// `evaluate_multi` and fold the `MultiJudgeVerdict` into a single
+    /// `JudgeVerdict` (conservative: `sufficient` is the AND across judges,
+    /// confidence the floor — already how `synthesize` works); otherwise run
+    /// the single configured `judge_model`. Folding means a wrong "done" needs
+    /// BOTH frontier models to agree — Sentinel's most expensive error gets
+    /// two adversarial opinions for the phases that opt in.
+    async fn judge_verdict_for(
+        &self,
+        skill: &str,
+        phase_id: &str,
+        phase_objectives: &str,
+        evidence: &Evidence,
+        judge_model: JudgeModel,
+        dual: bool,
+    ) -> Result<JudgeVerdict> {
+        if !dual {
+            return self
+                .judge
+                .evaluate(skill, phase_id, phase_objectives, evidence, judge_model)
+                .await;
+        }
+        let multi = self
+            .judge
+            .evaluate_multi(
+                skill,
+                phase_id,
+                phase_objectives,
+                evidence,
+                sentinel_domain::multi_judge::JudgeTrustTier::DualFrontier,
+            )
+            .await?;
+        // Fold to a single verdict: the synthesized sufficient/confidence are
+        // already conservative; concatenate the per-judge reasoning so the
+        // proof records both opinions.
+        let reasoning = if multi.individuals.is_empty() {
+            "dual-frontier judge produced no individual verdicts".to_string()
+        } else {
+            multi
+                .individuals
+                .iter()
+                .map(|run| format!("[{}] {}", run.model, run.verdict.reasoning))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        Ok(JudgeVerdict {
+            sufficient: multi.sufficient,
+            confidence: multi.confidence,
+            reasoning,
+            requested_evidence: None,
+        })
     }
 
     /// Submit a verdict for a single step within a phase. Builds the
@@ -401,6 +458,87 @@ mod step_evidence_tests {
     fn engine() -> ProofEngine {
         let state = Arc::new(RwLock::new(SessionState::new("test-session")));
         ProofEngine::new(state, Arc::new(StubJudge))
+    }
+
+    /// A judge whose `evaluate_multi` returns a fixed two-judge verdict (Opus +
+    /// Codex), so the dual fold in `judge_verdict_for` can be exercised without
+    /// the network. `evaluate` (single path) is unreachable here.
+    struct DualStubJudge {
+        opus_sufficient: bool,
+        codex_sufficient: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl JudgeService for DualStubJudge {
+        async fn evaluate(
+            &self,
+            _s: &str,
+            _p: &str,
+            _o: &str,
+            _e: &Evidence,
+            _m: JudgeModel,
+        ) -> Result<JudgeVerdict> {
+            unreachable!("dual path must use evaluate_multi, not evaluate")
+        }
+
+        async fn evaluate_multi(
+            &self,
+            _s: &str,
+            _p: &str,
+            _o: &str,
+            _e: &Evidence,
+            tier: sentinel_domain::multi_judge::JudgeTrustTier,
+        ) -> Result<sentinel_domain::multi_judge::MultiJudgeVerdict> {
+            use sentinel_domain::multi_judge::{JudgeRun, MultiJudgeVerdict};
+            let mk = |suf: bool, conf: f64, model: JudgeModel| JudgeRun {
+                model,
+                verdict: if suf {
+                    JudgeVerdict::pass(conf, "ok")
+                } else {
+                    JudgeVerdict::fail(conf, "not done", vec![])
+                },
+                cost_usd: None,
+                provider: None,
+            };
+            let runs = vec![
+                mk(self.opus_sufficient, 0.9, JudgeModel::Opus),
+                mk(self.codex_sufficient, 0.7, JudgeModel::Codex),
+            ];
+            Ok(MultiJudgeVerdict::synthesize(tier, runs))
+        }
+    }
+
+    fn dual_engine(opus: bool, codex: bool) -> ProofEngine {
+        let state = Arc::new(RwLock::new(SessionState::new("dual-session")));
+        ProofEngine::new(
+            state,
+            Arc::new(DualStubJudge {
+                opus_sufficient: opus,
+                codex_sufficient: codex,
+            }),
+        )
+    }
+
+    #[tokio::test]
+    async fn dual_verdict_sufficient_only_when_both_agree() {
+        // Both pass → sufficient, confidence = floor (0.7), reasoning names both.
+        let v = dual_engine(true, true)
+            .judge_verdict_for("s", "p", "o", &Evidence::default(), JudgeModel::Opus, true)
+            .await
+            .unwrap();
+        assert!(v.sufficient);
+        assert!((v.confidence - 0.7).abs() < 1e-9);
+        assert!(v.reasoning.contains("opus") || v.reasoning.contains("Opus"));
+    }
+
+    #[tokio::test]
+    async fn dual_verdict_fails_if_one_dissents() {
+        // Opus passes, GPT-5.5 fails → NOT sufficient (conservative AND).
+        let v = dual_engine(true, false)
+            .judge_verdict_for("s", "p", "o", &Evidence::default(), JudgeModel::Opus, true)
+            .await
+            .unwrap();
+        assert!(!v.sufficient, "a single dissent must fail the completion verdict");
     }
 
     #[tokio::test]

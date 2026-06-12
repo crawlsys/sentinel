@@ -1225,6 +1225,16 @@ async fn handle_submit_phase(
         ev
     };
 
+    // High-stakes opt-in: when the submission sets `dual: true`, the
+    // completion verdict runs the cross-vendor DualFrontier tier (Opus 4.8 +
+    // GPT-5.5) instead of the single configured judge_model. A wrong "done" is
+    // sentinel's most expensive error, so callers can demand two adversarial
+    // frontier opinions for the phases that warrant it.
+    let dual = args
+        .get("dual")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+
     // Generate cryptographic proof via the proof engine
     let started_at = Utc::now() - chrono::Duration::seconds(1); // Approximate phase start
     let proof_result = proof_engine
@@ -1236,6 +1246,7 @@ async fn handle_submit_phase(
             judge_model,
             started_at,
             workflow_configs.get(&skill),
+            dual,
         )
         .await;
 
