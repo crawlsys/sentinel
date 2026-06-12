@@ -121,6 +121,23 @@ pub fn process_pretool(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
         return HookOutput::block(envelope.render());
     }
 
+    // Check 4: cherry-picking — starting a lower-priority ticket while a
+    // higher-priority, startable ticket waits in the same person's queue.
+    // Work the most urgent thing first. Fails open if the target is
+    // unprioritized or has no assignee to scope by.
+    if let Some(higher) = higher_priority_available(ctx, &issue) {
+        let envelope = HookEnvelope::block(
+            "Linear PM-Enforcement Gate",
+            format!(
+                "Refusing to start {ticket}: a higher-priority ticket ({higher}) is \
+                 available and startable in the same queue. Don't cherry-pick — start \
+                 the most urgent work first. Start {higher}, or re-prioritize if {ticket} \
+                 genuinely comes first."
+            ),
+        );
+        return HookOutput::block(envelope.render());
+    }
+
     HookOutput::allow()
 }
 
@@ -302,6 +319,96 @@ fn cache_path(ctx: &HookContext<'_>) -> Option<PathBuf> {
     )
 }
 
+/// Read the whole issue cache as a list of issue objects (array or
+/// `{issues:[...]}`). Returns an empty vec on any read/parse failure.
+fn cache_all(ctx: &HookContext<'_>) -> Vec<Value> {
+    let Some(path) = cache_path(ctx) else {
+        return Vec::new();
+    };
+    let Ok(text) = ctx.fs.read_to_string(&path) else {
+        return Vec::new();
+    };
+    let Ok(value) = serde_json::from_str::<Value>(&text) else {
+        return Vec::new();
+    };
+    value
+        .as_array()
+        .or_else(|| value.get("issues").and_then(Value::as_array))
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// Linear priority: 1=Urgent (most urgent) .. 4=Low; 0/absent = No priority.
+/// Lower number = more urgent. Returns `None` for 0/absent (unprioritized).
+fn priority_of(issue: &Value) -> Option<i64> {
+    issue
+        .get("priority")
+        .and_then(Value::as_i64)
+        .filter(|p| *p >= 1 && *p <= 4)
+}
+
+/// Same owner? Compares assignee identity (id or name) so the cherry-pick
+/// rule scopes to *this person's* queue, not the whole org. When the ticket
+/// being started has no assignee we can't scope, so we don't gate (None).
+fn same_assignee(a: &Value, b: &Value) -> Option<bool> {
+    let key = |v: &Value| {
+        v.get("assignee").and_then(|asg| {
+            asg.get("id")
+                .or_else(|| asg.get("name"))
+                .or_else(|| asg.get("displayName"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+    };
+    let ka = key(a)?;
+    Some(key(b).as_ref() == Some(&ka))
+}
+
+/// Find a higher-priority, startable ticket in the same person's queue than
+/// `target`. "Startable" = open (not done/canceled), not blocked, and strictly
+/// more urgent (lower priority number). Returns the identifier of the first
+/// such ticket, or `None` if the target is already the most urgent available.
+/// Fails open: if the target has no priority, or no assignee to scope by, or
+/// the cache is empty, returns `None` (no cherry-pick block).
+fn higher_priority_available(ctx: &HookContext<'_>, target: &Value) -> Option<String> {
+    let target_pri = priority_of(target)?; // unprioritized target → don't gate
+    let all = cache_all(ctx);
+    if all.is_empty() {
+        return None;
+    }
+    let target_id = target.get("identifier").and_then(Value::as_str);
+    for issue in &all {
+        // Skip the target itself.
+        if issue.get("identifier").and_then(Value::as_str) == target_id {
+            continue;
+        }
+        // Scope to the same assignee; if we can't establish that, skip.
+        if same_assignee(issue, target) != Some(true) {
+            continue;
+        }
+        // Must be strictly more urgent.
+        let Some(p) = priority_of(issue) else { continue };
+        if p >= target_pri {
+            continue;
+        }
+        // Must be startable: open and not blocked.
+        let ty = issue
+            .get("state")
+            .and_then(|s| s.get("type"))
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_lowercase();
+        let open = matches!(ty.as_str(), "backlog" | "unstarted" | "triage" | "started");
+        if !open || blocked_reason(issue).is_some() {
+            continue;
+        }
+        if let Some(id) = issue.get("identifier").and_then(Value::as_str) {
+            return Some(id.to_string());
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -411,6 +518,29 @@ mod tests {
             "projectMilestone": { "id": "x", "name": "M1" }
         });
         assert!(!needs_milestone(&with_ms));
+    }
+
+    #[test]
+    fn priority_parsing() {
+        assert_eq!(priority_of(&serde_json::json!({ "priority": 1 })), Some(1));
+        assert_eq!(priority_of(&serde_json::json!({ "priority": 4 })), Some(4));
+        // 0 = No priority → None (unprioritized, don't gate on it).
+        assert_eq!(priority_of(&serde_json::json!({ "priority": 0 })), None);
+        assert_eq!(priority_of(&serde_json::json!({})), None);
+        // out of range → None
+        assert_eq!(priority_of(&serde_json::json!({ "priority": 9 })), None);
+    }
+
+    #[test]
+    fn same_assignee_scoping() {
+        let a = serde_json::json!({ "assignee": { "id": "u1" } });
+        let b = serde_json::json!({ "assignee": { "id": "u1" } });
+        let c = serde_json::json!({ "assignee": { "id": "u2" } });
+        assert_eq!(same_assignee(&a, &b), Some(true));
+        assert_eq!(same_assignee(&a, &c), Some(false));
+        // No assignee on the first → can't scope → None.
+        let none = serde_json::json!({});
+        assert_eq!(same_assignee(&none, &b), None);
     }
 
     #[test]
