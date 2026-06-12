@@ -104,7 +104,44 @@ pub fn process_pretool(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
         }
     }
 
+    // Check 3: untracked work — starting a ticket with no milestone, *when its
+    // project uses milestones*. A ticket you start should be tied to a tracked
+    // deliverable. Projects that don't define milestones are exempt (no false
+    // block); we only enforce when `projectHasMilestones` is true in the cache.
+    if needs_milestone(&issue) {
+        let envelope = HookEnvelope::block(
+            "Linear PM-Enforcement Gate",
+            format!(
+                "Refusing to start {ticket}: it has no milestone, but its project \
+                 uses milestones. Work you start should map to a tracked deliverable \
+                 — assign {ticket} to a project milestone first, then start it. \
+                 (Projects without milestones are exempt.)"
+            ),
+        );
+        return HookOutput::block(envelope.render());
+    }
+
     HookOutput::allow()
+}
+
+/// Does this issue need (but lack) a milestone? True only when the cache says
+/// the project uses milestones (`projectHasMilestones: true`) AND the issue
+/// itself carries no `projectMilestone`/`milestone`. Fails open: if the
+/// project-has-milestones signal is absent, we don't enforce.
+fn needs_milestone(issue: &Value) -> bool {
+    let project_uses = issue
+        .get("projectHasMilestones")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if !project_uses {
+        return false;
+    }
+    let has_milestone = issue
+        .get("projectMilestone")
+        .or_else(|| issue.get("milestone"))
+        .map(|m| !m.is_null())
+        .unwrap_or(false);
+    !has_milestone
 }
 
 /// Return a human-readable reason the issue is blocked, or `None` if it is
@@ -359,5 +396,32 @@ mod tests {
             "labels": ["frontend"]
         });
         assert!(blocked_reason(&issue).is_none());
+    }
+
+    #[test]
+    fn milestone_required_when_project_uses_them() {
+        // Project uses milestones, ticket has none → needs one.
+        let no_ms = serde_json::json!({
+            "identifier": "M-1", "projectHasMilestones": true, "projectMilestone": null
+        });
+        assert!(needs_milestone(&no_ms));
+        // Ticket has a milestone → fine.
+        let with_ms = serde_json::json!({
+            "identifier": "M-2", "projectHasMilestones": true,
+            "projectMilestone": { "id": "x", "name": "M1" }
+        });
+        assert!(!needs_milestone(&with_ms));
+    }
+
+    #[test]
+    fn milestone_not_required_when_project_has_none() {
+        // Project doesn't use milestones → exempt (no false block).
+        let exempt = serde_json::json!({
+            "identifier": "M-3", "projectHasMilestones": false, "projectMilestone": null
+        });
+        assert!(!needs_milestone(&exempt));
+        // Absent signal → also exempt (fail open).
+        let unknown = serde_json::json!({ "identifier": "M-4" });
+        assert!(!needs_milestone(&unknown));
     }
 }

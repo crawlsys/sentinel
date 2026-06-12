@@ -77,6 +77,9 @@ struct Issue {
     /// Blocked state, or blocked/blocker label) so the report and the gate
     /// agree on what "blocked" means.
     blocked_reason: Option<String>,
+    /// `true` when the issue's project uses milestones but the issue has none —
+    /// untracked work. Mirrors the gate's milestone rule.
+    needs_milestone: bool,
 }
 
 impl Issue {
@@ -149,6 +152,8 @@ pub struct PmAuditSummary {
     pub oversized_open: usize,
     // Blocked: open tickets that are blocked (a relation, state, or label).
     pub blocked_open: usize,
+    // Untracked: open tickets with no milestone, where the project uses them.
+    pub no_milestone_open: usize,
     // Check 3: QA-failed
     pub qa_failed: usize,
     pub qa_failed_points: f64,
@@ -259,6 +264,21 @@ pub fn scan_pm_audit(
             }
         }
 
+        // Check 2c: untracked work — open ticket with no milestone, where the
+        // project uses them.
+        if iss.is_open() && iss.needs_milestone {
+            summary.no_milestone_open += 1;
+            flags.push(PmFlag {
+                identifier: iss.identifier.clone(),
+                title: iss.title.clone(),
+                category: "no-milestone".into(),
+                estimate: iss.estimate,
+                state: iss.state_name.clone(),
+                detail: "no milestone, but the project uses them — assign one before starting"
+                    .into(),
+            });
+        }
+
         // Check 3: QA-failed.
         if iss.is_qa_failed() {
             summary.qa_failed += 1;
@@ -325,6 +345,7 @@ pub fn scan_pm_audit(
     summary.total_flags = flags.len();
     summary.hard_violations = summary.oversized_open > 0
         || summary.blocked_open > 0
+        || summary.no_milestone_open > 0
         || flags
             .iter()
             .any(|f| f.category == "missing-estimate");
@@ -396,6 +417,18 @@ fn load_issues(path: &Path) -> Result<Vec<Issue>> {
                 .and_then(serde_json::Value::as_str)
                 .map(str::to_string),
             blocked_reason: blocked_reason(v),
+            needs_milestone: {
+                let uses = v
+                    .get("projectHasMilestones")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false);
+                let has = v
+                    .get("projectMilestone")
+                    .or_else(|| v.get("milestone"))
+                    .map(|m| !m.is_null())
+                    .unwrap_or(false);
+                uses && !has
+            },
         });
     }
     Ok(out)
@@ -603,6 +636,25 @@ mod tests {
         // K-1 (open relation), K-2 (Blocked state), K-3 (label) = 3 blocked;
         // K-4's blocker is completed → not blocked.
         assert_eq!(s.blocked_open, 3);
+        assert!(s.hard_violations);
+    }
+
+    #[test]
+    fn flags_open_tickets_missing_milestone() {
+        let c = cache(
+            r#"[
+                {"identifier":"N-1","estimate":3,"state":{"name":"Todo","type":"backlog"},
+                 "projectHasMilestones":true,"projectMilestone":null},
+                {"identifier":"N-2","estimate":3,"state":{"name":"Todo","type":"backlog"},
+                 "projectHasMilestones":true,"projectMilestone":{"id":"x","name":"M1"}},
+                {"identifier":"N-3","estimate":3,"state":{"name":"Todo","type":"backlog"},
+                 "projectHasMilestones":false,"projectMilestone":null}
+            ]"#,
+        );
+        let out = tempfile::NamedTempFile::new().unwrap();
+        let s = scan_pm_audit(c.path(), out.path(), BurndownInputs::default()).unwrap();
+        // N-1 missing (project uses them); N-2 has one; N-3 project exempt.
+        assert_eq!(s.no_milestone_open, 1);
         assert!(s.hard_violations);
     }
 
