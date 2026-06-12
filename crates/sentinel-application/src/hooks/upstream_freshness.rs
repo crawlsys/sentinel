@@ -283,6 +283,7 @@ mod tests {
             llm: None,
             memory_mcp: base.memory_mcp,
             env: base.env,
+            linear_lookup: None,
         };
         let mut input = HookInput::default();
         input.cwd = Some("/repo".to_string());
@@ -310,6 +311,7 @@ mod tests {
             llm: None,
             memory_mcp: base.memory_mcp,
             env: base.env,
+            linear_lookup: None,
         };
         let mut input = HookInput::default();
         input
@@ -331,6 +333,7 @@ mod tests {
             llm: None,
             memory_mcp: base.memory_mcp,
             env: base.env,
+            linear_lookup: None,
         };
         let mut input = HookInput::default();
         input.cwd = Some("/repo".to_string());

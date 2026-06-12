@@ -465,6 +465,7 @@ mod tests {
             llm: None,
             memory_mcp: &stub_mcp,
             env: &stub_env,
+            linear_lookup: None,
         };
 
         let input = HookInput {

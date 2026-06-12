@@ -761,6 +761,7 @@ mod tests {
             llm: None,
             memory_mcp,
             env,
+            linear_lookup: None,
         };
 
         let mut input = HookInput::default();
@@ -837,6 +838,7 @@ mod tests {
             llm: None,
             memory_mcp,
             env,
+            linear_lookup: None,
         };
 
         let mut input = HookInput::default();
@@ -917,6 +919,7 @@ mod tests {
             llm: None,
             memory_mcp,
             env,
+            linear_lookup: None,
         };
 
         let mut input = HookInput::default();

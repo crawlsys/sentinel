@@ -349,6 +349,10 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
         }
     };
 
+    // Real-time single-issue Linear lookup for the PM gate. `None` when no
+    // SENTINEL_LINEAR_TOKEN is set — the gate then falls back to the cache.
+    let linear_lookup = sentinel_infrastructure::linear_lookup::LinearLookup::from_env();
+
     // Bundle all ports into HookContext
     let ctx = hooks::HookContext {
         git: &git,
@@ -358,6 +362,9 @@ pub async fn run_internal(event: &str, matcher: Option<&str>, standalone: bool) 
         llm: llm.as_deref(),
         memory_mcp: &memory_mcp,
         env: &real_env,
+        linear_lookup: linear_lookup
+            .as_ref()
+            .map(|l| l as &dyn hooks::LinearLookupPort),
     };
 
     // Process through matching hooks based on event type

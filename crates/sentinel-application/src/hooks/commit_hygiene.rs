@@ -257,6 +257,7 @@ mod tests {
             llm: None,
             memory_mcp,
             env,
+            linear_lookup: None,
         }
     }
 

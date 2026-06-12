@@ -481,6 +481,7 @@ mod tests {
                 llm: None,
                 memory_mcp,
                 env,
+                linear_lookup: None,
             };
             let pretool_input = HookInput {
                 session_id: Some(session_id.to_string()),
@@ -510,6 +511,7 @@ mod tests {
                 llm: None,
                 memory_mcp,
                 env,
+                linear_lookup: None,
             };
             let posttool_input = HookInput {
                 session_id: Some(session_id.to_string()),
@@ -546,6 +548,7 @@ mod tests {
                 llm: None,
                 memory_mcp,
                 env,
+                linear_lookup: None,
             };
             let pretool_input = HookInput {
                 session_id: Some(session_id.to_string()),
@@ -596,6 +599,7 @@ mod tests {
             llm: None,
             memory_mcp,
             env,
+            linear_lookup: None,
         };
         let pretool_input = HookInput {
             session_id: Some(session_id.to_string()),

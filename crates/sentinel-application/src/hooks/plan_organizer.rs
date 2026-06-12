@@ -823,6 +823,7 @@ mod tests {
             llm: None,
             memory_mcp: base.memory_mcp,
             env: base.env,
+            linear_lookup: None,
         };
         let input = HookInput {
             tool_name: Some("ExitPlanMode".to_string()),

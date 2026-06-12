@@ -61,8 +61,10 @@ pub fn process_pretool(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
         return HookOutput::allow();
     };
 
-    // Look up the full cached issue; fail open if absent.
-    let Some(issue) = cache_lookup(ctx, &ticket) else {
+    // Look up the issue — REAL-TIME first (single-ticket live Linear fetch),
+    // falling back to the on-disk cache when the live port is absent or fails.
+    // Fail open (allow) only if neither source can produce the issue.
+    let Some(issue) = live_or_cached(ctx, &ticket) else {
         return HookOutput::allow();
     };
 
@@ -296,7 +298,21 @@ fn looks_like_identifier(s: &str) -> bool {
         && num.chars().all(|c| c.is_ascii_digit())
 }
 
-/// Read the issue cache and return `ticket`'s full issue object, if present.
+/// Resolve the issue as real-time as possible: try the live single-ticket
+/// Linear lookup first (so the gate reflects this-instant state), and fall back
+/// to the on-disk cache when the live port is absent (no token configured) or
+/// returns `None` (network error / timeout / not found). This is the
+/// "real-time, cache as fallback" contract — never bricks pickup on a flaky
+/// network, but is live whenever it can be.
+fn live_or_cached(ctx: &HookContext<'_>, ticket: &str) -> Option<Value> {
+    if let Some(port) = ctx.linear_lookup {
+        if let Some(live) = port.fetch_issue(ticket) {
+            return Some(live);
+        }
+    }
+    cache_lookup(ctx, ticket)
+}
+
 fn cache_lookup(ctx: &HookContext<'_>, ticket: &str) -> Option<Value> {
     let path = cache_path(ctx)?;
     let text = ctx.fs.read_to_string(&path).ok()?;

@@ -418,8 +418,8 @@ where
 // The CLI (hook_cmd.rs) constructs concrete adapters and injects them.
 
 pub use sentinel_domain::ports::{
-    EnvPort, FileSystemPort, GitStatusPort, LlmModel, LlmPort, LlmRequest, MemoryMcpPort,
-    ProcessOutput, ProcessPort, VectorPoint, VectorScrollResult, VectorStorePort,
+    EnvPort, FileSystemPort, GitStatusPort, LinearLookupPort, LlmModel, LlmPort, LlmRequest,
+    MemoryMcpPort, ProcessOutput, ProcessPort, VectorPoint, VectorScrollResult, VectorStorePort,
 };
 
 // ---------------------------------------------------------------------------
@@ -451,6 +451,10 @@ pub struct HookContext<'a> {
 
     /// Environment-variable reader. Always present — wraps `std::env`.
     pub env: &'a dyn EnvPort,
+
+    /// Real-time single-issue Linear lookup for the PM gate. `None` when no
+    /// Linear token is configured — the gate then falls back to the cache.
+    pub linear_lookup: Option<&'a dyn LinearLookupPort>,
 }
 
 impl HookContext<'_> {
@@ -632,6 +636,7 @@ pub mod test_support {
             llm: None,
             memory_mcp,
             env,
+            linear_lookup: None,
         }
     }
 }

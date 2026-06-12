@@ -484,6 +484,7 @@ mod tests {
             llm: None,
             memory_mcp: mem,
             env,
+            linear_lookup: None,
         }
     }
 

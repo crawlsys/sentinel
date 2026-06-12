@@ -326,6 +326,7 @@ mod tests {
             llm: None,
             memory_mcp: base.memory_mcp,
             env: base.env,
+            linear_lookup: None,
         }
     }
 

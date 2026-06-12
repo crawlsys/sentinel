@@ -298,6 +298,25 @@ pub struct ProcessOutput {
 // LLM port
 // ---------------------------------------------------------------------------
 
+/// Port for a real-time, single-issue Linear lookup.
+///
+/// The PM gate (`linear_pm_gate`) is a synchronous `PreToolUse` hook that must
+/// decide block/allow in milliseconds, so it can't drive an async client. This
+/// port wraps a blocking single-issue fetch: given a Linear identifier (e.g.
+/// `"FPCRM-606"`), return the issue as a JSON value in the SAME shape as the
+/// on-disk cache (`identifier`, `estimate`, `priority`, `state{name,type}`,
+/// `labels`, `assignee`, `projectMilestone`, `projectHasMilestones`,
+/// `blockedBy`/`relations`) so the gate's existing parsing works unchanged.
+///
+/// The gate prefers this live fetch and falls back to the cache file when the
+/// port is absent or returns `None` (no token, network error, timeout) — so
+/// pickup is real-time when possible and never bricked when not.
+pub trait LinearLookupPort: Send + Sync {
+    /// Fetch one issue by identifier. `None` on any failure (missing token,
+    /// network error, timeout, not found) — callers fall back to the cache.
+    fn fetch_issue(&self, identifier: &str) -> Option<serde_json::Value>;
+}
+
 /// Port for free-form LLM text completion.
 ///
 /// Wraps Anthropic / `OpenRouter` / etc. for hooks that need an LLM call but

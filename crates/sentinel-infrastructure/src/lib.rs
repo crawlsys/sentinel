@@ -23,6 +23,7 @@ pub mod enforcement_graph;
 pub mod interceptor;
 pub mod ipc;
 pub mod linear_enforcer;
+pub mod linear_lookup;
 pub mod llm_scorer_runtime;
 pub mod mcp_transport;
 pub mod memory_mcp_client;
