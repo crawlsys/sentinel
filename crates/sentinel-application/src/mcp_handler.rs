@@ -216,6 +216,7 @@ impl McpHandler {
             "sentinel__submit_step_complete" => self.submit_step_complete(call.arguments).await,
             // ── Proof corpus query (M4.3) ────────────────────────────
             "sentinel__query_proof_corpus" => self.query_proof_corpus(call.arguments).await,
+            "sentinel__linear_pm_audit" => self.linear_pm_audit(call.arguments),
             _ => McpToolResult::err(format!("Unknown tool: {}", call.name)),
         }
     }
@@ -264,6 +265,37 @@ impl McpHandler {
                 Err(e) => McpToolResult::err(format!("Serialization error: {e}")),
             },
             Err(e) => McpToolResult::err(format!("Verification failed: {e}")),
+        }
+    }
+
+    /// `sentinel__linear_pm_audit` — run the PM-enforcement audit over the
+    /// local Linear issue cache and return the summary. Read-only; writes
+    /// the metrics artifact as a side effect (idempotent overwrite).
+    fn linear_pm_audit(&self, args: serde_json::Value) -> McpToolResult {
+        use crate::linear_pm_audit::{scan_pm_audit, BurndownInputs};
+
+        let Some(home) = dirs::home_dir() else {
+            return McpToolResult::err("could not resolve home directory");
+        };
+        let sentinel_dir = home.join(".claude").join("sentinel");
+        let linear_cache = sentinel_dir.join("linear-assigned.json");
+        let output_summary = sentinel_dir.join("metrics").join("linear-pm-audit.json");
+
+        let burndown = BurndownInputs {
+            velocity_pts_per_week: args
+                .get("velocity_pts_per_week")
+                .and_then(serde_json::Value::as_f64),
+            weeks_available: args
+                .get("weeks_available")
+                .and_then(serde_json::Value::as_f64),
+        };
+
+        match scan_pm_audit(&linear_cache, &output_summary, burndown) {
+            Ok(summary) => match serde_json::to_value(&summary) {
+                Ok(v) => McpToolResult::ok(v),
+                Err(e) => McpToolResult::err(format!("Serialization error: {e}")),
+            },
+            Err(e) => McpToolResult::err(format!("PM audit failed: {e}")),
         }
     }
 

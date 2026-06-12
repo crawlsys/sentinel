@@ -35,6 +35,7 @@ pub mod hygiene_override;
 pub mod hygiene_reminders;
 pub mod linear_inbound_sync;
 pub mod linear_lifecycle;
+pub mod linear_pm_gate;
 pub mod mcp_health;
 pub mod memory_extract;
 pub mod memory_feedback;
@@ -285,6 +286,7 @@ pub const HOOK_NAMES: &[&str] = &[
     "hygiene_reminders",
     "linear_inbound_sync",
     "linear_lifecycle",
+    "linear_pm_gate",
     "mcp_health",
     "memory_extract",
     "memory_feedback",

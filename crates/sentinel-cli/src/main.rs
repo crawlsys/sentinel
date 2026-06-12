@@ -30,6 +30,7 @@ mod mcp_cmd;
 mod pr_review_cmd;
 mod project_cmd;
 mod resign_cmd;
+mod linear_audit_cmd;
 mod roi_cmd;
 mod rotate_key_cmd;
 mod scan_cmd;
@@ -211,6 +212,15 @@ enum Commands {
     Roi {
         #[command(subcommand)]
         action: RoiAction,
+    },
+
+    /// Linear PM-enforcement audit — estimate hygiene, oversized tickets,
+    /// QA-failed risk, velocity burndown, and estimate-vs-actual calibration
+    /// over the Linear issue cache. Codifies the "good PM is good software"
+    /// checks. Writes ~/.claude/sentinel/metrics/linear-pm-audit.{json,jsonl}.
+    LinearAudit {
+        #[command(subcommand)]
+        action: LinearAuditAction,
     },
 
     /// Manage browser test (used by browserbase-tester skill) state
@@ -664,6 +674,22 @@ enum RoiAction {
 }
 
 #[derive(Subcommand)]
+enum LinearAuditAction {
+    /// Audit the Linear issue cache for PM discipline and write
+    /// ~/.claude/sentinel/metrics/linear-pm-audit.{json,jsonl}.
+    Scan {
+        /// Measured team velocity in story points per week (enables the
+        /// burndown projection when combined with --weeks).
+        #[arg(long)]
+        velocity: Option<f64>,
+        /// Weeks remaining until the target date (enables the burndown
+        /// projection when combined with --velocity).
+        #[arg(long)]
+        weeks: Option<f64>,
+    },
+}
+
+#[derive(Subcommand)]
 enum SlaAction {
     /// Apply rules against a subjects JSONL; record breaches.
     Check {
@@ -820,6 +846,11 @@ async fn main() -> anyhow::Result<()> {
         },
         Commands::Roi { action } => match action {
             RoiAction::Scan => roi_cmd::run(),
+        },
+        Commands::LinearAudit { action } => match action {
+            LinearAuditAction::Scan { velocity, weeks } => {
+                linear_audit_cmd::run(velocity, weeks)
+            }
         },
         Commands::DeployFreq { action } => match action {
             DeployFreqAction::Aggregate => deploy_freq_cmd::run_aggregate(),

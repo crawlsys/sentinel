@@ -30,6 +30,7 @@ pub mod issue_suggest;
 pub mod judge_enforcement;
 pub mod judge_service;
 pub mod lead_time;
+pub mod linear_pm_audit;
 pub mod memory_telemetry;
 pub mod master_dashboard;
 pub mod mcp_handler;

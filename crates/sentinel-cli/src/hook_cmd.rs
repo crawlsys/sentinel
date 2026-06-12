@@ -1312,6 +1312,14 @@ fn handle_pre_tool_use(
     });
     output.merge(&bug_gate_output);
 
+    // Linear PM-enforcement gate — hard-block starting an undecomposed,
+    // oversized (>=8pt) Linear ticket. Fails open on anything it can't
+    // resolve offline; only the high-confidence violation is blocked.
+    let linear_pm_output = time_and_record(ctx.fs, &mk_ctx("linear_pm_gate"), || {
+        hooks::linear_pm_gate::process_pretool(input, ctx)
+    });
+    output.merge(&linear_pm_output);
+
     // Task decomposition gate — block mutating tools (Edit/Write/NotebookEdit,
     // state-changing Bash) when no live decomposed task list exists for the
     // session. Allowlists Read/Glob/Grep/Task*/Skill/sequential-thinking so the

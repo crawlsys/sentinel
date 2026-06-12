@@ -580,6 +580,23 @@ fn tool_definitions() -> serde_json::Value {
                     },
                     "required": ["question", "content"]
                 }
+            },
+            {
+                "name": "sentinel__linear_pm_audit",
+                "description": "Run the Linear PM-enforcement audit over the local Linear issue cache (~/.claude/sentinel/linear-assigned.json): estimate hygiene (missing / non-Fibonacci), oversized open tickets (>=8pt decomposition candidates), QA-failed risk (built-but-bouncing points), optional velocity burndown (can remaining points close by the target date), and estimate-vs-actual cycle-time calibration per estimate bucket. Returns the summary JSON. Read-only.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "velocity_pts_per_week": {
+                            "type": "number",
+                            "description": "Measured team velocity (story points per week). Combined with weeks_available, enables the burndown projection."
+                        },
+                        "weeks_available": {
+                            "type": "number",
+                            "description": "Weeks remaining until the target date. Combined with velocity_pts_per_week, enables the burndown projection."
+                        }
+                    }
+                }
             }
         ]
     })
