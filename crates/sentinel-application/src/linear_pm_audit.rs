@@ -457,12 +457,12 @@ fn blocked_reason(v: &serde_json::Value) -> Option<String> {
             }
         }
     }
-    // 2. Blocked workflow state.
+    // 2. Blocked workflow state — bare "Blocked" or Firefly "QA Blocked".
     if let Some(state) = v.get("state") {
         let name = state.get("name").and_then(Value::as_str).unwrap_or("");
         let ty = state.get("type").and_then(Value::as_str).unwrap_or("");
-        if name.eq_ignore_ascii_case("Blocked") || ty.eq_ignore_ascii_case("blocked") {
-            return Some("Blocked state".into());
+        if name.to_lowercase().contains("blocked") || ty.eq_ignore_ascii_case("blocked") {
+            return Some(format!("{name} state"));
         }
     }
     // 3. Blocked / blocker label.
