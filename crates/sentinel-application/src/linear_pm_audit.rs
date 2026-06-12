@@ -72,6 +72,11 @@ struct Issue {
     state_type: String,
     started_at: Option<String>,
     completed_at: Option<String>,
+    /// Human-readable blocked reason, or `None` if startable. Mirrors the
+    /// [`crate::hooks::linear_pm_gate`] blocked rule (open blocked-by relation,
+    /// Blocked state, or blocked/blocker label) so the report and the gate
+    /// agree on what "blocked" means.
+    blocked_reason: Option<String>,
 }
 
 impl Issue {
@@ -142,6 +147,8 @@ pub struct PmAuditSummary {
     pub non_fibonacci: usize,
     // Check 2: oversized
     pub oversized_open: usize,
+    // Blocked: open tickets that are blocked (a relation, state, or label).
+    pub blocked_open: usize,
     // Check 3: QA-failed
     pub qa_failed: usize,
     pub qa_failed_points: f64,
@@ -237,6 +244,21 @@ pub fn scan_pm_audit(
             });
         }
 
+        // Check 2b: blocked & still open → must not be picked up.
+        if iss.is_open() {
+            if let Some(reason) = &iss.blocked_reason {
+                summary.blocked_open += 1;
+                flags.push(PmFlag {
+                    identifier: iss.identifier.clone(),
+                    title: iss.title.clone(),
+                    category: "blocked".into(),
+                    estimate: iss.estimate,
+                    state: iss.state_name.clone(),
+                    detail: format!("{reason} — do not start until the blocker clears"),
+                });
+            }
+        }
+
         // Check 3: QA-failed.
         if iss.is_qa_failed() {
             summary.qa_failed += 1;
@@ -302,6 +324,7 @@ pub fn scan_pm_audit(
 
     summary.total_flags = flags.len();
     summary.hard_violations = summary.oversized_open > 0
+        || summary.blocked_open > 0
         || flags
             .iter()
             .any(|f| f.category == "missing-estimate");
@@ -372,9 +395,57 @@ fn load_issues(path: &Path) -> Result<Vec<Issue>> {
                 .get("completedAt")
                 .and_then(serde_json::Value::as_str)
                 .map(str::to_string),
+            blocked_reason: blocked_reason(v),
         });
     }
     Ok(out)
+}
+
+/// Human-readable reason an issue is blocked, or `None` if startable. Checks
+/// the same three signals as the gate: an open `blockedBy` relation, a Blocked
+/// workflow state, or a blocked/blocker label. Permissive on shape.
+fn blocked_reason(v: &serde_json::Value) -> Option<String> {
+    use serde_json::Value;
+    // 1. Open blocked-by relation (a related issue not completed/canceled).
+    if let Some(arr) = v.get("blockedBy").and_then(Value::as_array) {
+        for rel in arr {
+            let ty = rel
+                .get("state")
+                .and_then(|s| s.get("type"))
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_lowercase();
+            if ty != "completed" && ty != "canceled" {
+                let id = rel
+                    .get("identifier")
+                    .and_then(Value::as_str)
+                    .unwrap_or("an open issue");
+                return Some(format!("blocked by {id}"));
+            }
+        }
+    }
+    // 2. Blocked workflow state.
+    if let Some(state) = v.get("state") {
+        let name = state.get("name").and_then(Value::as_str).unwrap_or("");
+        let ty = state.get("type").and_then(Value::as_str).unwrap_or("");
+        if name.eq_ignore_ascii_case("Blocked") || ty.eq_ignore_ascii_case("blocked") {
+            return Some("Blocked state".into());
+        }
+    }
+    // 3. Blocked / blocker label.
+    if let Some(arr) = v.get("labels").and_then(Value::as_array) {
+        for l in arr {
+            let label = l
+                .as_str()
+                .or_else(|| l.get("name").and_then(Value::as_str))
+                .unwrap_or("")
+                .to_lowercase();
+            if label == "blocked" || label == "blocker" {
+                return Some("'blocked' label".into());
+            }
+        }
+    }
+    None
 }
 
 fn write_outputs(flags: &[PmFlag], summary: &PmAuditSummary, output_summary: &Path) -> Result<()> {
@@ -513,6 +584,26 @@ mod tests {
         let s = scan_pm_audit(c.path(), out.path(), BurndownInputs::default()).unwrap();
         assert_eq!(s.qa_failed, 2);
         assert!((s.qa_failed_points - 8.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn flags_blocked_open_tickets() {
+        let c = cache(
+            r#"[
+                {"identifier":"K-1","estimate":3,"state":{"name":"Todo","type":"backlog"},
+                 "blockedBy":[{"identifier":"K-9","state":{"type":"started"}}]},
+                {"identifier":"K-2","estimate":2,"state":{"name":"Blocked","type":"started"}},
+                {"identifier":"K-3","estimate":2,"state":{"name":"Todo","type":"backlog"},"labels":["blocker"]},
+                {"identifier":"K-4","estimate":2,"state":{"name":"Todo","type":"backlog"},
+                 "blockedBy":[{"identifier":"K-8","state":{"type":"completed"}}]}
+            ]"#,
+        );
+        let out = tempfile::NamedTempFile::new().unwrap();
+        let s = scan_pm_audit(c.path(), out.path(), BurndownInputs::default()).unwrap();
+        // K-1 (open relation), K-2 (Blocked state), K-3 (label) = 3 blocked;
+        // K-4's blocker is completed → not blocked.
+        assert_eq!(s.blocked_open, 3);
+        assert!(s.hard_violations);
     }
 
     #[test]

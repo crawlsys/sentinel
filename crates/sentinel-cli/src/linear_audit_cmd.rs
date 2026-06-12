@@ -69,6 +69,11 @@ pub fn run(velocity: Option<f64>, weeks: Option<f64>) -> Result<()> {
     );
     // Check 2 + 3
     print_flag_line(
+        "Blocked & open (do not start)",
+        summary.blocked_open,
+        summary.blocked_open > 0,
+    );
+    print_flag_line(
         "Oversized & open (decompose)",
         summary.oversized_open,
         summary.oversized_open > 0,

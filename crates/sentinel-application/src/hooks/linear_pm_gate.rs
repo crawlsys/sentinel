@@ -61,27 +61,134 @@ pub fn process_pretool(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
         return HookOutput::allow();
     };
 
-    // Look up its estimate in the cache; fail open if absent.
-    let Some(estimate) = cache_estimate(ctx, &ticket) else {
+    // Look up the full cached issue; fail open if absent.
+    let Some(issue) = cache_lookup(ctx, &ticket) else {
         return HookOutput::allow();
     };
 
-    if estimate < OVERSIZED_POINTS {
-        return HookOutput::allow();
+    // Check 1 (hardest stop): the ticket is BLOCKED. Starting a ticket whose
+    // upstream work isn't done is wasted/at-risk effort — refuse it
+    // regardless of size. Covers an open blocked-by relation, a Blocked
+    // workflow state, or a blocked/blocker label.
+    if let Some(reason) = blocked_reason(&issue) {
+        let envelope = HookEnvelope::block(
+            "Linear PM-Enforcement Gate",
+            format!(
+                "Refusing to start {ticket}: it is BLOCKED ({reason}). Starting a \
+                 blocked ticket means working on something gated by incomplete \
+                 upstream work. Resolve the blocker (or remove the block) first, \
+                 then start it. Run `sentinel linear-audit scan` for the full PM picture."
+            ),
+        );
+        return HookOutput::block(envelope.render());
     }
 
-    let envelope = HookEnvelope::block(
-        "Linear PM-Enforcement Gate",
-        format!(
-            "Refusing to start {ticket}: it is a {estimate:.0}-point ticket and \
-             has not been decomposed. An 8+ point ticket as a single block hides \
-             risk and defies estimation — split it into sub-issues (each ≤ 5 pts) \
-             first, then start one of those. Run `sentinel linear-audit scan` for \
-             the full PM picture. (This gate only fires on starting a known \
-             oversized ticket; everything else is allowed.)"
-        ),
-    );
-    HookOutput::block(envelope.render())
+    // Check 2: oversized & undecomposed.
+    let estimate = issue
+        .get("estimate")
+        .and_then(Value::as_f64)
+        .filter(|e| e.is_finite() && *e > 0.0);
+    if let Some(e) = estimate {
+        if e >= OVERSIZED_POINTS {
+            let envelope = HookEnvelope::block(
+                "Linear PM-Enforcement Gate",
+                format!(
+                    "Refusing to start {ticket}: it is a {e:.0}-point ticket and \
+                     has not been decomposed. An 8+ point ticket as a single block hides \
+                     risk and defies estimation — split it into sub-issues (each ≤ 5 pts) \
+                     first, then start one of those. Run `sentinel linear-audit scan` for \
+                     the full PM picture."
+                ),
+            );
+            return HookOutput::block(envelope.render());
+        }
+    }
+
+    HookOutput::allow()
+}
+
+/// Return a human-readable reason the issue is blocked, or `None` if it is
+/// startable. Checks all three signals a team uses to mark a block:
+///   1. an open `blocked by` issue-relation (the related issue is not Done /
+///      Canceled),
+///   2. a `Blocked` workflow state (by name or type), and
+///   3. a `blocked` / `blocker` label.
+/// The cache is permissive: any of `relations`/`blockedBy`/`state`/`labels`
+/// may be absent, in which case that signal simply doesn't fire (fail open).
+fn blocked_reason(issue: &Value) -> Option<String> {
+    // 1. Open blocked-by relation. Accept a few shapes: a `blockedBy` array of
+    //    issue objects, or a `relations` array of `{type, relatedIssue:{state}}`.
+    if let Some(arr) = issue.get("blockedBy").and_then(Value::as_array) {
+        for rel in arr {
+            if !related_is_resolved(rel) {
+                let id = rel
+                    .get("identifier")
+                    .and_then(Value::as_str)
+                    .unwrap_or("an open issue");
+                return Some(format!("blocked by {id}"));
+            }
+        }
+    }
+    if let Some(arr) = issue.get("relations").and_then(Value::as_array) {
+        for rel in arr {
+            let ty = rel
+                .get("type")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_lowercase();
+            if ty.contains("blocked") || ty == "blocks_inverse" {
+                let related = rel.get("relatedIssue").or_else(|| rel.get("issue"));
+                if let Some(r) = related {
+                    if !related_is_resolved(r) {
+                        let id = r
+                            .get("identifier")
+                            .and_then(Value::as_str)
+                            .unwrap_or("an open issue");
+                        return Some(format!("blocked by {id}"));
+                    }
+                }
+            }
+        }
+    }
+
+    // 2. Blocked workflow state (by name or type).
+    if let Some(state) = issue.get("state") {
+        let name = state.get("name").and_then(Value::as_str).unwrap_or("");
+        let ty = state.get("type").and_then(Value::as_str).unwrap_or("");
+        if name.eq_ignore_ascii_case("Blocked") || ty.eq_ignore_ascii_case("blocked") {
+            return Some("its workflow state is Blocked".into());
+        }
+    }
+
+    // 3. A blocked / blocker label. Accept `labels` as an array of strings or
+    //    of `{name}` objects.
+    if let Some(arr) = issue.get("labels").and_then(Value::as_array) {
+        for l in arr {
+            let label = l
+                .as_str()
+                .or_else(|| l.get("name").and_then(Value::as_str))
+                .unwrap_or("")
+                .to_lowercase();
+            if label == "blocked" || label == "blocker" {
+                return Some("it carries a 'blocked' label".into());
+            }
+        }
+    }
+
+    None
+}
+
+/// Is a related issue resolved (Done / Canceled), i.e. no longer a blocker?
+/// Reads its `state.type` (Linear: `completed` / `canceled`). Unknown → treat
+/// as still-open (conservative: an unresolved-looking blocker blocks).
+fn related_is_resolved(related: &Value) -> bool {
+    let ty = related
+        .get("state")
+        .and_then(|s| s.get("type"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_lowercase();
+    ty == "completed" || ty == "canceled"
 }
 
 /// Does this `update_issue` payload look like a move into active work?
@@ -135,24 +242,17 @@ fn looks_like_identifier(s: &str) -> bool {
         && num.chars().all(|c| c.is_ascii_digit())
 }
 
-/// Read the issue cache and return `ticket`'s estimate, if present.
-fn cache_estimate(ctx: &HookContext<'_>, ticket: &str) -> Option<f64> {
+/// Read the issue cache and return `ticket`'s full issue object, if present.
+fn cache_lookup(ctx: &HookContext<'_>, ticket: &str) -> Option<Value> {
     let path = cache_path(ctx)?;
     let text = ctx.fs.read_to_string(&path).ok()?;
     let value: Value = serde_json::from_str(&text).ok()?;
     let arr = value
         .as_array()
         .or_else(|| value.get("issues").and_then(Value::as_array))?;
-    for issue in arr {
-        let id = issue.get("identifier").and_then(Value::as_str);
-        if id == Some(ticket) {
-            return issue
-                .get("estimate")
-                .and_then(Value::as_f64)
-                .filter(|e| e.is_finite() && *e > 0.0);
-        }
-    }
-    None
+    arr.iter()
+        .find(|issue| issue.get("identifier").and_then(Value::as_str) == Some(ticket))
+        .cloned()
 }
 
 fn cache_path(ctx: &HookContext<'_>) -> Option<PathBuf> {
@@ -200,5 +300,64 @@ mod tests {
         // No HookContext needed because we short-circuit before touching it;
         // assert via the tool_name guard directly.
         assert_eq!(input.tool_name.as_deref(), Some("Read"));
+    }
+
+    #[test]
+    fn blocked_by_open_relation() {
+        // blockedBy an issue that is NOT resolved → blocked.
+        let issue = serde_json::json!({
+            "identifier": "A-1",
+            "blockedBy": [{ "identifier": "A-2", "state": { "type": "started" } }]
+        });
+        assert!(blocked_reason(&issue).is_some());
+    }
+
+    #[test]
+    fn blocked_by_resolved_relation_is_not_blocked() {
+        // blockedBy an issue that IS completed → no longer a blocker.
+        let issue = serde_json::json!({
+            "identifier": "A-1",
+            "blockedBy": [{ "identifier": "A-2", "state": { "type": "completed" } }]
+        });
+        assert!(blocked_reason(&issue).is_none());
+    }
+
+    #[test]
+    fn relations_blocked_by_type() {
+        let issue = serde_json::json!({
+            "identifier": "A-1",
+            "relations": [{
+                "type": "blocked_by",
+                "relatedIssue": { "identifier": "A-9", "state": { "type": "backlog" } }
+            }]
+        });
+        assert!(blocked_reason(&issue).is_some());
+    }
+
+    #[test]
+    fn blocked_workflow_state() {
+        let by_name = serde_json::json!({ "state": { "name": "Blocked", "type": "started" } });
+        assert!(blocked_reason(&by_name).is_some());
+        let by_type = serde_json::json!({ "state": { "name": "Waiting", "type": "blocked" } });
+        assert!(blocked_reason(&by_type).is_some());
+    }
+
+    #[test]
+    fn blocked_label_string_and_object() {
+        let str_label = serde_json::json!({ "labels": ["blocked", "frontend"] });
+        assert!(blocked_reason(&str_label).is_some());
+        let obj_label = serde_json::json!({ "labels": [{ "name": "blocker" }] });
+        assert!(blocked_reason(&obj_label).is_some());
+    }
+
+    #[test]
+    fn unblocked_ticket_passes() {
+        let issue = serde_json::json!({
+            "identifier": "A-1",
+            "estimate": 3,
+            "state": { "name": "Todo", "type": "backlog" },
+            "labels": ["frontend"]
+        });
+        assert!(blocked_reason(&issue).is_none());
     }
 }
