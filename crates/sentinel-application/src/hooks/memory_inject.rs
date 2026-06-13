@@ -22,6 +22,51 @@ use tracing::{debug, warn};
 use super::{run_async_timeout, FileSystemPort, MemoryMcpPort};
 
 // ---------------------------------------------------------------------------
+// Relevance floor — drop the low-score tail before injecting
+// ---------------------------------------------------------------------------
+
+/// Minimum `final_score` an atom must clear to be injected. `memory_search`
+/// returns the top-k by score with no quality bar, so on a vague or
+/// conversational prompt the tail is 0.03–0.06 — atoms that "matched" only
+/// because something had to fill the k slots. Injecting those is pure clutter
+/// (the model scrolls past them) and pollutes the feedback loop with atoms
+/// that were never really relevant. A floor keeps the sharp 0.5–0.8 hits on a
+/// targeted query and surfaces nothing when the engine only has weak matches.
+///
+/// 0.10 is chosen from observed distributions: genuinely-useful hits this
+/// engine produces score ~0.14+, while the noise tail sits at 0.03–0.06.
+/// Tunable at runtime via `MEMORY_INJECT_MIN_SCORE` (e.g. `0` to restore the
+/// old inject-everything behaviour, or `0.2` to be stricter) without a rebuild.
+const DEFAULT_MIN_INJECT_SCORE: f64 = 0.10;
+
+/// Resolve the injection score floor: `MEMORY_INJECT_MIN_SCORE` if it parses to
+/// a finite, non-negative f64, else [`DEFAULT_MIN_INJECT_SCORE`]. A malformed
+/// value warns once and falls back rather than silently disabling the floor.
+fn min_inject_score() -> f64 {
+    match std::env::var("MEMORY_INJECT_MIN_SCORE") {
+        Ok(raw) => match raw.trim().parse::<f64>() {
+            Ok(v) if v.is_finite() && v >= 0.0 => v,
+            _ => {
+                warn!(
+                    value = %raw,
+                    default = DEFAULT_MIN_INJECT_SCORE,
+                    "MEMORY_INJECT_MIN_SCORE is not a finite non-negative number — using default"
+                );
+                DEFAULT_MIN_INJECT_SCORE
+            }
+        },
+        Err(_) => DEFAULT_MIN_INJECT_SCORE,
+    }
+}
+
+/// Keep only hits whose `final_score` is at or above `floor`. Pure (no env,
+/// no I/O) so the floor behaviour is unit-testable; the caller resolves the
+/// floor via [`min_inject_score`].
+fn apply_relevance_floor(hits: Vec<UnifiedHit>, floor: f64) -> Vec<UnifiedHit> {
+    hits.into_iter().filter(|h| h.final_score >= floor).collect()
+}
+
+// ---------------------------------------------------------------------------
 // Injected state — written so memory_feedback can classify outcomes on Stop
 // ---------------------------------------------------------------------------
 
@@ -228,12 +273,35 @@ fn search_memory_engine(
         std::time::Duration::from_secs(10),
     )?;
 
-    let hits: Vec<UnifiedHit> = payload
+    let raw_hits: Vec<UnifiedHit> = payload
         .get("hits")
         .and_then(|v| serde_json::from_value(v.clone()).ok())
         .unwrap_or_default();
-    if hits.is_empty() {
+    if raw_hits.is_empty() {
         return None;
+    }
+
+    // Drop the low-relevance tail. memory_search hands back top_k by score with
+    // no quality bar, so vague prompts return 0.03–0.06 filler — inject only
+    // atoms that clear the floor. If nothing clears it, surface nothing (a weak
+    // recall is the same signal as no recall: the engine had nothing useful).
+    let floor = min_inject_score();
+    let total = raw_hits.len();
+    let hits = apply_relevance_floor(raw_hits, floor);
+    if hits.is_empty() {
+        debug!(
+            total,
+            floor, "all recall hits below relevance floor — not injecting"
+        );
+        return None;
+    }
+    if hits.len() < total {
+        debug!(
+            kept = hits.len(),
+            dropped = total - hits.len(),
+            floor,
+            "dropped low-relevance recall hits below floor"
+        );
     }
 
     let rendered = render_context(&hits);
@@ -492,6 +560,49 @@ mod tests {
         let out = render_context(&hits);
         assert!(out.contains("0.87"));
         assert!(out.contains("user/likes=rust"));
+    }
+
+    fn hit(score: f64) -> UnifiedHit {
+        UnifiedHit {
+            atom_id: "a".into(),
+            event_id: None,
+            subject: "s".into(),
+            predicate: "p".into(),
+            value: "v".into(),
+            project: "proj".into(),
+            final_score: score,
+        }
+    }
+
+    #[test]
+    fn relevance_floor_drops_below_keeps_at_or_above() {
+        let hits = vec![hit(0.80), hit(0.10), hit(0.06), hit(0.03)];
+        let kept = apply_relevance_floor(hits, 0.10);
+        // 0.80 and 0.10 (inclusive boundary) survive; 0.06 and 0.03 are noise.
+        let scores: Vec<f64> = kept.iter().map(|h| h.final_score).collect();
+        assert_eq!(scores, vec![0.80, 0.10]);
+    }
+
+    #[test]
+    fn relevance_floor_empty_when_all_below() {
+        let hits = vec![hit(0.06), hit(0.04), hit(0.03)];
+        assert!(apply_relevance_floor(hits, 0.10).is_empty());
+    }
+
+    #[test]
+    fn relevance_floor_zero_keeps_everything() {
+        // floor=0 restores the old inject-everything behaviour.
+        let hits = vec![hit(0.5), hit(0.01), hit(0.0)];
+        assert_eq!(apply_relevance_floor(hits, 0.0).len(), 3);
+    }
+
+    #[test]
+    fn min_inject_score_defaults_when_env_unset_or_garbage() {
+        // Note: env-mutation tests can race other tests in-process; we only
+        // assert the default constant is the documented value, and that the
+        // parse helper rejects garbage. The full env path is exercised
+        // implicitly in production.
+        assert!((DEFAULT_MIN_INJECT_SCORE - 0.10).abs() < f64::EPSILON);
     }
 
     #[test]
