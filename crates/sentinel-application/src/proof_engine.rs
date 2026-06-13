@@ -145,8 +145,12 @@ impl ProofEngine {
                 || sentinel_domain::proof::GENESIS_HASH.to_string(),
                 |chain| chain.head_hash().to_string(),
             );
-            let combined_hash =
-                PhaseProof::compute_combined_hash(phase_id, &evidence_hash, &previous_hash);
+            let combined_hash = PhaseProof::compute_combined_hash(
+                phase_id,
+                &evidence_hash,
+                &previous_hash,
+                verdict.sufficient,
+            );
 
             let proof = PhaseProof {
                 phase_id: phase_id.to_string(),
@@ -348,6 +352,7 @@ impl ProofEngine {
                 &evidence_hash,
                 &artifact_hash,
                 &previous_hash,
+                verdict.sufficient,
             );
 
             let proof = StepProof {
@@ -783,6 +788,7 @@ mod step_evidence_tests {
                 "claim",
                 &evidence_hash,
                 sentinel_domain::proof::GENESIS_HASH,
+                true, // matches judge_verdict: JudgeVerdict::pass(..) below
             );
             let phase_proof = PhaseProof {
                 phase_id: "claim".into(),

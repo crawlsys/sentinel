@@ -632,6 +632,7 @@ mod tests {
             &evidence_hash,
             &artifact_hash,
             previous_hash,
+            true,
         );
         StepProof {
             step_id: step_id.into(),

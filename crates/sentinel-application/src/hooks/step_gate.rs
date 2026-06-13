@@ -320,6 +320,7 @@ mod tests {
             &evidence_hash,
             &artifact_hash,
             GENESIS_HASH,
+            true,
         );
         StepProof {
             step_id: step_id.into(),

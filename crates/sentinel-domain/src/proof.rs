@@ -68,16 +68,26 @@ impl PhaseProof {
         format!("{:x}", hasher.finalize())
     }
 
-    /// Compute the combined hash (the tessera)
+    /// Compute the combined hash (the tessera).
+    ///
+    /// Binds `judge_sufficient` — the AI judge's gate outcome — into the hash.
+    /// The Ed25519 signature (when present) covers `combined_hash`, so without
+    /// folding the verdict an attacker could flip `judge_verdict.sufficient` on a
+    /// sealed/signed proof and it would still pass `verify_self` AND signature
+    /// verification (the gate outcome was not integrity-protected). Folding it
+    /// (domain-separated) makes the verdict tamper-evident.
     pub fn compute_combined_hash(
         phase_id: &str,
         evidence_hash: &str,
         previous_hash: &str,
+        judge_sufficient: bool,
     ) -> String {
         let mut hasher = Sha256::new();
         hasher.update(phase_id.as_bytes());
         hasher.update(evidence_hash.as_bytes());
         hasher.update(previous_hash.as_bytes());
+        hasher.update(b"judge");
+        hasher.update([u8::from(judge_sufficient)]);
         format!("{:x}", hasher.finalize())
     }
 
@@ -98,9 +108,14 @@ impl PhaseProof {
             return false;
         }
 
-        // Verify combined hash
-        let expected_combined =
-            Self::compute_combined_hash(&self.phase_id, &self.evidence_hash, &self.previous_hash);
+        // Verify combined hash — includes the bound judge verdict, so a flipped
+        // verdict on a sealed proof breaks recomputation.
+        let expected_combined = Self::compute_combined_hash(
+            &self.phase_id,
+            &self.evidence_hash,
+            &self.previous_hash,
+            self.judge_verdict.sufficient,
+        );
         self.combined_hash == expected_combined
     }
 }
@@ -537,7 +552,7 @@ mod tests {
         let evidence = Evidence::default();
         let evidence_hash = PhaseProof::compute_evidence_hash(&evidence);
         let combined_hash =
-            PhaseProof::compute_combined_hash(phase_id, &evidence_hash, previous_hash);
+            PhaseProof::compute_combined_hash(phase_id, &evidence_hash, previous_hash, true);
 
         PhaseProof {
             phase_id: phase_id.to_string(),
@@ -644,9 +659,26 @@ mod tests {
         let h2 = PhaseProof::compute_evidence_hash(&evidence);
         assert_eq!(h1, h2);
 
-        let c1 = PhaseProof::compute_combined_hash("claim", &h1, GENESIS_HASH);
-        let c2 = PhaseProof::compute_combined_hash("claim", &h2, GENESIS_HASH);
+        let c1 = PhaseProof::compute_combined_hash("claim", &h1, GENESIS_HASH, true);
+        let c2 = PhaseProof::compute_combined_hash("claim", &h2, GENESIS_HASH, true);
         assert_eq!(c1, c2);
+    }
+
+    #[test]
+    fn flipping_judge_verdict_on_sealed_proof_breaks_verify_self() {
+        // Security regression: the judge's gate outcome is folded into
+        // combined_hash, so flipping `sufficient` on an already-sealed proof
+        // (without re-sealing) must fail recomputation. Previously the verdict
+        // was a free field — an attacker could turn a fail into a pass and the
+        // proof (and its Ed25519 signature over combined_hash) still verified.
+        let mut proof = make_proof("claim", "linear", GENESIS_HASH);
+        assert!(proof.verify_self(), "freshly sealed proof must verify");
+
+        proof.judge_verdict.sufficient = !proof.judge_verdict.sufficient;
+        assert!(
+            !proof.verify_self(),
+            "a flipped judge verdict on a sealed proof must break verify_self"
+        );
     }
 
     #[test]
@@ -654,7 +686,7 @@ mod tests {
         let evidence = Evidence::default();
         let evidence_hash = PhaseProof::compute_evidence_hash(&evidence);
         let combined_hash =
-            PhaseProof::compute_combined_hash("claim", &evidence_hash, GENESIS_HASH);
+            PhaseProof::compute_combined_hash("claim", &evidence_hash, GENESIS_HASH, true);
 
         let now = Utc::now();
         let proof = PhaseProof {
@@ -720,6 +752,7 @@ mod tests {
             &evidence_hash,
             &artifact_hash,
             previous_hash,
+            true,
         );
         StepProof {
             step_id: step_id.to_string(),

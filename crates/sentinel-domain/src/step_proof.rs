@@ -181,6 +181,7 @@ impl StepProof {
         evidence_hash: &str,
         artifact_hash: &str,
         previous_hash: &str,
+        judge_sufficient: bool,
     ) -> String {
         let mut hasher = Sha256::new();
         hasher.update(step_id.as_bytes());
@@ -189,6 +190,11 @@ impl StepProof {
         hasher.update(evidence_hash.as_bytes());
         hasher.update(artifact_hash.as_bytes());
         hasher.update(previous_hash.as_bytes());
+        // Bind the AI judge's gate outcome so a flipped verdict on a sealed/
+        // signed StepProof breaks the hash (and thus the Ed25519 signature over
+        // it). Domain-separated to avoid collisions with the field bytes.
+        hasher.update(b"judge");
+        hasher.update([u8::from(judge_sufficient)]);
         format!("{:x}", hasher.finalize())
     }
 
@@ -273,7 +279,8 @@ impl StepProof {
             return false;
         }
 
-        // Combined hash — the tessera.
+        // Combined hash — the tessera. Includes the bound judge verdict, so a
+        // flipped verdict on a sealed proof breaks recomputation.
         let expected_combined = Self::compute_combined_hash(
             &self.step_id,
             &self.phase_id,
@@ -281,6 +288,7 @@ impl StepProof {
             &self.evidence_hash,
             &self.artifact_hash,
             &self.previous_hash,
+            self.judge_verdict.sufficient,
         );
         self.combined_hash == expected_combined
     }
@@ -336,6 +344,7 @@ mod tests {
             &evidence_hash,
             &artifact_hash,
             previous_hash,
+            true,
         );
         StepProof {
             step_id: step_id.into(),
@@ -391,31 +400,94 @@ mod tests {
 
     #[test]
     fn combined_hash_changes_with_any_input() {
-        let base = StepProof::compute_combined_hash("s1", "p1", "linear", "eh", "ah", GENESIS_HASH);
+        let base =
+            StepProof::compute_combined_hash("s1", "p1", "linear", "eh", "ah", GENESIS_HASH, true);
         // Each component change should yield a different hash.
         assert_ne!(
             base,
-            StepProof::compute_combined_hash("s2", "p1", "linear", "eh", "ah", GENESIS_HASH),
+            StepProof::compute_combined_hash("s2", "p1", "linear", "eh", "ah", GENESIS_HASH, true),
         );
         assert_ne!(
             base,
-            StepProof::compute_combined_hash("s1", "p2", "linear", "eh", "ah", GENESIS_HASH),
+            StepProof::compute_combined_hash("s1", "p2", "linear", "eh", "ah", GENESIS_HASH, true),
         );
         assert_ne!(
             base,
-            StepProof::compute_combined_hash("s1", "p1", "git", "eh", "ah", GENESIS_HASH),
+            StepProof::compute_combined_hash("s1", "p1", "git", "eh", "ah", GENESIS_HASH, true),
         );
         assert_ne!(
             base,
-            StepProof::compute_combined_hash("s1", "p1", "linear", "eh2", "ah", GENESIS_HASH),
+            StepProof::compute_combined_hash("s1", "p1", "linear", "eh2", "ah", GENESIS_HASH, true),
         );
         assert_ne!(
             base,
-            StepProof::compute_combined_hash("s1", "p1", "linear", "eh", "ah2", GENESIS_HASH),
+            StepProof::compute_combined_hash("s1", "p1", "linear", "eh", "ah2", GENESIS_HASH, true),
         );
         assert_ne!(
             base,
-            StepProof::compute_combined_hash("s1", "p1", "linear", "eh", "ah", "different"),
+            StepProof::compute_combined_hash("s1", "p1", "linear", "eh", "ah", "different", true),
+        );
+        // The judge verdict itself must change the hash — the security fix.
+        assert_ne!(
+            base,
+            StepProof::compute_combined_hash("s1", "p1", "linear", "eh", "ah", GENESIS_HASH, false),
+        );
+    }
+
+    #[test]
+    fn flipping_judge_verdict_on_sealed_step_breaks_verify_self() {
+        // Security regression (mirrors the PhaseProof case): the judge verdict
+        // is bound into combined_hash, so flipping `sufficient` on a sealed
+        // StepProof without re-sealing must fail recomputation.
+        let mut p = make_step("1", "claim", "linear", GENESIS_HASH, serde_json::json!({"k": "v"}));
+        assert!(p.verify_self(), "freshly sealed step must verify");
+
+        p.judge_verdict.sufficient = !p.judge_verdict.sufficient;
+        assert!(
+            !p.verify_self(),
+            "a flipped judge verdict on a sealed step must break verify_self"
+        );
+    }
+
+    #[test]
+    fn signed_step_verdict_flip_is_uncloseable_without_the_key() {
+        // The severe path: StepProof signs combined_hash. Binding the verdict
+        // into that hash closes the verdict-flip-on-signed-proof bypass two ways.
+        let key = make_signing_key();
+        let vk = key.verifying_key();
+        let mut p = make_step("1", "claim", "linear", GENESIS_HASH, serde_json::json!({"k": "v"}));
+        p.sign_with(&key);
+        assert!(p.verify_self());
+        assert!(p.verify_signature(&vk).expect("verify"));
+
+        // Attack A — flip the verdict only: combined_hash recomputation now
+        // diverges, so verify_self catches it (even though the signature still
+        // matches the untouched combined_hash bytes).
+        let mut a = p.clone();
+        a.judge_verdict.sufficient = !a.judge_verdict.sufficient;
+        assert!(!a.verify_self(), "verdict flip must break verify_self");
+
+        // Attack B — flip the verdict AND re-seal combined_hash to pass
+        // verify_self: now the signature no longer covers the new hash, and the
+        // attacker cannot re-sign without the private key.
+        let mut b = p.clone();
+        b.judge_verdict.sufficient = !b.judge_verdict.sufficient;
+        b.combined_hash = StepProof::compute_combined_hash(
+            &b.step_id,
+            &b.phase_id,
+            &b.skill,
+            &b.evidence_hash,
+            &b.artifact_hash,
+            &b.previous_hash,
+            b.judge_verdict.sufficient,
+        );
+        assert!(b.verify_self(), "re-sealed proof recomputes consistently");
+        // verify_signature returns Err(VerificationFailed) for a present-but-
+        // invalid signature (its documented 3-way contract), so the re-sealed
+        // hash no longer matching the original signature surfaces as an error.
+        assert!(
+            matches!(b.verify_signature(&vk), Err(SignatureError::VerificationFailed)),
+            "re-sealing after a verdict flip must invalidate the signature"
         );
     }
 
@@ -495,6 +567,7 @@ mod tests {
             &p.evidence_hash,
             &p.artifact_hash,
             &p.previous_hash,
+            p.judge_verdict.sufficient,
         );
         assert!(!p.verify_self(), "completed_at < started_at must fail");
     }
