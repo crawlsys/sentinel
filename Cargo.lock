@@ -3364,7 +3364,6 @@ dependencies = [
 name = "sentinel-domain"
 version = "0.4.1"
 dependencies = [
- "anyhow",
  "async-trait",
  "chrono",
  "ed25519-dalek",
