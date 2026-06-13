@@ -1012,6 +1012,46 @@ mod tests {
     }
 
     #[test]
+    fn shipped_defaults_codex_orchestrator_is_trivially_reversible() {
+        // The codex/gemini LLM orchestrators reason + RETURN text — no side
+        // effect by themselves, so they must NOT land at the A3 dual-auditor
+        // gate (which blocks a read-only review whenever a frontier auditor
+        // blips). Their mutating sub-tools stay Irreversible (next test).
+        let c = shipped();
+        assert_eq!(
+            c.classify("mcp__codex__codex", &no_input()),
+            ReversibilityClass::TriviallyReversible
+        );
+        assert_eq!(
+            c.classify("mcp__codex__read_file", &no_input()),
+            ReversibilityClass::TriviallyReversible
+        );
+        assert_eq!(
+            c.classify("mcp__gemini__gemini", &no_input()),
+            ReversibilityClass::TriviallyReversible
+        );
+    }
+
+    #[test]
+    fn shipped_defaults_codex_mutations_stay_irreversible() {
+        // The real risk lives in the mutating sub-tools — they remain
+        // Irreversible and are gated individually, exactly where it matters.
+        let c = shipped();
+        assert_eq!(
+            c.classify("mcp__codex__apply_patch", &no_input()),
+            ReversibilityClass::Irreversible
+        );
+        assert_eq!(
+            c.classify("mcp__codex__write_file", &no_input()),
+            ReversibilityClass::Irreversible
+        );
+        assert_eq!(
+            c.classify("mcp__codex__shell", &no_input()),
+            ReversibilityClass::Irreversible
+        );
+    }
+
+    #[test]
     fn shipped_defaults_doc_systems_create_is_irreversible() {
         let c = shipped();
         assert_eq!(

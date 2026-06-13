@@ -724,3 +724,42 @@ class = "TriviallyReversible"
 "Task" = "TriviallyReversible"
 "TaskCreate" = "TriviallyReversible"
 "TaskUpdate" = "TriviallyReversible"
+
+# Codex (codex-mcp) — an LLM coding agent reachable over MCP. The top-level
+# orchestrator tools (`codex`, `codex_reply`) and its read/introspection tools
+# (`read_file`, `grep_files`, `list_dir`) have NO side effect by themselves —
+# `codex`/`codex_reply` run a reasoning session and RETURN text; reading a file
+# observes. Without an entry these hit the conservative unknown-MCP default
+# (Irreversible) and land at the A3 dry-run + DUAL-frontier-auditor gate, where
+# (a) the codex schema can't carry _intent/_reasoning/_expected_effect and
+# (b) an inconclusive dual audit (one frontier model unreachable) BLOCKS — so a
+# read-only adversarial review is unrunnable whenever an auditor API blips. The
+# genuinely-mutating sub-tools stay Irreversible (below) and are gated on their
+# own, individually — exactly where the real risk is.
+[mcp.codex]
+# --- Orchestrator + reads (TriviallyReversible: reason/observe, return text) ---
+codex = "TriviallyReversible"
+codex_reply = "TriviallyReversible"
+read_file = "TriviallyReversible"
+grep_files = "TriviallyReversible"
+list_dir = "TriviallyReversible"
+mcp_health_check = "TriviallyReversible"
+mcp_list_servers = "TriviallyReversible"
+mcp_restart_server = "ReversibleWithEffort"
+# --- Mutations (stay Irreversible — gated individually, real risk lives here) ---
+apply_patch = "Irreversible"
+write_file = "Irreversible"
+shell = "Irreversible"
+
+# Gemini (gemini-mcp) — peer of codex: an LLM reachable over MCP whose tools
+# (`gemini`, `gemini_reply`, `gemini_analyze_media`) run a reasoning/analysis
+# session and RETURN text. Pure observation + generation, no external side
+# effect. Same conservative-default deadlock as codex above; classify the
+# read/advisory tools trivially reversible.
+[mcp.gemini]
+gemini = "TriviallyReversible"
+gemini_reply = "TriviallyReversible"
+gemini_analyze_media = "TriviallyReversible"
+mcp_health_check = "TriviallyReversible"
+mcp_list_servers = "TriviallyReversible"
+mcp_restart_server = "ReversibleWithEffort"
