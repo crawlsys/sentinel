@@ -5,7 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Build & Test
 
 ```
-cargo build --release                              Build optimized binary (requires Rust 1.83+)
+cargo build --release                              Build optimized binary (requires Rust 1.87+)
 cargo clippy --workspace                           Lint (pedantic + nursery enabled)
 cargo test --workspace                             Run all tests
 cargo test -p sentinel-cli -- test_extract_skill   Run a single test by name substring
@@ -37,6 +37,7 @@ sentinel mcp                           Start MCP server over stdio
 | `sentinel-domain` | — | Pure business logic: proofs, workflows, evidence, hooks, routing |
 | `sentinel-application` | — | Use cases: engine, classifier, gate, 86 hook modules |
 | `sentinel-infrastructure` | — | IO adapters: config, state store, git, MCP transport, AI judge |
+| `sentinel-graph` | — | Phase-progression engine: compiles `workflows.toml` into a durable, checkpointed langgraph StateGraph with judge-verdict interrupts and Pass/Fail routing |
 | `sentinel-cli` | `sentinel` | CLI (37 top-level subcommands) + dashboard REST API (axum) + in-repo MCP host (stdio) |
 | `sentinel-git-interceptor` | `sentinel-git-interceptor` | Git shim that routes commits through sentinel gates |
 | `sentinel-npx-interceptor` | `sentinel-npx-interceptor` | npx shim that routes installs through sentinel gates |
@@ -92,7 +93,7 @@ Hooks are invoked by Claude Code's runtime via `sentinel hook --event <Event>`:
 
 | Category | Hooks (representative) |
 |----------|-------|
-| **Blocking** | `phase_gate`, `pre_push_browser_test`, `commit_message_validator`, `git_hygiene`, `pre_commit_verification`, `wrangler_guard`, `spec_challenge_gate`, `db_ops_gate`, `pr_merge_gate` |
+| **Blocking** | `phase_gate`, `pre_push_browser_test`, `commit_message_validator`, `git_hygiene`, `pre_commit_verification`, `spec_challenge_gate`, `db_ops_gate`, `pr_merge_gate` |
 | **Observational** | `commit_hygiene`, `mcp_health`, `error_reporter`, `verification_gate`, `evidence_collector`, `context_monitor` |
 | **Routing** | `skill_router`, `skill_telemetry` |
 | **Session** | `session_init`, `pre_compact`, `activity_tracker`, `execution_log` |
@@ -101,7 +102,7 @@ Hooks are invoked by Claude Code's runtime via `sentinel hook --event <Event>`:
 
 ## Key Paths
 
-- `crates/sentinel-application/src/hooks/` — all hook implementations (one file per hook; 90 modules)
+- `crates/sentinel-application/src/hooks/` — all hook implementations (one file per hook; 86 modules)
 - `crates/sentinel-application/src/hooks/mod.rs` — `HOOK_NAMES` const, `GitStatusPort` trait
 - `crates/sentinel-domain/src/workflow.rs` — `SkillWorkflow`, `WorkflowPhase` definitions
 - `crates/sentinel-domain/src/proof.rs` — `ProofChain`, `PhaseProof`
