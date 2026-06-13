@@ -46,6 +46,17 @@ use rig_core::prelude::CompletionClient;
 use rig_core::providers::{openai, openrouter};
 use tracing::warn;
 
+/// Output-token bound for OpenRouter scorer/auditor calls. A reasoning model
+/// (e.g. `gpt-5.5-pro`) runs UNBOUNDED — and the call stalls — if no
+/// `max_tokens` is sent, so every scorer prompt must cap it. Sized for a JSON
+/// verdict (scores + a paragraph of reasoning) PLUS the model's hidden
+/// reasoning tokens, which are billed against this same budget. Must stay
+/// ≥ 16: OpenAI rejects `max_output_tokens < 16` with a 400, which would make
+/// the cross-vendor dual auditor's OpenAI leg error on every call and trip the
+/// `block_for_inconclusive` path (a silent permanent-block, the same failure
+/// mode the Fable-5-suspension fix removed).
+const OPENROUTER_SCORER_MAX_TOKENS: u32 = 2048;
+
 // ---------------------------------------------------------------------------
 // Public type alias
 // ---------------------------------------------------------------------------
@@ -249,8 +260,14 @@ pub fn build_openrouter_prompt_fn(
     let prompt_fn: PromptFn = Arc::new(move |model_id, system, user_msg| {
         let client = client.clone();
         Box::pin(async move {
+            // Bound output tokens — a reasoning model (gpt-5.5-pro) otherwise
+            // runs unbounded and stalls; OpenAI also 400s `max_output_tokens`
+            // below 16. See OPENROUTER_SCORER_MAX_TOKENS.
             let agent = AgentBuilder::new(client.completion_model(&model_id))
                 .preamble(&system)
+                .additional_params(serde_json::json!({
+                    "max_tokens": OPENROUTER_SCORER_MAX_TOKENS,
+                }))
                 .build();
             let result: anyhow::Result<String, _> = agent.prompt(user_msg).await;
             result.map_err(|e| anyhow::anyhow!("openrouter {scorer_label} ({model_id}): {e}"))

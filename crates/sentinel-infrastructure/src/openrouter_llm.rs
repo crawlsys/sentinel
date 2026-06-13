@@ -64,7 +64,10 @@ impl LlmPort for OpenRouterLlm {
         // rig 0.38's OpenRouter request struct omits `max_tokens`, so inject it
         // via the `#[serde(flatten)]`ed additional_params — without it a
         // reasoning model (gpt-5.5-pro) runs unbounded and the call stalls.
-        let max_tokens = request.max_tokens.max(1);
+        // Floor at 16: OpenAI rejects `max_output_tokens < 16` with a 400
+        // (e.g. gpt-5.5-pro as LlmModel::Codex), which would error every call
+        // on that leg. 16 is OpenAI's documented minimum.
+        let max_tokens = request.max_tokens.max(16);
         let agent = AgentBuilder::new(self.client.completion_model(model_id))
             .temperature(0.0)
             .additional_params(serde_json::json!({ "max_tokens": max_tokens }))
