@@ -32,6 +32,35 @@ use sentinel_domain::judge::{JudgeModel, JudgeVerdict};
 type PromptFn =
     Arc<dyn Fn(String, String, String) -> BoxFuture<'static, Result<String>> + Send + Sync>;
 
+/// Resolve the transport for a judge `model_id`, preferring a subscription CLI
+/// for the `DualFrontier` frontier pair and falling back to `openrouter_fn`.
+///
+/// Routes only the two frontier models whose subscription CLI faithfully serves
+/// them: `anthropic/claude-opus-*` → `claude -p`, `openai/*` → `codex exec`.
+/// Everything else (Sonnet, Kimi) keeps the OpenRouter transport — model
+/// identity matters for those tiers. The CLI builders return `None` when the
+/// binary is absent, so a box without the CLIs transparently uses OpenRouter.
+/// `SENTINEL_AUDITOR_NO_SUBSCRIPTION=1` forces OpenRouter for all models.
+fn resolve_judge_transport(model_id: &str, openrouter_fn: &PromptFn) -> (PromptFn, &'static str) {
+    if std::env::var("SENTINEL_AUDITOR_NO_SUBSCRIPTION")
+        .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+    {
+        return (openrouter_fn.clone(), "openrouter");
+    }
+    // The CLI prompt-fns share the same (model_id, system, user) shape as our
+    // local PromptFn, so they slot in directly.
+    let cli: Option<(PromptFn, &'static str)> = if model_id.starts_with("anthropic/claude-opus") {
+        crate::llm_scorer_runtime::build_claude_cli_prompt_fn("judge")
+            .map(|(pf, _prefix)| (pf as PromptFn, "claude-cli"))
+    } else if model_id.starts_with("openai/") {
+        crate::llm_scorer_runtime::build_codex_cli_prompt_fn("judge")
+            .map(|(pf, _prefix)| (pf as PromptFn, "codex-cli"))
+    } else {
+        None
+    };
+    cli.unwrap_or_else(|| (openrouter_fn.clone(), "openrouter"))
+}
+
 /// The OpenRouter-backed adversarial judge provider
 struct JudgeProvider {
     prompt_fn: PromptFn,
@@ -62,20 +91,29 @@ impl JudgeProvider {
     /// Send a judge prompt to the model identified by `model_id` and parse
     /// the JSON verdict. The model id comes from
     /// [`JudgeModel::openrouter_model_id`](sentinel_domain::judge::JudgeModel::openrouter_model_id).
+    ///
+    /// Subscription-first (same ladder as the prod auditor): for the
+    /// `DualFrontier` frontier models — Anthropic Opus (`anthropic/claude-opus-*`)
+    /// and OpenAI (`openai/*`) — prefer the local subscription CLI (`claude -p` /
+    /// `codex exec`, $0 per-token) when installed, falling back to OpenRouter.
+    /// Sonnet/Kimi stay on OpenRouter: model identity matters there (a bare
+    /// `claude -p` is not guaranteed to be Sonnet, and Kimi has no CLI). Opt out
+    /// with `SENTINEL_AUDITOR_NO_SUBSCRIPTION=1`.
     async fn judge(
         &self,
         model_id: &str,
         system: &str,
         user_msg: &str,
     ) -> Result<JudgeVerdict> {
-        let text = (self.prompt_fn)(
+        let (prompt_fn, provider) = resolve_judge_transport(model_id, &self.prompt_fn);
+        let text = prompt_fn(
             model_id.to_string(),
             system.to_string(),
             user_msg.to_string(),
         )
         .await?;
         debug!(
-            provider = "openrouter",
+            provider = provider,
             model = model_id,
             response_len = text.len(),
             "Adversarial judge response received"
@@ -246,6 +284,64 @@ fn extract_json_from_markdown(text: &str) -> Result<JudgeVerdict, serde_json::Er
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A stand-in OpenRouter prompt-fn for transport-resolution tests.
+    fn dummy_openrouter_fn() -> PromptFn {
+        Arc::new(|_m, _s, _u| Box::pin(async { Ok("openrouter".to_string()) }))
+    }
+
+    #[test]
+    fn resolve_judge_transport_keeps_openrouter_for_sonnet_and_kimi() {
+        // Sonnet + Kimi must stay on OpenRouter — model identity matters there
+        // (a bare `claude -p` isn't guaranteed to be Sonnet; Kimi has no CLI),
+        // so even if `claude`/`codex` are installed they must NOT be chosen.
+        std::env::remove_var("SENTINEL_AUDITOR_NO_SUBSCRIPTION");
+        let or = dummy_openrouter_fn();
+        let (_pf1, p1) = resolve_judge_transport("anthropic/claude-sonnet-4.6", &or);
+        let (_pf2, p2) = resolve_judge_transport("moonshotai/kimi-k2.6", &or);
+        assert_eq!(p1, "openrouter", "Sonnet must stay on OpenRouter");
+        assert_eq!(p2, "openrouter", "Kimi must stay on OpenRouter");
+    }
+
+    #[test]
+    fn resolve_judge_transport_opt_out_forces_openrouter() {
+        // SENTINEL_AUDITOR_NO_SUBSCRIPTION=1 forces OpenRouter for EVERY model,
+        // including the frontier dual pair.
+        let or = dummy_openrouter_fn();
+        std::env::set_var("SENTINEL_AUDITOR_NO_SUBSCRIPTION", "1");
+        let (_a, pa) = resolve_judge_transport("anthropic/claude-opus-4.8", &or);
+        let (_o, po) = resolve_judge_transport("openai/gpt-5.5-pro", &or);
+        std::env::remove_var("SENTINEL_AUDITOR_NO_SUBSCRIPTION");
+        assert_eq!(pa, "openrouter", "opt-out forces OpenRouter for Opus");
+        assert_eq!(po, "openrouter", "opt-out forces OpenRouter for Codex");
+    }
+
+    #[test]
+    fn resolve_judge_transport_frontier_pair_prefers_cli_when_present() {
+        // For the frontier dual pair, the chosen provider is the subscription
+        // CLI when its binary is on PATH, else OpenRouter. We don't assume the
+        // CI box has claude/codex, so assert the result is one of the two valid
+        // outcomes per leg — never something else, never a panic.
+        std::env::remove_var("SENTINEL_AUDITOR_NO_SUBSCRIPTION");
+        let or = dummy_openrouter_fn();
+        let (_a, pa) = resolve_judge_transport("anthropic/claude-opus-4.8", &or);
+        let (_o, po) = resolve_judge_transport("openai/gpt-5.5-pro", &or);
+        assert!(
+            pa == "claude-cli" || pa == "openrouter",
+            "Opus leg must be claude-cli (if installed) or openrouter, got {pa}"
+        );
+        assert!(
+            po == "codex-cli" || po == "openrouter",
+            "Codex leg must be codex-cli (if installed) or openrouter, got {po}"
+        );
+        // On this dev box both CLIs are installed → expect the CLI path.
+        if super::super::llm_scorer_runtime::resolve_cli("claude").is_some() {
+            assert_eq!(pa, "claude-cli", "claude is on PATH → Opus leg must use it");
+        }
+        if super::super::llm_scorer_runtime::resolve_cli("codex").is_some() {
+            assert_eq!(po, "codex-cli", "codex is on PATH → Codex leg must use it");
+        }
+    }
 
     #[test]
     fn test_extract_json_direct() {
