@@ -108,6 +108,13 @@ pub struct RigAuditor {
     /// Per-call timeout. Auditor calls exceeding this surface as
     /// [`AuditorError::TimedOut`].
     timeout: Duration,
+    /// When true, [`Self::resolve_leg`] never substitutes a subscription CLI —
+    /// it always returns this auditor's configured `prompt_fn`. Set by the
+    /// stub-driven unit tests (so they exercise the injected `PromptFn` rather
+    /// than shelling out to a real `claude`/`codex` that happens to be on the
+    /// dev box) and via the `SENTINEL_AUDITOR_NO_SUBSCRIPTION` env opt-out.
+    /// Production constructors leave it `false`.
+    force_configured_prompt_fn: bool,
 }
 
 impl std::fmt::Debug for RigAuditor {
@@ -124,7 +131,10 @@ impl RigAuditor {
     /// Construct from a custom prompt function — primarily for tests
     /// (lets the test inject a stub `PromptFn` instead of hitting the
     /// network). Defaults `provider_prefix` to `"openrouter"` so the
-    /// pre-Phase-5 test fixtures keep working unchanged.
+    /// pre-Phase-5 test fixtures keep working unchanged. Pins
+    /// `force_configured_prompt_fn = true` so the injected stub is ALWAYS used —
+    /// a stub-driven test must never shell out to a real `claude`/`codex` that
+    /// happens to be installed on the dev box.
     #[must_use]
     pub fn with_prompt_fn(prompt_fn: PromptFn, model_id: impl Into<String>) -> Self {
         Self {
@@ -132,6 +142,7 @@ impl RigAuditor {
             model_id: model_id.into(),
             provider_prefix: "openrouter".to_string(),
             timeout: DEFAULT_AUDITOR_TIMEOUT,
+            force_configured_prompt_fn: true,
         }
     }
 
@@ -220,6 +231,7 @@ impl RigAuditor {
             model_id,
             provider_prefix,
             timeout,
+            force_configured_prompt_fn: false,
         })
     }
 
@@ -238,6 +250,7 @@ impl RigAuditor {
             model_id,
             provider_prefix,
             timeout,
+            force_configured_prompt_fn: false,
         })
     }
 
@@ -284,6 +297,7 @@ impl RigAuditor {
                     model_id,
                     provider_prefix,
                     timeout,
+                    force_configured_prompt_fn: false,
                 })
             }
             VendorClass::Anthropic
@@ -317,6 +331,7 @@ impl RigAuditor {
                     model_id,
                     provider_prefix,
                     timeout,
+                    force_configured_prompt_fn: false,
                 })
             }
         }
@@ -408,6 +423,38 @@ pub const DUAL_PRIMARY_MODEL: &str = "anthropic/claude-opus-4.8"; // $15/$75
 pub const DUAL_SECOND_MODEL: &str = "openai/gpt-5.5-pro"; // $30/$180
 
 impl RigAuditor {
+    /// Resolve the transport for a given `model_id`, preferring a
+    /// **subscription-backed CLI** over the metered OpenRouter path.
+    ///
+    /// The dual auditor cross-checks one Anthropic + one OpenAI model. When the
+    /// operator has the matching subscription CLI installed (`claude` for an
+    /// `anthropic/*` model, `codex` for an `openai/*` model), use it for $0
+    /// per-token; otherwise fall back to this auditor's configured prompt-fn
+    /// (OpenRouter). Detect-and-use only — never auto-installs. The opt-out
+    /// `SENTINEL_AUDITOR_NO_SUBSCRIPTION=1` forces the OpenRouter path.
+    ///
+    /// Returns `(prompt_fn, provider_prefix)`. The CLI prompt-fns ignore the
+    /// `model_id` (the CLI uses its own subscription model), so the returned
+    /// `provider_prefix` (`claude-cli` / `codex-cli`) is what distinguishes the
+    /// audit attribution from the `openrouter` fallback.
+    fn resolve_leg(&self, model_id: &str) -> (PromptFn, String) {
+        // Test-pinned (stub injected) or operator opt-out → always use the
+        // configured prompt-fn, never a subscription CLI.
+        if self.force_configured_prompt_fn
+            || std::env::var("SENTINEL_AUDITOR_NO_SUBSCRIPTION")
+                .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        {
+            return (self.prompt_fn.clone(), self.provider_prefix.clone());
+        }
+        let vendor = model_id.split('/').next().unwrap_or("");
+        let cli = match vendor {
+            "anthropic" => llm_scorer_runtime::build_claude_cli_prompt_fn("auditor"),
+            "openai" => llm_scorer_runtime::build_codex_cli_prompt_fn("auditor"),
+            _ => None,
+        };
+        cli.unwrap_or_else(|| (self.prompt_fn.clone(), self.provider_prefix.clone()))
+    }
+
     /// Run the single-model audit against an explicit `model_id`. Factored out
     /// of the `AuditorPort::score` impl so `score_dual` can drive two models.
     fn score_with_model(
@@ -422,11 +469,13 @@ impl RigAuditor {
             AuditorError::Other("auditor sidecar runtime unavailable".to_string())
         })?;
 
-        let prompt_fn = self.prompt_fn.clone();
+        // Subscription-first: prefer claude/codex CLI for the matching vendor,
+        // fall back to this auditor's prompt-fn (OpenRouter) otherwise.
+        let (prompt_fn, provider_prefix) = self.resolve_leg(model_id);
         let model_id = model_id.to_string();
         // Build the attribution string before `model_id` is moved into the
         // prompt call below.
-        let auditor_model = format!("{}:{}", self.provider_prefix, model_id);
+        let auditor_model = format!("{provider_prefix}:{model_id}");
         let timeout = self.timeout;
         // `score` is sync but is called from inside the CLI's `#[tokio::main]`
         // multi-thread runtime (the PreToolUse hook dispatch). Calling
@@ -924,6 +973,50 @@ mod tests {
         );
         assert_eq!(primary_vendor, "anthropic");
         assert_eq!(second_vendor, "openai");
+    }
+
+    #[test]
+    fn resolve_leg_opt_out_forces_openrouter_fallback() {
+        // With SENTINEL_AUDITOR_NO_SUBSCRIPTION=1, resolve_leg must ignore any
+        // installed CLI and return the auditor's own (OpenRouter) prefix for
+        // BOTH vendors — the zero-regression escape hatch. Build with the
+        // force-flag OFF so we're exercising the ENV path specifically.
+        let stub = make_stub(vec![Ok(make_pass_response())]);
+        let mut auditor = RigAuditor::with_prompt_fn(stub, "anthropic/claude-opus-4.8");
+        auditor.force_configured_prompt_fn = false;
+        // SAFETY: single-threaded test; restore after.
+        std::env::set_var("SENTINEL_AUDITOR_NO_SUBSCRIPTION", "1");
+        let (_pf_a, prefix_a) = auditor.resolve_leg("anthropic/claude-opus-4.8");
+        let (_pf_o, prefix_o) = auditor.resolve_leg("openai/gpt-5.5-pro");
+        std::env::remove_var("SENTINEL_AUDITOR_NO_SUBSCRIPTION");
+        assert_eq!(prefix_a, "openrouter", "opt-out must use the auditor's prefix");
+        assert_eq!(prefix_o, "openrouter", "opt-out must use the auditor's prefix");
+    }
+
+    #[test]
+    fn resolve_leg_unknown_vendor_falls_back_to_auditor_prompt_fn() {
+        // A model whose vendor has no subscription-CLI mapping (e.g. moonshot)
+        // always resolves to the auditor's configured prompt-fn (OpenRouter),
+        // regardless of what CLIs are installed. Force-flag OFF + env cleared so
+        // we hit the vendor-match branch (which has no "moonshotai" CLI).
+        std::env::remove_var("SENTINEL_AUDITOR_NO_SUBSCRIPTION");
+        let stub = make_stub(vec![Ok(make_pass_response())]);
+        let mut auditor = RigAuditor::with_prompt_fn(stub, "moonshotai/kimi-k2");
+        auditor.force_configured_prompt_fn = false;
+        let (_pf, prefix) = auditor.resolve_leg("moonshotai/kimi-k2");
+        assert_eq!(prefix, "openrouter");
+    }
+
+    #[test]
+    fn force_configured_prompt_fn_keeps_stub_for_known_vendors() {
+        // The stub-test constructor pins force_configured_prompt_fn=true, so
+        // even an anthropic/openai model resolves to the injected prompt-fn —
+        // NOT a real claude/codex on the dev box. This is what keeps the
+        // dual_* tests deterministic.
+        let stub = make_stub(vec![Ok(make_pass_response())]);
+        let auditor = RigAuditor::with_prompt_fn(stub, "anthropic/claude-opus-4.8");
+        let (_pf, prefix) = auditor.resolve_leg("anthropic/claude-opus-4.8");
+        assert_eq!(prefix, "openrouter", "forced constructor must keep the stub prefix");
     }
 
     #[test]

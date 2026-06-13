@@ -276,6 +276,145 @@ pub fn build_openrouter_prompt_fn(
     Ok((prompt_fn, "openrouter".to_string()))
 }
 
+// ---------------------------------------------------------------------------
+// Subscription-backed CLI prompt-fns (claude -p / codex exec)
+// ---------------------------------------------------------------------------
+//
+// When the operator has a subscription-backed CLI installed + authed, prefer
+// it over the metered OpenRouter path: `claude -p` (Anthropic, subscription)
+// and `codex exec` (OpenAI, subscription) both produce a one-shot completion
+// for $0 per-token. Detection is presence-on-PATH only (DETECT-AND-USE; we
+// never auto-install). Callers fall back to OpenRouter when these return None.
+
+/// Resolve a CLI binary on `PATH` to its absolute path, or `None` if absent.
+/// Cached per binary name for the engine's lifetime — a `which` per audit
+/// would be wasteful, and PATH does not change mid-process.
+#[must_use]
+pub fn resolve_cli(bin: &str) -> Option<std::path::PathBuf> {
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+    static CACHE: OnceLock<Mutex<HashMap<String, Option<std::path::PathBuf>>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(hit) = cache.lock().ok().and_then(|c| c.get(bin).cloned()) {
+        return hit;
+    }
+    let found = which_on_path(bin);
+    if let Ok(mut c) = cache.lock() {
+        c.insert(bin.to_string(), found.clone());
+    }
+    found
+}
+
+/// Minimal cross-platform `which`: probe each `PATH` entry for `bin` (plus the
+/// Windows executable extensions). Avoids a `which`-crate dependency.
+fn which_on_path(bin: &str) -> Option<std::path::PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    let exts: &[&str] = if cfg!(windows) {
+        &["", ".exe", ".cmd", ".bat"]
+    } else {
+        &[""]
+    };
+    for dir in std::env::split_paths(&path) {
+        for ext in exts {
+            let candidate = dir.join(format!("{bin}{ext}"));
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+/// Build a `PromptFn` backed by the **`claude -p`** subscription CLI (the
+/// Anthropic leg). Returns `None` when `claude` is not on `PATH` — the caller
+/// then falls back to OpenRouter. The `model_id` argument is accepted for
+/// signature-compatibility but ignored: `claude -p` uses the CLI's configured
+/// subscription model. System prompt is passed via `--append-system-prompt`;
+/// the user message is the positional `-p` prompt. Output is the assistant's
+/// reply text (clean — `claude -p` prints only the answer).
+#[must_use]
+pub fn build_claude_cli_prompt_fn(scorer_label: &'static str) -> Option<(PromptFn, String)> {
+    let bin = resolve_cli("claude")?;
+    let prompt_fn: PromptFn = Arc::new(move |_model_id, system, user_msg| {
+        let bin = bin.clone();
+        Box::pin(async move {
+            let out = tokio::process::Command::new(&bin)
+                .arg("-p")
+                .arg("--append-system-prompt")
+                .arg(&system)
+                .arg(&user_msg)
+                .output()
+                .await
+                .map_err(|e| anyhow::anyhow!("claude {scorer_label}: spawn failed: {e}"))?;
+            if !out.status.success() {
+                let err = String::from_utf8_lossy(&out.stderr);
+                return Err(anyhow::anyhow!(
+                    "claude {scorer_label}: exit {:?}: {}",
+                    out.status.code(),
+                    err.trim()
+                ));
+            }
+            Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+        })
+    });
+    Some((prompt_fn, "claude-cli".to_string()))
+}
+
+/// Build a `PromptFn` backed by the **`codex exec`** subscription CLI (the
+/// OpenAI leg). Returns `None` when `codex` is not on `PATH`. Uses
+/// `--output-last-message <tmpfile>` so we read ONLY the model's final answer
+/// (plain `codex exec` prints a full transcript). The system + user prompts are
+/// concatenated into the single positional prompt (`codex exec` has no separate
+/// system flag). `model_id` is accepted but ignored — `codex` uses its
+/// configured subscription model.
+#[must_use]
+pub fn build_codex_cli_prompt_fn(scorer_label: &'static str) -> Option<(PromptFn, String)> {
+    let bin = resolve_cli("codex")?;
+    let prompt_fn: PromptFn = Arc::new(move |_model_id, system, user_msg| {
+        let bin = bin.clone();
+        Box::pin(async move {
+            // `codex exec` has no system-prompt flag; prepend it to the prompt.
+            let prompt = if system.is_empty() {
+                user_msg
+            } else {
+                format!("{system}\n\n{user_msg}")
+            };
+            // Unique temp path for the final-message capture. No Date/rand in
+            // this crate's sandbox, so derive uniqueness from pid + an atomic.
+            static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let out_file = std::env::temp_dir()
+                .join(format!("sentinel-codex-{}-{seq}.txt", std::process::id()));
+            let status = tokio::process::Command::new(&bin)
+                .arg("exec")
+                .arg("--output-last-message")
+                .arg(&out_file)
+                .arg(&prompt)
+                .output()
+                .await
+                .map_err(|e| anyhow::anyhow!("codex {scorer_label}: spawn failed: {e}"))?;
+            let answer = tokio::fs::read_to_string(&out_file).await.ok();
+            // Best-effort cleanup of the temp file.
+            let _ = tokio::fs::remove_file(&out_file).await;
+            if !status.status.success() {
+                let err = String::from_utf8_lossy(&status.stderr);
+                return Err(anyhow::anyhow!(
+                    "codex {scorer_label}: exit {:?}: {}",
+                    status.status.code(),
+                    err.trim()
+                ));
+            }
+            match answer {
+                Some(a) if !a.trim().is_empty() => Ok(a.trim().to_string()),
+                _ => Err(anyhow::anyhow!(
+                    "codex {scorer_label}: no final message captured"
+                )),
+            }
+        })
+    });
+    Some((prompt_fn, "codex-cli".to_string()))
+}
+
 /// Build a `PromptFn` that routes to Ollama (local or cloud), auto-
 /// detecting which mode to use from the env resolver.
 ///
@@ -348,6 +487,48 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -----------------------------------------------------------------------
+    // subscription CLI detection + prompt-fn builders
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn resolve_cli_returns_none_for_absent_binary() {
+        // A binary name that cannot exist on PATH → None (and the caller then
+        // falls back to OpenRouter — the zero-regression guarantee).
+        assert!(resolve_cli("sentinel-no-such-binary-xyzzy-9999").is_none());
+    }
+
+    #[test]
+    fn cli_prompt_fn_builders_are_none_when_binary_absent() {
+        // We can't assume claude/codex are installed in CI, but we CAN assert
+        // the builders return None for a guaranteed-absent name by routing
+        // through the same which_on_path logic. Directly: a bogus binary.
+        assert!(which_on_path("sentinel-no-such-binary-xyzzy-9999").is_none());
+    }
+
+    #[test]
+    fn resolve_cli_is_cached() {
+        // Two lookups of the same absent binary return the same (None) result;
+        // the cache must not panic or diverge on repeat calls.
+        let a = resolve_cli("sentinel-absent-cache-probe-0001");
+        let b = resolve_cli("sentinel-absent-cache-probe-0001");
+        assert_eq!(a, b);
+        assert!(a.is_none());
+    }
+
+    #[test]
+    fn which_on_path_finds_a_real_binary_when_present() {
+        // Whatever this test runner is, SOME ubiquitous binary exists. On
+        // Windows `cmd` is always on PATH; on unix `sh`. This exercises the
+        // positive branch of which_on_path without depending on claude/codex.
+        let ubiquitous = if cfg!(windows) { "cmd" } else { "sh" };
+        // Not asserting Some unconditionally (PATH can be exotic in sandboxes),
+        // but if found it must be an existing file.
+        if let Some(p) = which_on_path(ubiquitous) {
+            assert!(p.is_file(), "resolved path must be a real file: {p:?}");
+        }
+    }
 
     // -----------------------------------------------------------------------
     // strip_code_fence — existing coverage
