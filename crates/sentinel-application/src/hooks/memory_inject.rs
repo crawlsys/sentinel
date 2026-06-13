@@ -250,6 +250,13 @@ fn search_memory_engine(
     );
     args.insert("project".into(), serde_json::Value::String(project.clone()));
     args.insert("top_k".into(), serde_json::Value::Number(8u32.into()));
+    // Rerank the injected atoms. The memories surfaced into context every turn
+    // are exactly the ones worth ordering well, so we ask memory-mcp to run the
+    // LLM reranker (better semantic ordering than raw embedding score). This is
+    // safe in the hook: the reranker degrades to base order on any failure (and
+    // search is already wrapped in the 10s budget below), so a slow or failed
+    // rerank never blocks the turn — it just falls back to embedding order.
+    args.insert("rerank".into(), serde_json::Value::Bool(true));
 
     // Recall search cold-starts memory-mcp + server-side embed + vector search
     // + rerank — that routinely exceeds the default 3s hook budget, which would
