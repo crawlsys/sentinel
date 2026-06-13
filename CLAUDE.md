@@ -37,7 +37,7 @@ sentinel mcp                           Start MCP server over stdio
 | `sentinel-domain` | — | Pure business logic: proofs, workflows, evidence, hooks, routing |
 | `sentinel-application` | — | Use cases: engine, classifier, gate, 86 hook modules |
 | `sentinel-infrastructure` | — | IO adapters: config, state store, git, MCP transport, AI judge |
-| `sentinel-cli` | `sentinel` | CLI (32 top-level subcommands) + dashboard REST API (axum) + in-repo MCP host (stdio) |
+| `sentinel-cli` | `sentinel` | CLI (37 top-level subcommands) + dashboard REST API (axum) + in-repo MCP host (stdio) |
 | `sentinel-git-interceptor` | `sentinel-git-interceptor` | Git shim that routes commits through sentinel gates |
 | `sentinel-npx-interceptor` | `sentinel-npx-interceptor` | npx shim that routes installs through sentinel gates |
 
@@ -45,7 +45,7 @@ sentinel mcp                           Start MCP server over stdio
 
 ## MCP Server Tools
 
-The in-repo MCP host (`sentinel mcp`, defined in `crates/sentinel-cli/src/mcp_cmd.rs`) exposes 16 tools via Claude Code (`mcp__sentinel__<tool>`):
+The in-repo MCP host (`sentinel mcp`, defined in `crates/sentinel-cli/src/mcp_cmd.rs`) exposes 22 tools via Claude Code (`mcp__sentinel__<tool>`):
 
 | Tool | Description |
 |------|-------------|
@@ -65,6 +65,12 @@ The in-repo MCP host (`sentinel mcp`, defined in `crates/sentinel-cli/src/mcp_cm
 | `delegate_codex` | Delegate an adversarial/code-reasoning task to the Codex worker model (via OpenRouter) |
 | `delegate_kimi_context_scan` | Delegate a cheap large-context scan to the Kimi worker model (via OpenRouter) |
 | `replay_phase` | Time-travel replay of a skill phase by forking from the checkpoint before it (first-class QA-failed re-attempt) |
+| `dev_scorecard` | Per-developer scorecards (throughput, first-pass QA, consistency) from git + Linear, with attribution-divergence flagging |
+| `linear_code_audit` | Flag Completed tickets with zero code evidence (commits/files) — potential false-done |
+| `linear_health` | Composite 0-100 Linear health score (hygiene, structure, data quality, flow) |
+| `linear_pm_audit` | PM-enforcement audit: estimate hygiene, oversized tickets, QA-failed risk, burndown, cycle-time calibration |
+| `severity_scan` | Dual-LLM severity/priority judging per ticket (shadow-only; never mutates Linear) |
+| `token_cost` | Price the SEN-7 token aggregate at API rates; cached-vs-uncached cost split |
 
 ### CLAUDE.md Self-Maintenance
 

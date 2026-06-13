@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use axum::extract::Request;
 use axum::middleware::Next;
 use axum::response::Response;
