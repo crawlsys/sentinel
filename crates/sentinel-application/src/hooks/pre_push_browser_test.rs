@@ -446,19 +446,19 @@ mod tests {
         fn home_dir(&self) -> Option<std::path::PathBuf> {
             dirs::home_dir()
         }
-        fn read_to_string(&self, p: &std::path::Path) -> anyhow::Result<String> {
+        fn read_to_string(&self, p: &std::path::Path) -> Result<String, sentinel_domain::port_errors::FileSystemError> {
             Ok(std::fs::read_to_string(p)?)
         }
-        fn write(&self, p: &std::path::Path, c: &[u8]) -> anyhow::Result<()> {
+        fn write(&self, p: &std::path::Path, c: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
             if let Some(parent) = p.parent() {
                 let _ = std::fs::create_dir_all(parent);
             }
             Ok(std::fs::write(p, c)?)
         }
-        fn create_dir_all(&self, p: &std::path::Path) -> anyhow::Result<()> {
+        fn create_dir_all(&self, p: &std::path::Path) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
             Ok(std::fs::create_dir_all(p)?)
         }
-        fn read_dir(&self, p: &std::path::Path) -> anyhow::Result<Vec<std::path::PathBuf>> {
+        fn read_dir(&self, p: &std::path::Path) -> Result<Vec<std::path::PathBuf>, sentinel_domain::port_errors::FileSystemError> {
             Ok(std::fs::read_dir(p)?
                 .filter_map(|e| e.ok().map(|e| e.path()))
                 .collect())
@@ -469,10 +469,10 @@ mod tests {
         fn is_dir(&self, p: &std::path::Path) -> bool {
             p.is_dir()
         }
-        fn metadata(&self, p: &std::path::Path) -> anyhow::Result<std::fs::Metadata> {
+        fn metadata(&self, p: &std::path::Path) -> Result<std::fs::Metadata, sentinel_domain::port_errors::FileSystemError> {
             Ok(std::fs::metadata(p)?)
         }
-        fn append(&self, p: &std::path::Path, c: &[u8]) -> anyhow::Result<()> {
+        fn append(&self, p: &std::path::Path, c: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
             use std::io::Write;
             if let Some(parent) = p.parent() {
                 let _ = std::fs::create_dir_all(parent);
@@ -705,19 +705,19 @@ mod tests {
     /// methods return safe defaults — the tests exercise only the diff path.
     struct RealTestGit;
     impl super::super::GitStatusPort for RealTestGit {
-        fn has_uncommitted_changes(&self, _: &str) -> anyhow::Result<bool> {
+        fn has_uncommitted_changes(&self, _: &str) -> Result<bool, sentinel_domain::port_errors::GitError> {
             Ok(false)
         }
-        fn changed_files(&self, _: &str) -> anyhow::Result<Vec<String>> {
+        fn changed_files(&self, _: &str) -> Result<Vec<String>, sentinel_domain::port_errors::GitError> {
             Ok(vec![])
         }
-        fn current_branch(&self, _: &str) -> anyhow::Result<String> {
+        fn current_branch(&self, _: &str) -> Result<String, sentinel_domain::port_errors::GitError> {
             Ok("main".into())
         }
         fn is_worktree(&self, _: &str) -> bool {
             false
         }
-        fn has_unpushed_commits(&self, _: &str) -> anyhow::Result<bool> {
+        fn has_unpushed_commits(&self, _: &str) -> Result<bool, sentinel_domain::port_errors::GitError> {
             Ok(false)
         }
         fn repo_root(&self, _: &str) -> Option<String> {

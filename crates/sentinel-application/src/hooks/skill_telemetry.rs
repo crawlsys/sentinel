@@ -273,23 +273,23 @@ mod tests {
         fn home_dir(&self) -> Option<PathBuf> {
             Some(PathBuf::from("/mock/home"))
         }
-        fn read_to_string(&self, p: &Path) -> anyhow::Result<String> {
+        fn read_to_string(&self, p: &Path) -> Result<String, sentinel_domain::port_errors::FileSystemError> {
             self.files
                 .get(p)
                 .cloned()
-                .ok_or_else(|| anyhow::anyhow!("not found"))
+                .ok_or_else(|| sentinel_domain::port_errors::FileSystemError::backend("not found"))
         }
-        fn write(&self, p: &Path, c: &[u8]) -> anyhow::Result<()> {
+        fn write(&self, p: &Path, c: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
             self.written
                 .lock()
                 .unwrap()
                 .insert(p.to_path_buf(), c.to_vec());
             Ok(())
         }
-        fn create_dir_all(&self, _: &Path) -> anyhow::Result<()> {
+        fn create_dir_all(&self, _: &Path) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
             Ok(())
         }
-        fn read_dir(&self, _: &Path) -> anyhow::Result<Vec<PathBuf>> {
+        fn read_dir(&self, _: &Path) -> Result<Vec<PathBuf>, sentinel_domain::port_errors::FileSystemError> {
             Ok(vec![])
         }
         fn exists(&self, p: &Path) -> bool {
@@ -298,10 +298,10 @@ mod tests {
         fn is_dir(&self, _: &Path) -> bool {
             false
         }
-        fn metadata(&self, _: &Path) -> anyhow::Result<std::fs::Metadata> {
-            anyhow::bail!("no")
+        fn metadata(&self, _: &Path) -> Result<std::fs::Metadata, sentinel_domain::port_errors::FileSystemError> {
+            Err(sentinel_domain::port_errors::FileSystemError::backend("no"))
         }
-        fn append(&self, _: &Path, _: &[u8]) -> anyhow::Result<()> {
+        fn append(&self, _: &Path, _: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
             Ok(())
         }
     }

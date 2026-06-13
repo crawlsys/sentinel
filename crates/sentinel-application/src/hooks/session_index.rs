@@ -570,16 +570,16 @@ mod tests {
         fn home_dir(&self) -> Option<PathBuf> {
             Some(PathBuf::from("/mock/home"))
         }
-        fn read_to_string(&self, _path: &Path) -> anyhow::Result<String> {
+        fn read_to_string(&self, _path: &Path) -> Result<String, sentinel_domain::port_errors::FileSystemError> {
             Ok(self.0.clone())
         }
-        fn write(&self, _path: &Path, _content: &[u8]) -> anyhow::Result<()> {
+        fn write(&self, _path: &Path, _content: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
             Ok(())
         }
-        fn create_dir_all(&self, _path: &Path) -> anyhow::Result<()> {
+        fn create_dir_all(&self, _path: &Path) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
             Ok(())
         }
-        fn read_dir(&self, _path: &Path) -> anyhow::Result<Vec<PathBuf>> {
+        fn read_dir(&self, _path: &Path) -> Result<Vec<PathBuf>, sentinel_domain::port_errors::FileSystemError> {
             Ok(vec![])
         }
         fn exists(&self, _path: &Path) -> bool {
@@ -588,10 +588,10 @@ mod tests {
         fn is_dir(&self, _path: &Path) -> bool {
             false
         }
-        fn metadata(&self, _path: &Path) -> anyhow::Result<std::fs::Metadata> {
-            anyhow::bail!("no metadata in stub")
+        fn metadata(&self, _path: &Path) -> Result<std::fs::Metadata, sentinel_domain::port_errors::FileSystemError> {
+            Err(sentinel_domain::port_errors::FileSystemError::backend("no metadata in stub"))
         }
-        fn append(&self, _path: &Path, _content: &[u8]) -> anyhow::Result<()> {
+        fn append(&self, _path: &Path, _content: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
             Ok(())
         }
     }

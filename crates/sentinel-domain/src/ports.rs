@@ -10,6 +10,10 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::port_errors::{
+    FileSystemError, GitError, LlmError, MemoryMcpError, ProcessError, VectorStoreError,
+};
+
 // ---------------------------------------------------------------------------
 // Git port
 // ---------------------------------------------------------------------------
@@ -17,19 +21,19 @@ use std::path::{Path, PathBuf};
 /// Port for git status queries — implemented by the infrastructure layer.
 pub trait GitStatusPort {
     /// Check if there are uncommitted changes in the given repo path.
-    fn has_uncommitted_changes(&self, repo_path: &str) -> anyhow::Result<bool>;
+    fn has_uncommitted_changes(&self, repo_path: &str) -> Result<bool, GitError>;
 
     /// Get list of changed files (staged + unstaged).
-    fn changed_files(&self, repo_path: &str) -> anyhow::Result<Vec<String>>;
+    fn changed_files(&self, repo_path: &str) -> Result<Vec<String>, GitError>;
 
     /// Get the current branch name (e.g. "main", "feat/my-feature").
-    fn current_branch(&self, repo_path: &str) -> anyhow::Result<String>;
+    fn current_branch(&self, repo_path: &str) -> Result<String, GitError>;
 
     /// Check if the path is inside a git worktree (not the main working tree).
     fn is_worktree(&self, repo_path: &str) -> bool;
 
     /// Check if local branch has commits not yet pushed to remote.
-    fn has_unpushed_commits(&self, repo_path: &str) -> anyhow::Result<bool>;
+    fn has_unpushed_commits(&self, repo_path: &str) -> Result<bool, GitError>;
 
     /// Get the repository root (absolute path) for the given working path.
     /// Returns `None` if the path is not inside any git repo.
@@ -123,7 +127,7 @@ pub trait VectorStorePort: Send + Sync {
     /// Upsert points with server-side embedding. Each point has an id,
     /// text (for embedding), and a JSON payload.
     async fn upsert_points(&self, collection: &str, points: Vec<VectorPoint>)
-        -> anyhow::Result<()>;
+        -> Result<(), VectorStoreError>;
 
     /// Scroll (list) points with optional filter. Returns payloads.
     async fn scroll(
@@ -131,7 +135,7 @@ pub trait VectorStorePort: Send + Sync {
         collection: &str,
         filter: Option<serde_json::Value>,
         limit: u32,
-    ) -> anyhow::Result<Vec<VectorScrollResult>>;
+    ) -> Result<Vec<VectorScrollResult>, VectorStoreError>;
 
     /// Update payload fields on existing points by ID.
     async fn set_payload(
@@ -139,7 +143,7 @@ pub trait VectorStorePort: Send + Sync {
         collection: &str,
         point_ids: &[String],
         payload: serde_json::Value,
-    ) -> anyhow::Result<()>;
+    ) -> Result<(), VectorStoreError>;
 }
 
 /// A point to upsert (with server-side embedding).
@@ -190,16 +194,16 @@ pub trait FileSystemPort: Send + Sync {
     }
 
     /// Read a file's contents as a string.
-    fn read_to_string(&self, path: &Path) -> anyhow::Result<String>;
+    fn read_to_string(&self, path: &Path) -> Result<String, FileSystemError>;
 
     /// Write bytes to a file (creates parent dirs if needed).
-    fn write(&self, path: &Path, content: &[u8]) -> anyhow::Result<()>;
+    fn write(&self, path: &Path, content: &[u8]) -> Result<(), FileSystemError>;
 
     /// Create a directory and all parent directories.
-    fn create_dir_all(&self, path: &Path) -> anyhow::Result<()>;
+    fn create_dir_all(&self, path: &Path) -> Result<(), FileSystemError>;
 
     /// List entries in a directory (returns paths).
-    fn read_dir(&self, path: &Path) -> anyhow::Result<Vec<PathBuf>>;
+    fn read_dir(&self, path: &Path) -> Result<Vec<PathBuf>, FileSystemError>;
 
     /// Check if a path exists.
     fn exists(&self, path: &Path) -> bool;
@@ -208,10 +212,10 @@ pub trait FileSystemPort: Send + Sync {
     fn is_dir(&self, path: &Path) -> bool;
 
     /// Get file metadata (for mtime checks).
-    fn metadata(&self, path: &Path) -> anyhow::Result<std::fs::Metadata>;
+    fn metadata(&self, path: &Path) -> Result<std::fs::Metadata, FileSystemError>;
 
     /// Append bytes to a file (creates if needed, does not truncate).
-    fn append(&self, path: &Path, content: &[u8]) -> anyhow::Result<()>;
+    fn append(&self, path: &Path, content: &[u8]) -> Result<(), FileSystemError>;
 
     /// Copy a file from `src` to `dst`. Required for the metrics-dir migration
     /// in `session_init` (move = copy + remove for cross-device safety).
@@ -220,7 +224,7 @@ pub trait FileSystemPort: Send + Sync {
     /// tests that exercise the copy path must override; the real adapter in
     /// `sentinel-infrastructure` overrides with `std::fs::copy`. Default
     /// exists so the 20+ existing test stubs don't need to change.
-    fn copy(&self, _src: &Path, _dst: &Path) -> anyhow::Result<()> {
+    fn copy(&self, _src: &Path, _dst: &Path) -> Result<(), FileSystemError> {
         Ok(())
     }
 
@@ -229,7 +233,7 @@ pub trait FileSystemPort: Send + Sync {
     /// short-lived state markers (`skill_router`, `verification_gate`, `session_init`).
     ///
     /// Default impl: Ok(()). See `copy` for rationale.
-    fn remove_file(&self, _path: &Path) -> anyhow::Result<()> {
+    fn remove_file(&self, _path: &Path) -> Result<(), FileSystemError> {
         Ok(())
     }
 
@@ -238,7 +242,7 @@ pub trait FileSystemPort: Send + Sync {
     /// the legacy `~/.claude/metrics/` directory after migrating its contents.
     ///
     /// Default impl: Ok(()). See `copy` for rationale.
-    fn remove_dir(&self, _path: &Path) -> anyhow::Result<()> {
+    fn remove_dir(&self, _path: &Path) -> Result<(), FileSystemError> {
         Ok(())
     }
 
@@ -251,7 +255,7 @@ pub trait FileSystemPort: Send + Sync {
     /// in `sentinel-infrastructure` overrides with `std::fs::canonicalize`.
     /// Stub callers that don't exercise canonicalization can rely on the
     /// no-op default.
-    fn canonicalize(&self, path: &Path) -> anyhow::Result<PathBuf> {
+    fn canonicalize(&self, path: &Path) -> Result<PathBuf, FileSystemError> {
         Ok(path.to_path_buf())
     }
 
@@ -263,7 +267,7 @@ pub trait FileSystemPort: Send + Sync {
     /// don't need updating. The real adapter in `sentinel-infrastructure`
     /// overrides with `std::fs::remove_dir_all`. Tests that exercise
     /// recursive removal must inject an adapter that performs the deletion.
-    fn remove_dir_all(&self, _path: &Path) -> anyhow::Result<()> {
+    fn remove_dir_all(&self, _path: &Path) -> Result<(), FileSystemError> {
         Ok(())
     }
 }
@@ -280,10 +284,10 @@ pub trait FileSystemPort: Send + Sync {
 pub trait ProcessPort: Send + Sync {
     /// Run a command and capture output. Returns (`exit_success`, stdout, stderr).
     fn run(&self, command: &str, args: &[&str], cwd: Option<&str>)
-        -> anyhow::Result<ProcessOutput>;
+        -> Result<ProcessOutput, ProcessError>;
 
     /// Spawn a detached process (fire-and-forget). Returns immediately.
-    fn spawn_detached(&self, command: &str, args: &[&str]) -> anyhow::Result<()>;
+    fn spawn_detached(&self, command: &str, args: &[&str]) -> Result<(), ProcessError>;
 }
 
 /// Output from a process execution.
@@ -326,7 +330,7 @@ pub trait LinearLookupPort: Send + Sync {
 #[async_trait::async_trait]
 pub trait LlmPort: Send + Sync {
     /// Run a completion. Returns the model's text response.
-    async fn complete(&self, request: LlmRequest) -> anyhow::Result<String>;
+    async fn complete(&self, request: LlmRequest) -> Result<String, LlmError>;
 }
 
 /// Request for an LLM completion.
@@ -400,7 +404,7 @@ pub trait MemoryMcpPort: Send + Sync {
         &self,
         name: &str,
         arguments: serde_json::Map<String, serde_json::Value>,
-    ) -> anyhow::Result<serde_json::Value>;
+    ) -> Result<serde_json::Value, MemoryMcpError>;
 }
 
 // ---------------------------------------------------------------------------

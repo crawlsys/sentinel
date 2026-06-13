@@ -664,22 +664,22 @@ mod tests {
         }
     }
     impl GitStatusPort for FakeGit {
-        fn has_uncommitted_changes(&self, _: &str) -> anyhow::Result<bool> {
+        fn has_uncommitted_changes(&self, _: &str) -> Result<bool, sentinel_domain::port_errors::GitError> {
             if self.err {
-                anyhow::bail!("git boom");
+                return Err(sentinel_domain::port_errors::GitError::backend("git boom"));
             }
             Ok(self.dirty)
         }
-        fn changed_files(&self, _: &str) -> anyhow::Result<Vec<String>> {
+        fn changed_files(&self, _: &str) -> Result<Vec<String>, sentinel_domain::port_errors::GitError> {
             Ok(vec![])
         }
-        fn current_branch(&self, _: &str) -> anyhow::Result<String> {
+        fn current_branch(&self, _: &str) -> Result<String, sentinel_domain::port_errors::GitError> {
             Ok("main".into())
         }
         fn is_worktree(&self, _: &str) -> bool {
             false
         }
-        fn has_unpushed_commits(&self, _: &str) -> anyhow::Result<bool> {
+        fn has_unpushed_commits(&self, _: &str) -> Result<bool, sentinel_domain::port_errors::GitError> {
             Ok(false)
         }
         fn repo_root(&self, _: &str) -> Option<String> {
@@ -745,10 +745,10 @@ mod tests {
             command: &str,
             args: &[&str],
             _cwd: Option<&str>,
-        ) -> anyhow::Result<ProcessOutput> {
+        ) -> Result<ProcessOutput, sentinel_domain::port_errors::ProcessError> {
             match command {
-                "git" if self.git_missing => anyhow::bail!("git: command not found"),
-                "gh" if self.gh_missing => anyhow::bail!("gh: command not found"),
+                "git" if self.git_missing => Err(sentinel_domain::port_errors::ProcessError::backend("git: command not found")),
+                "gh" if self.gh_missing => Err(sentinel_domain::port_errors::ProcessError::backend("gh: command not found")),
                 "git" if args.first() == Some(&"merge-base") => match self.merge_base_ancestor {
                     Some(true) => Ok(ProcessOutput {
                         success: true,
@@ -779,7 +779,7 @@ mod tests {
                 }),
             }
         }
-        fn spawn_detached(&self, _: &str, _: &[&str]) -> anyhow::Result<()> {
+        fn spawn_detached(&self, _: &str, _: &[&str]) -> Result<(), sentinel_domain::port_errors::ProcessError> {
             Ok(())
         }
     }

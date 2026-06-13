@@ -587,27 +587,27 @@ mod tests {
         fn home_dir(&self) -> Option<PathBuf> {
             Some(PathBuf::from("/mock/home"))
         }
-        fn read_to_string(&self, p: &Path) -> anyhow::Result<String> {
+        fn read_to_string(&self, p: &Path) -> Result<String, sentinel_domain::port_errors::FileSystemError> {
             // Pass-through to real disk for transcript files (used by
             // `detect_plan_mode_from_transcript`); other reads are not used
             // by the gate logic that exercises MockFs.
             if p.exists() {
                 Ok(std::fs::read_to_string(p)?)
             } else {
-                anyhow::bail!("not found")
+                Err(sentinel_domain::port_errors::FileSystemError::backend("not found"))
             }
         }
-        fn write(&self, path: &Path, _: &[u8]) -> anyhow::Result<()> {
+        fn write(&self, path: &Path, _: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
             self.existing_files
                 .lock()
                 .unwrap()
                 .insert(path.to_path_buf());
             Ok(())
         }
-        fn create_dir_all(&self, _: &Path) -> anyhow::Result<()> {
+        fn create_dir_all(&self, _: &Path) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
             Ok(())
         }
-        fn read_dir(&self, _: &Path) -> anyhow::Result<Vec<PathBuf>> {
+        fn read_dir(&self, _: &Path) -> Result<Vec<PathBuf>, sentinel_domain::port_errors::FileSystemError> {
             Ok(vec![])
         }
         fn exists(&self, path: &Path) -> bool {
@@ -616,10 +616,10 @@ mod tests {
         fn is_dir(&self, _: &Path) -> bool {
             false
         }
-        fn metadata(&self, _: &Path) -> anyhow::Result<std::fs::Metadata> {
-            anyhow::bail!("no")
+        fn metadata(&self, _: &Path) -> Result<std::fs::Metadata, sentinel_domain::port_errors::FileSystemError> {
+            Err(sentinel_domain::port_errors::FileSystemError::backend("no"))
         }
-        fn append(&self, _: &Path, _: &[u8]) -> anyhow::Result<()> {
+        fn append(&self, _: &Path, _: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
             Ok(())
         }
     }
@@ -633,16 +633,16 @@ mod tests {
         fn home_dir(&self) -> Option<PathBuf> {
             dirs::home_dir()
         }
-        fn read_to_string(&self, path: &Path) -> anyhow::Result<String> {
+        fn read_to_string(&self, path: &Path) -> Result<String, sentinel_domain::port_errors::FileSystemError> {
             Ok(std::fs::read_to_string(path)?)
         }
-        fn write(&self, _: &Path, _: &[u8]) -> anyhow::Result<()> {
+        fn write(&self, _: &Path, _: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
             Ok(())
         }
-        fn create_dir_all(&self, _: &Path) -> anyhow::Result<()> {
+        fn create_dir_all(&self, _: &Path) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
             Ok(())
         }
-        fn read_dir(&self, _: &Path) -> anyhow::Result<Vec<PathBuf>> {
+        fn read_dir(&self, _: &Path) -> Result<Vec<PathBuf>, sentinel_domain::port_errors::FileSystemError> {
             Ok(vec![])
         }
         fn exists(&self, path: &Path) -> bool {
@@ -651,10 +651,10 @@ mod tests {
         fn is_dir(&self, path: &Path) -> bool {
             path.is_dir()
         }
-        fn metadata(&self, path: &Path) -> anyhow::Result<std::fs::Metadata> {
+        fn metadata(&self, path: &Path) -> Result<std::fs::Metadata, sentinel_domain::port_errors::FileSystemError> {
             Ok(std::fs::metadata(path)?)
         }
-        fn append(&self, _: &Path, _: &[u8]) -> anyhow::Result<()> {
+        fn append(&self, _: &Path, _: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
             Ok(())
         }
     }
@@ -966,16 +966,16 @@ mod tests {
             fn home_dir(&self) -> Option<PathBuf> {
                 Some(self.home.clone())
             }
-            fn read_to_string(&self, p: &Path) -> anyhow::Result<String> {
+            fn read_to_string(&self, p: &Path) -> Result<String, sentinel_domain::port_errors::FileSystemError> {
                 Ok(std::fs::read_to_string(p)?)
             }
-            fn write(&self, _: &Path, _: &[u8]) -> anyhow::Result<()> {
+            fn write(&self, _: &Path, _: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
                 Ok(())
             }
-            fn create_dir_all(&self, _: &Path) -> anyhow::Result<()> {
+            fn create_dir_all(&self, _: &Path) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
                 Ok(())
             }
-            fn read_dir(&self, p: &Path) -> anyhow::Result<Vec<PathBuf>> {
+            fn read_dir(&self, p: &Path) -> Result<Vec<PathBuf>, sentinel_domain::port_errors::FileSystemError> {
                 Ok(std::fs::read_dir(p)?
                     .filter_map(|e| e.ok().map(|e| e.path()))
                     .collect())
@@ -986,10 +986,10 @@ mod tests {
             fn is_dir(&self, p: &Path) -> bool {
                 p.is_dir()
             }
-            fn metadata(&self, p: &Path) -> anyhow::Result<std::fs::Metadata> {
+            fn metadata(&self, p: &Path) -> Result<std::fs::Metadata, sentinel_domain::port_errors::FileSystemError> {
                 Ok(std::fs::metadata(p)?)
             }
-            fn append(&self, _: &Path, _: &[u8]) -> anyhow::Result<()> {
+            fn append(&self, _: &Path, _: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
                 Ok(())
             }
         }
@@ -1072,18 +1072,18 @@ mod tests {
             fn home_dir(&self) -> Option<PathBuf> {
                 Some(self.home.clone())
             }
-            fn read_to_string(&self, p: &Path) -> anyhow::Result<String> {
+            fn read_to_string(&self, p: &Path) -> Result<String, sentinel_domain::port_errors::FileSystemError> {
                 Ok(fs::read_to_string(p)?)
             }
-            fn write(&self, p: &Path, b: &[u8]) -> anyhow::Result<()> {
+            fn write(&self, p: &Path, b: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
                 fs::write(p, b)?;
                 Ok(())
             }
-            fn create_dir_all(&self, p: &Path) -> anyhow::Result<()> {
+            fn create_dir_all(&self, p: &Path) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
                 fs::create_dir_all(p)?;
                 Ok(())
             }
-            fn read_dir(&self, p: &Path) -> anyhow::Result<Vec<PathBuf>> {
+            fn read_dir(&self, p: &Path) -> Result<Vec<PathBuf>, sentinel_domain::port_errors::FileSystemError> {
                 Ok(fs::read_dir(p)?
                     .filter_map(|e| e.ok().map(|e| e.path()))
                     .collect())
@@ -1094,10 +1094,10 @@ mod tests {
             fn is_dir(&self, p: &Path) -> bool {
                 p.is_dir()
             }
-            fn metadata(&self, p: &Path) -> anyhow::Result<fs::Metadata> {
+            fn metadata(&self, p: &Path) -> Result<fs::Metadata, sentinel_domain::port_errors::FileSystemError> {
                 Ok(fs::metadata(p)?)
             }
-            fn append(&self, p: &Path, b: &[u8]) -> anyhow::Result<()> {
+            fn append(&self, p: &Path, b: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
                 use std::io::Write;
                 let mut f = fs::OpenOptions::new().append(true).create(true).open(p)?;
                 f.write_all(b)?;
@@ -1242,18 +1242,18 @@ mod tests {
         fn home_dir(&self) -> Option<PathBuf> {
             None
         }
-        fn read_to_string(&self, p: &Path) -> anyhow::Result<String> {
+        fn read_to_string(&self, p: &Path) -> Result<String, sentinel_domain::port_errors::FileSystemError> {
             Ok(fs::read_to_string(p)?)
         }
-        fn write(&self, p: &Path, b: &[u8]) -> anyhow::Result<()> {
+        fn write(&self, p: &Path, b: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
             fs::write(p, b)?;
             Ok(())
         }
-        fn create_dir_all(&self, p: &Path) -> anyhow::Result<()> {
+        fn create_dir_all(&self, p: &Path) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
             fs::create_dir_all(p)?;
             Ok(())
         }
-        fn read_dir(&self, p: &Path) -> anyhow::Result<Vec<PathBuf>> {
+        fn read_dir(&self, p: &Path) -> Result<Vec<PathBuf>, sentinel_domain::port_errors::FileSystemError> {
             Ok(fs::read_dir(p)?
                 .filter_map(|e| e.ok().map(|e| e.path()))
                 .collect())
@@ -1264,10 +1264,10 @@ mod tests {
         fn is_dir(&self, p: &Path) -> bool {
             p.is_dir()
         }
-        fn metadata(&self, p: &Path) -> anyhow::Result<fs::Metadata> {
+        fn metadata(&self, p: &Path) -> Result<fs::Metadata, sentinel_domain::port_errors::FileSystemError> {
             Ok(fs::metadata(p)?)
         }
-        fn append(&self, p: &Path, b: &[u8]) -> anyhow::Result<()> {
+        fn append(&self, p: &Path, b: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
             use std::io::Write;
             let mut f = fs::OpenOptions::new().append(true).create(true).open(p)?;
             f.write_all(b)?;
@@ -1584,16 +1584,16 @@ mod tests {
             fn home_dir(&self) -> Option<PathBuf> {
                 None
             }
-            fn read_to_string(&self, p: &Path) -> anyhow::Result<String> {
+            fn read_to_string(&self, p: &Path) -> Result<String, sentinel_domain::port_errors::FileSystemError> {
                 self.real.read_to_string(p)
             }
-            fn write(&self, p: &Path, b: &[u8]) -> anyhow::Result<()> {
+            fn write(&self, p: &Path, b: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
                 self.markers.write(p, b)
             }
-            fn create_dir_all(&self, p: &Path) -> anyhow::Result<()> {
+            fn create_dir_all(&self, p: &Path) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
                 self.real.create_dir_all(p)
             }
-            fn read_dir(&self, p: &Path) -> anyhow::Result<Vec<PathBuf>> {
+            fn read_dir(&self, p: &Path) -> Result<Vec<PathBuf>, sentinel_domain::port_errors::FileSystemError> {
                 self.real.read_dir(p)
             }
             fn exists(&self, p: &Path) -> bool {
@@ -1607,10 +1607,10 @@ mod tests {
             fn is_dir(&self, p: &Path) -> bool {
                 self.real.is_dir(p)
             }
-            fn metadata(&self, p: &Path) -> anyhow::Result<fs::Metadata> {
+            fn metadata(&self, p: &Path) -> Result<fs::Metadata, sentinel_domain::port_errors::FileSystemError> {
                 self.real.metadata(p)
             }
-            fn append(&self, p: &Path, b: &[u8]) -> anyhow::Result<()> {
+            fn append(&self, p: &Path, b: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
                 self.real.append(p, b)
             }
         }

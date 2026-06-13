@@ -483,20 +483,20 @@ mod tests {
         fn home_dir(&self) -> Option<PathBuf> {
             Some(std::env::temp_dir())
         }
-        fn read_to_string(&self, _path: &Path) -> anyhow::Result<String> {
+        fn read_to_string(&self, _path: &Path) -> Result<String, sentinel_domain::port_errors::FileSystemError> {
             Ok(String::new())
         }
-        fn write(&self, path: &Path, _content: &[u8]) -> anyhow::Result<()> {
+        fn write(&self, path: &Path, _content: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
             self.written.lock().unwrap().insert(path.to_path_buf());
             Ok(())
         }
-        fn append(&self, path: &Path, content: &[u8]) -> anyhow::Result<()> {
+        fn append(&self, path: &Path, content: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
             self.write(path, content)
         }
-        fn create_dir_all(&self, _path: &Path) -> anyhow::Result<()> {
+        fn create_dir_all(&self, _path: &Path) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
             Ok(())
         }
-        fn read_dir(&self, _path: &Path) -> anyhow::Result<Vec<PathBuf>> {
+        fn read_dir(&self, _path: &Path) -> Result<Vec<PathBuf>, sentinel_domain::port_errors::FileSystemError> {
             Ok(vec![])
         }
         fn exists(&self, path: &Path) -> bool {
@@ -505,8 +505,8 @@ mod tests {
         fn is_dir(&self, _path: &Path) -> bool {
             false
         }
-        fn metadata(&self, _path: &Path) -> anyhow::Result<std::fs::Metadata> {
-            anyhow::bail!("not implemented")
+        fn metadata(&self, _path: &Path) -> Result<std::fs::Metadata, sentinel_domain::port_errors::FileSystemError> {
+            Err(sentinel_domain::port_errors::FileSystemError::Backend("not implemented".into()))
         }
     }
 

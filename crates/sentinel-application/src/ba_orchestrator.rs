@@ -312,12 +312,12 @@ mod tests {
 
     #[async_trait]
     impl LlmPort for StubLlm {
-        async fn complete(&self, request: LlmRequest) -> anyhow::Result<String> {
+        async fn complete(&self, request: LlmRequest) -> Result<String, sentinel_domain::port_errors::LlmError> {
             *self.last_request.lock().unwrap() = Some(request);
             let result = self.response.lock().unwrap().clone();
             match result {
                 Ok(text) => Ok(text),
-                Err(msg) => Err(anyhow::anyhow!("{msg}")),
+                Err(msg) => Err(sentinel_domain::port_errors::LlmError::Backend(msg)),
             }
         }
     }

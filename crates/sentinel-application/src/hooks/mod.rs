@@ -484,23 +484,24 @@ impl HookContext<'_> {
 #[cfg(test)]
 pub mod test_support {
     use super::*;
+    use sentinel_domain::port_errors::{FileSystemError, GitError, ProcessError};
     use std::path::{Path, PathBuf};
 
     pub struct StubGit;
     impl GitStatusPort for StubGit {
-        fn has_uncommitted_changes(&self, _: &str) -> anyhow::Result<bool> {
+        fn has_uncommitted_changes(&self, _: &str) -> Result<bool, GitError> {
             Ok(false)
         }
-        fn changed_files(&self, _: &str) -> anyhow::Result<Vec<String>> {
+        fn changed_files(&self, _: &str) -> Result<Vec<String>, GitError> {
             Ok(vec![])
         }
-        fn current_branch(&self, _: &str) -> anyhow::Result<String> {
+        fn current_branch(&self, _: &str) -> Result<String, GitError> {
             Ok("main".into())
         }
         fn is_worktree(&self, _: &str) -> bool {
             false
         }
-        fn has_unpushed_commits(&self, _: &str) -> anyhow::Result<bool> {
+        fn has_unpushed_commits(&self, _: &str) -> Result<bool, GitError> {
             Ok(false)
         }
         fn repo_root(&self, _: &str) -> Option<String> {
@@ -531,16 +532,16 @@ pub mod test_support {
         fn home_dir(&self) -> Option<PathBuf> {
             Some(PathBuf::from("/mock/home"))
         }
-        fn read_to_string(&self, _: &Path) -> anyhow::Result<String> {
-            anyhow::bail!("not found")
+        fn read_to_string(&self, _: &Path) -> Result<String, FileSystemError> {
+            Err(FileSystemError::NotFound("not found".into()))
         }
-        fn write(&self, _: &Path, _: &[u8]) -> anyhow::Result<()> {
+        fn write(&self, _: &Path, _: &[u8]) -> Result<(), FileSystemError> {
             Ok(())
         }
-        fn create_dir_all(&self, _: &Path) -> anyhow::Result<()> {
+        fn create_dir_all(&self, _: &Path) -> Result<(), FileSystemError> {
             Ok(())
         }
-        fn read_dir(&self, _: &Path) -> anyhow::Result<Vec<PathBuf>> {
+        fn read_dir(&self, _: &Path) -> Result<Vec<PathBuf>, FileSystemError> {
             Ok(vec![])
         }
         fn exists(&self, _: &Path) -> bool {
@@ -549,24 +550,24 @@ pub mod test_support {
         fn is_dir(&self, _: &Path) -> bool {
             false
         }
-        fn metadata(&self, _: &Path) -> anyhow::Result<std::fs::Metadata> {
-            anyhow::bail!("no")
+        fn metadata(&self, _: &Path) -> Result<std::fs::Metadata, FileSystemError> {
+            Err(FileSystemError::Backend("no".into()))
         }
-        fn append(&self, _: &Path, _: &[u8]) -> anyhow::Result<()> {
+        fn append(&self, _: &Path, _: &[u8]) -> Result<(), FileSystemError> {
             Ok(())
         }
     }
 
     pub struct StubProcess;
     impl ProcessPort for StubProcess {
-        fn run(&self, _: &str, _: &[&str], _: Option<&str>) -> anyhow::Result<ProcessOutput> {
+        fn run(&self, _: &str, _: &[&str], _: Option<&str>) -> Result<ProcessOutput, ProcessError> {
             Ok(ProcessOutput {
                 success: true,
                 stdout: String::new(),
                 stderr: String::new(),
             })
         }
-        fn spawn_detached(&self, _: &str, _: &[&str]) -> anyhow::Result<()> {
+        fn spawn_detached(&self, _: &str, _: &[&str]) -> Result<(), ProcessError> {
             Ok(())
         }
     }
@@ -613,7 +614,7 @@ pub mod test_support {
             &self,
             _name: &str,
             _arguments: serde_json::Map<String, serde_json::Value>,
-        ) -> anyhow::Result<serde_json::Value> {
+        ) -> Result<serde_json::Value, sentinel_domain::port_errors::MemoryMcpError> {
             // Tests that don't need a memory-mcp response get a benign empty
             // object — hooks that depend on specific shapes will fail to
             // deserialise, which is the right signal to inject a real stub.
@@ -655,22 +656,22 @@ mod migrate_tests {
         fn home_dir(&self) -> Option<PathBuf> {
             Some(self.home.clone())
         }
-        fn read_to_string(&self, p: &Path) -> anyhow::Result<String> {
-            Ok(std::fs::read_to_string(p)?)
+        fn read_to_string(&self, p: &Path) -> Result<String, sentinel_domain::port_errors::FileSystemError> {
+            std::fs::read_to_string(p).map_err(sentinel_domain::port_errors::FileSystemError::backend)
         }
-        fn write(&self, p: &Path, c: &[u8]) -> anyhow::Result<()> {
+        fn write(&self, p: &Path, c: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
             if let Some(par) = p.parent() {
-                std::fs::create_dir_all(par)?;
+                std::fs::create_dir_all(par).map_err(sentinel_domain::port_errors::FileSystemError::backend)?;
             }
-            Ok(std::fs::write(p, c)?)
+            std::fs::write(p, c).map_err(sentinel_domain::port_errors::FileSystemError::backend)
         }
-        fn create_dir_all(&self, p: &Path) -> anyhow::Result<()> {
-            Ok(std::fs::create_dir_all(p)?)
+        fn create_dir_all(&self, p: &Path) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+            std::fs::create_dir_all(p).map_err(sentinel_domain::port_errors::FileSystemError::backend)
         }
-        fn read_dir(&self, p: &Path) -> anyhow::Result<Vec<PathBuf>> {
-            Ok(std::fs::read_dir(p)?
-                .filter_map(|e| e.ok().map(|e| e.path()))
-                .collect())
+        fn read_dir(&self, p: &Path) -> Result<Vec<PathBuf>, sentinel_domain::port_errors::FileSystemError> {
+            std::fs::read_dir(p)
+                .map_err(sentinel_domain::port_errors::FileSystemError::backend)
+                .map(|rd| rd.filter_map(|e| e.ok().map(|e| e.path())).collect())
         }
         fn exists(&self, p: &Path) -> bool {
             p.exists()
@@ -678,10 +679,10 @@ mod migrate_tests {
         fn is_dir(&self, p: &Path) -> bool {
             p.is_dir()
         }
-        fn metadata(&self, p: &Path) -> anyhow::Result<std::fs::Metadata> {
-            Ok(std::fs::metadata(p)?)
+        fn metadata(&self, p: &Path) -> Result<std::fs::Metadata, sentinel_domain::port_errors::FileSystemError> {
+            std::fs::metadata(p).map_err(sentinel_domain::port_errors::FileSystemError::backend)
         }
-        fn append(&self, _: &Path, _: &[u8]) -> anyhow::Result<()> {
+        fn append(&self, _: &Path, _: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
             Ok(())
         }
     }

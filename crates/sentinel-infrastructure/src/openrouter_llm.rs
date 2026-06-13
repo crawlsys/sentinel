@@ -59,7 +59,10 @@ impl OpenRouterLlm {
 
 #[async_trait::async_trait]
 impl LlmPort for OpenRouterLlm {
-    async fn complete(&self, request: LlmRequest) -> Result<String> {
+    async fn complete(
+        &self,
+        request: LlmRequest,
+    ) -> Result<String, sentinel_domain::port_errors::LlmError> {
         let model_id = Self::model_id(request.model);
         // rig 0.38's OpenRouter request struct omits `max_tokens`, so inject it
         // via the `#[serde(flatten)]`ed additional_params — without it a
@@ -75,7 +78,11 @@ impl LlmPort for OpenRouterLlm {
         agent
             .prompt(request.prompt)
             .await
-            .map_err(|e| anyhow::anyhow!("OpenRouter completion ({model_id}): {e}"))
+            .map_err(|e| {
+                sentinel_domain::port_errors::LlmError::Backend(format!(
+                    "OpenRouter completion ({model_id}): {e}"
+                ))
+            })
     }
 }
 

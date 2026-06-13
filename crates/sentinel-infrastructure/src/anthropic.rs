@@ -180,7 +180,10 @@ const fn llm_to_judge(model: LlmModel) -> JudgeModel {
 /// the port surface minimal.
 #[async_trait::async_trait]
 impl LlmPort for AnthropicClient {
-    async fn complete(&self, request: LlmRequest) -> Result<String> {
+    async fn complete(
+        &self,
+        request: LlmRequest,
+    ) -> Result<String, sentinel_domain::port_errors::LlmError> {
         self.message(
             llm_to_judge(request.model),
             "",
@@ -188,5 +191,6 @@ impl LlmPort for AnthropicClient {
             request.max_tokens,
         )
         .await
+        .map_err(sentinel_domain::port_errors::LlmError::backend)
     }
 }

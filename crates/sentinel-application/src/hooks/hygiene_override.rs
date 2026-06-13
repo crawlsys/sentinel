@@ -191,7 +191,8 @@ fn write_signed_override(
     }
     let ts = now_secs();
     let sig = compute_override_sig(override_type, session_id, ts);
-    fs.write(path, format!("{ts}:{sig}").as_bytes())
+    fs.write(path, format!("{ts}:{sig}").as_bytes())?;
+    Ok(())
 }
 
 /// Check if a signed override file is active (exists, valid signature, not expired).

@@ -150,7 +150,7 @@ mod tests {
 
     #[async_trait]
     impl LlmPort for SpyLlm {
-        async fn complete(&self, request: LlmRequest) -> Result<String> {
+        async fn complete(&self, request: LlmRequest) -> Result<String, sentinel_domain::port_errors::LlmError> {
             *self.last.lock().unwrap() = Some(request);
             Ok(self.reply.clone())
         }

@@ -396,16 +396,16 @@ mod tests {
         fn home_dir(&self) -> Option<std::path::PathBuf> {
             Some(std::path::PathBuf::from("/mock/home"))
         }
-        fn read_to_string(&self, _: &std::path::Path) -> anyhow::Result<String> {
-            anyhow::bail!("no")
+        fn read_to_string(&self, _: &std::path::Path) -> Result<String, sentinel_domain::port_errors::FileSystemError> {
+            Err(sentinel_domain::port_errors::FileSystemError::Backend("no".into()))
         }
-        fn write(&self, _: &std::path::Path, _: &[u8]) -> anyhow::Result<()> {
+        fn write(&self, _: &std::path::Path, _: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
             Ok(())
         }
-        fn create_dir_all(&self, _: &std::path::Path) -> anyhow::Result<()> {
+        fn create_dir_all(&self, _: &std::path::Path) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
             Ok(())
         }
-        fn read_dir(&self, _: &std::path::Path) -> anyhow::Result<Vec<std::path::PathBuf>> {
+        fn read_dir(&self, _: &std::path::Path) -> Result<Vec<std::path::PathBuf>, sentinel_domain::port_errors::FileSystemError> {
             Ok(vec![])
         }
         fn exists(&self, _: &std::path::Path) -> bool {
@@ -414,10 +414,10 @@ mod tests {
         fn is_dir(&self, _: &std::path::Path) -> bool {
             true
         }
-        fn metadata(&self, _: &std::path::Path) -> anyhow::Result<std::fs::Metadata> {
-            anyhow::bail!("no")
+        fn metadata(&self, _: &std::path::Path) -> Result<std::fs::Metadata, sentinel_domain::port_errors::FileSystemError> {
+            Err(sentinel_domain::port_errors::FileSystemError::Backend("no".into()))
         }
-        fn append(&self, _: &std::path::Path, _: &[u8]) -> anyhow::Result<()> {
+        fn append(&self, _: &std::path::Path, _: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
             Ok(())
         }
     }

@@ -6,8 +6,14 @@
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::Context;
+use sentinel_domain::port_errors::FileSystemError;
 use sentinel_domain::ports::FileSystemPort;
+
+/// Map an internal `anyhow::Error` (carrying the path-context message) into the
+/// domain `FileSystemError`. Keeps the adapter's rich `with_context` messages
+/// while satisfying the port's bespoke error contract.
+type Result<T> = std::result::Result<T, FileSystemError>;
 
 /// Infrastructure adapter implementing `FileSystemPort` via real `std::fs`.
 pub struct RealFileSystem;
@@ -33,35 +39,47 @@ impl FileSystemPort for RealFileSystem {
     }
 
     fn read_to_string(&self, path: &Path) -> Result<String> {
-        std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))
+        std::fs::read_to_string(path)
+            .with_context(|| format!("read {}", path.display()))
+            .map_err(FileSystemError::backend)
     }
 
     fn write(&self, path: &Path, content: &[u8]) -> Result<()> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
-                .with_context(|| format!("create_dir_all {}", parent.display()))?;
+                .with_context(|| format!("create_dir_all {}", parent.display()))
+                .map_err(FileSystemError::backend)?;
         }
-        std::fs::write(path, content).with_context(|| format!("write {}", path.display()))
+        std::fs::write(path, content)
+            .with_context(|| format!("write {}", path.display()))
+            .map_err(FileSystemError::backend)
     }
 
     fn create_dir_all(&self, path: &Path) -> Result<()> {
-        std::fs::create_dir_all(path).with_context(|| format!("create_dir_all {}", path.display()))
+        std::fs::create_dir_all(path)
+            .with_context(|| format!("create_dir_all {}", path.display()))
+            .map_err(FileSystemError::backend)
     }
 
     fn read_dir(&self, path: &Path) -> Result<Vec<PathBuf>> {
         let entries = std::fs::read_dir(path)
-            .with_context(|| format!("read_dir {}", path.display()))?
+            .with_context(|| format!("read_dir {}", path.display()))
+            .map_err(FileSystemError::backend)?
             .filter_map(|e| e.ok().map(|e| e.path()))
             .collect();
         Ok(entries)
     }
 
     fn canonicalize(&self, path: &Path) -> Result<PathBuf> {
-        std::fs::canonicalize(path).with_context(|| format!("canonicalize {}", path.display()))
+        std::fs::canonicalize(path)
+            .with_context(|| format!("canonicalize {}", path.display()))
+            .map_err(FileSystemError::backend)
     }
 
     fn remove_dir_all(&self, path: &Path) -> Result<()> {
-        std::fs::remove_dir_all(path).with_context(|| format!("remove_dir_all {}", path.display()))
+        std::fs::remove_dir_all(path)
+            .with_context(|| format!("remove_dir_all {}", path.display()))
+            .map_err(FileSystemError::backend)
     }
 
     fn exists(&self, path: &Path) -> bool {
@@ -73,13 +91,16 @@ impl FileSystemPort for RealFileSystem {
     }
 
     fn metadata(&self, path: &Path) -> Result<std::fs::Metadata> {
-        std::fs::metadata(path).with_context(|| format!("metadata {}", path.display()))
+        std::fs::metadata(path)
+            .with_context(|| format!("metadata {}", path.display()))
+            .map_err(FileSystemError::backend)
     }
 
     fn append(&self, path: &Path, content: &[u8]) -> Result<()> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
-                .with_context(|| format!("create_dir_all {}", parent.display()))?;
+                .with_context(|| format!("create_dir_all {}", parent.display()))
+                .map_err(FileSystemError::backend)?;
         }
         // Best-effort rotation: if this is an observability metrics JSONL
         // and the file has crossed the size cap, archive it before the
@@ -103,18 +124,22 @@ impl FileSystemPort for RealFileSystem {
             .create(true)
             .append(true)
             .open(path)
-            .with_context(|| format!("append open {}", path.display()))?;
+            .with_context(|| format!("append open {}", path.display()))
+            .map_err(FileSystemError::backend)?;
         file.write_all(payload)
             .with_context(|| format!("append write {}", path.display()))
+            .map_err(FileSystemError::backend)
     }
 
     fn copy(&self, src: &Path, dst: &Path) -> Result<()> {
         if let Some(parent) = dst.parent() {
             std::fs::create_dir_all(parent)
-                .with_context(|| format!("create_dir_all {}", parent.display()))?;
+                .with_context(|| format!("create_dir_all {}", parent.display()))
+                .map_err(FileSystemError::backend)?;
         }
         std::fs::copy(src, dst)
-            .with_context(|| format!("copy {} -> {}", src.display(), dst.display()))?;
+            .with_context(|| format!("copy {} -> {}", src.display(), dst.display()))
+            .map_err(FileSystemError::backend)?;
         Ok(())
     }
 
@@ -124,7 +149,9 @@ impl FileSystemPort for RealFileSystem {
             // Treat "not found" as success — callers use this for best-effort
             // cleanup of state markers that may not exist yet.
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(anyhow::Error::new(e).context(format!("remove_file {}", path.display()))),
+            Err(e) => Err(FileSystemError::backend(
+                anyhow::Error::new(e).context(format!("remove_file {}", path.display())),
+            )),
         }
     }
 
@@ -132,7 +159,9 @@ impl FileSystemPort for RealFileSystem {
         match std::fs::remove_dir(path) {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(anyhow::Error::new(e).context(format!("remove_dir {}", path.display()))),
+            Err(e) => Err(FileSystemError::backend(
+                anyhow::Error::new(e).context(format!("remove_dir {}", path.display())),
+            )),
         }
     }
 }

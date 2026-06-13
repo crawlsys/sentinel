@@ -359,10 +359,12 @@ impl MemoryMcpPort for MemoryMcpClient {
         &self,
         name: &str,
         arguments: serde_json::Map<String, serde_json::Value>,
-    ) -> Result<serde_json::Value> {
+    ) -> Result<serde_json::Value, sentinel_domain::port_errors::MemoryMcpError> {
         // Delegate to the inherent method, which already wraps the call in
         // the configured timeout and handles the MCP handshake.
-        Self::call_tool(self, name, arguments).await
+        Self::call_tool(self, name, arguments)
+            .await
+            .map_err(sentinel_domain::port_errors::MemoryMcpError::backend)
     }
 }
 

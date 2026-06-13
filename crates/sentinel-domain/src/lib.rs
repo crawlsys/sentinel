@@ -26,6 +26,7 @@ pub mod mcp_tool;
 pub mod multi_judge;
 pub mod override_phrase;
 pub mod path_safety;
+pub mod port_errors;
 pub mod ports;
 pub mod pricing;
 pub mod project;

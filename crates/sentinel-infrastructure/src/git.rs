@@ -3,6 +3,7 @@
 //! Wraps git CLI for status, diff, branch info.
 
 use anyhow::{Context, Result};
+use sentinel_domain::port_errors::GitError;
 use sentinel_domain::ports::GitStatusPort;
 use std::process::Command;
 
@@ -287,16 +288,16 @@ pub fn merged_remote_branches(repo_path: &str, base_ref: &str) -> Vec<String> {
 pub struct RealGit;
 
 impl GitStatusPort for RealGit {
-    fn has_uncommitted_changes(&self, repo_path: &str) -> Result<bool> {
-        has_uncommitted_changes(repo_path)
+    fn has_uncommitted_changes(&self, repo_path: &str) -> Result<bool, GitError> {
+        has_uncommitted_changes(repo_path).map_err(GitError::backend)
     }
 
-    fn changed_files(&self, repo_path: &str) -> Result<Vec<String>> {
-        changed_files(repo_path)
+    fn changed_files(&self, repo_path: &str) -> Result<Vec<String>, GitError> {
+        changed_files(repo_path).map_err(GitError::backend)
     }
 
-    fn current_branch(&self, repo_path: &str) -> Result<String> {
-        current_branch(repo_path)
+    fn current_branch(&self, repo_path: &str) -> Result<String, GitError> {
+        current_branch(repo_path).map_err(GitError::backend)
     }
 
     fn is_worktree(&self, repo_path: &str) -> bool {
@@ -304,8 +305,8 @@ impl GitStatusPort for RealGit {
         std::path::Path::new(repo_path).join(".git").is_file()
     }
 
-    fn has_unpushed_commits(&self, repo_path: &str) -> Result<bool> {
-        has_unpushed_commits(repo_path)
+    fn has_unpushed_commits(&self, repo_path: &str) -> Result<bool, GitError> {
+        has_unpushed_commits(repo_path).map_err(GitError::backend)
     }
 
     fn repo_root(&self, path: &str) -> Option<String> {

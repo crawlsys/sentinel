@@ -3,8 +3,14 @@
 //! Handles HTTP client lifecycle, auth, URL construction, and
 //! server-side embedding model configuration.
 
-use anyhow::{Context, Result};
+use anyhow::Context;
+use sentinel_domain::port_errors::VectorStoreError;
 use sentinel_domain::ports::{VectorPoint, VectorScrollResult, VectorStorePort};
+
+/// Adapter-local result alias: every `VectorStorePort` method returns the
+/// domain `VectorStoreError`. The internal reqwest/serde errors are mapped via
+/// `VectorStoreError::backend` (preserving the `.context(...)` message).
+type Result<T> = std::result::Result<T, VectorStoreError>;
 use tracing::debug;
 
 /// Qdrant Cloud configuration.
@@ -82,7 +88,8 @@ impl VectorStorePort for QdrantAdapter {
                 .json(&body)
                 .send()
                 .await
-                .context("Qdrant upsert failed")?;
+                .context("Qdrant upsert failed")
+                .map_err(VectorStoreError::backend)?;
         }
 
         debug!(collection, count = points.len(), "Qdrant upsert complete");
@@ -110,9 +117,13 @@ impl VectorStorePort for QdrantAdapter {
             .json(&body)
             .send()
             .await
-            .context("Qdrant scroll failed")?;
+            .context("Qdrant scroll failed")
+            .map_err(VectorStoreError::backend)?;
 
-        let json: serde_json::Value = resp.json().await?;
+        let json: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(VectorStoreError::backend)?;
 
         let points = json
             .get("result")
@@ -150,7 +161,8 @@ impl VectorStorePort for QdrantAdapter {
             .json(&body)
             .send()
             .await
-            .context("Qdrant set_payload failed")?;
+            .context("Qdrant set_payload failed")
+            .map_err(VectorStoreError::backend)?;
 
         debug!(
             collection,

@@ -351,22 +351,22 @@ mod tests {
             fn home_dir(&self) -> Option<PathBuf> {
                 dirs::home_dir()
             }
-            fn read_to_string(&self, p: &Path) -> anyhow::Result<String> {
-                std::fs::read_to_string(p).map_err(Into::into)
+            fn read_to_string(&self, p: &Path) -> Result<String, sentinel_domain::port_errors::FileSystemError> {
+                std::fs::read_to_string(p).map_err(sentinel_domain::port_errors::FileSystemError::backend)
             }
-            fn write(&self, p: &Path, data: &[u8]) -> anyhow::Result<()> {
+            fn write(&self, p: &Path, data: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
                 if let Some(parent) = p.parent() {
-                    std::fs::create_dir_all(parent)?;
+                    std::fs::create_dir_all(parent).map_err(sentinel_domain::port_errors::FileSystemError::backend)?;
                 }
-                std::fs::write(p, data).map_err(Into::into)
+                std::fs::write(p, data).map_err(sentinel_domain::port_errors::FileSystemError::backend)
             }
-            fn create_dir_all(&self, p: &Path) -> anyhow::Result<()> {
-                std::fs::create_dir_all(p).map_err(Into::into)
+            fn create_dir_all(&self, p: &Path) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+                std::fs::create_dir_all(p).map_err(sentinel_domain::port_errors::FileSystemError::backend)
             }
-            fn read_dir(&self, p: &Path) -> anyhow::Result<Vec<PathBuf>> {
-                Ok(std::fs::read_dir(p)?
-                    .filter_map(|e| e.ok().map(|e| e.path()))
-                    .collect())
+            fn read_dir(&self, p: &Path) -> Result<Vec<PathBuf>, sentinel_domain::port_errors::FileSystemError> {
+                std::fs::read_dir(p)
+                    .map_err(sentinel_domain::port_errors::FileSystemError::backend)
+                    .map(|rd| rd.filter_map(|e| e.ok().map(|e| e.path())).collect())
             }
             fn exists(&self, p: &Path) -> bool {
                 p.exists()
@@ -374,19 +374,20 @@ mod tests {
             fn is_dir(&self, p: &Path) -> bool {
                 p.is_dir()
             }
-            fn metadata(&self, p: &Path) -> anyhow::Result<std::fs::Metadata> {
-                std::fs::metadata(p).map_err(Into::into)
+            fn metadata(&self, p: &Path) -> Result<std::fs::Metadata, sentinel_domain::port_errors::FileSystemError> {
+                std::fs::metadata(p).map_err(sentinel_domain::port_errors::FileSystemError::backend)
             }
-            fn append(&self, p: &Path, data: &[u8]) -> anyhow::Result<()> {
+            fn append(&self, p: &Path, data: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
                 use std::io::Write;
                 if let Some(parent) = p.parent() {
-                    std::fs::create_dir_all(parent)?;
+                    std::fs::create_dir_all(parent).map_err(sentinel_domain::port_errors::FileSystemError::backend)?;
                 }
                 let mut f = std::fs::OpenOptions::new()
                     .create(true)
                     .append(true)
-                    .open(p)?;
-                f.write_all(data).map_err(Into::into)
+                    .open(p)
+                    .map_err(sentinel_domain::port_errors::FileSystemError::backend)?;
+                f.write_all(data).map_err(sentinel_domain::port_errors::FileSystemError::backend)
             }
         }
 

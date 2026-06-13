@@ -362,19 +362,19 @@ mod tests {
         fn home_dir(&self) -> Option<PathBuf> {
             Some(self.home.clone())
         }
-        fn read_to_string(&self, p: &Path) -> anyhow::Result<String> {
+        fn read_to_string(&self, p: &Path) -> Result<String, sentinel_domain::port_errors::FileSystemError> {
             Ok(std::fs::read_to_string(p)?)
         }
-        fn write(&self, p: &Path, c: &[u8]) -> anyhow::Result<()> {
+        fn write(&self, p: &Path, c: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
             if let Some(par) = p.parent() {
                 std::fs::create_dir_all(par)?;
             }
             Ok(std::fs::write(p, c)?)
         }
-        fn create_dir_all(&self, p: &Path) -> anyhow::Result<()> {
+        fn create_dir_all(&self, p: &Path) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
             Ok(std::fs::create_dir_all(p)?)
         }
-        fn read_dir(&self, p: &Path) -> anyhow::Result<Vec<PathBuf>> {
+        fn read_dir(&self, p: &Path) -> Result<Vec<PathBuf>, sentinel_domain::port_errors::FileSystemError> {
             Ok(std::fs::read_dir(p)?
                 .filter_map(|e| e.ok().map(|e| e.path()))
                 .collect())
@@ -385,10 +385,10 @@ mod tests {
         fn is_dir(&self, p: &Path) -> bool {
             p.is_dir()
         }
-        fn metadata(&self, p: &Path) -> anyhow::Result<std::fs::Metadata> {
+        fn metadata(&self, p: &Path) -> Result<std::fs::Metadata, sentinel_domain::port_errors::FileSystemError> {
             Ok(std::fs::metadata(p)?)
         }
-        fn append(&self, _: &Path, _: &[u8]) -> anyhow::Result<()> {
+        fn append(&self, _: &Path, _: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
             Ok(())
         }
     }
@@ -401,17 +401,17 @@ mod tests {
         fn home_dir(&self) -> Option<PathBuf> {
             Some(self.home.clone())
         }
-        fn read_to_string(&self, _: &Path) -> anyhow::Result<String> {
-            anyhow::bail!("boom")
+        fn read_to_string(&self, _: &Path) -> Result<String, sentinel_domain::port_errors::FileSystemError> {
+            Err(sentinel_domain::port_errors::FileSystemError::backend("boom"))
         }
-        fn write(&self, _: &Path, _: &[u8]) -> anyhow::Result<()> {
-            anyhow::bail!("boom")
+        fn write(&self, _: &Path, _: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+            Err(sentinel_domain::port_errors::FileSystemError::backend("boom"))
         }
-        fn create_dir_all(&self, _: &Path) -> anyhow::Result<()> {
-            anyhow::bail!("boom")
+        fn create_dir_all(&self, _: &Path) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+            Err(sentinel_domain::port_errors::FileSystemError::backend("boom"))
         }
-        fn read_dir(&self, _: &Path) -> anyhow::Result<Vec<PathBuf>> {
-            anyhow::bail!("boom")
+        fn read_dir(&self, _: &Path) -> Result<Vec<PathBuf>, sentinel_domain::port_errors::FileSystemError> {
+            Err(sentinel_domain::port_errors::FileSystemError::backend("boom"))
         }
         fn exists(&self, _: &Path) -> bool {
             false
@@ -420,11 +420,11 @@ mod tests {
             // Claim the tasks dir exists so read_dir gets exercised and fails.
             true
         }
-        fn metadata(&self, _: &Path) -> anyhow::Result<std::fs::Metadata> {
-            anyhow::bail!("boom")
+        fn metadata(&self, _: &Path) -> Result<std::fs::Metadata, sentinel_domain::port_errors::FileSystemError> {
+            Err(sentinel_domain::port_errors::FileSystemError::backend("boom"))
         }
-        fn append(&self, _: &Path, _: &[u8]) -> anyhow::Result<()> {
-            anyhow::bail!("boom")
+        fn append(&self, _: &Path, _: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+            Err(sentinel_domain::port_errors::FileSystemError::backend("boom"))
         }
     }
 
@@ -434,19 +434,19 @@ mod tests {
         uncommitted: bool,
     }
     impl GitStatusPort for FakeGit {
-        fn has_uncommitted_changes(&self, _: &str) -> anyhow::Result<bool> {
+        fn has_uncommitted_changes(&self, _: &str) -> Result<bool, sentinel_domain::port_errors::GitError> {
             Ok(self.uncommitted)
         }
-        fn changed_files(&self, _: &str) -> anyhow::Result<Vec<String>> {
+        fn changed_files(&self, _: &str) -> Result<Vec<String>, sentinel_domain::port_errors::GitError> {
             Ok(vec![])
         }
-        fn current_branch(&self, _: &str) -> anyhow::Result<String> {
+        fn current_branch(&self, _: &str) -> Result<String, sentinel_domain::port_errors::GitError> {
             Ok("main".into())
         }
         fn is_worktree(&self, _: &str) -> bool {
             false
         }
-        fn has_unpushed_commits(&self, _: &str) -> anyhow::Result<bool> {
+        fn has_unpushed_commits(&self, _: &str) -> Result<bool, sentinel_domain::port_errors::GitError> {
             Ok(false)
         }
         fn repo_root(&self, _: &str) -> Option<String> {

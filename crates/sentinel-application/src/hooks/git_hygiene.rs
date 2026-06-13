@@ -275,19 +275,19 @@ mod tests {
     }
 
     impl GitStatusPort for StubGit {
-        fn has_uncommitted_changes(&self, _repo_path: &str) -> anyhow::Result<bool> {
+        fn has_uncommitted_changes(&self, _repo_path: &str) -> Result<bool, sentinel_domain::port_errors::GitError> {
             Ok(self.has_changes)
         }
-        fn changed_files(&self, _repo_path: &str) -> anyhow::Result<Vec<String>> {
+        fn changed_files(&self, _repo_path: &str) -> Result<Vec<String>, sentinel_domain::port_errors::GitError> {
             Ok(self.files.clone())
         }
-        fn current_branch(&self, _repo_path: &str) -> anyhow::Result<String> {
+        fn current_branch(&self, _repo_path: &str) -> Result<String, sentinel_domain::port_errors::GitError> {
             Ok(self.branch.clone())
         }
         fn is_worktree(&self, _repo_path: &str) -> bool {
             self.worktree
         }
-        fn has_unpushed_commits(&self, _repo_path: &str) -> anyhow::Result<bool> {
+        fn has_unpushed_commits(&self, _repo_path: &str) -> Result<bool, sentinel_domain::port_errors::GitError> {
             Ok(false)
         }
         fn repo_root(&self, _path: &str) -> Option<String> {
@@ -323,13 +323,13 @@ mod tests {
     }
 
     impl GitStatusPort for PathAwareStubGit {
-        fn has_uncommitted_changes(&self, _: &str) -> anyhow::Result<bool> {
+        fn has_uncommitted_changes(&self, _: &str) -> Result<bool, sentinel_domain::port_errors::GitError> {
             Ok(false)
         }
-        fn changed_files(&self, _: &str) -> anyhow::Result<Vec<String>> {
+        fn changed_files(&self, _: &str) -> Result<Vec<String>, sentinel_domain::port_errors::GitError> {
             Ok(vec![])
         }
-        fn current_branch(&self, repo_path: &str) -> anyhow::Result<String> {
+        fn current_branch(&self, repo_path: &str) -> Result<String, sentinel_domain::port_errors::GitError> {
             if repo_path == self.worktree_root {
                 Ok("feat/wt".to_string())
             } else {
@@ -339,7 +339,7 @@ mod tests {
         fn is_worktree(&self, repo_path: &str) -> bool {
             repo_path == self.worktree_root
         }
-        fn has_unpushed_commits(&self, _: &str) -> anyhow::Result<bool> {
+        fn has_unpushed_commits(&self, _: &str) -> Result<bool, sentinel_domain::port_errors::GitError> {
             Ok(false)
         }
         fn repo_root(&self, path: &str) -> Option<String> {
@@ -651,19 +651,19 @@ mod tests {
     }
 
     impl GitStatusPort for DiskRepoStub {
-        fn has_uncommitted_changes(&self, _: &str) -> anyhow::Result<bool> {
+        fn has_uncommitted_changes(&self, _: &str) -> Result<bool, sentinel_domain::port_errors::GitError> {
             Ok(false)
         }
-        fn changed_files(&self, _: &str) -> anyhow::Result<Vec<String>> {
+        fn changed_files(&self, _: &str) -> Result<Vec<String>, sentinel_domain::port_errors::GitError> {
             Ok(vec![])
         }
-        fn current_branch(&self, _: &str) -> anyhow::Result<String> {
+        fn current_branch(&self, _: &str) -> Result<String, sentinel_domain::port_errors::GitError> {
             Ok(self.branch.clone())
         }
         fn is_worktree(&self, _: &str) -> bool {
             self.worktree
         }
-        fn has_unpushed_commits(&self, _: &str) -> anyhow::Result<bool> {
+        fn has_unpushed_commits(&self, _: &str) -> Result<bool, sentinel_domain::port_errors::GitError> {
             Ok(false)
         }
         fn repo_root(&self, _: &str) -> Option<String> {
@@ -736,16 +736,16 @@ mod tests {
         fn home_dir(&self) -> Option<std::path::PathBuf> {
             dirs::home_dir()
         }
-        fn read_to_string(&self, p: &std::path::Path) -> anyhow::Result<String> {
-            Ok(std::fs::read_to_string(p)?)
+        fn read_to_string(&self, p: &std::path::Path) -> Result<String, sentinel_domain::port_errors::FileSystemError> {
+            std::fs::read_to_string(p).map_err(sentinel_domain::port_errors::FileSystemError::backend)
         }
-        fn write(&self, _: &std::path::Path, _: &[u8]) -> anyhow::Result<()> {
+        fn write(&self, _: &std::path::Path, _: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
             Ok(())
         }
-        fn create_dir_all(&self, _: &std::path::Path) -> anyhow::Result<()> {
+        fn create_dir_all(&self, _: &std::path::Path) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
             Ok(())
         }
-        fn read_dir(&self, _: &std::path::Path) -> anyhow::Result<Vec<std::path::PathBuf>> {
+        fn read_dir(&self, _: &std::path::Path) -> Result<Vec<std::path::PathBuf>, sentinel_domain::port_errors::FileSystemError> {
             Ok(vec![])
         }
         fn exists(&self, p: &std::path::Path) -> bool {
@@ -754,10 +754,10 @@ mod tests {
         fn is_dir(&self, p: &std::path::Path) -> bool {
             p.is_dir()
         }
-        fn metadata(&self, p: &std::path::Path) -> anyhow::Result<std::fs::Metadata> {
-            Ok(std::fs::metadata(p)?)
+        fn metadata(&self, p: &std::path::Path) -> Result<std::fs::Metadata, sentinel_domain::port_errors::FileSystemError> {
+            std::fs::metadata(p).map_err(sentinel_domain::port_errors::FileSystemError::backend)
         }
-        fn append(&self, _: &std::path::Path, _: &[u8]) -> anyhow::Result<()> {
+        fn append(&self, _: &std::path::Path, _: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
             Ok(())
         }
     }
@@ -822,16 +822,16 @@ mod tests {
             fn home_dir(&self) -> Option<std::path::PathBuf> {
                 dirs::home_dir()
             }
-            fn read_to_string(&self, p: &std::path::Path) -> anyhow::Result<String> {
-                Ok(std::fs::read_to_string(p)?)
+            fn read_to_string(&self, p: &std::path::Path) -> Result<String, sentinel_domain::port_errors::FileSystemError> {
+                std::fs::read_to_string(p).map_err(sentinel_domain::port_errors::FileSystemError::backend)
             }
-            fn write(&self, _: &std::path::Path, _: &[u8]) -> anyhow::Result<()> {
+            fn write(&self, _: &std::path::Path, _: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
                 Ok(())
             }
-            fn create_dir_all(&self, _: &std::path::Path) -> anyhow::Result<()> {
+            fn create_dir_all(&self, _: &std::path::Path) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
                 Ok(())
             }
-            fn read_dir(&self, _: &std::path::Path) -> anyhow::Result<Vec<std::path::PathBuf>> {
+            fn read_dir(&self, _: &std::path::Path) -> Result<Vec<std::path::PathBuf>, sentinel_domain::port_errors::FileSystemError> {
                 Ok(vec![])
             }
             fn exists(&self, p: &std::path::Path) -> bool {
@@ -840,10 +840,10 @@ mod tests {
             fn is_dir(&self, p: &std::path::Path) -> bool {
                 p.is_dir()
             }
-            fn metadata(&self, p: &std::path::Path) -> anyhow::Result<std::fs::Metadata> {
-                Ok(std::fs::metadata(p)?)
+            fn metadata(&self, p: &std::path::Path) -> Result<std::fs::Metadata, sentinel_domain::port_errors::FileSystemError> {
+                std::fs::metadata(p).map_err(sentinel_domain::port_errors::FileSystemError::backend)
             }
-            fn append(&self, _: &std::path::Path, _: &[u8]) -> anyhow::Result<()> {
+            fn append(&self, _: &std::path::Path, _: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
                 Ok(())
             }
         }

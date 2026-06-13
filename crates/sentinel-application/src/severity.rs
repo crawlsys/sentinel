@@ -500,7 +500,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl LlmPort for MockLlm {
-        async fn complete(&self, request: LlmRequest) -> anyhow::Result<String> {
+        async fn complete(&self, request: LlmRequest) -> Result<String, sentinel_domain::port_errors::LlmError> {
             let q = match request.model {
                 LlmModel::Opus => &self.opus,
                 _ => &self.codex,

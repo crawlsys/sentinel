@@ -301,16 +301,16 @@ mod tests {
             fn home_dir(&self) -> Option<std::path::PathBuf> {
                 dirs::home_dir()
             }
-            fn read_to_string(&self, p: &std::path::Path) -> anyhow::Result<String> {
-                Ok(std::fs::read_to_string(p)?)
+            fn read_to_string(&self, p: &std::path::Path) -> Result<String, sentinel_domain::port_errors::FileSystemError> {
+                std::fs::read_to_string(p).map_err(sentinel_domain::port_errors::FileSystemError::backend)
             }
-            fn write(&self, _: &std::path::Path, _: &[u8]) -> anyhow::Result<()> {
+            fn write(&self, _: &std::path::Path, _: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
                 Ok(())
             }
-            fn create_dir_all(&self, _: &std::path::Path) -> anyhow::Result<()> {
+            fn create_dir_all(&self, _: &std::path::Path) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
                 Ok(())
             }
-            fn read_dir(&self, _: &std::path::Path) -> anyhow::Result<Vec<std::path::PathBuf>> {
+            fn read_dir(&self, _: &std::path::Path) -> Result<Vec<std::path::PathBuf>, sentinel_domain::port_errors::FileSystemError> {
                 Ok(vec![])
             }
             fn exists(&self, p: &std::path::Path) -> bool {
@@ -319,10 +319,10 @@ mod tests {
             fn is_dir(&self, p: &std::path::Path) -> bool {
                 p.is_dir()
             }
-            fn metadata(&self, p: &std::path::Path) -> anyhow::Result<std::fs::Metadata> {
-                Ok(std::fs::metadata(p)?)
+            fn metadata(&self, p: &std::path::Path) -> Result<std::fs::Metadata, sentinel_domain::port_errors::FileSystemError> {
+                std::fs::metadata(p).map_err(sentinel_domain::port_errors::FileSystemError::backend)
             }
-            fn append(&self, _: &std::path::Path, _: &[u8]) -> anyhow::Result<()> {
+            fn append(&self, _: &std::path::Path, _: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
                 Ok(())
             }
         }

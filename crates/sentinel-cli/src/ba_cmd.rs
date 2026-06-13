@@ -142,7 +142,7 @@ mod tests {
 
     #[async_trait]
     impl LlmPort for StubLlm {
-        async fn complete(&self, _request: LlmRequest) -> anyhow::Result<String> {
+        async fn complete(&self, _request: LlmRequest) -> Result<String, sentinel_domain::port_errors::LlmError> {
             Ok(self.response.clone())
         }
     }

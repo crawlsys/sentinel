@@ -225,8 +225,9 @@ fn rotate_accounts(
     // The legacy name was kept as a shadow copy at ~/.cargo/bin/accounts.exe
     // for a while, but that shadow drifts: any cargo install of the CLI only
     // updates `claude-accounts.exe`. Call the canonical name directly.
-    ctx.process
-        .run("claude-accounts", &["rotate", cooldown_arg.as_str()], None)
+    Ok(ctx
+        .process
+        .run("claude-accounts", &["rotate", cooldown_arg.as_str()], None)?)
 }
 
 fn summarize_process_failure(output: &super::ProcessOutput) -> String {
@@ -498,19 +499,19 @@ mod tests {
         fn home_dir(&self) -> Option<PathBuf> {
             Some(self.home.clone())
         }
-        fn read_to_string(&self, path: &Path) -> anyhow::Result<String> {
+        fn read_to_string(&self, path: &Path) -> Result<String, sentinel_domain::port_errors::FileSystemError> {
             Ok(fs::read_to_string(path)?)
         }
-        fn write(&self, path: &Path, content: &[u8]) -> anyhow::Result<()> {
+        fn write(&self, path: &Path, content: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
             if let Some(parent) = path.parent() {
                 fs::create_dir_all(parent)?;
             }
             Ok(fs::write(path, content)?)
         }
-        fn create_dir_all(&self, path: &Path) -> anyhow::Result<()> {
+        fn create_dir_all(&self, path: &Path) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
             Ok(fs::create_dir_all(path)?)
         }
-        fn read_dir(&self, path: &Path) -> anyhow::Result<Vec<PathBuf>> {
+        fn read_dir(&self, path: &Path) -> Result<Vec<PathBuf>, sentinel_domain::port_errors::FileSystemError> {
             Ok(fs::read_dir(path)?
                 .filter_map(|e| e.ok().map(|e| e.path()))
                 .collect())
@@ -521,10 +522,10 @@ mod tests {
         fn is_dir(&self, path: &Path) -> bool {
             path.is_dir()
         }
-        fn metadata(&self, path: &Path) -> anyhow::Result<std::fs::Metadata> {
+        fn metadata(&self, path: &Path) -> Result<std::fs::Metadata, sentinel_domain::port_errors::FileSystemError> {
             Ok(fs::metadata(path)?)
         }
-        fn append(&self, path: &Path, content: &[u8]) -> anyhow::Result<()> {
+        fn append(&self, path: &Path, content: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
             use std::io::Write;
             if let Some(parent) = path.parent() {
                 fs::create_dir_all(parent)?;
@@ -540,19 +541,19 @@ mod tests {
 
     struct StubGit;
     impl GitStatusPort for StubGit {
-        fn has_uncommitted_changes(&self, _: &str) -> anyhow::Result<bool> {
+        fn has_uncommitted_changes(&self, _: &str) -> Result<bool, sentinel_domain::port_errors::GitError> {
             Ok(false)
         }
-        fn changed_files(&self, _: &str) -> anyhow::Result<Vec<String>> {
+        fn changed_files(&self, _: &str) -> Result<Vec<String>, sentinel_domain::port_errors::GitError> {
             Ok(vec![])
         }
-        fn current_branch(&self, _: &str) -> anyhow::Result<String> {
+        fn current_branch(&self, _: &str) -> Result<String, sentinel_domain::port_errors::GitError> {
             Ok("main".into())
         }
         fn is_worktree(&self, _: &str) -> bool {
             false
         }
-        fn has_unpushed_commits(&self, _: &str) -> anyhow::Result<bool> {
+        fn has_unpushed_commits(&self, _: &str) -> Result<bool, sentinel_domain::port_errors::GitError> {
             Ok(false)
         }
         fn repo_root(&self, _: &str) -> Option<String> {
@@ -593,14 +594,16 @@ mod tests {
     }
 
     impl ProcessPort for TestProcess {
-        fn run(&self, _: &str, _: &[&str], _: Option<&str>) -> anyhow::Result<ProcessOutput> {
+        fn run(&self, _: &str, _: &[&str], _: Option<&str>) -> Result<ProcessOutput, sentinel_domain::port_errors::ProcessError> {
             match &self.output {
                 TestProcessResult::Ok(output) => Ok(output.clone()),
-                TestProcessResult::Err(message) => Err(anyhow::anyhow!(message.clone())),
+                TestProcessResult::Err(message) => {
+                    Err(sentinel_domain::port_errors::ProcessError::Backend(message.clone()))
+                }
             }
         }
 
-        fn spawn_detached(&self, _: &str, _: &[&str]) -> anyhow::Result<()> {
+        fn spawn_detached(&self, _: &str, _: &[&str]) -> Result<(), sentinel_domain::port_errors::ProcessError> {
             Ok(())
         }
     }
