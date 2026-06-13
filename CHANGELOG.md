@@ -7,6 +7,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 ## [Unreleased]
 
 ### Changed
+- **`memory_inject` reranks the per-turn injected atoms** (2026-06-12). The hook now passes `rerank: true` to `memory_search`, so the memories surfaced into context on every `UserPromptSubmit` are ordered by the LLM reranker (better semantic ordering than raw embedding score) rather than noop. Safe in the hot path: the reranker degrades to base embedding order on any failure, and the call is already wrapped in the dedicated 10s budget that was sized with rerank in mind, so a slow/failed rerank never blocks the turn — it falls back to embedding order. One-line args insert; `StubMemoryMcp` ignores args so existing inject tests are unaffected (19/19 pass).
 - **`memory_inject` now applies a relevance floor — no more low-score noise** (2026-06-12). The hook requested `top_k=8` from `memory_search` and injected all 8 verbatim with no quality bar, so a vague or conversational prompt dumped a tail of 0.03–0.06 atoms that "matched" only because something had to fill the k slots — clutter the model scrolls past, and noise in the feedback loop. Now hits below a relevance floor (default **0.10**, tunable at runtime via `MEMORY_INJECT_MIN_SCORE` — `0` restores inject-everything) are dropped before rendering; if nothing clears the floor, nothing is injected (a weak recall is the same signal as no recall). Sharp targeted queries (0.5–0.8 hits) are unaffected. Pure `apply_relevance_floor` helper + `min_inject_score` env resolver, 4 new unit tests.
 
 ### Added
