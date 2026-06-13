@@ -391,10 +391,21 @@ fn auditor_sidecar() -> Option<&'static tokio::runtime::Runtime> {
     sidecar(&SIDECAR, "sentinel-auditor-sidecar")
 }
 
-/// Second frontier model for the cross-vendor dual audit of production
-/// actions. Paired with the default Opus 4.8 so an Anthropic blind spot is
-/// caught by OpenAI and vice versa. Overridable via `SENTINEL_AUDITOR_MODEL_2`.
-pub const DUAL_SECOND_MODEL: &str = "openai/gpt-5.5-pro";
+/// The cross-vendor DUAL audit pair for prod / irreversible actions: two
+/// top-tier frontier models, ONE PER VENDOR, so an Anthropic blind spot is
+/// caught by OpenAI and vice versa. Pinned explicitly (NOT derived from the
+/// capability router's single pick — that router excludes the *acting* vendor,
+/// so its lone model is same-vendor on both sides of a naive dual). Override
+/// either via `SENTINEL_AUDITOR_MODEL` (primary) / `SENTINEL_AUDITOR_MODEL_2`.
+/// Both verified CALLABLE on OpenRouter by live chat-completion probe (2026-06)
+/// — catalog presence alone is insufficient (see the Fable 5 note below).
+//
+// NOTE: Fable 5 (anthropic/claude-fable-5) was the intended Anthropic leg but
+// is SUSPENDED — every provider 404s it ("Claude Fable 5 is not available.
+// Please use Opus 4.8."), which would make the dual auditor always
+// inconclusive-block. Anthropic leg pinned to Opus 4.8.
+pub const DUAL_PRIMARY_MODEL: &str = "anthropic/claude-opus-4.8"; // $15/$75
+pub const DUAL_SECOND_MODEL: &str = "openai/gpt-5.5-pro"; // $30/$180
 
 impl RigAuditor {
     /// Run the single-model audit against an explicit `model_id`. Factored out
@@ -461,14 +472,20 @@ impl AuditorPort for RigAuditor {
     /// error sentinel can make, so a single dissenting frontier opinion holds
     /// the action. The verdict's `auditor_model` names both models.
     fn score_dual(&self, dry_run: &DryRunRequest) -> Result<AuditorVerdict, AuditorError> {
+        // Pin BOTH sides to the explicit cross-vendor pair — do NOT use
+        // `self.model_id` (the capability router excludes the acting vendor, so
+        // its single pick is same-vendor as a naive second, defeating the
+        // cross-vendor point). Env overrides win if set.
+        let primary = std::env::var("SENTINEL_AUDITOR_MODEL")
+            .unwrap_or_else(|_| DUAL_PRIMARY_MODEL.to_string());
         let second = std::env::var("SENTINEL_AUDITOR_MODEL_2")
             .unwrap_or_else(|_| DUAL_SECOND_MODEL.to_string());
 
-        let v1 = self.score_with_model(dry_run, &self.model_id);
+        let v1 = self.score_with_model(dry_run, &primary);
         let v2 = self.score_with_model(dry_run, &second);
 
         match (v1, v2) {
-            (Ok(a), Ok(b)) => Ok(reconcile_conservative(a, b, &self.model_id, &second)),
+            (Ok(a), Ok(b)) => Ok(reconcile_conservative(a, b, &primary, &second)),
             // One judge errored: a surviving BLOCK stays block; a surviving
             // PASS is downgraded to an inconclusive block — we can't confirm
             // safety with only one frontier opinion on a prod action.
@@ -476,7 +493,7 @@ impl AuditorPort for RigAuditor {
                 if a.decision.is_block() {
                     Ok(a)
                 } else {
-                    Ok(block_for_inconclusive(&self.model_id, &second))
+                    Ok(block_for_inconclusive(&primary, &second))
                 }
             }
             // Both errored — propagate the first error.
@@ -891,6 +908,22 @@ mod tests {
         let auditor = RigAuditor::with_prompt_fn(stub, "test/model");
         let v = auditor.score_dual(&fixture_dry_run()).unwrap();
         assert!(v.decision.is_block());
+    }
+
+    #[test]
+    fn pinned_dual_pair_is_genuinely_cross_vendor() {
+        // The whole point of the fix: the two pinned auditor models must come
+        // from DIFFERENT vendors, or a "dual" audit is just one vendor twice
+        // (the original bug — both legs resolved to OpenAI GPT). Vendor is the
+        // slug prefix before the first '/'.
+        let primary_vendor = DUAL_PRIMARY_MODEL.split('/').next().unwrap();
+        let second_vendor = DUAL_SECOND_MODEL.split('/').next().unwrap();
+        assert_ne!(
+            primary_vendor, second_vendor,
+            "dual auditor pair must be cross-vendor, got {DUAL_PRIMARY_MODEL} + {DUAL_SECOND_MODEL}"
+        );
+        assert_eq!(primary_vendor, "anthropic");
+        assert_eq!(second_vendor, "openai");
     }
 
     #[test]
