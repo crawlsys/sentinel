@@ -361,41 +361,85 @@ pub fn build_claude_cli_prompt_fn(scorer_label: &'static str) -> Option<(PromptF
 }
 
 /// Build a `PromptFn` backed by the **`codex exec`** subscription CLI (the
-/// OpenAI leg). Returns `None` when `codex` is not on `PATH`. Uses
-/// `--output-last-message <tmpfile>` so we read ONLY the model's final answer
-/// (plain `codex exec` prints a full transcript). The system + user prompts are
-/// concatenated into the single positional prompt (`codex exec` has no separate
-/// system flag). `model_id` is accepted but ignored — `codex` uses its
-/// configured subscription model.
+/// OpenAI leg). Returns `None` when `codex` is not on `PATH`.
+///
+/// The prompt (system + user, concatenated — `codex exec` has no system flag)
+/// is fed on **stdin**, not as a positional argument: codex switches to
+/// "Reading additional input from stdin" whenever certain flags (notably
+/// `--output-schema`) are present, so a positional prompt is silently ignored
+/// and the call hangs. Stdin is also more robust for large prompts (no
+/// arg-length / shell-quoting limits). `--output-last-message <tmpfile>` reads
+/// ONLY the model's final answer (plain `codex exec` prints a full transcript).
+///
+/// When `schema_json` is `Some(..)`, it is written to a temp file and passed via
+/// `--output-schema`, constraining codex's final message to that JSON Schema —
+/// so the OpenAI leg returns guaranteed-valid JSON (no parse-failure path). The
+/// auditor passes `None` (its verdict shape is a nested enum); the completion
+/// judge passes the flat `JudgeVerdict` schema. `model_id` is accepted but
+/// ignored — `codex` uses its configured subscription model.
 #[must_use]
-pub fn build_codex_cli_prompt_fn(scorer_label: &'static str) -> Option<(PromptFn, String)> {
+pub fn build_codex_cli_prompt_fn(
+    scorer_label: &'static str,
+    schema_json: Option<&'static str>,
+) -> Option<(PromptFn, String)> {
     let bin = resolve_cli("codex")?;
     let prompt_fn: PromptFn = Arc::new(move |_model_id, system, user_msg| {
         let bin = bin.clone();
         Box::pin(async move {
+            use tokio::io::AsyncWriteExt;
             // `codex exec` has no system-prompt flag; prepend it to the prompt.
             let prompt = if system.is_empty() {
                 user_msg
             } else {
                 format!("{system}\n\n{user_msg}")
             };
-            // Unique temp path for the final-message capture. No Date/rand in
-            // this crate's sandbox, so derive uniqueness from pid + an atomic.
+            // Unique temp paths (no Date/rand in this crate's sandbox → pid +
+            // atomic). One for the captured final message, one for the schema.
             static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
             let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let out_file = std::env::temp_dir()
-                .join(format!("sentinel-codex-{}-{seq}.txt", std::process::id()));
-            let status = tokio::process::Command::new(&bin)
-                .arg("exec")
-                .arg("--output-last-message")
-                .arg(&out_file)
-                .arg(&prompt)
-                .output()
-                .await
+            let pid = std::process::id();
+            let out_file = std::env::temp_dir().join(format!("sentinel-codex-{pid}-{seq}.txt"));
+            let schema_file = schema_json
+                .map(|_| std::env::temp_dir().join(format!("sentinel-codex-schema-{pid}-{seq}.json")));
+            if let (Some(path), Some(body)) = (schema_file.as_ref(), schema_json) {
+                if let Err(e) = tokio::fs::write(path, body).await {
+                    return Err(anyhow::anyhow!(
+                        "codex {scorer_label}: failed to write schema file: {e}"
+                    ));
+                }
+            }
+
+            let mut cmd = tokio::process::Command::new(&bin);
+            cmd.arg("exec").arg("--output-last-message").arg(&out_file);
+            if let Some(path) = schema_file.as_ref() {
+                cmd.arg("--output-schema").arg(path);
+            }
+            cmd.stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped());
+
+            let mut child = cmd
+                .spawn()
                 .map_err(|e| anyhow::anyhow!("codex {scorer_label}: spawn failed: {e}"))?;
+            // Feed the prompt on stdin and close it so codex stops waiting.
+            if let Some(mut stdin) = child.stdin.take() {
+                stdin
+                    .write_all(prompt.as_bytes())
+                    .await
+                    .map_err(|e| anyhow::anyhow!("codex {scorer_label}: stdin write: {e}"))?;
+                drop(stdin); // EOF
+            }
+            let status = child
+                .wait_with_output()
+                .await
+                .map_err(|e| anyhow::anyhow!("codex {scorer_label}: wait failed: {e}"))?;
+
             let answer = tokio::fs::read_to_string(&out_file).await.ok();
-            // Best-effort cleanup of the temp file.
+            // Best-effort cleanup of both temp files.
             let _ = tokio::fs::remove_file(&out_file).await;
+            if let Some(path) = schema_file.as_ref() {
+                let _ = tokio::fs::remove_file(path).await;
+            }
             if !status.status.success() {
                 let err = String::from_utf8_lossy(&status.stderr);
                 return Err(anyhow::anyhow!(

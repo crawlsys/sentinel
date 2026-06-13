@@ -449,7 +449,10 @@ impl RigAuditor {
         let vendor = model_id.split('/').next().unwrap_or("");
         let cli = match vendor {
             "anthropic" => llm_scorer_runtime::build_claude_cli_prompt_fn("auditor"),
-            "openai" => llm_scorer_runtime::build_codex_cli_prompt_fn("auditor"),
+            // No schema: the auditor's verdict shape is a nested enum
+            // (`{Block:{reason}}`), awkward to JSON-Schema-constrain; the
+            // existing free-form JSON parse path handles it.
+            "openai" => llm_scorer_runtime::build_codex_cli_prompt_fn("auditor", None),
             _ => None,
         };
         cli.unwrap_or_else(|| (self.prompt_fn.clone(), self.provider_prefix.clone()))

@@ -33,6 +33,30 @@ type PromptFn =
     Arc<dyn Fn(String, String, String) -> BoxFuture<'static, Result<String>> + Send + Sync>;
 
 /// Resolve the transport for a judge `model_id`, preferring a subscription CLI
+/// JSON Schema for [`JudgeVerdict`], passed to `codex exec --output-schema` so
+/// the OpenAI judge leg returns guaranteed-valid JSON (no parse-failure path).
+/// Mirrors the `JudgeVerdict` deserialize shape: `sufficient` (bool),
+/// `confidence` (0..1), `reasoning` (string), `requested_evidence` (string array
+/// or null).
+///
+/// NOTE: OpenAI structured-output (codex `--output-schema`) requires `required`
+/// to list **every** key in `properties` — an optional field is expressed by
+/// making it nullable (`["array","null"]`) and STILL listing it in `required`,
+/// not by omitting it. Omitting `requested_evidence` from `required` yields a
+/// 400 `invalid_json_schema`. `JudgeVerdict`'s serde tolerates the explicit
+/// `null` (the field is `Option`).
+const JUDGE_VERDICT_SCHEMA: &str = r#"{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["sufficient", "confidence", "reasoning", "requested_evidence"],
+  "properties": {
+    "sufficient": { "type": "boolean" },
+    "confidence": { "type": "number", "minimum": 0.0, "maximum": 1.0 },
+    "reasoning": { "type": "string" },
+    "requested_evidence": { "type": ["array", "null"], "items": { "type": "string" } }
+  }
+}"#;
+
 /// for the `DualFrontier` frontier pair and falling back to `openrouter_fn`.
 ///
 /// Routes only the two frontier models whose subscription CLI faithfully serves
@@ -53,7 +77,7 @@ fn resolve_judge_transport(model_id: &str, openrouter_fn: &PromptFn) -> (PromptF
         crate::llm_scorer_runtime::build_claude_cli_prompt_fn("judge")
             .map(|(pf, _prefix)| (pf as PromptFn, "claude-cli"))
     } else if model_id.starts_with("openai/") {
-        crate::llm_scorer_runtime::build_codex_cli_prompt_fn("judge")
+        crate::llm_scorer_runtime::build_codex_cli_prompt_fn("judge", Some(JUDGE_VERDICT_SCHEMA))
             .map(|(pf, _prefix)| (pf as PromptFn, "codex-cli"))
     } else {
         None
@@ -290,11 +314,45 @@ mod tests {
         Arc::new(|_m, _s, _u| Box::pin(async { Ok("openrouter".to_string()) }))
     }
 
+    /// Serializes tests that read/write `SENTINEL_AUDITOR_NO_SUBSCRIPTION` —
+    /// process env is global, so parallel env-touching tests would race.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn judge_verdict_schema_is_valid_and_openai_strict() {
+        // The schema must (a) parse as JSON, and (b) satisfy OpenAI's
+        // structured-output rule that `required` lists EVERY key in
+        // `properties` — omitting one yields a 400 invalid_json_schema at call
+        // time. This guards against a future edit reintroducing that bug.
+        let v: serde_json::Value =
+            serde_json::from_str(JUDGE_VERDICT_SCHEMA).expect("schema must be valid JSON");
+        let props: Vec<&str> = v["properties"]
+            .as_object()
+            .expect("properties object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        let required: Vec<&str> = v["required"]
+            .as_array()
+            .expect("required array")
+            .iter()
+            .map(|x| x.as_str().unwrap())
+            .collect();
+        for p in &props {
+            assert!(
+                required.contains(p),
+                "OpenAI strict schema: property {p:?} must be in `required`"
+            );
+        }
+        assert_eq!(v["additionalProperties"], serde_json::json!(false));
+    }
+
     #[test]
     fn resolve_judge_transport_keeps_openrouter_for_sonnet_and_kimi() {
         // Sonnet + Kimi must stay on OpenRouter — model identity matters there
         // (a bare `claude -p` isn't guaranteed to be Sonnet; Kimi has no CLI),
         // so even if `claude`/`codex` are installed they must NOT be chosen.
+        let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         std::env::remove_var("SENTINEL_AUDITOR_NO_SUBSCRIPTION");
         let or = dummy_openrouter_fn();
         let (_pf1, p1) = resolve_judge_transport("anthropic/claude-sonnet-4.6", &or);
@@ -307,6 +365,7 @@ mod tests {
     fn resolve_judge_transport_opt_out_forces_openrouter() {
         // SENTINEL_AUDITOR_NO_SUBSCRIPTION=1 forces OpenRouter for EVERY model,
         // including the frontier dual pair.
+        let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let or = dummy_openrouter_fn();
         std::env::set_var("SENTINEL_AUDITOR_NO_SUBSCRIPTION", "1");
         let (_a, pa) = resolve_judge_transport("anthropic/claude-opus-4.8", &or);
@@ -322,6 +381,7 @@ mod tests {
         // CLI when its binary is on PATH, else OpenRouter. We don't assume the
         // CI box has claude/codex, so assert the result is one of the two valid
         // outcomes per leg — never something else, never a panic.
+        let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         std::env::remove_var("SENTINEL_AUDITOR_NO_SUBSCRIPTION");
         let or = dummy_openrouter_fn();
         let (_a, pa) = resolve_judge_transport("anthropic/claude-opus-4.8", &or);
