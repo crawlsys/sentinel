@@ -67,6 +67,55 @@ fn multi_step_implementation_signal(prompt: &str) -> bool {
         .any(|p| Regex::new(p).is_ok_and(|re| re.is_match(&lower)))
 }
 
+/// Large fan-out orchestration that the native `Workflow` tool handles far
+/// better than `/loop` driving subagents one turn at a time: codebase-wide
+/// sweeps, big migrations, multi-angle research, adversarial judge panels. The
+/// `Workflow` script holds the loop/branching itself and returns only the final
+/// answer, so the main context isn't spent coordinating dozens of agents.
+fn workflow_orchestration_signal(prompt: &str) -> bool {
+    let patterns = [
+        r"\b(audit|sweep|migrate|review) (every|all|the (whole|entire))\b",
+        r"\bacross (all|every|the (whole|entire)).*(repo|file|endpoint|module|ticket)",
+        r"\b(\d{2,}|dozens?|hundreds?) of (files?|agents?|tickets?|endpoints?|repos?)\b",
+        r"\bjudge panel\b",
+        r"\bcross[- ]check\b.*\b(sources?|claims?|findings?)\b",
+    ];
+    let lower = prompt.to_lowercase();
+    patterns
+        .iter()
+        .any(|p| Regex::new(p).is_ok_and(|re| re.is_match(&lower)))
+}
+
+/// A request to `/loop` / poll / babysit something that ALREADY notifies the
+/// session on completion (a `Workflow`, a background subagent, a CI/deploy that
+/// pushes via Channels). Anthropic fixed exactly this for native `/loop`
+/// (changelog v2.1.141 / v2.1.147 — stopped scheduling redundant wakeups for
+/// background tasks that already notify). The completion notification
+/// re-invokes the session, so an interval poll is wasted tokens; prefer the
+/// notification, Channels, or the Monitor tool. Requires BOTH a poll/wait verb
+/// AND a self-notifying target — plain polling of an external service that does
+/// NOT push to the session is legitimate and must not trip.
+fn redundant_poll_signal(prompt: &str) -> bool {
+    let lower = prompt.to_lowercase();
+    let poll_verb = [
+        r"\b(/loop|loop|poll|babysit|keep checking|watch|wait (for|until))\b",
+        r"\bcheck (every|back)\b",
+    ]
+    .iter()
+    .any(|p| Regex::new(p).is_ok_and(|re| re.is_match(&lower)));
+
+    let self_notifying_target = [
+        r"\bworkflow\b",
+        r"\bbackground (agent|subagent|task|job)\b",
+        r"\bagent (to )?(finish|complete|notif)",
+        r"\b(deploy|build|ci) (that|which) (notif|push)",
+    ]
+    .iter()
+    .any(|p| Regex::new(p).is_ok_and(|re| re.is_match(&lower)));
+
+    poll_verb && self_notifying_target
+}
+
 /// True if we're executing inside a subagent — we don't want to nudge
 /// subagents to spawn more subagents (could recurse).
 fn is_in_subagent(input: &HookInput) -> bool {
@@ -122,6 +171,29 @@ pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
              router didn't already route, consider invoking `Skill(skill: \"<name>\")` \
              explicitly — skills enforce phase workflows and bring pre-built agent \
              orchestration patterns.",
+        );
+    }
+
+    if workflow_orchestration_signal(prompt) {
+        nudges.push(
+            "- **Workflow (native)**: this is large fan-out — a codebase sweep, big \
+             migration, multi-angle research, or judge panel. Reach for the native \
+             `Workflow` tool, not `/loop` driving subagents one turn at a time. The \
+             workflow script holds the loop and branching itself and returns only the \
+             final answer, so your context isn't spent coordinating dozens of agents \
+             (up to 16 concurrent / 1000 total per run).",
+        );
+    }
+
+    if redundant_poll_signal(prompt) {
+        nudges.push(
+            "- **Don't double-drive a self-notifying task**: you're about to poll/`/loop` \
+             something (a Workflow, a background subagent, a CI/deploy that pushes) that \
+             ALREADY notifies the session on completion. The notification re-invokes you \
+             — an interval poll is wasted tokens. This mirrors Anthropic's own native \
+             fix (changelog v2.1.141). Prefer the completion notification, **Channels** \
+             (event → session), or the **Monitor** tool over a poll. For \
+             \"don't stop until X is true\", use `/goal` rather than a fixed-interval loop.",
         );
     }
 
@@ -201,6 +273,76 @@ mod tests {
         assert!(
             injected.contains("Skills"),
             "missing skill nudge: {injected}"
+        );
+    }
+
+    #[test]
+    fn test_workflow_orchestration_signal() {
+        assert!(workflow_orchestration_signal(
+            "audit every endpoint under src/routes for missing auth checks"
+        ));
+        assert!(workflow_orchestration_signal(
+            "migrate all the files across the whole repo from Solid to React"
+        ));
+        assert!(workflow_orchestration_signal(
+            "run a judge panel on these three design options"
+        ));
+        assert!(workflow_orchestration_signal(
+            "cross-check the claims in this report against sources"
+        ));
+        // Small/normal work should NOT trip the workflow nudge.
+        assert!(!workflow_orchestration_signal("fix the bug in auth.rs"));
+        assert!(!workflow_orchestration_signal("review my last commit"));
+    }
+
+    #[test]
+    fn test_redundant_poll_signal_requires_both_verb_and_target() {
+        // poll verb + self-notifying target → trips.
+        assert!(redundant_poll_signal(
+            "keep checking the workflow and tell me when it's done"
+        ));
+        assert!(redundant_poll_signal(
+            "/loop every 2m to wait for the background agent to finish"
+        ));
+        assert!(redundant_poll_signal(
+            "poll the deploy that pushes a notification when ready"
+        ));
+        // poll verb but EXTERNAL target that does NOT self-notify → legitimate,
+        // must not trip (false-positive guard).
+        assert!(!redundant_poll_signal(
+            "poll the upstream vendor API every 5 minutes for new orders"
+        ));
+        assert!(!redundant_poll_signal("watch the stock price"));
+        // self-notifying target but no poll verb → not a double-drive.
+        assert!(!redundant_poll_signal(
+            "dispatch a workflow to audit the endpoints"
+        ));
+    }
+
+    #[test]
+    fn test_workflow_and_poll_nudges_inject() {
+        let ctx = super::super::test_support::stub_ctx();
+        let wf = process(
+            &prompt_input("audit every endpoint across the whole repo for auth bugs"),
+            &ctx,
+        );
+        let wf_ctx = wf
+            .hook_specific_output
+            .and_then(|h| h.additional_context)
+            .unwrap_or_default();
+        assert!(wf_ctx.contains("Workflow (native)"), "missing: {wf_ctx}");
+
+        let poll = process(
+            &prompt_input("just keep checking the workflow until it finishes and ping me"),
+            &ctx,
+        );
+        let poll_ctx = poll
+            .hook_specific_output
+            .and_then(|h| h.additional_context)
+            .unwrap_or_default();
+        assert!(
+            poll_ctx.contains("double-drive"),
+            "missing poll nudge: {poll_ctx}"
         );
     }
 
