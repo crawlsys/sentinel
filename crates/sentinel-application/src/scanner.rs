@@ -193,6 +193,23 @@ pub fn count_mcp_servers(home_dir: &Path) -> usize {
         .unwrap_or(0)
 }
 
+/// Count MCP servers a marketplace repo *declares*, from `<root>/marketplace.json`'s
+/// `mcp[]` array.
+///
+/// Returns `None` when `root_dir` has no readable `marketplace.json` with an `mcp`
+/// array (e.g. when scanning `~/.claude/`, which has no such file) — the caller
+/// then falls back to the live `~/.claude.json` count via [`count_mcp_servers`].
+/// This is what makes `count_components` honest in BOTH contexts: a marketplace
+/// clone reports what the marketplace ships; a live `~/.claude` reports what is
+/// actually registered.
+pub fn count_declared_mcp_servers(root_dir: &Path) -> Option<usize> {
+    let content = fs::read_to_string(root_dir.join("marketplace.json")).ok()?;
+    let data = serde_json::from_str::<serde_json::Value>(&content).ok()?;
+    data.get("mcp")
+        .and_then(|v| v.as_array())
+        .map(std::vec::Vec::len)
+}
+
 /// Count Rust repos matching a suffix pattern in `~/Documents/GitHub/`.
 ///
 /// `home_dir` should be the user's home directory (parent of `~/.claude/`).
@@ -222,7 +239,13 @@ pub fn count_components(claude_dir: &Path) -> ComponentCounts {
     let hooks = super::hooks::HOOK_NAMES.len();
     let commands = count_files_with_ext(&claude_dir.join("commands"), ".md");
     let agents = count_files_with_ext(&claude_dir.join("agents"), ".md");
-    let mcp_servers = count_mcp_servers(&home_dir);
+    // Prefer the marketplace's own declaration (`marketplace.json` mcp[]) when
+    // scanning a marketplace repo; fall back to the live `~/.claude.json` only
+    // when no such declaration exists. Without this, scanning a marketplace
+    // clone reported 0 MCP servers (the clone has no ~/.claude.json) and
+    // `--sync-counts` would write that 0 into the repo's own docs.
+    let mcp_servers =
+        count_declared_mcp_servers(claude_dir).unwrap_or_else(|| count_mcp_servers(&home_dir));
     let mcp_repos = count_repos_with_suffix(&home_dir, "-mcp-rust");
     let cli_repos = count_repos_with_suffix(&home_dir, "-cli-rust");
 
@@ -2405,5 +2428,31 @@ matcher = ["Edit", "Write"]
         assert_eq!(hooks[1].name, "git_hygiene");
         assert_eq!(hooks[1].matcher, "Edit, Write");
         assert_eq!(hooks[1].depends_on, vec!["skill_router"]);
+    }
+
+    #[test]
+    fn count_declared_mcp_servers_reads_marketplace_json_and_none_when_absent() {
+        let tmp = std::env::temp_dir().join(format!("sen-mcp-decl-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+
+        // No marketplace.json yet -> None (caller falls back to ~/.claude.json).
+        assert_eq!(super::count_declared_mcp_servers(&tmp), None);
+
+        // marketplace.json with a 3-entry mcp[] -> Some(3), independent of any
+        // live ~/.claude.json.
+        fs::write(
+            tmp.join("marketplace.json"),
+            r#"{"mcp":[{"name":"a"},{"name":"b"},{"name":"c"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(super::count_declared_mcp_servers(&tmp), Some(3));
+
+        // A marketplace.json with no mcp key -> None (not Some(0)): nothing
+        // declared means "fall back", not "zero servers".
+        fs::write(tmp.join("marketplace.json"), r#"{"name":"x"}"#).unwrap();
+        assert_eq!(super::count_declared_mcp_servers(&tmp), None);
+
+        let _ = fs::remove_dir_all(&tmp);
     }
 }
