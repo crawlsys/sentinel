@@ -16,7 +16,10 @@ use sentinel_application::scanner;
 /// - `--sync-counts`: synchronize counts across all marketplace text files
 /// - `--manifest`: generate manifest.json with SHA-256 hashes
 /// - `--dry-run`: preview changes without writing (for --sync-counts)
-/// - `--dir <path>`: override marketplace root (default: `~/.claude/`)
+/// - `--dir <path>`: override marketplace root. When omitted, the root is
+///   auto-detected by walking up from the current directory for a marketplace
+///   marker (`.claude-plugin/marketplace.json` or a root `marketplace.json`
+///   alongside a `skills/` dir); if none is found, falls back to `~/.claude/`.
 pub fn run(
     counts_only: bool,
     validate_only: bool,
@@ -27,9 +30,11 @@ pub fn run(
 ) -> anyhow::Result<()> {
     let root_dir = match dir {
         Some(d) => PathBuf::from(d),
-        None => dirs::home_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join(".claude"),
+        None => detect_marketplace_root().unwrap_or_else(|| {
+            dirs::home_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join(".claude")
+        }),
     };
 
     if !root_dir.exists() {
@@ -172,4 +177,66 @@ pub fn run(
     }
 
     Ok(())
+}
+
+/// Detect a marketplace root by walking up from the current working directory.
+///
+/// A directory qualifies as a marketplace root when it contains either:
+/// - `.claude-plugin/marketplace.json` (the plugin-marketplace manifest), or
+/// - a `marketplace.json` alongside a `skills/` directory (the repo layout).
+///
+/// Returns `None` if no marker is found before reaching the filesystem root, so
+/// the caller can fall back to `~/.claude/`. This makes `sentinel scan` operate
+/// on the repo it is invoked in rather than always rewriting `~/.claude/`.
+fn detect_marketplace_root() -> Option<PathBuf> {
+    let start = std::env::current_dir().ok()?;
+    find_marketplace_root(&start)
+}
+
+/// Walk up from `start` looking for a marketplace marker. Pure (no cwd access)
+/// so it is unit-testable. Returns the first ancestor (incl. `start`) that is a
+/// marketplace root, or `None` at the filesystem root.
+fn find_marketplace_root(start: &std::path::Path) -> Option<PathBuf> {
+    let mut cur = Some(start);
+    while let Some(dir) = cur {
+        let is_marketplace = dir.join(".claude-plugin/marketplace.json").is_file()
+            || (dir.join("marketplace.json").is_file() && dir.join("skills").is_dir());
+        if is_marketplace {
+            return Some(dir.to_path_buf());
+        }
+        cur = dir.parent();
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::find_marketplace_root;
+    use std::fs;
+
+    #[test]
+    fn detects_claude_plugin_marker_and_walks_up_from_subdir() {
+        let tmp = std::env::temp_dir().join(format!("sen-mkt-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(tmp.join(".claude-plugin")).unwrap();
+        fs::write(tmp.join(".claude-plugin/marketplace.json"), "{}").unwrap();
+        let sub = tmp.join("skills").join("foo");
+        fs::create_dir_all(&sub).unwrap();
+
+        // From the root itself and from a nested subdir, both resolve to root.
+        assert_eq!(find_marketplace_root(&tmp).as_deref(), Some(tmp.as_path()));
+        assert_eq!(find_marketplace_root(&sub).as_deref(), Some(tmp.as_path()));
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn no_marker_returns_none() {
+        let tmp = std::env::temp_dir().join(format!("sen-nomkt-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        // A bare temp dir has no marketplace marker up its (temp) ancestry.
+        assert_eq!(find_marketplace_root(&tmp), None);
+        let _ = fs::remove_dir_all(&tmp);
+    }
 }
