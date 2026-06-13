@@ -309,8 +309,15 @@ pub fn resolve_cli(bin: &str) -> Option<std::path::PathBuf> {
 /// Windows executable extensions). Avoids a `which`-crate dependency.
 fn which_on_path(bin: &str) -> Option<std::path::PathBuf> {
     let path = std::env::var_os("PATH")?;
+    // On Windows the OS can only `CreateProcess` a real executable — `.exe`,
+    // or `.cmd`/`.bat` (resolved through the loader). A bare extensionless file
+    // is typically a POSIX `#!/bin/sh` shim (npm installs one next to the
+    // `.cmd`), which fails with "os error 193: %1 is not a valid Win32
+    // application". So on Windows try the executable extensions FIRST and DROP
+    // the extensionless candidate entirely. On unix the bare name is the
+    // executable.
     let exts: &[&str] = if cfg!(windows) {
-        &["", ".exe", ".cmd", ".bat"]
+        &[".exe", ".cmd", ".bat"]
     } else {
         &[""]
     };
@@ -535,6 +542,50 @@ mod tests {
     // -----------------------------------------------------------------------
     // subscription CLI detection + prompt-fn builders
     // -----------------------------------------------------------------------
+
+    #[cfg(windows)]
+    #[test]
+    fn which_on_path_prefers_executable_extension_over_bare_shim() {
+        // Regression: npm installs a bare POSIX `#!/bin/sh` shim next to the
+        // real `.cmd` on Windows. which_on_path must resolve the `.cmd`/`.exe`
+        // (CreateProcess-able), never the extensionless shim — picking the bare
+        // file caused "os error 193: %1 is not a valid Win32 application" on the
+        // codex leg (caught by the live integration test). Build a temp dir with
+        // both `tool` (bare) and `tool.cmd`, put it on PATH, and assert the
+        // resolved path ends in `.cmd`.
+        let dir = std::env::temp_dir().join(format!(
+            "sentinel-which-test-{}-{}",
+            std::process::id(),
+            // distinct per run without rand/Date
+            std::time::SystemTime::UNIX_EPOCH.elapsed().map(|d| d.subsec_nanos()).unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let bare = dir.join("zzqtool");
+        let cmd = dir.join("zzqtool.cmd");
+        std::fs::write(&bare, "#!/bin/sh\necho hi\n").unwrap();
+        std::fs::write(&cmd, "@echo hi\n").unwrap();
+        let orig = std::env::var_os("PATH");
+        let new_path = match &orig {
+            Some(p) => {
+                let mut v = vec![dir.clone()];
+                v.extend(std::env::split_paths(p));
+                std::env::join_paths(v).unwrap()
+            }
+            None => dir.clone().into_os_string(),
+        };
+        std::env::set_var("PATH", &new_path);
+        let found = which_on_path("zzqtool");
+        if let Some(p) = orig {
+            std::env::set_var("PATH", p);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        let found = found.expect("should resolve zzqtool via the .cmd");
+        assert_eq!(
+            found.extension().and_then(|e| e.to_str()),
+            Some("cmd"),
+            "must resolve the .cmd, not the bare POSIX shim: {found:?}"
+        );
+    }
 
     #[test]
     fn resolve_cli_returns_none_for_absent_binary() {
