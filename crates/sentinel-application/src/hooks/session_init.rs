@@ -1016,13 +1016,21 @@ Sentinel hooks detect specific tool calls and inject CronCreate for monitoring:
 
 You do NOT need to create these manually — sentinel injects them via hooks.
 
-### Default /loop Behavior
+### Async work — four NATIVE primitives, distinct layers (loop · schedule/cron · goal · Workflow)
 
-Running bare `/loop` uses `~/.claude/loop.md` which does:
-- Continue unfinished work from the conversation
-- Babysit open PRs (CI status, review comments, merge conflicts)
-- Run cleanup (stale worktrees, uncommitted changes, forgotten tasks)
-- Check Linear for new assigned issues
+All four are **native Claude Code features** (verified against code.claude.com/docs, June 2026). They compose; they do not collide. Pick by layer:
+
+| Primitive | What it is | Plan held by | Reach for it when |
+|-----------|-----------|--------------|-------------------|
+| **`/loop`** (native bundled skill) | Session poll. `/loop 5m <prompt>` fixed interval, `/loop <prompt>` Claude-chosen interval (1m–1h), bare `/loop` runs the built-in maintenance prompt or `.claude/loop.md` / `~/.claude/loop.md`, `/loop 20m /cmd` re-runs a slash command. Esc clears a pending wakeup; 7-day expiry. Uses `CronCreate` under the hood. | Claude, turn by turn | quick in-session polling/babysitting that has **no self-notifying background task** to wait on |
+| **`CronCreate`/`CronList`/`CronDelete`** + **`/schedule`** (Routines) | Time-trigger. `CronCreate` = session-scoped cron (the mandatory hygiene crons use this); `/schedule` = durable **cloud** routines that survive session exit (1h min interval). | the cron prompt | recurring time-based work; use `/schedule` when it must run unattended/after you close the session |
+| **`/goal`** (native, v2.1.139) | Keep working across turns until a **completion condition** is met. Guarded so its evaluator does not fire while background shells/subagents still run. | Claude, until condition met | "don't stop until X is true" — a finish line, not an interval |
+| **`Workflow`** | Background fan-out runtime; the script holds the loop/branching, **notifies on completion**, resumable same-session, 16 concurrent / 1000 total agents. | the script | orchestration: audits, migrations, multi-angle research, judge panels — anything needing more agents than one context can coordinate |
+
+**THE composition rule (mirrors Anthropic's own native fix, changelog v2.1.141 / re-fixed v2.1.147 — "Fixed `/loop` scheduling redundant wakeups to poll for background tasks that already notify on completion"):**
+> When work is dispatched to a **`Workflow` or a background subagent that NOTIFIES on completion, do NOT also kick `/loop` (or a short-interval `CronCreate`) to poll it.** The completion notification re-invokes the session; the poll is wasted tokens. To react to external events without polling at all, prefer **Channels** (CI/webhook pushes into the session) or the **Monitor** tool (streams a background script's output) over an interval loop.
+
+Bare `/loop` (no prompt) runs the built-in maintenance prompt — continue unfinished work, tend the current branch's PR (CI/review/conflicts), run cleanup when idle — or `~/.claude/loop.md` if you create one to override it. Sentinel's mandatory hygiene/audit jobs are `CronCreate` (above), independent of `/loop`.
 
 ## Date Context
 
@@ -1483,12 +1491,15 @@ verification. If a skill fits the work, use it.
 - Skills compose. Chain them when appropriate (e.g. `plan` → `execute` →
 `review` → `commit` → `pr`).
 
-**Use crons and loops for async work — stop babysitting in-session:**
+**Use the right async primitive — stop babysitting in-session:**
+- Four native primitives, distinct layers (see "Async work" above for the full table): **`/loop`** (session poll, interval or self-paced), **`CronCreate`/`/schedule`** (time-trigger; cron is session-scoped, `/schedule` Routines are durable cloud), **`/goal`** (keep working across turns until a condition is met), **`Workflow`** (background fan-out that notifies on completion). They compose.
 - When work naturally polls (CI status, Linear state transitions, a long
 cargo build, a remote deploy), **schedule a cron** via `CronCreate` or
 kick `/loop` instead of sitting in-session waiting. Polling eats context
 and slows the rest of the queue. Let the harness notify you when
 something changes.
+- **Don't double-drive.** If you dispatch a `Workflow` or a background subagent that NOTIFIES on completion, do NOT also `/loop` or short-cron to poll it — the notification re-invokes you; the poll is wasted tokens (this mirrors Anthropic's own native fix, changelog v2.1.141). To react to events without polling at all, prefer **Channels** (CI/webhook → session) or the **Monitor** tool over an interval loop. For "don't stop until X is true," use **`/goal`** rather than a fixed-interval loop.
+- For orchestration that needs many agents (audits, migrations, multi-angle research, judge panels), reach for **`Workflow`** — not a `/loop` driving subagents one turn at a time.
 - Concrete triggers for `CronCreate` (recurring):
   * "Check the deploy every 5 minutes until it's green."
   * "Re-fetch Linear issues every 10 minutes and refresh the cache."
