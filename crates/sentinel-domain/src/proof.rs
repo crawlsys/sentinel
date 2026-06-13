@@ -5,6 +5,7 @@
 //! creating a tamper-evident chain — same trust model as blockchain.
 
 use chrono::{DateTime, Utc};
+use ed25519_dalek::VerifyingKey;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -78,12 +79,16 @@ impl PhaseProof {
     /// (domain-separated) makes the verdict tamper-evident.
     pub fn compute_combined_hash(
         phase_id: &str,
+        skill: &str,
         evidence_hash: &str,
         previous_hash: &str,
         judge_sufficient: bool,
     ) -> String {
         let mut hasher = Sha256::new();
         hasher.update(phase_id.as_bytes());
+        // Bind `skill` (as StepProof already does) so a proof can't be replayed
+        // under a different skill's chain without breaking the hash.
+        hasher.update(skill.as_bytes());
         hasher.update(evidence_hash.as_bytes());
         hasher.update(previous_hash.as_bytes());
         hasher.update(b"judge");
@@ -112,6 +117,7 @@ impl PhaseProof {
         // verdict on a sealed proof breaks recomputation.
         let expected_combined = Self::compute_combined_hash(
             &self.phase_id,
+            &self.skill,
             &self.evidence_hash,
             &self.previous_hash,
             self.judge_verdict.sufficient,
@@ -243,6 +249,31 @@ pub struct ProofChain {
     pub chain_valid: bool,
 }
 
+/// Result of verifying Ed25519 signatures across a chain's `StepProof` entries.
+///
+/// `PhaseProof` entries are NOT signature-checked (they carry no signature
+/// field) — their integrity rests on the hash chain + `verify_self`. A forged
+/// `PhaseProof` is therefore not caught here; closing that requires adding
+/// signing to `PhaseProof` (a separate follow-on).
+#[derive(Debug, Clone)]
+pub struct SignatureReport {
+    /// Signed step entries that verified against the key.
+    pub verified: usize,
+    /// Step entries with no signature (legacy / signing-disabled).
+    pub unsigned: usize,
+    /// Entry ids (`<phase_id>.<step_id>`) that were present-but-invalid, or
+    /// unsigned while signatures were required. Non-empty ⇒ the chain fails.
+    pub failures: Vec<String>,
+}
+
+impl SignatureReport {
+    /// Whether every signed entry verified and no required signature was missing.
+    #[must_use]
+    pub fn is_ok(&self) -> bool {
+        self.failures.is_empty()
+    }
+}
+
 impl ProofChain {
     /// Create a new empty chain for a skill
     #[must_use]
@@ -273,6 +304,45 @@ impl ProofChain {
         self.proofs
             .last()
             .map_or(GENESIS_HASH, |p| &p.combined_hash)
+    }
+
+    /// Verify Ed25519 signatures on every `StepProof` entry against `key`,
+    /// failing closed.
+    ///
+    /// - signed + valid    → counted in `verified`
+    /// - signed + invalid  → recorded as a failure (the proof was tampered with
+    ///   after signing — e.g. a flipped judge verdict changes `combined_hash`,
+    ///   so the signature over it no longer matches)
+    /// - unsigned          → counted in `unsigned`; a failure ONLY when
+    ///   `require_signed` is set (the signing-required posture)
+    ///
+    /// This is the check that `verify()` (hash-only) deliberately omits: without
+    /// it, an entry whose signed `combined_hash` was altered still passes chain
+    /// verification. See [`SignatureReport`] for the `PhaseProof` caveat.
+    #[must_use]
+    pub fn verify_signatures(&self, key: &VerifyingKey, require_signed: bool) -> SignatureReport {
+        let mut report = SignatureReport {
+            verified: 0,
+            unsigned: 0,
+            failures: Vec::new(),
+        };
+        for entry in &self.entries {
+            let ProofEntry::Step(step) = entry else {
+                continue;
+            };
+            let id = format!("{}.{}", step.phase_id, step.step_id);
+            match step.verify_signature(key) {
+                Ok(true) => report.verified += 1,
+                Ok(false) => {
+                    report.unsigned += 1;
+                    if require_signed {
+                        report.failures.push(id);
+                    }
+                },
+                Err(_) => report.failures.push(id),
+            }
+        }
+        report
     }
 
     /// **Attack #175 fix**: Maximum proofs per chain.
@@ -552,7 +622,7 @@ mod tests {
         let evidence = Evidence::default();
         let evidence_hash = PhaseProof::compute_evidence_hash(&evidence);
         let combined_hash =
-            PhaseProof::compute_combined_hash(phase_id, &evidence_hash, previous_hash, true);
+            PhaseProof::compute_combined_hash(phase_id, skill, &evidence_hash, previous_hash, true);
 
         PhaseProof {
             phase_id: phase_id.to_string(),
@@ -659,9 +729,103 @@ mod tests {
         let h2 = PhaseProof::compute_evidence_hash(&evidence);
         assert_eq!(h1, h2);
 
-        let c1 = PhaseProof::compute_combined_hash("claim", &h1, GENESIS_HASH, true);
-        let c2 = PhaseProof::compute_combined_hash("claim", &h2, GENESIS_HASH, true);
+        let c1 = PhaseProof::compute_combined_hash("claim", "linear", &h1, GENESIS_HASH, true);
+        let c2 = PhaseProof::compute_combined_hash("claim", "linear", &h2, GENESIS_HASH, true);
         assert_eq!(c1, c2);
+    }
+
+    #[test]
+    fn phase_combined_hash_golden_locks_the_preimage() {
+        // Golden values pin the EXACT hash output for fixed inputs, so a silent
+        // change to the preimage (field order, separators, the verdict byte)
+        // is caught here even though every compute-then-verify test would still
+        // pass (they recompute from the same formula). On-disk chains depend on
+        // this preimage being stable; regenerate ONLY with a deliberate
+        // migration. Preimage: phase_id || skill || evidence_hash ||
+        // previous_hash || b"judge" || [u8::from(sufficient)].
+        //
+        // NOTE: these values changed when `skill` was bound into the preimage
+        // (Phase 1) — a deliberate migration; pre-existing PhaseProofs re-seal.
+        assert_eq!(
+            PhaseProof::compute_combined_hash("claim", "linear", "ev", GENESIS_HASH, true),
+            "9ab4a97f58feffb685707d70ecf9245fcf4a0546034a327073499a7e5f6bcaff",
+        );
+        // The verdict byte must change the digest (locks the security binding).
+        assert_eq!(
+            PhaseProof::compute_combined_hash("claim", "linear", "ev", GENESIS_HASH, false),
+            "d28106912e86aa43c84a63cd9786749a35fa92dfe5a47af276f5c90c81990ad3",
+        );
+    }
+
+    #[test]
+    fn chain_signature_verification_fails_closed_on_tamper_and_forgery() {
+        use ed25519_dalek::SigningKey;
+        let key = SigningKey::from_bytes(&[7u8; 32]);
+        let vk = key.verifying_key();
+        let art = || serde_json::json!({"k": "v"});
+
+        // Correctly signed step → passes, counted as verified.
+        let mut good = ProofChain::new("linear", "sess");
+        let mut step = make_step("s1", "claim", "linear", GENESIS_HASH, art());
+        step.sign_with(&key);
+        good.add_step_proof(step).expect("add signed step");
+        let rep = good.verify_signatures(&vk, false);
+        assert!(rep.is_ok());
+        assert_eq!(rep.verified, 1);
+
+        // Wrong key must fail — the verifier can't be fooled by an arbitrary key.
+        let wrong = SigningKey::from_bytes(&[9u8; 32]).verifying_key();
+        assert!(!good.verify_signatures(&wrong, false).is_ok());
+
+        // Forged/garbled signature with a still-valid combined_hash → fails
+        // closed. (verify_self, and thus add_step_proof, accept it because the
+        // hash is intact — this is exactly the gap signature verification closes.)
+        let mut forged_chain = ProofChain::new("linear", "sess");
+        let mut forged = make_step("s1", "claim", "linear", GENESIS_HASH, art());
+        forged.sign_with(&key);
+        forged.signature = Some("00".repeat(64));
+        forged_chain.add_step_proof(forged).expect("add (hash still valid)");
+        assert!(
+            !forged_chain.verify_signatures(&vk, false).is_ok(),
+            "a forged signature must fail chain signature verification"
+        );
+
+        // Re-sealed verdict flip: flip the verdict AND recompute combined_hash so
+        // verify_self passes — the signature (over the original hash) no longer
+        // matches and can't be reforged without the private key. Caught here even
+        // though hash-only verify() would pass it.
+        let mut resealed_chain = ProofChain::new("linear", "sess");
+        let mut t = make_step("s1", "claim", "linear", GENESIS_HASH, art());
+        t.sign_with(&key);
+        t.judge_verdict.sufficient = !t.judge_verdict.sufficient;
+        t.combined_hash = StepProof::compute_combined_hash(
+            &t.step_id,
+            &t.phase_id,
+            &t.skill,
+            &t.evidence_hash,
+            &t.artifact_hash,
+            &t.previous_hash,
+            t.judge_verdict.sufficient,
+        );
+        assert!(t.verify_self(), "re-sealed proof recomputes consistently");
+        resealed_chain.add_step_proof(t).expect("add re-sealed");
+        assert!(
+            !resealed_chain.verify_signatures(&vk, false).is_ok(),
+            "a re-sealed verdict flip must invalidate the signature"
+        );
+
+        // Unsigned entry: fine unless signatures are required.
+        let mut unsigned_chain = ProofChain::new("linear", "sess");
+        let unsigned = make_step("s1", "claim", "linear", GENESIS_HASH, art());
+        unsigned_chain.add_step_proof(unsigned).expect("add unsigned");
+        assert!(
+            unsigned_chain.verify_signatures(&vk, false).is_ok(),
+            "unsigned is acceptable when signatures are not required"
+        );
+        assert!(
+            !unsigned_chain.verify_signatures(&vk, true).is_ok(),
+            "unsigned must fail when signatures are required"
+        );
     }
 
     #[test]
@@ -686,7 +850,7 @@ mod tests {
         let evidence = Evidence::default();
         let evidence_hash = PhaseProof::compute_evidence_hash(&evidence);
         let combined_hash =
-            PhaseProof::compute_combined_hash("claim", &evidence_hash, GENESIS_HASH, true);
+            PhaseProof::compute_combined_hash("claim", "linear", &evidence_hash, GENESIS_HASH, true);
 
         let now = Utc::now();
         let proof = PhaseProof {

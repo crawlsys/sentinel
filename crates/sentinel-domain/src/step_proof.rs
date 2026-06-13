@@ -435,6 +435,24 @@ mod tests {
     }
 
     #[test]
+    fn step_combined_hash_golden_locks_the_preimage() {
+        // Golden values pin the EXACT hash output for fixed inputs (see the
+        // PhaseProof golden test for rationale). On-disk chains depend on this
+        // preimage being stable; regenerate ONLY with a deliberate migration.
+        // Preimage: step_id || phase_id || skill || evidence_hash ||
+        // artifact_hash || previous_hash || b"judge" || [u8::from(sufficient)].
+        assert_eq!(
+            StepProof::compute_combined_hash("s1", "claim", "linear", "ev", "art", GENESIS_HASH, true),
+            "22e17051e523b7d7b2a91fc62f7d1d330e1b5318760d791a9041bdfd6433ae79",
+        );
+        // The verdict byte must change the digest (locks the security binding).
+        assert_eq!(
+            StepProof::compute_combined_hash("s1", "claim", "linear", "ev", "art", GENESIS_HASH, false),
+            "576568e080e2f4344fc92dc14e085e8cd61e33e10dd2817fc262bc4d2174798c",
+        );
+    }
+
+    #[test]
     fn flipping_judge_verdict_on_sealed_step_breaks_verify_self() {
         // Security regression (mirrors the PhaseProof case): the judge verdict
         // is bound into combined_hash, so flipping `sufficient` on a sealed

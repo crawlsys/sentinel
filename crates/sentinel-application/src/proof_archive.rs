@@ -388,7 +388,8 @@ mod tests {
     fn make_phase_proof(phase_id: &str, skill: &str, session_id: &str, prev: &str) -> PhaseProof {
         let evidence = Evidence::default();
         let evidence_hash = PhaseProof::compute_evidence_hash(&evidence);
-        let combined_hash = PhaseProof::compute_combined_hash(phase_id, &evidence_hash, prev, true);
+        let combined_hash =
+            PhaseProof::compute_combined_hash(phase_id, skill, &evidence_hash, prev, true);
         let now = Utc::now();
         PhaseProof {
             phase_id: phase_id.to_string(),

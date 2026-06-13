@@ -1,5 +1,11 @@
 #!/usr/bin/env bash
-# pre-push: block if sentinel-application unit tests fail.
+# pre-push: block the push unless the WHOLE workspace builds and tests pass.
+#
+# Widened from "cargo test -p sentinel-application --lib" to the full
+# build+test gate (scripts/verify.sh): the narrow version could not catch a
+# non-compiling sibling crate — e.g. the sentinel-cli bin shipped to `main`
+# missing an `anyhow::Context` import, which `-p sentinel-application --lib`
+# never exercises. The gate is only as good as its breadth.
 #
 # Install (repo root):
 #   git config core.hooksPath .githooks
@@ -10,20 +16,20 @@
 set -euo pipefail
 
 if [[ "${SENTINEL_SKIP_PREPUSH_TEST:-0}" == "1" ]]; then
-  echo "[pre-push] SENTINEL_SKIP_PREPUSH_TEST=1 set — skipping cargo test" >&2
+  echo "[pre-push] SENTINEL_SKIP_PREPUSH_TEST=1 set — skipping workspace verification" >&2
   exit 0
 fi
 
-echo "[pre-push] running: cargo test -p sentinel-application --lib" >&2
-if ! cargo test -p sentinel-application --lib --quiet; then
+echo "[pre-push] running: scripts/verify.sh (build --all-targets + test --workspace)" >&2
+if ! "$(git rev-parse --show-toplevel)/scripts/verify.sh"; then
   cat >&2 <<'EOF'
 
 +============================================================+
-|  BLOCKED: sentinel-application tests FAILED               |
+|  BLOCKED: workspace build or tests FAILED                  |
 +============================================================+
 |  Fix the failures before pushing. Rerun:                   |
 |                                                            |
-|    cargo test -p sentinel-application --lib                |
+|    scripts/verify.sh                                       |
 |                                                            |
 |  Emergency bypass (use sparingly):                         |
 |    SENTINEL_SKIP_PREPUSH_TEST=1 git push ...               |
@@ -33,5 +39,5 @@ EOF
   exit 1
 fi
 
-echo "[pre-push] tests green — push allowed" >&2
+echo "[pre-push] workspace green — push allowed" >&2
 exit 0

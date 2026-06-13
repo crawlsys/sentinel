@@ -1,0 +1,14 @@
+# Pin the exact toolchain so `cargo build`/`clippy`/`test` are reproducible for
+# everyone, not just whoever happens to have a given stable installed. Newer
+# stables add pedantic/nursery clippy lints that fire on pre-existing code, so
+# "green" otherwise depends on which rustc you have — that ambiguity is exactly
+# what this file removes by fixing the lint set.
+#
+# Pinned to 1.96 (the toolchain the codebase is actually maintained against,
+# NOT the lower `rust-version = "1.87"` MSRV floor in Cargo.toml — e.g.
+# change_failure.rs allows `clippy::manual_is_multiple_of`, a lint that only
+# exists on toolchains newer than 1.87). The `-D warnings` clippy bar is a
+# separate cleanup track; this pin just makes build/test/clippy deterministic.
+[toolchain]
+channel = "1.96"
+components = ["clippy", "rustfmt"]

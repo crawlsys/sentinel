@@ -72,6 +72,36 @@ fn load_signing_key_from_env() -> Option<ed25519_dalek::SigningKey> {
     Some(ed25519_dalek::SigningKey::from_bytes(&seed))
 }
 
+/// Load the Ed25519 PUBLIC verifying key from `SENTINEL_VERIFY_KEY` (32-byte
+/// hex). When set, `verify_chain` checks signatures and fails closed on a bad
+/// one. Deliberately the public key, NOT derived from `SENTINEL_SIGNING_KEY`:
+/// deriving it would let whoever holds the signing key re-sign a forged chain.
+/// Lenient (returns `None` on a bad value) so a typo doesn't crash MCP startup —
+/// the result is "signatures not checked", surfaced by the caller, not a panic.
+pub(crate) fn load_verify_key_from_env() -> Option<ed25519_dalek::VerifyingKey> {
+    let raw = std::env::var("SENTINEL_VERIFY_KEY").ok()?;
+    let bytes = match hex::decode(raw.trim()) {
+        Ok(b) => b,
+        Err(e) => {
+            warn!(error = %e, "SENTINEL_VERIFY_KEY is not valid hex — chain signatures will NOT be verified");
+            return None;
+        }
+    };
+    if bytes.len() != 32 {
+        warn!(len = bytes.len(), "SENTINEL_VERIFY_KEY must be a 32-byte hex Ed25519 public key — chain signatures will NOT be verified");
+        return None;
+    }
+    let mut arr = [0u8; 32];
+    arr.copy_from_slice(&bytes);
+    match ed25519_dalek::VerifyingKey::from_bytes(&arr) {
+        Ok(k) => Some(k),
+        Err(e) => {
+            warn!(error = %e, "SENTINEL_VERIFY_KEY is not a valid Ed25519 public key — chain signatures will NOT be verified");
+            None
+        }
+    }
+}
+
 fn detect_live_session_id() -> Option<String> {
     let home = std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
@@ -684,7 +714,8 @@ pub async fn run() -> Result<()> {
     );
     let proof_engine = Arc::new(
         ProofEngine::new(state.clone(), judge.clone())
-            .with_signing(signing_key, signing_required),
+            .with_signing(signing_key, signing_required)
+            .with_verify_key(load_verify_key_from_env()),
     );
     // Wire cross-session proof archive backing (#39): query_proof_corpus
     // walks the index at ~/.claude/sentinel/proofs/index.jsonl in addition

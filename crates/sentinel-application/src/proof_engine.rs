@@ -15,7 +15,7 @@ use sentinel_domain::judge::{JudgeModel, JudgeVerdict};
 use sentinel_domain::proof::{PhaseProof, ProofChain};
 use sentinel_domain::state::SessionState;
 use sentinel_domain::step_proof::StepProof;
-use ed25519_dalek::SigningKey;
+use ed25519_dalek::{SigningKey, VerifyingKey};
 
 use crate::judge_service::JudgeService;
 
@@ -40,6 +40,16 @@ pub struct ProofEngine {
     /// `SENTINEL_SIGNING_REQUIRED`. With no key configured, every seal errors
     /// rather than silently writing an unsigned (un-attestable) proof.
     signing_required: bool,
+
+    /// Optional Ed25519 PUBLIC key for verifying signatures during chain
+    /// verification. Loaded from `SENTINEL_VERIFY_KEY` by the CLI layer. When
+    /// present, `verify_chain` checks every signed `StepProof` and fails closed
+    /// on a present-but-invalid signature (and on unsigned entries when
+    /// `signing_required`). Deliberately independent of `signing_key`: deriving
+    /// the verify key from the signing key would let whoever holds the signing
+    /// key (potentially the agent) re-sign a forged chain. `None` = signatures
+    /// not checked (hash-chain integrity only).
+    verify_key: Option<VerifyingKey>,
 }
 
 impl ProofEngine {
@@ -49,6 +59,7 @@ impl ProofEngine {
             judge,
             signing_key: None,
             signing_required: false,
+            verify_key: None,
         }
     }
 
@@ -61,6 +72,16 @@ impl ProofEngine {
     pub fn with_signing(mut self, key: Option<SigningKey>, required: bool) -> Self {
         self.signing_key = key;
         self.signing_required = required;
+        self
+    }
+
+    /// Wire the Ed25519 PUBLIC verifying key used by [`verify_chain`]. When
+    /// `Some`, chain verification additionally checks every signed `StepProof`
+    /// and fails closed on a bad signature (and on unsigned entries when the
+    /// mandatory-signing posture is set). Loaded from `SENTINEL_VERIFY_KEY`.
+    #[must_use]
+    pub fn with_verify_key(mut self, key: Option<VerifyingKey>) -> Self {
+        self.verify_key = key;
         self
     }
 
@@ -147,6 +168,7 @@ impl ProofEngine {
             );
             let combined_hash = PhaseProof::compute_combined_hash(
                 phase_id,
+                skill,
                 &evidence_hash,
                 &previous_hash,
                 verdict.sufficient,
@@ -424,7 +446,28 @@ impl ProofEngine {
             .proof_chains
             .get(skill)
             .ok_or_else(|| anyhow::anyhow!("No proof chain for skill '{skill}'"))?;
-        Ok(chain.verify())
+        let mut verification = chain.verify();
+
+        // Fold in Ed25519 signature verification when a verify key is
+        // configured. Without this, a signed entry whose combined_hash was
+        // altered (or whose signature is forged) still passes the hash-only
+        // chain check. Fail closed: any signature failure invalidates the chain.
+        if let Some(key) = &self.verify_key {
+            let report = chain.verify_signatures(key, self.signing_required);
+            if !report.is_ok() {
+                verification.valid = false;
+                for entry_id in report.failures {
+                    verification
+                        .errors
+                        .push(format!("signature verification failed for entry {entry_id}"));
+                }
+            }
+        }
+        // When no verify key is configured, behavior is unchanged (hash-only) —
+        // back-compat. Surfacing "signatures not verified" is the display
+        // layer's job (verify_cmd), not a chain error.
+
+        Ok(verification)
     }
 }
 
@@ -786,6 +829,7 @@ mod step_evidence_tests {
             let evidence_hash = PhaseProof::compute_evidence_hash(&evidence);
             let combined_hash = PhaseProof::compute_combined_hash(
                 "claim",
+                "linear",
                 &evidence_hash,
                 sentinel_domain::proof::GENESIS_HASH,
                 true, // matches judge_verdict: JudgeVerdict::pass(..) below
