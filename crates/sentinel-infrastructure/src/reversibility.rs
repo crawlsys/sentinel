@@ -1468,6 +1468,29 @@ mod tests {
     }
 
     #[test]
+    fn shipped_defaults_internet_reads_trivial_writes_rwe_reboot_irreversible() {
+        let c = shipped();
+        for t in ["network_overview", "health_check", "log_stats", "att_status", "netgear_status"] {
+            assert_eq!(
+                c.classify(&format!("mcp__internet__{t}"), &no_input()),
+                ReversibilityClass::TriviallyReversible,
+                "internet {t} should be TriviallyReversible"
+            );
+        }
+        assert_eq!(
+            c.classify("mcp__internet__config_set", &no_input()),
+            ReversibilityClass::ReversibleWithEffort
+        );
+        for t in ["att_reboot", "netgear_reboot", "netgear_wan_release"] {
+            assert_eq!(
+                c.classify(&format!("mcp__internet__{t}"), &no_input()),
+                ReversibilityClass::Irreversible,
+                "internet {t} should be Irreversible"
+            );
+        }
+    }
+
+    #[test]
     fn shipped_defaults_auth0_reads_trivial_delete_irreversible() {
         let c = shipped();
         assert_eq!(

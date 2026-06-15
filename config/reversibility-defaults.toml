@@ -456,6 +456,91 @@ delete_role = "Irreversible"
 revoke_api_key = "Irreversible"
 delete_project = "Catastrophic"
 
+# Internet (internet-mcp, formerly router-guardian) — manages the ATT BGW320
+# gateway + Netgear RS600 router on Gary's home LAN. Almost all tools are
+# read-only status/diagnostics/log queries (pure observation). Config writes
+# are recoverable (re-set the value). The genuinely disruptive ops — device
+# reboots, WAN release/bounce (drop the connection), firmware upload (flashes
+# the device), and remote-management changes (can lock you out) — stay
+# Irreversible. Without an [mcp.internet] entry the unknown-MCP default
+# (Irreversible) routes EVERY internet tool through the A3 dry-run auditor,
+# whose _intent/_reasoning/_expected_effect fields the internet tool schemas
+# reject — and even read-only network_overview/health_check/log_stats get
+# blocked (and the auditor itself times out at 30s). Same deadlock class as
+# the cdp / doppler / memory-mcp fixes above.
+[mcp.internet]
+# --- Reads / status / diagnostics (TriviallyReversible) ---
+health_check = "TriviallyReversible"
+network_overview = "TriviallyReversible"
+nat_check = "TriviallyReversible"
+rdp_check = "TriviallyReversible"
+config_show = "TriviallyReversible"
+log_collect = "TriviallyReversible"
+log_history = "TriviallyReversible"
+log_stats = "TriviallyReversible"
+mcp_health_check = "TriviallyReversible"
+mcp_list_servers = "TriviallyReversible"
+att_status = "TriviallyReversible"
+att_system_info = "TriviallyReversible"
+att_broadband = "TriviallyReversible"
+att_devices = "TriviallyReversible"
+att_diagnostics = "TriviallyReversible"
+att_lan_stats = "TriviallyReversible"
+att_firewall = "TriviallyReversible"
+att_firewall_advanced = "TriviallyReversible"
+att_nat_list = "TriviallyReversible"
+att_packet_filter_list = "TriviallyReversible"
+att_passthrough_status = "TriviallyReversible"
+att_public_subnet = "TriviallyReversible"
+att_security_options = "TriviallyReversible"
+att_voice = "TriviallyReversible"
+att_wifi = "TriviallyReversible"
+att_login_test = "TriviallyReversible"
+netgear_status = "TriviallyReversible"
+netgear_device_info = "TriviallyReversible"
+netgear_devices = "TriviallyReversible"
+netgear_external_ip = "TriviallyReversible"
+netgear_wan = "TriviallyReversible"
+netgear_traffic = "TriviallyReversible"
+netgear_logs = "TriviallyReversible"
+netgear_dhcp_leases = "TriviallyReversible"
+netgear_ddns_status = "TriviallyReversible"
+netgear_firmware = "TriviallyReversible"
+netgear_firmware_probe = "TriviallyReversible"
+netgear_ports_list = "TriviallyReversible"
+netgear_remote_status = "TriviallyReversible"
+netgear_wifi_list = "TriviallyReversible"
+netgear_wifi_clients = "TriviallyReversible"
+netgear_login_test = "TriviallyReversible"
+# --- Config writes + dual read/set tools (ReversibleWithEffort) ---
+config_init = "ReversibleWithEffort"
+config_set = "ReversibleWithEffort"
+passthrough_fix = "ReversibleWithEffort"
+att_passthrough_set = "ReversibleWithEffort"
+att_nat_add = "ReversibleWithEffort"
+netgear_dhcp_config = "ReversibleWithEffort"
+netgear_ddns_set = "ReversibleWithEffort"
+netgear_ports_add = "ReversibleWithEffort"
+netgear_native_forward_add = "ReversibleWithEffort"
+netgear_qos = "ReversibleWithEffort"
+netgear_qos_toggle = "ReversibleWithEffort"
+netgear_parental = "ReversibleWithEffort"
+netgear_wifi_toggle = "ReversibleWithEffort"
+netgear_firmware_download = "ReversibleWithEffort"
+netgear_wan_renew = "ReversibleWithEffort"
+mcp_restart_server = "ReversibleWithEffort"
+# --- Disruptive / outage-causing / device-flashing (Irreversible) ---
+att_reboot = "Irreversible"
+att_remote_enable = "Irreversible"
+att_remote_disable = "Irreversible"
+att_nat_delete = "Irreversible"
+netgear_reboot = "Irreversible"
+netgear_wan_release = "Irreversible"
+netgear_wan_bounce = "Irreversible"
+netgear_remote_set = "Irreversible"
+netgear_ports_delete = "Irreversible"
+netgear_firmware_upload = "Irreversible"
+
 # ---------------------------------------------------------------------------
 # Layer 3: Bash command patterns
 # ---------------------------------------------------------------------------
