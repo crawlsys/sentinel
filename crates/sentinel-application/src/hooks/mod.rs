@@ -149,6 +149,71 @@ pub fn metrics_dir(home: &std::path::Path) -> std::path::PathBuf {
     sentinel_dir(home).join("metrics")
 }
 
+/// The root holding Claude Code's native per-session task lists:
+/// `<home>/.claude/tasks`. Each session gets a subdir of `N.json` task files
+/// plus `.lock`/`.highwatermark` control files.
+pub fn tasks_root(home: &std::path::Path) -> std::path::PathBuf {
+    home.join(".claude").join("tasks")
+}
+
+/// Canonical mapping from a hook's `session_id` to its on-disk task directory.
+///
+/// Claude Code does **not** name the task dir uniformly: depending on how the
+/// session was started, the same `session_id` value passed to hooks (the full
+/// UUID, e.g. `e2ea5630-3c79-409c-9ca4-423975a5a5fb`) is stored under EITHER
+///   - `<tasks>/<session_id>/`                  (literal id), OR
+///   - `<tasks>/session-<first-uuid-group>/`    (e.g. `session-e2ea5630/`).
+/// Both forms are emitted concurrently (observed live on the same day), so this
+/// is not a migration that settled on one name — a hook must resolve whichever
+/// the harness actually wrote for this session.
+///
+/// Every task hook previously hard-coded `tasks_root().join(session_id)`, which
+/// silently missed the `session-…` form and made gates fail closed / coverage
+/// checks read nothing. This is the single source of truth: it returns the
+/// directory that EXISTS for this session, checked in a fixed, session-scoped
+/// order (no cross-session scan, no mtime guessing). If neither exists yet it
+/// returns the literal-id path so callers' own `is_dir` check still yields a
+/// definitive "no tasks here" for a genuinely fresh session.
+///
+/// Idempotent on an already-prefixed id (one that already starts `session-`):
+/// the prefixed candidate collapses to the same value, so passing either form
+/// resolves correctly.
+pub fn session_task_dir(
+    fs: &dyn FileSystemPort,
+    home: &std::path::Path,
+    session_id: &str,
+) -> std::path::PathBuf {
+    let root = tasks_root(home);
+    let literal = root.join(session_id);
+    if fs.is_dir(&literal) {
+        return literal;
+    }
+    if let Some(prefixed_name) = session_prefixed_dir_name(session_id) {
+        let prefixed = root.join(&prefixed_name);
+        if fs.is_dir(&prefixed) {
+            return prefixed;
+        }
+    }
+    // Neither form exists yet — return the literal path so the caller's own
+    // existence check reports a definitive absence (fresh session, no tasks).
+    literal
+}
+
+/// The `session-<first-uuid-group>` directory name for a `session_id`, or
+/// `None` when the id is unusable (empty) or already in prefixed form (so the
+/// resolver doesn't double-prefix). The "first group" is the substring before
+/// the first `-`, matching how Claude Code shortens the UUID.
+fn session_prefixed_dir_name(session_id: &str) -> Option<String> {
+    if session_id.is_empty() || session_id.starts_with("session-") {
+        return None;
+    }
+    let first_group = session_id.split('-').next().unwrap_or(session_id);
+    if first_group.is_empty() {
+        return None;
+    }
+    Some(format!("session-{first_group}"))
+}
+
 /// Return `<home>/.claude/sentinel/persistent-tasks`.
 ///
 /// Snapshots of the per-session `TaskList` (one subdir per `project_hash`). The
@@ -833,5 +898,137 @@ mod project_hash_tests {
         let h = project_hash("/repo");
         assert_eq!(h.len(), 8);
         assert!(h.chars().all(|c| c.is_ascii_hexdigit()), "got: {h}");
+    }
+}
+
+#[cfg(test)]
+mod session_task_dir_tests {
+    use super::*;
+    use std::path::{Path, PathBuf};
+
+    /// FS whose `home_dir` is a caller-supplied temp dir; `is_dir` hits the real
+    /// filesystem so resolution can be exercised against seeded directories.
+    struct TmpHomeFs {
+        home: PathBuf,
+    }
+    impl FileSystemPort for TmpHomeFs {
+        fn home_dir(&self) -> Option<PathBuf> {
+            Some(self.home.clone())
+        }
+        fn read_to_string(&self, p: &Path) -> Result<String, sentinel_domain::port_errors::FileSystemError> {
+            Ok(std::fs::read_to_string(p)?)
+        }
+        fn write(&self, p: &Path, c: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+            if let Some(par) = p.parent() {
+                std::fs::create_dir_all(par)?;
+            }
+            Ok(std::fs::write(p, c)?)
+        }
+        fn create_dir_all(&self, p: &Path) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+            Ok(std::fs::create_dir_all(p)?)
+        }
+        fn read_dir(&self, p: &Path) -> Result<Vec<PathBuf>, sentinel_domain::port_errors::FileSystemError> {
+            Ok(std::fs::read_dir(p)?.filter_map(|e| e.ok().map(|e| e.path())).collect())
+        }
+        fn exists(&self, p: &Path) -> bool {
+            p.exists()
+        }
+        fn is_dir(&self, p: &Path) -> bool {
+            p.is_dir()
+        }
+        fn metadata(&self, p: &Path) -> Result<std::fs::Metadata, sentinel_domain::port_errors::FileSystemError> {
+            Ok(std::fs::metadata(p)?)
+        }
+        fn append(&self, _: &Path, _: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+            Ok(())
+        }
+    }
+
+    // --- pure name derivation ------------------------------------------------
+
+    #[test]
+    fn prefixed_name_from_full_uuid_uses_first_group() {
+        assert_eq!(
+            session_prefixed_dir_name("e2ea5630-3c79-409c-9ca4-423975a5a5fb").as_deref(),
+            Some("session-e2ea5630")
+        );
+        assert_eq!(
+            session_prefixed_dir_name("dac1d29b-1111-2222-3333-444455556666").as_deref(),
+            Some("session-dac1d29b")
+        );
+    }
+
+    #[test]
+    fn prefixed_name_is_idempotent_and_rejects_empty() {
+        // Already-prefixed id must not be double-prefixed.
+        assert_eq!(session_prefixed_dir_name("session-e2ea5630"), None);
+        // Empty id is unusable.
+        assert_eq!(session_prefixed_dir_name(""), None);
+    }
+
+    #[test]
+    fn prefixed_name_for_id_without_hyphen_uses_whole_id() {
+        assert_eq!(
+            session_prefixed_dir_name("abcdef12").as_deref(),
+            Some("session-abcdef12")
+        );
+    }
+
+    // --- directory resolution ------------------------------------------------
+
+    fn seed_dir(home: &Path, name: &str) {
+        std::fs::create_dir_all(tasks_root(home).join(name)).unwrap();
+    }
+
+    #[test]
+    fn resolves_literal_dir_when_present() {
+        let tmp = tempfile::tempdir().unwrap();
+        let id = "e2ea5630-3c79-409c-9ca4-423975a5a5fb";
+        seed_dir(tmp.path(), id);
+        let fs = TmpHomeFs { home: tmp.path().to_path_buf() };
+        assert_eq!(
+            session_task_dir(&fs, tmp.path(), id),
+            tasks_root(tmp.path()).join(id)
+        );
+    }
+
+    #[test]
+    fn resolves_session_prefixed_dir_when_literal_absent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let id = "e2ea5630-3c79-409c-9ca4-423975a5a5fb";
+        seed_dir(tmp.path(), "session-e2ea5630");
+        let fs = TmpHomeFs { home: tmp.path().to_path_buf() };
+        assert_eq!(
+            session_task_dir(&fs, tmp.path(), id),
+            tasks_root(tmp.path()).join("session-e2ea5630"),
+            "must fall through to the session-{{first8}} dir the harness wrote"
+        );
+    }
+
+    #[test]
+    fn prefers_literal_over_prefixed_when_both_exist() {
+        let tmp = tempfile::tempdir().unwrap();
+        let id = "e2ea5630-3c79-409c-9ca4-423975a5a5fb";
+        seed_dir(tmp.path(), id);
+        seed_dir(tmp.path(), "session-e2ea5630");
+        let fs = TmpHomeFs { home: tmp.path().to_path_buf() };
+        assert_eq!(
+            session_task_dir(&fs, tmp.path(), id),
+            tasks_root(tmp.path()).join(id),
+            "literal id is the primary form and wins when both are present"
+        );
+    }
+
+    #[test]
+    fn returns_literal_path_when_neither_exists() {
+        let tmp = tempfile::tempdir().unwrap();
+        let id = "ffffffff-0000-0000-0000-000000000000";
+        let fs = TmpHomeFs { home: tmp.path().to_path_buf() };
+        // No dir seeded — returns the literal path so the caller's is_dir check
+        // reports a definitive absence (fresh session).
+        assert_eq!(
+            session_task_dir(&fs, tmp.path(), id),
+            tasks_root(tmp.path()).join(id)
+        );
     }
 }

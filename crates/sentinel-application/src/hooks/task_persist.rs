@@ -139,7 +139,7 @@ fn persistent_tasks_dir(fs: &dyn FileSystemPort, project_hash: &str) -> Option<P
 /// project B's tasks if A's session dir hadn't been created yet.
 fn find_active_task_dir(fs: &dyn FileSystemPort, session_id: &str) -> Option<PathBuf> {
     let home = fs.home_dir()?;
-    let session_dir = home.join(".claude").join("tasks").join(session_id);
+    let session_dir = super::session_task_dir(fs, &home, session_id);
     if fs.is_dir(&session_dir) && has_task_files(fs, &session_dir) {
         Some(session_dir)
     } else {

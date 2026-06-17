@@ -98,9 +98,11 @@ const MUTATING_BASH_MARKERS: &[&str] = &[
     "pip install",
     "sed -i",
     "tee ",
-    " > ",
-    " >> ",
-    ">>",
+    // NOTE: stdout/file redirection (`>`, `>>`) is intentionally NOT listed
+    // here. It is detected by the dedicated `>`-after-stderr-strip check in
+    // `is_mutating_bash`, which correctly exempts stderr redirections
+    // (`2>&1`, `2>>err.log`). Listing `>>`/`>` here would re-match the raw
+    // command and wrongly flag those stderr forms as writes.
 ];
 
 /// Whether the tool is on the always-allow list.
@@ -126,14 +128,66 @@ fn bash_command(input: &HookInput) -> Option<String> {
 /// `false` for read-only commands and `true` only when an obvious mutating
 /// marker is present.
 fn is_mutating_bash(command: &str) -> bool {
-    // A redirection of any kind (`>`/`>>`) is a write; check raw first since
-    // the trimmed marker list also covers spaced forms.
-    if command.contains('>') {
+    // A stdout/file redirection (`>`/`>>`) is a write. But STDERR redirections
+    // (`2>&1`, `2>/dev/null`, `N>&M`, `2>file`) are NOT writes to tracked state
+    // — they are ubiquitous on read-only commands (`ls 2>&1`, `find … 2>/dev/null`).
+    // Strip those first so they don't trip the `>` check and block reads.
+    let without_stderr = strip_stderr_redirections(command);
+    if without_stderr.contains('>') {
         return true;
     }
     MUTATING_BASH_MARKERS
         .iter()
-        .any(|marker| command.contains(marker))
+        .any(|marker| without_stderr.contains(marker))
+}
+
+/// Remove stderr-redirection tokens from a command so they don't read as
+/// stdout/file writes. Handles the common forms:
+///   - `2>&1`, `2>&-`        (fd dup / close)
+///   - `2>/dev/null`, `2>file`, `2>>file`  (stderr to a sink — not tracked state)
+///   - any `N>&M` fd-dup where the source fd is a digit
+/// Deliberately conservative: only the recognized `\d>` / `\d>>` / `\d>&` forms
+/// are stripped; a bare `>` or `>>` (stdout/file write) is left intact.
+fn strip_stderr_redirections(command: &str) -> String {
+    let bytes = command.as_bytes();
+    let mut out = String::with_capacity(command.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i] as char;
+        // A redirection introduced by a leading fd digit, e.g. `2>`, `2>>`, `2>&1`.
+        // Only treat it as stderr (strippable) when the fd is NOT 1 (stdout).
+        if c.is_ascii_digit() && i + 1 < bytes.len() && bytes[i + 1] == b'>' && c != '1' {
+            // Consume the digit and `>`.
+            i += 2;
+            // Optional second `>` (append form `2>>`).
+            if i < bytes.len() && bytes[i] == b'>' {
+                i += 1;
+            }
+            // Optional `&` + target fd (`2>&1`, `2>&-`).
+            if i < bytes.len() && bytes[i] == b'&' {
+                i += 1;
+                while i < bytes.len()
+                    && (bytes[i].is_ascii_digit() || bytes[i] == b'-')
+                {
+                    i += 1;
+                }
+            } else {
+                // `2>/dev/null`, `2>file` — skip the (optional) whitespace and
+                // the redirection target path token.
+                while i < bytes.len() && bytes[i] == b' ' {
+                    i += 1;
+                }
+                while i < bytes.len() && !bytes[i].is_ascii_whitespace() && bytes[i] != b'>' {
+                    i += 1;
+                }
+            }
+            out.push(' ');
+            continue;
+        }
+        out.push(c);
+        i += 1;
+    }
+    out
 }
 
 /// Classify whether the tool about to run is a mutating operation that the
@@ -150,8 +204,9 @@ fn is_mutating_tool(input: &HookInput, tool_name: &str) -> bool {
 
 /// Best-effort: has this session decomposed its work?
 ///
-/// Reads `~/.claude/tasks/{session_id}/` (the same dir `task_persist` snapshots
-/// to). Returns:
+/// Resolves the session's task dir via [`super::session_task_dir`] (which
+/// handles both the literal-`{session_id}` and `session-{first8}` naming the
+/// harness emits — see that fn for why both exist). Returns:
 ///   - `Some(true)`  — at least one open task file exists (a decomposed list is
 ///                     live), OR the session decomposed earlier this session
 ///                     (the `.highwatermark` counter is `>= 1`) even if every
@@ -163,7 +218,7 @@ fn is_mutating_tool(input: &HookInput, tool_name: &str) -> bool {
 fn has_live_task_list(fs: &dyn FileSystemPort, session_id: Option<&str>) -> Option<bool> {
     let session_id = session_id.filter(|s| !s.is_empty())?;
     let home = fs.home_dir()?;
-    let session_dir = home.join(".claude").join("tasks").join(session_id);
+    let session_dir = super::session_task_dir(fs, &home, session_id);
     if !fs.is_dir(&session_dir) {
         // Dir doesn't exist yet — no tasks created this session. This is a
         // *readable* answer (the absence is definitive), so return Some(false)
@@ -171,7 +226,7 @@ fn has_live_task_list(fs: &dyn FileSystemPort, session_id: Option<&str>) -> Opti
         return Some(false);
     }
     let entries = fs.read_dir(&session_dir).ok()?;
-    if entries.iter().any(|p| is_task_json(p)) {
+    if entries.iter().any(is_task_json) {
         return Some(true);
     }
     // No open task files — but completed tasks are pruned from disk, so an
@@ -427,6 +482,39 @@ mod tests {
     }
 
     #[test]
+    fn stderr_redirections_are_not_mutating() {
+        // The common stderr forms on read-only commands must NOT be flagged as
+        // writes — this was the bug that blocked `ls 2>&1`, `find … 2>/dev/null`.
+        for c in [
+            "ls -la 2>&1",
+            "find . -name '*.rs' 2>/dev/null",
+            "grep foo bar.rs 2>&1 | head",
+            "cat f 2>>errs.log",       // stderr append to a sink — not tracked state
+            "command -v tool 2>&-",    // close stderr
+            "node -e 'x' 2>&1",
+        ] {
+            assert!(
+                !is_mutating_bash(c),
+                "stderr redirection must not be mutating: {c}"
+            );
+        }
+    }
+
+    #[test]
+    fn stdout_redirections_are_still_mutating() {
+        // A real stdout/file write must still be caught even when a stderr
+        // redirection is also present.
+        for c in [
+            "echo hi > out.txt",
+            "cat a >> b",
+            "make 2>&1 > build.log",   // stdout file write alongside stderr dup
+            "tool > result 2>/dev/null",
+        ] {
+            assert!(is_mutating_bash(c), "stdout write must be mutating: {c}");
+        }
+    }
+
+    #[test]
     fn mutating_bash_is_detected() {
         for c in [
             "git commit -m x",
@@ -599,6 +687,44 @@ mod tests {
             home: tmp.path().to_path_buf(),
         };
         assert_eq!(has_live_task_list(&fs, Some("sess-done")), Some(true));
+    }
+
+    #[test]
+    fn has_live_task_list_true_for_session_prefixed_dir() {
+        // The harness wrote tasks under `session-{first8}/` but the hook receives
+        // the full UUID. The resolver must find the prefixed dir. This is the
+        // exact bug that made the gate fail closed and block every mutating tool.
+        let tmp = tempfile::tempdir().unwrap();
+        let full_uuid = "e2ea5630-3c79-409c-9ca4-423975a5a5fb";
+        seed_task(tmp.path(), "session-e2ea5630", "in_progress");
+        let fs = ScopedHomeFs {
+            home: tmp.path().to_path_buf(),
+        };
+        assert_eq!(
+            has_live_task_list(&fs, Some(full_uuid)),
+            Some(true),
+            "must resolve the session-{{first8}} dir from the full-UUID session id"
+        );
+    }
+
+    #[test]
+    fn edit_allowed_when_tasks_under_session_prefixed_dir() {
+        // End-to-end: mutating tool must be ALLOWED when the live task list lives
+        // under the `session-{first8}` naming the harness chose for this session.
+        let tmp = tempfile::tempdir().unwrap();
+        seed_task(tmp.path(), "session-dac1d29b", "pending");
+        let fs: &'static ScopedHomeFs = Box::leak(Box::new(ScopedHomeFs {
+            home: tmp.path().to_path_buf(),
+        }));
+        let ctx = ctx_with_fs(fs);
+        let out = process(
+            &input("Edit", Some("dac1d29b-1111-2222-3333-444455556666")),
+            &ctx,
+        );
+        assert!(
+            out.blocked.is_none(),
+            "Edit must be allowed when tasks live under session-{{first8}}"
+        );
     }
 
     #[test]
