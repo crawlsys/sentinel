@@ -393,18 +393,86 @@ fn migrate_last_sync_commit(claude_dir: &Path) {
 // Marketplace repo discovery + sync
 // ---------------------------------------------------------------------------
 
-/// Find the marketplace git repo on disk
+/// Find the marketplace git repo on disk.
+///
+/// Claude Code plugins install marketplaces under
+/// `~/.claude/plugins/marketplaces/<name>`, and the canonical path is recorded
+/// in `~/.claude/plugins/known_marketplaces.json`. Prefer that registry before
+/// falling back to older manually-cloned locations.
 fn find_marketplace_repo() -> Option<PathBuf> {
     let home = dirs::home_dir()?;
+    let claude_dir = home.join(".claude");
 
-    for candidate in REPO_CANDIDATES {
-        let dir = home.join(candidate);
+    find_marketplace_repo_from_home(&home, &claude_dir)
+}
+
+fn find_marketplace_repo_from_home(home: &Path, claude_dir: &Path) -> Option<PathBuf> {
+    for dir in marketplace_repo_candidates(home, claude_dir) {
         if is_marketplace_repo(&dir) {
             return Some(dir);
         }
     }
 
     None
+}
+
+fn marketplace_repo_candidates(home: &Path, claude_dir: &Path) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+
+    for dir in plugin_marketplace_dirs(claude_dir) {
+        push_unique_path(&mut candidates, dir);
+    }
+    for candidate in REPO_CANDIDATES {
+        push_unique_path(&mut candidates, home.join(candidate));
+    }
+
+    candidates
+}
+
+fn plugin_marketplace_dirs(claude_dir: &Path) -> Vec<PathBuf> {
+    let known = claude_dir.join("plugins").join("known_marketplaces.json");
+    let Ok(content) = fs::read_to_string(known) else {
+        return Vec::new();
+    };
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) else {
+        return Vec::new();
+    };
+    let Some(entries) = json.as_object() else {
+        return Vec::new();
+    };
+
+    let mut scored = Vec::new();
+    for (name, entry) in entries {
+        let Some(install_location) = entry.get("installLocation").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let repo = entry
+            .get("source")
+            .and_then(|s| s.get("repo"))
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        let score = marketplace_registry_score(name, repo);
+        scored.push((score, PathBuf::from(install_location)));
+    }
+
+    scored.sort_by_key(|(score, path)| (*score, path.clone()));
+    scored.into_iter().map(|(_, path)| path).collect()
+}
+
+fn marketplace_registry_score(name: &str, repo: &str) -> u8 {
+    if repo == "legatus-ai/claude-code-marketplace" {
+        0
+    } else if repo.ends_with("/claude-code-marketplace") || name.contains("legatus") {
+        1
+    } else {
+        2
+    }
+}
+
+fn push_unique_path(paths: &mut Vec<PathBuf>, path: PathBuf) {
+    if !paths.iter().any(|existing| existing == &path) {
+        paths.push(path);
+    }
 }
 
 /// Check if a directory is the marketplace git repo
@@ -1991,6 +2059,50 @@ mod tests {
     #[test]
     fn test_is_marketplace_repo_false() {
         assert!(!is_marketplace_repo(Path::new("/nonexistent/path")));
+    }
+
+    #[test]
+    fn test_find_marketplace_repo_uses_plugin_registry() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path();
+        let claude_dir = home.join(".claude");
+        let plugin_repo = claude_dir
+            .join("plugins")
+            .join("marketplaces")
+            .join("legatus-marketplace");
+        let legacy_repo = home
+            .join("Documents")
+            .join("GitHub")
+            .join("claude-code-marketplace");
+
+        make_marketplace_repo(&plugin_repo);
+        make_marketplace_repo(&legacy_repo);
+
+        let known = claude_dir.join("plugins").join("known_marketplaces.json");
+        std::fs::create_dir_all(known.parent().unwrap()).unwrap();
+        let json = serde_json::json!({
+            "claude-plugins-official": {
+                "source": { "source": "github", "repo": "anthropics/claude-plugins-official" },
+                "installLocation": claude_dir
+                    .join("plugins")
+                    .join("marketplaces")
+                    .join("claude-plugins-official")
+            },
+            "legatus-marketplace": {
+                "source": { "source": "github", "repo": "legatus-ai/claude-code-marketplace" },
+                "installLocation": plugin_repo
+            }
+        });
+        std::fs::write(&known, serde_json::to_string_pretty(&json).unwrap()).unwrap();
+
+        let found = find_marketplace_repo_from_home(home, &claude_dir).unwrap();
+        assert_eq!(found, plugin_repo);
+    }
+
+    fn make_marketplace_repo(path: &Path) {
+        std::fs::create_dir_all(path.join(".git")).unwrap();
+        std::fs::create_dir_all(path.join("skills")).unwrap();
+        std::fs::write(path.join("install.js"), "").unwrap();
     }
 
     #[test]

@@ -33,7 +33,7 @@ pub const DEFAULT_REPOS: &[&str] = &[
     "firefly-pro-gh/firefly-pro-routing-engine",
     "firefly-pro-gh/firefly-pro-routing-api",
     "firefly-pro-gh/firefly-pro-marketing",
-    "garysomerhalder/sentinel",
+    "legatus-ai/sentinel",
 ];
 
 /// Bot logins recognised as automated reviewers — comments authored by

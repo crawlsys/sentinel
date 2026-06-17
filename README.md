@@ -9,7 +9,7 @@ Sentinel is a Rust-based hook engine that enforces workflow compliance for Claud
 One-command install of sentinel + the linear MCP/CLI + the marketplace:
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/garysomerhalder/sentinel/main/scripts/bootstrap.sh | bash
+curl -sSL https://raw.githubusercontent.com/legatus-ai/sentinel/main/scripts/bootstrap.sh | bash
 ```
 
 Re-run-safe (skips anything already present). Override paths with `SENTINEL_GH_DIR`, `SENTINEL_CLAUDE_DIR`, `SENTINEL_GH_OWNER`. See [`scripts/bootstrap.sh`](scripts/bootstrap.sh) for the full step list.

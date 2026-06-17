@@ -284,7 +284,7 @@ mod tests {
             step_id: "1".into(),
             claim_type: "git.pr_opened".into(),
             context: serde_json::json!({
-                "owner": "garysomerhalder",
+                "owner": "legatus-ai",
                 "repo": "sentinel",
                 "pr_number": 42,
             }),
@@ -292,7 +292,7 @@ mod tests {
     }
 
     fn sample_payload() -> serde_json::Value {
-        serde_json::json!({ "url": "https://github.com/garysomerhalder/sentinel/pull/42" })
+        serde_json::json!({ "url": "https://github.com/legatus-ai/sentinel/pull/42" })
     }
 
     // ─── EvidenceClaim.context_hash ──────────────────────────────────
@@ -409,7 +409,7 @@ mod tests {
         // Verify against a different claim (different pr_number).
         let mut claim_43 = sample_claim();
         claim_43.context = serde_json::json!({
-            "owner": "garysomerhalder",
+            "owner": "legatus-ai",
             "repo": "sentinel",
             "pr_number": 43,
         });

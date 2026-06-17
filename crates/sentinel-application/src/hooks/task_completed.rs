@@ -1247,10 +1247,10 @@ mod tests {
             })
         );
         assert_eq!(
-            extract_pr("see https://github.com/garysomerhalder/sentinel/pull/146 merged"),
+            extract_pr("see https://github.com/legatus-ai/sentinel/pull/146 merged"),
             Some(PrRef {
                 number: 146,
-                repo: Some(("garysomerhalder".to_string(), "sentinel".to_string()))
+                repo: Some(("legatus-ai".to_string(), "sentinel".to_string()))
             })
         );
         assert_eq!(extract_pr("no pr referenced"), None);

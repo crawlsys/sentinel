@@ -1804,7 +1804,7 @@ pub fn generate_manifest(root_dir: &Path) -> Manifest {
     let manifest = Manifest {
         version: 1,
         generated: chrono::Utc::now().to_rfc3339(),
-        repo: "garysomerhalder/claude-code-marketplace".to_string(),
+        repo: "legatus-ai/claude-code-marketplace".to_string(),
         branch: "main".to_string(),
         file_count,
         files,

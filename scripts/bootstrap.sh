@@ -2,7 +2,7 @@
 # Sentinel + Marketplace one-command bootstrap installer.
 #
 # Usage:
-#   curl -sSL https://raw.githubusercontent.com/garysomerhalder/sentinel/main/scripts/bootstrap.sh | bash
+#   curl -sSL https://raw.githubusercontent.com/legatus-ai/sentinel/main/scripts/bootstrap.sh | bash
 #
 # Or after cloning sentinel manually:
 #   ./scripts/bootstrap.sh
@@ -54,7 +54,7 @@ CLAUDE_DIR="${SENTINEL_CLAUDE_DIR:-$HOME/.claude}"
 CONFIG_DIR="$CLAUDE_DIR/sentinel/config"
 CARGO_BIN="${CARGO_HOME:-$HOME/.cargo}/bin"
 
-OWNER="${SENTINEL_GH_OWNER:-garysomerhalder}"
+OWNER="${SENTINEL_GH_OWNER:-legatus-ai}"
 
 REPOS=(
   "vulcan-mcp-sdk-rust"
