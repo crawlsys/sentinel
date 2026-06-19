@@ -200,12 +200,21 @@ const JUDGE: &str = "judge";
 const FLAG: &str = "flag";
 const CLEAR: &str = "clear";
 
-fn node_config(node: &str, checkpointer_backend: &str, checkpointer_scope: &str) -> NodeConfig {
+fn node_config(
+    node: &str,
+    checkpointer_backend: &str,
+    checkpointer_scope: &str,
+    checkpointer_tenant_scope: &str,
+) -> NodeConfig {
     NodeConfig::new()
         .with_metadata("sentinel.graph", "reconciliation")
         .with_metadata("sentinel.node", node)
         .with_metadata("sentinel.checkpointer_backend", checkpointer_backend)
         .with_metadata("sentinel.checkpointer_scope", checkpointer_scope)
+        .with_metadata(
+            "sentinel.checkpointer_tenant_scope",
+            checkpointer_tenant_scope,
+        )
         .with_timeout(NodeTimeoutPolicy::run_only(Duration::from_secs(2)))
 }
 
@@ -297,6 +306,7 @@ async fn build_reconciliation_graph_with_checkpointer(
 ) -> Result<langgraph_core::application::services::CompilationResult<ReconState>, String> {
     let checkpointer_backend = checkpointer.backend();
     let checkpointer_scope = checkpointer.scope();
+    let checkpointer_tenant_scope = checkpointer.tenant_scope_metadata_value();
     let schema = reconciliation_state_schema();
     let builder = StateGraphBuilder::<ReconState>::with_schema(schema.clone())
         .with_input_schema(schema.clone())
@@ -307,7 +317,12 @@ async fn build_reconciliation_graph_with_checkpointer(
                 emit_decision_node_event("reconciliation", CLASSIFY, &s.identifier)?;
                 Ok::<_, NodeError>(s)
             },
-            node_config(CLASSIFY, checkpointer_backend, checkpointer_scope),
+            node_config(
+                CLASSIFY,
+                checkpointer_backend,
+                checkpointer_scope,
+                checkpointer_tenant_scope,
+            ),
         )
         .add_async_node_with_config(
             JUDGE,
@@ -315,7 +330,12 @@ async fn build_reconciliation_graph_with_checkpointer(
                 emit_decision_node_event("reconciliation", JUDGE, &s.identifier)?;
                 Ok::<_, NodeError>(s)
             },
-            node_config(JUDGE, checkpointer_backend, checkpointer_scope),
+            node_config(
+                JUDGE,
+                checkpointer_backend,
+                checkpointer_scope,
+                checkpointer_tenant_scope,
+            ),
         )
         .add_async_node_with_config(
             FLAG,
@@ -325,7 +345,12 @@ async fn build_reconciliation_graph_with_checkpointer(
                 next.decision = ReconDecision::Flag;
                 Ok::<_, NodeError>(next)
             },
-            node_config(FLAG, checkpointer_backend, checkpointer_scope),
+            node_config(
+                FLAG,
+                checkpointer_backend,
+                checkpointer_scope,
+                checkpointer_tenant_scope,
+            ),
         )
         .add_async_node_with_config(
             CLEAR,
@@ -335,7 +360,12 @@ async fn build_reconciliation_graph_with_checkpointer(
                 next.decision = ReconDecision::Clear;
                 Ok::<_, NodeError>(next)
             },
-            node_config(CLEAR, checkpointer_backend, checkpointer_scope),
+            node_config(
+                CLEAR,
+                checkpointer_backend,
+                checkpointer_scope,
+                checkpointer_tenant_scope,
+            ),
         )
         .add_edge(START, CLASSIFY)
         .add_edge(CLASSIFY, JUDGE)

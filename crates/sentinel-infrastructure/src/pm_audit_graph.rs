@@ -161,12 +161,21 @@ fn is_advisory_pm_category(category: &str) -> bool {
     matches!(category, "non-fibonacci" | "qa-failed")
 }
 
-fn node_config(node: &str, checkpointer_backend: &str, checkpointer_scope: &str) -> NodeConfig {
+fn node_config(
+    node: &str,
+    checkpointer_backend: &str,
+    checkpointer_scope: &str,
+    checkpointer_tenant_scope: &str,
+) -> NodeConfig {
     NodeConfig::new()
         .with_metadata("sentinel.graph", "pm_audit")
         .with_metadata("sentinel.node", node)
         .with_metadata("sentinel.checkpointer_backend", checkpointer_backend)
         .with_metadata("sentinel.checkpointer_scope", checkpointer_scope)
+        .with_metadata(
+            "sentinel.checkpointer_tenant_scope",
+            checkpointer_tenant_scope,
+        )
         .with_timeout(NodeTimeoutPolicy::run_only(Duration::from_secs(2)))
 }
 
@@ -284,6 +293,7 @@ async fn build_pm_audit_graph_with_checkpointer(
 ) -> Result<PmAuditGraph, String> {
     let checkpointer_backend = checkpointer.backend();
     let checkpointer_scope = checkpointer.scope();
+    let checkpointer_tenant_scope = checkpointer.tenant_scope_metadata_value();
     let schema = pm_audit_state_schema();
     let builder = StateGraphBuilder::<PmAuditState>::with_schema(schema.clone())
         .with_input_schema(schema.clone())
@@ -294,7 +304,12 @@ async fn build_pm_audit_graph_with_checkpointer(
                 emit_decision_node_event("pm_audit", CLASSIFY, &s.identifier)?;
                 Ok::<_, NodeError>(s)
             },
-            node_config(CLASSIFY, checkpointer_backend, checkpointer_scope),
+            node_config(
+                CLASSIFY,
+                checkpointer_backend,
+                checkpointer_scope,
+                checkpointer_tenant_scope,
+            ),
         )
         .add_async_node_with_config(
             HARD,
@@ -304,7 +319,12 @@ async fn build_pm_audit_graph_with_checkpointer(
                 next.decision = PmAuditDecision::HardViolation;
                 Ok::<_, NodeError>(next)
             },
-            node_config(HARD, checkpointer_backend, checkpointer_scope),
+            node_config(
+                HARD,
+                checkpointer_backend,
+                checkpointer_scope,
+                checkpointer_tenant_scope,
+            ),
         )
         .add_async_node_with_config(
             ADVISORY,
@@ -314,7 +334,12 @@ async fn build_pm_audit_graph_with_checkpointer(
                 next.decision = PmAuditDecision::Advisory;
                 Ok::<_, NodeError>(next)
             },
-            node_config(ADVISORY, checkpointer_backend, checkpointer_scope),
+            node_config(
+                ADVISORY,
+                checkpointer_backend,
+                checkpointer_scope,
+                checkpointer_tenant_scope,
+            ),
         )
         .add_async_node_with_config(
             CLEAR,
@@ -324,7 +349,12 @@ async fn build_pm_audit_graph_with_checkpointer(
                 next.decision = PmAuditDecision::Clear;
                 Ok::<_, NodeError>(next)
             },
-            node_config(CLEAR, checkpointer_backend, checkpointer_scope),
+            node_config(
+                CLEAR,
+                checkpointer_backend,
+                checkpointer_scope,
+                checkpointer_tenant_scope,
+            ),
         )
         .add_edge(START, CLASSIFY)
         .add_conditional_edge(CLASSIFY, |s: &PmAuditState| {

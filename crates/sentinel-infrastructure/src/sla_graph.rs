@@ -196,12 +196,21 @@ fn expected_decision(state: &SlaState) -> SlaDecision {
     }
 }
 
-fn node_config(node: &str, checkpointer_backend: &str, checkpointer_scope: &str) -> NodeConfig {
+fn node_config(
+    node: &str,
+    checkpointer_backend: &str,
+    checkpointer_scope: &str,
+    checkpointer_tenant_scope: &str,
+) -> NodeConfig {
     NodeConfig::new()
         .with_metadata("sentinel.graph", "sla")
         .with_metadata("sentinel.node", node)
         .with_metadata("sentinel.checkpointer_backend", checkpointer_backend)
         .with_metadata("sentinel.checkpointer_scope", checkpointer_scope)
+        .with_metadata(
+            "sentinel.checkpointer_tenant_scope",
+            checkpointer_tenant_scope,
+        )
         .with_timeout(NodeTimeoutPolicy::run_only(Duration::from_secs(2)))
 }
 
@@ -379,6 +388,7 @@ async fn build_sla_graph_with_checkpointer(
 ) -> Result<SlaGraph, String> {
     let checkpointer_backend = checkpointer.backend();
     let checkpointer_scope = checkpointer.scope();
+    let checkpointer_tenant_scope = checkpointer.tenant_scope_metadata_value();
     let schema = sla_state_schema();
     let builder = StateGraphBuilder::<SlaState>::with_schema(schema.clone())
         .with_input_schema(schema.clone())
@@ -389,7 +399,12 @@ async fn build_sla_graph_with_checkpointer(
                 emit_decision_node_event("sla", CLASSIFY, &s.identifier)?;
                 Ok::<_, NodeError>(s)
             },
-            node_config(CLASSIFY, checkpointer_backend, checkpointer_scope),
+            node_config(
+                CLASSIFY,
+                checkpointer_backend,
+                checkpointer_scope,
+                checkpointer_tenant_scope,
+            ),
         )
         .add_async_node_with_config(
             NO_DATA,
@@ -399,7 +414,12 @@ async fn build_sla_graph_with_checkpointer(
                 next.decision = SlaDecision::NoData;
                 Ok::<_, NodeError>(next)
             },
-            node_config(NO_DATA, checkpointer_backend, checkpointer_scope),
+            node_config(
+                NO_DATA,
+                checkpointer_backend,
+                checkpointer_scope,
+                checkpointer_tenant_scope,
+            ),
         )
         .add_async_node_with_config(
             NO_WINDOW_BREACHES,
@@ -409,7 +429,12 @@ async fn build_sla_graph_with_checkpointer(
                 next.decision = SlaDecision::NoWindowBreaches;
                 Ok::<_, NodeError>(next)
             },
-            node_config(NO_WINDOW_BREACHES, checkpointer_backend, checkpointer_scope),
+            node_config(
+                NO_WINDOW_BREACHES,
+                checkpointer_backend,
+                checkpointer_scope,
+                checkpointer_tenant_scope,
+            ),
         )
         .add_async_node_with_config(
             REPEATED_BREACH,
@@ -419,7 +444,12 @@ async fn build_sla_graph_with_checkpointer(
                 next.decision = SlaDecision::RepeatedBreach;
                 Ok::<_, NodeError>(next)
             },
-            node_config(REPEATED_BREACH, checkpointer_backend, checkpointer_scope),
+            node_config(
+                REPEATED_BREACH,
+                checkpointer_backend,
+                checkpointer_scope,
+                checkpointer_tenant_scope,
+            ),
         )
         .add_async_node_with_config(
             ACTIVE_BREACH,
@@ -429,7 +459,12 @@ async fn build_sla_graph_with_checkpointer(
                 next.decision = SlaDecision::ActiveBreach;
                 Ok::<_, NodeError>(next)
             },
-            node_config(ACTIVE_BREACH, checkpointer_backend, checkpointer_scope),
+            node_config(
+                ACTIVE_BREACH,
+                checkpointer_backend,
+                checkpointer_scope,
+                checkpointer_tenant_scope,
+            ),
         )
         .add_async_node_with_config(
             SATURATED_BREACH_LOAD,
@@ -443,6 +478,7 @@ async fn build_sla_graph_with_checkpointer(
                 SATURATED_BREACH_LOAD,
                 checkpointer_backend,
                 checkpointer_scope,
+                checkpointer_tenant_scope,
             ),
         )
         .add_edge(START, CLASSIFY)

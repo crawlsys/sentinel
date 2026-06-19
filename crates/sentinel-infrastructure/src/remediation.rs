@@ -895,12 +895,21 @@ const CLEAR: &str = "clear";
 const ESCALATE: &str = "escalate";
 const REVERT: &str = "revert";
 
-fn node_config(node: &str, checkpointer_backend: &str, checkpointer_scope: &str) -> NodeConfig {
+fn node_config(
+    node: &str,
+    checkpointer_backend: &str,
+    checkpointer_scope: &str,
+    checkpointer_tenant_scope: &str,
+) -> NodeConfig {
     NodeConfig::new()
         .with_metadata("sentinel.graph", "remediation")
         .with_metadata("sentinel.node", node)
         .with_metadata("sentinel.checkpointer_backend", checkpointer_backend)
         .with_metadata("sentinel.checkpointer_scope", checkpointer_scope)
+        .with_metadata(
+            "sentinel.checkpointer_tenant_scope",
+            checkpointer_tenant_scope,
+        )
         .with_timeout(NodeTimeoutPolicy::run_only(Duration::from_secs(2)))
 }
 
@@ -1025,6 +1034,7 @@ async fn build_remediation_graph_with_checkpointer(
 ) -> Result<langgraph_core::application::services::CompilationResult<RemediationState>, String> {
     let checkpointer_backend = checkpointer.backend();
     let checkpointer_scope = checkpointer.scope();
+    let checkpointer_tenant_scope = checkpointer.tenant_scope_metadata_value();
     let schema = remediation_state_schema();
     let builder = StateGraphBuilder::<RemediationState>::with_schema(schema.clone())
         .with_input_schema(schema.clone())
@@ -1039,7 +1049,12 @@ async fn build_remediation_graph_with_checkpointer(
                 )?;
                 Ok::<_, NodeError>(s)
             },
-            node_config(CLASSIFY, checkpointer_backend, checkpointer_scope),
+            node_config(
+                CLASSIFY,
+                checkpointer_backend,
+                checkpointer_scope,
+                checkpointer_tenant_scope,
+            ),
         )
         .add_async_node_with_config(
             VERIFY,
@@ -1051,7 +1066,12 @@ async fn build_remediation_graph_with_checkpointer(
                 )?;
                 Ok::<_, NodeError>(s)
             },
-            node_config(VERIFY, checkpointer_backend, checkpointer_scope),
+            node_config(
+                VERIFY,
+                checkpointer_backend,
+                checkpointer_scope,
+                checkpointer_tenant_scope,
+            ),
         )
         .add_async_node_with_config(
             APPLY,
@@ -1065,7 +1085,12 @@ async fn build_remediation_graph_with_checkpointer(
                 n.outcome = RemediationOutcome::Apply;
                 Ok::<_, NodeError>(n)
             },
-            node_config(APPLY, checkpointer_backend, checkpointer_scope),
+            node_config(
+                APPLY,
+                checkpointer_backend,
+                checkpointer_scope,
+                checkpointer_tenant_scope,
+            ),
         )
         .add_async_node_with_config(
             CLEAR,
@@ -1079,7 +1104,12 @@ async fn build_remediation_graph_with_checkpointer(
                 n.outcome = RemediationOutcome::Clear;
                 Ok::<_, NodeError>(n)
             },
-            node_config(CLEAR, checkpointer_backend, checkpointer_scope),
+            node_config(
+                CLEAR,
+                checkpointer_backend,
+                checkpointer_scope,
+                checkpointer_tenant_scope,
+            ),
         )
         .add_async_node_with_config(
             ESCALATE,
@@ -1093,7 +1123,12 @@ async fn build_remediation_graph_with_checkpointer(
                 n.outcome = RemediationOutcome::Escalate;
                 Ok::<_, NodeError>(n)
             },
-            node_config(ESCALATE, checkpointer_backend, checkpointer_scope),
+            node_config(
+                ESCALATE,
+                checkpointer_backend,
+                checkpointer_scope,
+                checkpointer_tenant_scope,
+            ),
         )
         .add_async_node_with_config(
             REVERT,
@@ -1107,7 +1142,12 @@ async fn build_remediation_graph_with_checkpointer(
                 n.outcome = RemediationOutcome::Revert;
                 Ok::<_, NodeError>(n)
             },
-            node_config(REVERT, checkpointer_backend, checkpointer_scope),
+            node_config(
+                REVERT,
+                checkpointer_backend,
+                checkpointer_scope,
+                checkpointer_tenant_scope,
+            ),
         )
         .add_edge(START, CLASSIFY)
         .add_edge(CLASSIFY, VERIFY)

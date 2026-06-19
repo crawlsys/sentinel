@@ -180,12 +180,21 @@ fn expected_decision(state: &EvalRunState) -> EvalRunDecision {
     }
 }
 
-fn node_config(node: &str, checkpointer_backend: &str, checkpointer_scope: &str) -> NodeConfig {
+fn node_config(
+    node: &str,
+    checkpointer_backend: &str,
+    checkpointer_scope: &str,
+    checkpointer_tenant_scope: &str,
+) -> NodeConfig {
     NodeConfig::new()
         .with_metadata("sentinel.graph", "eval")
         .with_metadata("sentinel.node", node)
         .with_metadata("sentinel.checkpointer_backend", checkpointer_backend)
         .with_metadata("sentinel.checkpointer_scope", checkpointer_scope)
+        .with_metadata(
+            "sentinel.checkpointer_tenant_scope",
+            checkpointer_tenant_scope,
+        )
         .with_timeout(NodeTimeoutPolicy::run_only(Duration::from_secs(2)))
 }
 
@@ -333,6 +342,7 @@ async fn build_eval_graph_with_checkpointer(
 ) -> Result<EvalGraph, String> {
     let checkpointer_backend = checkpointer.backend();
     let checkpointer_scope = checkpointer.scope();
+    let checkpointer_tenant_scope = checkpointer.tenant_scope_metadata_value();
     let schema = eval_state_schema();
     let builder = StateGraphBuilder::<EvalRunState>::with_schema(schema.clone())
         .with_input_schema(schema.clone())
@@ -343,7 +353,12 @@ async fn build_eval_graph_with_checkpointer(
                 emit_decision_node_event("eval", CLASSIFY, &s.identifier)?;
                 Ok::<_, NodeError>(s)
             },
-            node_config(CLASSIFY, checkpointer_backend, checkpointer_scope),
+            node_config(
+                CLASSIFY,
+                checkpointer_backend,
+                checkpointer_scope,
+                checkpointer_tenant_scope,
+            ),
         )
         .add_async_node_with_config(
             NO_CASES,
@@ -353,7 +368,12 @@ async fn build_eval_graph_with_checkpointer(
                 next.decision = EvalRunDecision::NoCases;
                 Ok::<_, NodeError>(next)
             },
-            node_config(NO_CASES, checkpointer_backend, checkpointer_scope),
+            node_config(
+                NO_CASES,
+                checkpointer_backend,
+                checkpointer_scope,
+                checkpointer_tenant_scope,
+            ),
         )
         .add_async_node_with_config(
             SCORING_FAILED,
@@ -363,7 +383,12 @@ async fn build_eval_graph_with_checkpointer(
                 next.decision = EvalRunDecision::ScoringErrors;
                 Ok::<_, NodeError>(next)
             },
-            node_config(SCORING_FAILED, checkpointer_backend, checkpointer_scope),
+            node_config(
+                SCORING_FAILED,
+                checkpointer_backend,
+                checkpointer_scope,
+                checkpointer_tenant_scope,
+            ),
         )
         .add_async_node_with_config(
             FAILING,
@@ -373,7 +398,12 @@ async fn build_eval_graph_with_checkpointer(
                 next.decision = EvalRunDecision::Failing;
                 Ok::<_, NodeError>(next)
             },
-            node_config(FAILING, checkpointer_backend, checkpointer_scope),
+            node_config(
+                FAILING,
+                checkpointer_backend,
+                checkpointer_scope,
+                checkpointer_tenant_scope,
+            ),
         )
         .add_async_node_with_config(
             BORDERLINE,
@@ -383,7 +413,12 @@ async fn build_eval_graph_with_checkpointer(
                 next.decision = EvalRunDecision::Borderline;
                 Ok::<_, NodeError>(next)
             },
-            node_config(BORDERLINE, checkpointer_backend, checkpointer_scope),
+            node_config(
+                BORDERLINE,
+                checkpointer_backend,
+                checkpointer_scope,
+                checkpointer_tenant_scope,
+            ),
         )
         .add_async_node_with_config(
             PASSING,
@@ -393,7 +428,12 @@ async fn build_eval_graph_with_checkpointer(
                 next.decision = EvalRunDecision::Passing;
                 Ok::<_, NodeError>(next)
             },
-            node_config(PASSING, checkpointer_backend, checkpointer_scope),
+            node_config(
+                PASSING,
+                checkpointer_backend,
+                checkpointer_scope,
+                checkpointer_tenant_scope,
+            ),
         )
         .add_async_node_with_config(
             STRONG,
@@ -403,7 +443,12 @@ async fn build_eval_graph_with_checkpointer(
                 next.decision = EvalRunDecision::Strong;
                 Ok::<_, NodeError>(next)
             },
-            node_config(STRONG, checkpointer_backend, checkpointer_scope),
+            node_config(
+                STRONG,
+                checkpointer_backend,
+                checkpointer_scope,
+                checkpointer_tenant_scope,
+            ),
         )
         .add_edge(START, CLASSIFY)
         .add_conditional_edge(CLASSIFY, |s: &EvalRunState| match expected_decision(s) {

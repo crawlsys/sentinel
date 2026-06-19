@@ -205,12 +205,21 @@ fn expected_decision(state: &PrePushBrowserState) -> PrePushBrowserDecision {
     }
 }
 
-fn node_config(node: &str, checkpointer_backend: &str, checkpointer_scope: &str) -> NodeConfig {
+fn node_config(
+    node: &str,
+    checkpointer_backend: &str,
+    checkpointer_scope: &str,
+    checkpointer_tenant_scope: &str,
+) -> NodeConfig {
     NodeConfig::new()
         .with_metadata("sentinel.graph", "pre_push_browser_test")
         .with_metadata("sentinel.node", node)
         .with_metadata("sentinel.checkpointer_backend", checkpointer_backend)
         .with_metadata("sentinel.checkpointer_scope", checkpointer_scope)
+        .with_metadata(
+            "sentinel.checkpointer_tenant_scope",
+            checkpointer_tenant_scope,
+        )
         .with_timeout(NodeTimeoutPolicy::run_only(Duration::from_secs(2)))
 }
 
@@ -436,6 +445,7 @@ async fn build_pre_push_browser_graph_with_checkpointer(
 ) -> Result<PrePushBrowserGraph, String> {
     let checkpointer_backend = checkpointer.backend();
     let checkpointer_scope = checkpointer.scope();
+    let checkpointer_tenant_scope = checkpointer.tenant_scope_metadata_value();
     let schema = pre_push_browser_state_schema();
     let builder = StateGraphBuilder::<PrePushBrowserState>::with_schema(schema.clone())
         .with_input_schema(schema.clone())
@@ -446,7 +456,12 @@ async fn build_pre_push_browser_graph_with_checkpointer(
                 emit_decision_node_event("pre_push_browser_test", CLASSIFY, &s.identifier)?;
                 classify_node(s).await
             },
-            node_config(CLASSIFY, checkpointer_backend, checkpointer_scope),
+            node_config(
+                CLASSIFY,
+                checkpointer_backend,
+                checkpointer_scope,
+                checkpointer_tenant_scope,
+            ),
         )
         .add_async_node_with_config(
             ALLOW,
@@ -456,7 +471,12 @@ async fn build_pre_push_browser_graph_with_checkpointer(
                 next.decision = PrePushBrowserDecision::Allow;
                 Ok::<_, NodeError>(next)
             },
-            node_config(ALLOW, checkpointer_backend, checkpointer_scope),
+            node_config(
+                ALLOW,
+                checkpointer_backend,
+                checkpointer_scope,
+                checkpointer_tenant_scope,
+            ),
         )
         .add_async_node_with_config(
             ALLOW_NO_BROWSER_CONFIG,
@@ -474,6 +494,7 @@ async fn build_pre_push_browser_graph_with_checkpointer(
                 ALLOW_NO_BROWSER_CONFIG,
                 checkpointer_backend,
                 checkpointer_scope,
+                checkpointer_tenant_scope,
             ),
         )
         .add_async_node_with_config(
@@ -492,6 +513,7 @@ async fn build_pre_push_browser_graph_with_checkpointer(
                 ALLOW_NO_FRONTEND_CHANGES,
                 checkpointer_backend,
                 checkpointer_scope,
+                checkpointer_tenant_scope,
             ),
         )
         .add_async_node_with_config(
@@ -510,6 +532,7 @@ async fn build_pre_push_browser_graph_with_checkpointer(
                 ALLOW_RECENT_BROWSER_TEST,
                 checkpointer_backend,
                 checkpointer_scope,
+                checkpointer_tenant_scope,
             ),
         )
         .add_async_node_with_config(
@@ -520,7 +543,12 @@ async fn build_pre_push_browser_graph_with_checkpointer(
                 next.decision = PrePushBrowserDecision::Block;
                 Ok::<_, NodeError>(next)
             },
-            node_config(BLOCK, checkpointer_backend, checkpointer_scope),
+            node_config(
+                BLOCK,
+                checkpointer_backend,
+                checkpointer_scope,
+                checkpointer_tenant_scope,
+            ),
         )
         .add_edge(START, CLASSIFY)
         .add_conditional_edge(

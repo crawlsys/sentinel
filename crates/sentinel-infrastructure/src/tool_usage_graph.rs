@@ -311,12 +311,21 @@ fn terminal_node_id(decision: ToolUsageDecision) -> &'static str {
     }
 }
 
-fn node_config(node: &str, checkpointer_backend: &str, checkpointer_scope: &str) -> NodeConfig {
+fn node_config(
+    node: &str,
+    checkpointer_backend: &str,
+    checkpointer_scope: &str,
+    checkpointer_tenant_scope: &str,
+) -> NodeConfig {
     NodeConfig::new()
         .with_metadata("sentinel.graph", "tool_usage")
         .with_metadata("sentinel.node", node)
         .with_metadata("sentinel.checkpointer_backend", checkpointer_backend)
         .with_metadata("sentinel.checkpointer_scope", checkpointer_scope)
+        .with_metadata(
+            "sentinel.checkpointer_tenant_scope",
+            checkpointer_tenant_scope,
+        )
         .with_timeout(NodeTimeoutPolicy::run_only(Duration::from_secs(2)))
 }
 
@@ -639,6 +648,7 @@ async fn build_tool_usage_graph_with_checkpointer(
 ) -> Result<ToolUsageGraph, String> {
     let checkpointer_backend = checkpointer.backend();
     let checkpointer_scope = checkpointer.scope();
+    let checkpointer_tenant_scope = checkpointer.tenant_scope_metadata_value();
     let schema = tool_usage_state_schema();
     let builder = StateGraphBuilder::<ToolUsageState>::with_schema(schema.clone())
         .with_input_schema(schema.clone())
@@ -649,7 +659,12 @@ async fn build_tool_usage_graph_with_checkpointer(
                 emit_decision_node_event("tool_usage", CLASSIFY, &s.identifier)?;
                 classify_node(s).await
             },
-            node_config(CLASSIFY, checkpointer_backend, checkpointer_scope),
+            node_config(
+                CLASSIFY,
+                checkpointer_backend,
+                checkpointer_scope,
+                checkpointer_tenant_scope,
+            ),
         )
         .add_async_node_with_config(
             ALLOW_NO_TOOL,
@@ -657,7 +672,12 @@ async fn build_tool_usage_graph_with_checkpointer(
                 emit_decision_node_event("tool_usage", ALLOW_NO_TOOL, &s.identifier)?;
                 terminal_node(s, ToolUsageDecision::AllowNoTool).await
             },
-            node_config(ALLOW_NO_TOOL, checkpointer_backend, checkpointer_scope),
+            node_config(
+                ALLOW_NO_TOOL,
+                checkpointer_backend,
+                checkpointer_scope,
+                checkpointer_tenant_scope,
+            ),
         )
         .add_async_node_with_config(
             ALLOW_TRIVIALLY_REVERSIBLE,
@@ -669,6 +689,7 @@ async fn build_tool_usage_graph_with_checkpointer(
                 ALLOW_TRIVIALLY_REVERSIBLE,
                 checkpointer_backend,
                 checkpointer_scope,
+                checkpointer_tenant_scope,
             ),
         )
         .add_async_node_with_config(
@@ -677,7 +698,12 @@ async fn build_tool_usage_graph_with_checkpointer(
                 emit_decision_node_event("tool_usage", ALLOW_A3_HANDOFF, &s.identifier)?;
                 terminal_node(s, ToolUsageDecision::AllowA3Handoff).await
             },
-            node_config(ALLOW_A3_HANDOFF, checkpointer_backend, checkpointer_scope),
+            node_config(
+                ALLOW_A3_HANDOFF,
+                checkpointer_backend,
+                checkpointer_scope,
+                checkpointer_tenant_scope,
+            ),
         )
         .add_async_node_with_config(
             ALLOW,
@@ -685,7 +711,12 @@ async fn build_tool_usage_graph_with_checkpointer(
                 emit_decision_node_event("tool_usage", ALLOW, &s.identifier)?;
                 terminal_node(s, ToolUsageDecision::Allow).await
             },
-            node_config(ALLOW, checkpointer_backend, checkpointer_scope),
+            node_config(
+                ALLOW,
+                checkpointer_backend,
+                checkpointer_scope,
+                checkpointer_tenant_scope,
+            ),
         )
         .add_async_node_with_config(
             DENY_MISSING_SESSION_ID,
@@ -697,6 +728,7 @@ async fn build_tool_usage_graph_with_checkpointer(
                 DENY_MISSING_SESSION_ID,
                 checkpointer_backend,
                 checkpointer_scope,
+                checkpointer_tenant_scope,
             ),
         )
         .add_async_node_with_config(
@@ -713,6 +745,7 @@ async fn build_tool_usage_graph_with_checkpointer(
                 DENY_MISSING_TRANSCRIPT_PATH,
                 checkpointer_backend,
                 checkpointer_scope,
+                checkpointer_tenant_scope,
             ),
         )
         .add_async_node_with_config(
@@ -725,6 +758,7 @@ async fn build_tool_usage_graph_with_checkpointer(
                 DENY_TRANSCRIPT_AUTHORITY,
                 checkpointer_backend,
                 checkpointer_scope,
+                checkpointer_tenant_scope,
             ),
         )
         .add_async_node_with_config(
@@ -737,6 +771,7 @@ async fn build_tool_usage_graph_with_checkpointer(
                 DENY_TASK_LIST_AUTHORITY,
                 checkpointer_backend,
                 checkpointer_scope,
+                checkpointer_tenant_scope,
             ),
         )
         .add_async_node_with_config(
@@ -753,6 +788,7 @@ async fn build_tool_usage_graph_with_checkpointer(
                 DENY_MISSING_SEQUENTIAL_THINKING,
                 checkpointer_backend,
                 checkpointer_scope,
+                checkpointer_tenant_scope,
             ),
         )
         .add_async_node_with_config(
@@ -765,6 +801,7 @@ async fn build_tool_usage_graph_with_checkpointer(
                 DENY_MISSING_TASK_LIST,
                 checkpointer_backend,
                 checkpointer_scope,
+                checkpointer_tenant_scope,
             ),
         )
         .add_async_node_with_config(
@@ -777,6 +814,7 @@ async fn build_tool_usage_graph_with_checkpointer(
                 DENY_PLAN_IN_PROGRESS,
                 checkpointer_backend,
                 checkpointer_scope,
+                checkpointer_tenant_scope,
             ),
         )
         .add_async_node_with_config(
@@ -789,6 +827,7 @@ async fn build_tool_usage_graph_with_checkpointer(
                 DENY_MISSING_APPROVED_PLAN,
                 checkpointer_backend,
                 checkpointer_scope,
+                checkpointer_tenant_scope,
             ),
         )
         .add_async_node_with_config(
@@ -805,6 +844,7 @@ async fn build_tool_usage_graph_with_checkpointer(
                 DENY_MISSING_IN_PROGRESS_TASK,
                 checkpointer_backend,
                 checkpointer_scope,
+                checkpointer_tenant_scope,
             ),
         )
         .add_edge(START, CLASSIFY)

@@ -19,6 +19,7 @@ use langgraph_core::RedisCheckpointer;
 use langgraph_core::SqliteCheckpointer;
 
 const CHECKPOINTER_BACKEND_METADATA: &str = "sentinel.checkpointer_backend";
+const CHECKPOINTER_TENANT_SCOPE_METADATA: &str = "sentinel.checkpointer_tenant_scope";
 
 /// Runtime backend selector for durable infrastructure decision-graph checkpoints.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -42,6 +43,7 @@ pub(crate) struct DecisionGraphCheckpointer {
     saver: Arc<dyn CheckpointSaver>,
     backend: &'static str,
     scope: String,
+    tenant_scope: Option<String>,
 }
 
 impl DecisionGraphCheckpointer {
@@ -53,6 +55,16 @@ impl DecisionGraphCheckpointer {
     #[must_use]
     pub(crate) fn scope(&self) -> &str {
         &self.scope
+    }
+
+    #[must_use]
+    pub(crate) fn tenant_scope(&self) -> Option<&str> {
+        self.tenant_scope.as_deref()
+    }
+
+    #[must_use]
+    pub(crate) fn tenant_scope_metadata_value(&self) -> &str {
+        self.tenant_scope().unwrap_or("")
     }
 
     #[must_use]
@@ -255,6 +267,40 @@ fn tenant_scope_for_checkpointer_backend(backend: &str) -> Result<Option<String>
     }
 }
 
+fn tenant_scope_for_checkpointer_config(
+    config: &DecisionGraphCheckpointerConfig,
+) -> Result<Option<String>, String> {
+    match config {
+        DecisionGraphCheckpointerConfig::Sqlite { .. } => Ok(None),
+        DecisionGraphCheckpointerConfig::Postgres { .. } => {
+            tenant_scope_for_postgres_checkpointer_config()
+        }
+        DecisionGraphCheckpointerConfig::Redis { .. } => {
+            tenant_scope_for_redis_checkpointer_config()
+        }
+    }
+}
+
+#[cfg(feature = "postgres")]
+fn tenant_scope_for_postgres_checkpointer_config() -> Result<Option<String>, String> {
+    tenant_scope_for_checkpointer_backend("postgres")
+}
+
+#[cfg(not(feature = "postgres"))]
+fn tenant_scope_for_postgres_checkpointer_config() -> Result<Option<String>, String> {
+    Ok(None)
+}
+
+#[cfg(feature = "redis")]
+fn tenant_scope_for_redis_checkpointer_config() -> Result<Option<String>, String> {
+    tenant_scope_for_checkpointer_backend("redis")
+}
+
+#[cfg(not(feature = "redis"))]
+fn tenant_scope_for_redis_checkpointer_config() -> Result<Option<String>, String> {
+    Ok(None)
+}
+
 /// Resolve the SQLite checkpoint database path for a named decision graph.
 ///
 /// Databases live under Sentinel's state directory and are keyed by graph
@@ -286,6 +332,7 @@ pub(crate) async fn checkpointer_for_config(
 ) -> Result<DecisionGraphCheckpointer, String> {
     let backend = config.backend_name();
     let scope = config.scope_name();
+    let tenant_scope = tenant_scope_for_checkpointer_config(&config)?;
     let saver = match config {
         DecisionGraphCheckpointerConfig::Sqlite { database_path } => {
             sqlite_checkpointer(&database_path).await
@@ -303,6 +350,7 @@ pub(crate) async fn checkpointer_for_config(
         saver,
         backend,
         scope,
+        tenant_scope,
     })
 }
 
@@ -406,9 +454,11 @@ where
     T: Serialize,
 {
     let backend = compiled_checkpointer_backend(graph_name, compiled)?;
-    run_thread_id_for_backend(&backend, graph_name, identifier, input)
+    let tenant_scope = compiled_checkpointer_tenant_scope(graph_name, compiled, &backend)?;
+    run_thread_id_for_tenant_scope(tenant_scope.as_deref(), graph_name, identifier, input)
 }
 
+#[cfg(test)]
 fn run_thread_id_for_backend<T: Serialize>(
     backend: &str,
     graph_name: &str,
@@ -421,6 +471,19 @@ fn run_thread_id_for_backend<T: Serialize>(
     let base = format!("{graph_name}:{identifier}:{}", encode_hex(&digest));
     let tenant_scope = tenant_scope_for_checkpointer_backend(backend)?;
     tenant_scoped_thread_id(base, tenant_scope.as_deref())
+}
+
+fn run_thread_id_for_tenant_scope<T: Serialize>(
+    tenant_scope: Option<&str>,
+    graph_name: &str,
+    identifier: &str,
+    input: &T,
+) -> Result<String, String> {
+    let bytes = serde_json::to_vec(input)
+        .map_err(|e| format!("failed to serialize {graph_name} graph input: {e}"))?;
+    let digest = Sha256::digest(&bytes);
+    let base = format!("{graph_name}:{identifier}:{}", encode_hex(&digest));
+    tenant_scoped_thread_id(base, tenant_scope)
 }
 
 fn compiled_checkpointer_backend<S>(
@@ -487,6 +550,84 @@ where
     }
 }
 
+fn compiled_checkpointer_tenant_scope<S>(
+    graph_name: &str,
+    compiled: &CompilationResult<S>,
+    backend: &str,
+) -> Result<Option<String>, String>
+where
+    S: Clone + Serialize + DeserializeOwned + Send + Sync + 'static,
+{
+    let mut tenant_scope: Option<String> = None;
+    let mut saw_node = false;
+    for node_id in compiled.graph.node_ids() {
+        saw_node = true;
+        let node = compiled
+            .graph
+            .node_introspection(node_id.as_str())
+            .ok_or_else(|| {
+                format!(
+                    "{graph_name} decision graph node '{}' is missing compiled introspection",
+                    node_id.as_str()
+                )
+            })?;
+        let node_tenant_scope = node
+            .metadata
+            .get(CHECKPOINTER_TENANT_SCOPE_METADATA)
+            .ok_or_else(|| {
+                format!(
+                    "{graph_name} decision graph node '{}' is missing {CHECKPOINTER_TENANT_SCOPE_METADATA} metadata",
+                    node.id
+                )
+            })?;
+        match tenant_scope.as_deref() {
+            Some(existing) if existing != *node_tenant_scope => {
+                return Err(format!(
+                    "{graph_name} decision graph has inconsistent checkpointer tenant metadata: expected {existing:?}, node '{}' had {node_tenant_scope:?}",
+                    node.id
+                ));
+            }
+            Some(_) => {}
+            None => tenant_scope = Some((*node_tenant_scope).to_string()),
+        }
+    }
+
+    if !saw_node {
+        return Err(format!(
+            "{graph_name} decision graph must contain at least one node with {CHECKPOINTER_TENANT_SCOPE_METADATA} metadata"
+        ));
+    }
+
+    let tenant_scope = tenant_scope.ok_or_else(|| {
+        format!(
+            "{graph_name} decision graph is missing {CHECKPOINTER_TENANT_SCOPE_METADATA} metadata"
+        )
+    })?;
+    match backend {
+        "sqlite" => {
+            if tenant_scope.is_empty() {
+                Ok(None)
+            } else {
+                Err(format!(
+                    "{graph_name} SQLite decision graph must not carry hosted tenant metadata"
+                ))
+            }
+        }
+        "postgres" | "redis" => {
+            if tenant_scope.is_empty() {
+                return Err(format!(
+                    "{graph_name} {backend} decision graph requires non-empty {CHECKPOINTER_TENANT_SCOPE_METADATA} metadata"
+                ));
+            }
+            validate_tenant_scope(&tenant_scope)?;
+            Ok(Some(tenant_scope))
+        }
+        other => Err(format!(
+            "unsupported decision graph checkpointer backend '{other}' from compiled {graph_name} metadata"
+        )),
+    }
+}
+
 fn tenant_scoped_thread_id(base: String, tenant: Option<&str>) -> Result<String, String> {
     tenant_scoped_langgraph_thread_id(base, tenant)
 }
@@ -521,8 +662,48 @@ mod tests {
     use std::sync::Mutex;
 
     use super::*;
+    use langgraph_core::application::services::GraphCompiler;
+    use langgraph_core::domain::value_objects::{NodeConfig, NodeError, StateSchema, END, START};
+    use langgraph_core::StateGraphBuilder;
+    use serde::Deserialize;
 
     static DECISION_GRAPH_CHECKPOINTER_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    struct TestDecisionState {
+        identifier: String,
+    }
+
+    async fn compiled_test_graph(
+        backend: &str,
+        tenant_scope: &str,
+    ) -> CompilationResult<TestDecisionState> {
+        let checkpointer = checkpointer_for_config(DecisionGraphCheckpointerConfig::Sqlite {
+            database_path: ":memory:".to_string(),
+        })
+        .await
+        .expect("sqlite checkpointer");
+        let schema = StateSchema::<TestDecisionState>::new().with_serializable_validation();
+        let graph = StateGraphBuilder::<TestDecisionState>::with_schema(schema)
+            .add_node_with_config(
+                "classify",
+                |state: &TestDecisionState| Ok::<_, NodeError>(state.clone()),
+                NodeConfig::new()
+                    .with_metadata("sentinel.graph", "severity")
+                    .with_metadata("sentinel.node", "classify")
+                    .with_metadata(CHECKPOINTER_BACKEND_METADATA, backend)
+                    .with_metadata("sentinel.checkpointer_scope", "database_path::memory:")
+                    .with_metadata(CHECKPOINTER_TENANT_SCOPE_METADATA, tenant_scope),
+            )
+            .add_edge(START, "classify")
+            .add_edge("classify", END)
+            .build()
+            .expect("test graph");
+        GraphCompiler::new()
+            .with_checkpointer(checkpointer.into_saver())
+            .compile_with_config(graph)
+            .expect("compile test graph")
+    }
 
     fn with_decision_graph_checkpointer_env<R>(
         backend: Option<&str>,
@@ -823,6 +1004,30 @@ mod tests {
         );
     }
 
+    #[cfg(all(feature = "postgres", feature = "redis"))]
+    #[test]
+    fn explicit_hosted_decision_checkpointer_config_requires_tenant_scope() {
+        with_decision_graph_checkpointer_env(None, None, None, None, || {
+            let postgres_err =
+                tenant_scope_for_checkpointer_config(&DecisionGraphCheckpointerConfig::Postgres {
+                    database_url: "postgres://sentinel:sentinel@localhost/sentinel".to_string(),
+                    schema: Some("sentinel_decisions".to_string()),
+                })
+                .expect_err("explicit postgres config must require tenant scope");
+            assert!(postgres_err.contains(LANGGRAPH_TENANT_ENV));
+            assert!(postgres_err.contains("tenant-scoped"));
+
+            let redis_err =
+                tenant_scope_for_checkpointer_config(&DecisionGraphCheckpointerConfig::Redis {
+                    redis_url: "redis://localhost:6379/0".to_string(),
+                    ttl_seconds: Some(60),
+                })
+                .expect_err("explicit redis config must require tenant scope");
+            assert!(redis_err.contains(LANGGRAPH_TENANT_ENV));
+            assert!(redis_err.contains("tenant-scoped"));
+        });
+    }
+
     #[test]
     fn decision_graph_checkpointer_config_rejects_empty_backend_env() {
         with_decision_graph_checkpointer_env(Some("   "), None, None, None, || {
@@ -984,6 +1189,60 @@ mod tests {
             assert!(err.contains("unsupported decision graph checkpointer backend 'unsupported'"));
             assert!(err.contains("expected sqlite, postgres, or redis"));
         });
+    }
+
+    #[tokio::test]
+    async fn compiled_decision_graph_thread_id_uses_compiled_tenant_scope_after_env_drift() {
+        let compiled = compiled_test_graph("redis", "legatus_ai").await;
+        with_decision_graph_checkpointer_env_full(
+            Some("redis"),
+            None,
+            None,
+            Some("redis://localhost:6379/0"),
+            None,
+            Some("wrong_tenant"),
+            || {
+                let thread_id = run_thread_id_for_compiled(
+                    &compiled,
+                    "severity",
+                    "SEN-123",
+                    &serde_json::json!({"ticket": "SEN-123"}),
+                )
+                .expect("compiled hosted thread id");
+
+                assert!(thread_id.starts_with("tenant:legatus_ai:severity:SEN-123:"));
+            },
+        );
+    }
+
+    #[tokio::test]
+    async fn compiled_decision_graph_thread_id_rejects_missing_hosted_tenant_metadata() {
+        let compiled = compiled_test_graph("postgres", "").await;
+        let err = run_thread_id_for_compiled(
+            &compiled,
+            "severity",
+            "SEN-123",
+            &serde_json::json!({"ticket": "SEN-123"}),
+        )
+        .expect_err("hosted compiled graph must carry tenant metadata");
+
+        assert!(err.contains("requires non-empty"));
+        assert!(err.contains(CHECKPOINTER_TENANT_SCOPE_METADATA));
+    }
+
+    #[tokio::test]
+    async fn compiled_decision_graph_thread_id_rejects_sqlite_tenant_metadata() {
+        let compiled = compiled_test_graph("sqlite", "legatus_ai").await;
+        let err = run_thread_id_for_compiled(
+            &compiled,
+            "severity",
+            "SEN-123",
+            &serde_json::json!({"ticket": "SEN-123"}),
+        )
+        .expect_err("sqlite compiled graph must not carry tenant metadata");
+
+        assert!(err.contains("SQLite decision graph"));
+        assert!(err.contains("must not carry hosted tenant metadata"));
     }
 
     #[test]

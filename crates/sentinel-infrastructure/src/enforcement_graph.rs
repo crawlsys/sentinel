@@ -163,12 +163,21 @@ const JUDGE: &str = "judge";
 const REVERT: &str = "revert";
 const CLEAR: &str = "clear";
 
-fn node_config(node: &str, checkpointer_backend: &str, checkpointer_scope: &str) -> NodeConfig {
+fn node_config(
+    node: &str,
+    checkpointer_backend: &str,
+    checkpointer_scope: &str,
+    checkpointer_tenant_scope: &str,
+) -> NodeConfig {
     NodeConfig::new()
         .with_metadata("sentinel.graph", "enforcement")
         .with_metadata("sentinel.node", node)
         .with_metadata("sentinel.checkpointer_backend", checkpointer_backend)
         .with_metadata("sentinel.checkpointer_scope", checkpointer_scope)
+        .with_metadata(
+            "sentinel.checkpointer_tenant_scope",
+            checkpointer_tenant_scope,
+        )
         .with_timeout(NodeTimeoutPolicy::run_only(Duration::from_secs(2)))
 }
 
@@ -273,6 +282,7 @@ async fn build_escalation_graph_with_checkpointer(
 ) -> Result<langgraph_core::application::services::CompilationResult<EscalationState>, String> {
     let checkpointer_backend = checkpointer.backend();
     let checkpointer_scope = checkpointer.scope();
+    let checkpointer_tenant_scope = checkpointer.tenant_scope_metadata_value();
     let schema = enforcement_state_schema();
     let builder = StateGraphBuilder::<EscalationState>::with_schema(schema.clone())
         .with_input_schema(schema.clone())
@@ -284,7 +294,12 @@ async fn build_escalation_graph_with_checkpointer(
                 emit_decision_node_event("enforcement", CLASSIFY, &s.identifier)?;
                 Ok::<_, NodeError>(s)
             },
-            node_config(CLASSIFY, checkpointer_backend, checkpointer_scope),
+            node_config(
+                CLASSIFY,
+                checkpointer_backend,
+                checkpointer_scope,
+                checkpointer_tenant_scope,
+            ),
         )
         // judge: pass through; the verdict was set by the orchestrator.
         .add_async_node_with_config(
@@ -293,7 +308,12 @@ async fn build_escalation_graph_with_checkpointer(
                 emit_decision_node_event("enforcement", JUDGE, &s.identifier)?;
                 Ok::<_, NodeError>(s)
             },
-            node_config(JUDGE, checkpointer_backend, checkpointer_scope),
+            node_config(
+                JUDGE,
+                checkpointer_backend,
+                checkpointer_scope,
+                checkpointer_tenant_scope,
+            ),
         )
         // revert / clear: record the terminal decision.
         .add_async_node_with_config(
@@ -304,7 +324,12 @@ async fn build_escalation_graph_with_checkpointer(
                 next.decision = Decision::Revert;
                 Ok::<_, NodeError>(next)
             },
-            node_config(REVERT, checkpointer_backend, checkpointer_scope),
+            node_config(
+                REVERT,
+                checkpointer_backend,
+                checkpointer_scope,
+                checkpointer_tenant_scope,
+            ),
         )
         .add_async_node_with_config(
             CLEAR,
@@ -314,7 +339,12 @@ async fn build_escalation_graph_with_checkpointer(
                 next.decision = Decision::Clear;
                 Ok::<_, NodeError>(next)
             },
-            node_config(CLEAR, checkpointer_backend, checkpointer_scope),
+            node_config(
+                CLEAR,
+                checkpointer_backend,
+                checkpointer_scope,
+                checkpointer_tenant_scope,
+            ),
         )
         .add_edge(START, CLASSIFY)
         // classify → judge (started+unready) or clear (ready/not-started).

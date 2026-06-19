@@ -61,6 +61,14 @@ fn all_langgraph_decision_graphs_use_v3_streaming_authority() {
             "{label} must compile with a durable LangGraph checkpointer"
         );
         assert!(
+            source.contains("tenant_scope_metadata_value("),
+            "{label} must capture checkpointer tenant scope at graph compile time"
+        );
+        assert!(
+            source.contains("sentinel.checkpointer_tenant_scope"),
+            "{label} must attach tenant scope to LangGraph node metadata"
+        );
+        assert!(
             source.contains(".compile_with_config("),
             "{label} must preserve LangGraph runtime configuration during compilation"
         );

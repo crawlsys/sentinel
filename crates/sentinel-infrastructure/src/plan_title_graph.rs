@@ -172,12 +172,21 @@ fn expected_decision(state: &PlanTitleState) -> PlanTitleDecision {
     }
 }
 
-fn node_config(node: &str, checkpointer_backend: &str, checkpointer_scope: &str) -> NodeConfig {
+fn node_config(
+    node: &str,
+    checkpointer_backend: &str,
+    checkpointer_scope: &str,
+    checkpointer_tenant_scope: &str,
+) -> NodeConfig {
     NodeConfig::new()
         .with_metadata("sentinel.graph", "plan_title")
         .with_metadata("sentinel.node", node)
         .with_metadata("sentinel.checkpointer_backend", checkpointer_backend)
         .with_metadata("sentinel.checkpointer_scope", checkpointer_scope)
+        .with_metadata(
+            "sentinel.checkpointer_tenant_scope",
+            checkpointer_tenant_scope,
+        )
         .with_timeout(NodeTimeoutPolicy::run_only(Duration::from_secs(2)))
 }
 
@@ -364,6 +373,7 @@ async fn build_plan_title_graph_with_checkpointer(
 ) -> Result<PlanTitleGraph, String> {
     let checkpointer_backend = checkpointer.backend();
     let checkpointer_scope = checkpointer.scope();
+    let checkpointer_tenant_scope = checkpointer.tenant_scope_metadata_value();
     let schema = plan_title_state_schema();
     let builder = StateGraphBuilder::<PlanTitleState>::with_schema(schema.clone())
         .with_input_schema(schema.clone())
@@ -374,7 +384,12 @@ async fn build_plan_title_graph_with_checkpointer(
                 emit_decision_node_event("plan_title", CLASSIFY, &s.identifier)?;
                 classify_node(s).await
             },
-            node_config(CLASSIFY, checkpointer_backend, checkpointer_scope),
+            node_config(
+                CLASSIFY,
+                checkpointer_backend,
+                checkpointer_scope,
+                checkpointer_tenant_scope,
+            ),
         )
         .add_async_node_with_config(
             ALLOW,
@@ -384,7 +399,12 @@ async fn build_plan_title_graph_with_checkpointer(
                 next.decision = PlanTitleDecision::Allow;
                 Ok::<_, NodeError>(next)
             },
-            node_config(ALLOW, checkpointer_backend, checkpointer_scope),
+            node_config(
+                ALLOW,
+                checkpointer_backend,
+                checkpointer_scope,
+                checkpointer_tenant_scope,
+            ),
         )
         .add_async_node_with_config(
             BLOCK_MISSING_PLAN,
@@ -394,7 +414,12 @@ async fn build_plan_title_graph_with_checkpointer(
                 next.decision = PlanTitleDecision::BlockMissingPlan;
                 Ok::<_, NodeError>(next)
             },
-            node_config(BLOCK_MISSING_PLAN, checkpointer_backend, checkpointer_scope),
+            node_config(
+                BLOCK_MISSING_PLAN,
+                checkpointer_backend,
+                checkpointer_scope,
+                checkpointer_tenant_scope,
+            ),
         )
         .add_async_node_with_config(
             BLOCK_TITLELESS,
@@ -404,7 +429,12 @@ async fn build_plan_title_graph_with_checkpointer(
                 next.decision = PlanTitleDecision::BlockTitleless;
                 Ok::<_, NodeError>(next)
             },
-            node_config(BLOCK_TITLELESS, checkpointer_backend, checkpointer_scope),
+            node_config(
+                BLOCK_TITLELESS,
+                checkpointer_backend,
+                checkpointer_scope,
+                checkpointer_tenant_scope,
+            ),
         )
         .add_edge(START, CLASSIFY)
         .add_conditional_edge(CLASSIFY, |s: &PlanTitleState| match expected_decision(s) {

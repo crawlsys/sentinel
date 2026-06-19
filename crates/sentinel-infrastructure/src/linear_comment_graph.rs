@@ -88,12 +88,21 @@ const SKIP: &str = "skip";
 
 pub type LinearCommentGraph = CompilationResult<LinearCommentState>;
 
-fn node_config(node: &str, checkpointer_backend: &str, checkpointer_scope: &str) -> NodeConfig {
+fn node_config(
+    node: &str,
+    checkpointer_backend: &str,
+    checkpointer_scope: &str,
+    checkpointer_tenant_scope: &str,
+) -> NodeConfig {
     NodeConfig::new()
         .with_metadata("sentinel.graph", "linear_comment")
         .with_metadata("sentinel.node", node)
         .with_metadata("sentinel.checkpointer_backend", checkpointer_backend)
         .with_metadata("sentinel.checkpointer_scope", checkpointer_scope)
+        .with_metadata(
+            "sentinel.checkpointer_tenant_scope",
+            checkpointer_tenant_scope,
+        )
         .with_timeout(NodeTimeoutPolicy::run_only(Duration::from_secs(2)))
 }
 
@@ -172,6 +181,7 @@ async fn build_linear_comment_graph_with_checkpointer(
 ) -> Result<LinearCommentGraph, String> {
     let checkpointer_backend = checkpointer.backend();
     let checkpointer_scope = checkpointer.scope();
+    let checkpointer_tenant_scope = checkpointer.tenant_scope_metadata_value();
     let schema = linear_comment_state_schema();
     let builder = StateGraphBuilder::<LinearCommentState>::with_schema(schema.clone())
         .with_input_schema(schema.clone())
@@ -182,7 +192,12 @@ async fn build_linear_comment_graph_with_checkpointer(
                 emit_decision_node_event("linear_comment", CLASSIFY, &s.identifier)?;
                 Ok::<_, NodeError>(s)
             },
-            node_config(CLASSIFY, checkpointer_backend, checkpointer_scope),
+            node_config(
+                CLASSIFY,
+                checkpointer_backend,
+                checkpointer_scope,
+                checkpointer_tenant_scope,
+            ),
         )
         .add_async_node_with_config(
             POST,
@@ -192,7 +207,12 @@ async fn build_linear_comment_graph_with_checkpointer(
                 next.decision = LinearCommentDecision::Post;
                 Ok::<_, NodeError>(next)
             },
-            node_config(POST, checkpointer_backend, checkpointer_scope),
+            node_config(
+                POST,
+                checkpointer_backend,
+                checkpointer_scope,
+                checkpointer_tenant_scope,
+            ),
         )
         .add_async_node_with_config(
             SKIP,
@@ -202,7 +222,12 @@ async fn build_linear_comment_graph_with_checkpointer(
                 next.decision = LinearCommentDecision::Skip;
                 Ok::<_, NodeError>(next)
             },
-            node_config(SKIP, checkpointer_backend, checkpointer_scope),
+            node_config(
+                SKIP,
+                checkpointer_backend,
+                checkpointer_scope,
+                checkpointer_tenant_scope,
+            ),
         )
         .add_edge(START, CLASSIFY)
         .add_conditional_edge(CLASSIFY, |s: &LinearCommentState| {

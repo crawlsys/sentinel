@@ -196,12 +196,21 @@ fn expected_decision(state: &TokenUsageState) -> TokenUsageDecision {
     }
 }
 
-fn node_config(node: &str, checkpointer_backend: &str, checkpointer_scope: &str) -> NodeConfig {
+fn node_config(
+    node: &str,
+    checkpointer_backend: &str,
+    checkpointer_scope: &str,
+    checkpointer_tenant_scope: &str,
+) -> NodeConfig {
     NodeConfig::new()
         .with_metadata("sentinel.graph", "token_usage")
         .with_metadata("sentinel.node", node)
         .with_metadata("sentinel.checkpointer_backend", checkpointer_backend)
         .with_metadata("sentinel.checkpointer_scope", checkpointer_scope)
+        .with_metadata(
+            "sentinel.checkpointer_tenant_scope",
+            checkpointer_tenant_scope,
+        )
         .with_timeout(NodeTimeoutPolicy::run_only(Duration::from_secs(2)))
 }
 
@@ -394,6 +403,7 @@ async fn build_token_usage_graph_with_checkpointer(
 ) -> Result<TokenUsageGraph, String> {
     let checkpointer_backend = checkpointer.backend();
     let checkpointer_scope = checkpointer.scope();
+    let checkpointer_tenant_scope = checkpointer.tenant_scope_metadata_value();
     let schema = token_usage_state_schema();
     let builder = StateGraphBuilder::<TokenUsageState>::with_schema(schema.clone())
         .with_input_schema(schema.clone())
@@ -404,7 +414,12 @@ async fn build_token_usage_graph_with_checkpointer(
                 emit_decision_node_event("token_usage", CLASSIFY, &s.identifier)?;
                 Ok::<_, NodeError>(s)
             },
-            node_config(CLASSIFY, checkpointer_backend, checkpointer_scope),
+            node_config(
+                CLASSIFY,
+                checkpointer_backend,
+                checkpointer_scope,
+                checkpointer_tenant_scope,
+            ),
         )
         .add_async_node_with_config(
             NO_DATA,
@@ -414,7 +429,12 @@ async fn build_token_usage_graph_with_checkpointer(
                 next.decision = TokenUsageDecision::NoData;
                 Ok::<_, NodeError>(next)
             },
-            node_config(NO_DATA, checkpointer_backend, checkpointer_scope),
+            node_config(
+                NO_DATA,
+                checkpointer_backend,
+                checkpointer_scope,
+                checkpointer_tenant_scope,
+            ),
         )
         .add_async_node_with_config(
             NO_MAPPED_TICKETS,
@@ -424,7 +444,12 @@ async fn build_token_usage_graph_with_checkpointer(
                 next.decision = TokenUsageDecision::NoMappedTickets;
                 Ok::<_, NodeError>(next)
             },
-            node_config(NO_MAPPED_TICKETS, checkpointer_backend, checkpointer_scope),
+            node_config(
+                NO_MAPPED_TICKETS,
+                checkpointer_backend,
+                checkpointer_scope,
+                checkpointer_tenant_scope,
+            ),
         )
         .add_async_node_with_config(
             UNPRICED_MODEL_RISK,
@@ -438,6 +463,7 @@ async fn build_token_usage_graph_with_checkpointer(
                 UNPRICED_MODEL_RISK,
                 checkpointer_backend,
                 checkpointer_scope,
+                checkpointer_tenant_scope,
             ),
         )
         .add_async_node_with_config(
@@ -452,6 +478,7 @@ async fn build_token_usage_graph_with_checkpointer(
                 MAPPING_COVERAGE_RISK,
                 checkpointer_backend,
                 checkpointer_scope,
+                checkpointer_tenant_scope,
             ),
         )
         .add_async_node_with_config(
@@ -466,6 +493,7 @@ async fn build_token_usage_graph_with_checkpointer(
                 EXPENSIVE_TICKET_RISK,
                 checkpointer_backend,
                 checkpointer_scope,
+                checkpointer_tenant_scope,
             ),
         )
         .add_async_node_with_config(
@@ -476,7 +504,12 @@ async fn build_token_usage_graph_with_checkpointer(
                 next.decision = TokenUsageDecision::HealthyUsage;
                 Ok::<_, NodeError>(next)
             },
-            node_config(HEALTHY_USAGE, checkpointer_backend, checkpointer_scope),
+            node_config(
+                HEALTHY_USAGE,
+                checkpointer_backend,
+                checkpointer_scope,
+                checkpointer_tenant_scope,
+            ),
         )
         .add_edge(START, CLASSIFY)
         .add_conditional_edge(CLASSIFY, |s: &TokenUsageState| match expected_decision(s) {

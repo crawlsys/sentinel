@@ -14,6 +14,7 @@ use langgraph_core::application::services::{
 };
 use langgraph_core::domain::value_objects::{NodeError, END, START};
 use langgraph_core::ports::WriteHistoryEntry;
+use sentinel_domain::langgraph_thread::validate_tenant_scope;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::sync::mpsc;
@@ -149,6 +150,8 @@ pub struct DecisionGraphTopology {
     pub durable_checkpointer: bool,
     pub checkpointer_backend: String,
     pub checkpointer_scope: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub checkpointer_tenant_scope: Option<String>,
     pub auto_checkpoint: bool,
     pub max_iterations: usize,
     pub schemas: DecisionGraphSchemas,
@@ -188,6 +191,8 @@ where
         .collect();
     let checkpointer_backend = required_checkpointer_backend(graph_name, &nodes)?;
     let checkpointer_scope = required_checkpointer_scope(graph_name, &nodes)?;
+    let checkpointer_tenant_scope =
+        required_checkpointer_tenant_scope(graph_name, &nodes, &checkpointer_backend)?;
     required_decision_node_runtime_contract(graph_name, &nodes)?;
 
     let edges: Vec<DecisionGraphEdgeInfo> = graph
@@ -217,6 +222,7 @@ where
         durable_checkpointer,
         checkpointer_backend,
         checkpointer_scope,
+        checkpointer_tenant_scope,
         auto_checkpoint,
         max_iterations,
         schemas: DecisionGraphSchemas {
@@ -228,6 +234,42 @@ where
         nodes,
         edges,
     })
+}
+
+fn required_checkpointer_tenant_scope(
+    graph_name: &str,
+    nodes: &[DecisionGraphNodeInfo],
+    backend: &str,
+) -> Result<Option<String>, String> {
+    let tenant_scope = required_uniform_metadata(
+        graph_name,
+        nodes,
+        "sentinel.checkpointer_tenant_scope",
+        "checkpointer tenant scope",
+    )?;
+    match backend {
+        "sqlite" => {
+            if tenant_scope.is_empty() {
+                Ok(None)
+            } else {
+                Err(format!(
+                    "{graph_name} SQLite decision graph must not carry hosted tenant metadata"
+                ))
+            }
+        }
+        "postgres" | "redis" => {
+            if tenant_scope.is_empty() {
+                return Err(format!(
+                    "{graph_name} {backend} decision graph requires non-empty sentinel.checkpointer_tenant_scope metadata"
+                ));
+            }
+            validate_tenant_scope(&tenant_scope)?;
+            Ok(Some(tenant_scope))
+        }
+        other => Err(format!(
+            "unsupported decision graph checkpointer backend '{other}' for {graph_name} topology"
+        )),
+    }
 }
 
 fn required_checkpointer_scope(
@@ -1827,6 +1869,10 @@ mod tests {
         if let Some(scope) = scope {
             metadata.insert("sentinel.checkpointer_scope".to_string(), scope.to_string());
         }
+        metadata.insert(
+            "sentinel.checkpointer_tenant_scope".to_string(),
+            String::new(),
+        );
         DecisionGraphNodeInfo {
             id: id.to_string(),
             deferred: false,
@@ -2555,6 +2601,55 @@ mod tests {
             .expect_err("mismatched scope must fail");
         assert!(err.contains("database_path:a.db"));
         assert!(err.contains("database_path:b.db"));
+    }
+
+    #[test]
+    fn required_checkpointer_tenant_scope_matches_backend_contract() {
+        let sqlite_nodes = vec![
+            node("classify", Some("sqlite"), Some("database_path::memory:")),
+            node("set", Some("sqlite"), Some("database_path::memory:")),
+        ];
+        assert_eq!(
+            required_checkpointer_tenant_scope("severity", &sqlite_nodes, "sqlite")
+                .expect("sqlite tenant scope"),
+            None
+        );
+
+        let mut redis_nodes = sqlite_nodes.clone();
+        for node in &mut redis_nodes {
+            node.metadata.insert(
+                "sentinel.checkpointer_backend".to_string(),
+                "redis".to_string(),
+            );
+            node.metadata.insert(
+                "sentinel.checkpointer_tenant_scope".to_string(),
+                "legatus_ai".to_string(),
+            );
+        }
+        assert_eq!(
+            required_checkpointer_tenant_scope("severity", &redis_nodes, "redis")
+                .expect("redis tenant scope"),
+            Some("legatus_ai".to_string())
+        );
+
+        let err = required_checkpointer_tenant_scope("severity", &sqlite_nodes, "redis")
+            .expect_err("hosted backend must require tenant metadata");
+        assert!(err.contains("non-empty sentinel.checkpointer_tenant_scope"));
+
+        let err = required_checkpointer_tenant_scope("severity", &redis_nodes, "sqlite")
+            .expect_err("sqlite backend must reject hosted tenant metadata");
+        assert!(err.contains("must not carry hosted tenant metadata"));
+
+        let mut mismatched = redis_nodes.clone();
+        mismatched[1].metadata.insert(
+            "sentinel.checkpointer_tenant_scope".to_string(),
+            "other_tenant".to_string(),
+        );
+        let err = required_checkpointer_tenant_scope("severity", &mismatched, "redis")
+            .expect_err("mismatched tenants must fail");
+        assert!(err.contains("checkpointer tenant scope"));
+        assert!(err.contains("legatus_ai"));
+        assert!(err.contains("other_tenant"));
     }
 
     #[test]

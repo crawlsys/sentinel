@@ -2319,6 +2319,7 @@ mod tests {
             durable_checkpointer: true,
             checkpointer_backend: "sqlite".to_string(),
             checkpointer_scope: "database_path:test.db".to_string(),
+            checkpointer_tenant_scope: None,
             auto_checkpoint: true,
             max_iterations: 100,
             schemas: crate::decision_graph_introspection::DecisionGraphSchemas {

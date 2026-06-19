@@ -173,12 +173,21 @@ fn expected_decision(state: &WipSnapshotState) -> WipSnapshotDecision {
     }
 }
 
-fn node_config(node: &str, checkpointer_backend: &str, checkpointer_scope: &str) -> NodeConfig {
+fn node_config(
+    node: &str,
+    checkpointer_backend: &str,
+    checkpointer_scope: &str,
+    checkpointer_tenant_scope: &str,
+) -> NodeConfig {
     NodeConfig::new()
         .with_metadata("sentinel.graph", "wip_snapshot")
         .with_metadata("sentinel.node", node)
         .with_metadata("sentinel.checkpointer_backend", checkpointer_backend)
         .with_metadata("sentinel.checkpointer_scope", checkpointer_scope)
+        .with_metadata(
+            "sentinel.checkpointer_tenant_scope",
+            checkpointer_tenant_scope,
+        )
         .with_timeout(NodeTimeoutPolicy::run_only(Duration::from_secs(2)))
 }
 
@@ -300,6 +309,7 @@ async fn build_wip_snapshot_graph_with_checkpointer(
 ) -> Result<WipSnapshotGraph, String> {
     let checkpointer_backend = checkpointer.backend();
     let checkpointer_scope = checkpointer.scope();
+    let checkpointer_tenant_scope = checkpointer.tenant_scope_metadata_value();
     let schema = wip_snapshot_state_schema();
     let builder = StateGraphBuilder::<WipSnapshotState>::with_schema(schema.clone())
         .with_input_schema(schema.clone())
@@ -310,7 +320,12 @@ async fn build_wip_snapshot_graph_with_checkpointer(
                 emit_decision_node_event("wip_snapshot", CLASSIFY, &s.identifier)?;
                 classify_node(s).await
             },
-            node_config(CLASSIFY, checkpointer_backend, checkpointer_scope),
+            node_config(
+                CLASSIFY,
+                checkpointer_backend,
+                checkpointer_scope,
+                checkpointer_tenant_scope,
+            ),
         )
         .add_async_node_with_config(
             SNAPSHOT_PRESENT,
@@ -318,7 +333,12 @@ async fn build_wip_snapshot_graph_with_checkpointer(
                 emit_decision_node_event("wip_snapshot", SNAPSHOT_PRESENT, &s.identifier)?;
                 terminal_node(s, WipSnapshotDecision::SnapshotPresent).await
             },
-            node_config(SNAPSHOT_PRESENT, checkpointer_backend, checkpointer_scope),
+            node_config(
+                SNAPSHOT_PRESENT,
+                checkpointer_backend,
+                checkpointer_scope,
+                checkpointer_tenant_scope,
+            ),
         )
         .add_async_node_with_config(
             NO_SNAPSHOT,
@@ -326,7 +346,12 @@ async fn build_wip_snapshot_graph_with_checkpointer(
                 emit_decision_node_event("wip_snapshot", NO_SNAPSHOT, &s.identifier)?;
                 terminal_node(s, WipSnapshotDecision::NoSnapshot).await
             },
-            node_config(NO_SNAPSHOT, checkpointer_backend, checkpointer_scope),
+            node_config(
+                NO_SNAPSHOT,
+                checkpointer_backend,
+                checkpointer_scope,
+                checkpointer_tenant_scope,
+            ),
         )
         .add_edge(START, CLASSIFY)
         .add_conditional_edge(CLASSIFY, |s: &WipSnapshotState| {

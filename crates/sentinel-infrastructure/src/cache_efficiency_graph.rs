@@ -245,12 +245,21 @@ fn expected_decision(state: &CacheEfficiencyState) -> CacheEfficiencyDecision {
     }
 }
 
-fn node_config(node: &str, checkpointer_backend: &str, checkpointer_scope: &str) -> NodeConfig {
+fn node_config(
+    node: &str,
+    checkpointer_backend: &str,
+    checkpointer_scope: &str,
+    checkpointer_tenant_scope: &str,
+) -> NodeConfig {
     NodeConfig::new()
         .with_metadata("sentinel.graph", "cache_efficiency")
         .with_metadata("sentinel.node", node)
         .with_metadata("sentinel.checkpointer_backend", checkpointer_backend)
         .with_metadata("sentinel.checkpointer_scope", checkpointer_scope)
+        .with_metadata(
+            "sentinel.checkpointer_tenant_scope",
+            checkpointer_tenant_scope,
+        )
         .with_timeout(NodeTimeoutPolicy::run_only(Duration::from_secs(2)))
 }
 
@@ -503,6 +512,7 @@ async fn build_cache_efficiency_graph_with_checkpointer(
 ) -> Result<CacheEfficiencyGraph, String> {
     let checkpointer_backend = checkpointer.backend();
     let checkpointer_scope = checkpointer.scope();
+    let checkpointer_tenant_scope = checkpointer.tenant_scope_metadata_value();
     let schema = cache_efficiency_state_schema();
     let builder = StateGraphBuilder::<CacheEfficiencyState>::with_schema(schema.clone())
         .with_input_schema(schema.clone())
@@ -513,7 +523,12 @@ async fn build_cache_efficiency_graph_with_checkpointer(
                 emit_decision_node_event("cache_efficiency", CLASSIFY, &s.identifier)?;
                 Ok::<_, NodeError>(s)
             },
-            node_config(CLASSIFY, checkpointer_backend, checkpointer_scope),
+            node_config(
+                CLASSIFY,
+                checkpointer_backend,
+                checkpointer_scope,
+                checkpointer_tenant_scope,
+            ),
         )
         .add_async_node_with_config(
             NO_DATA,
@@ -523,7 +538,12 @@ async fn build_cache_efficiency_graph_with_checkpointer(
                 next.decision = CacheEfficiencyDecision::NoData;
                 Ok::<_, NodeError>(next)
             },
-            node_config(NO_DATA, checkpointer_backend, checkpointer_scope),
+            node_config(
+                NO_DATA,
+                checkpointer_backend,
+                checkpointer_scope,
+                checkpointer_tenant_scope,
+            ),
         )
         .add_async_node_with_config(
             NO_USAGE_DATA,
@@ -533,7 +553,12 @@ async fn build_cache_efficiency_graph_with_checkpointer(
                 next.decision = CacheEfficiencyDecision::NoUsageData;
                 Ok::<_, NodeError>(next)
             },
-            node_config(NO_USAGE_DATA, checkpointer_backend, checkpointer_scope),
+            node_config(
+                NO_USAGE_DATA,
+                checkpointer_backend,
+                checkpointer_scope,
+                checkpointer_tenant_scope,
+            ),
         )
         .add_async_node_with_config(
             CACHE_WASTE_RISK,
@@ -543,7 +568,12 @@ async fn build_cache_efficiency_graph_with_checkpointer(
                 next.decision = CacheEfficiencyDecision::CacheWasteRisk;
                 Ok::<_, NodeError>(next)
             },
-            node_config(CACHE_WASTE_RISK, checkpointer_backend, checkpointer_scope),
+            node_config(
+                CACHE_WASTE_RISK,
+                checkpointer_backend,
+                checkpointer_scope,
+                checkpointer_tenant_scope,
+            ),
         )
         .add_async_node_with_config(
             NEEDS_TUNING,
@@ -553,7 +583,12 @@ async fn build_cache_efficiency_graph_with_checkpointer(
                 next.decision = CacheEfficiencyDecision::NeedsTuning;
                 Ok::<_, NodeError>(next)
             },
-            node_config(NEEDS_TUNING, checkpointer_backend, checkpointer_scope),
+            node_config(
+                NEEDS_TUNING,
+                checkpointer_backend,
+                checkpointer_scope,
+                checkpointer_tenant_scope,
+            ),
         )
         .add_async_node_with_config(
             CACHE_EFFECTIVE,
@@ -563,7 +598,12 @@ async fn build_cache_efficiency_graph_with_checkpointer(
                 next.decision = CacheEfficiencyDecision::CacheEffective;
                 Ok::<_, NodeError>(next)
             },
-            node_config(CACHE_EFFECTIVE, checkpointer_backend, checkpointer_scope),
+            node_config(
+                CACHE_EFFECTIVE,
+                checkpointer_backend,
+                checkpointer_scope,
+                checkpointer_tenant_scope,
+            ),
         )
         .add_async_node_with_config(
             CACHE_EXCELLENT,
@@ -573,7 +613,12 @@ async fn build_cache_efficiency_graph_with_checkpointer(
                 next.decision = CacheEfficiencyDecision::CacheExcellent;
                 Ok::<_, NodeError>(next)
             },
-            node_config(CACHE_EXCELLENT, checkpointer_backend, checkpointer_scope),
+            node_config(
+                CACHE_EXCELLENT,
+                checkpointer_backend,
+                checkpointer_scope,
+                checkpointer_tenant_scope,
+            ),
         )
         .add_edge(START, CLASSIFY)
         .add_conditional_edge(

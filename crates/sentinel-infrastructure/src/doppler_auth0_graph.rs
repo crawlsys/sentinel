@@ -210,12 +210,21 @@ fn expected_decision(state: &DopplerAuth0State) -> DopplerAuth0Decision {
     }
 }
 
-fn node_config(node: &str, checkpointer_backend: &str, checkpointer_scope: &str) -> NodeConfig {
+fn node_config(
+    node: &str,
+    checkpointer_backend: &str,
+    checkpointer_scope: &str,
+    checkpointer_tenant_scope: &str,
+) -> NodeConfig {
     NodeConfig::new()
         .with_metadata("sentinel.graph", "doppler_auth0")
         .with_metadata("sentinel.node", node)
         .with_metadata("sentinel.checkpointer_backend", checkpointer_backend)
         .with_metadata("sentinel.checkpointer_scope", checkpointer_scope)
+        .with_metadata(
+            "sentinel.checkpointer_tenant_scope",
+            checkpointer_tenant_scope,
+        )
         .with_timeout(NodeTimeoutPolicy::run_only(Duration::from_secs(2)))
 }
 
@@ -417,6 +426,7 @@ async fn build_doppler_auth0_graph_with_checkpointer(
 ) -> Result<DopplerAuth0Graph, String> {
     let checkpointer_backend = checkpointer.backend();
     let checkpointer_scope = checkpointer.scope();
+    let checkpointer_tenant_scope = checkpointer.tenant_scope_metadata_value();
     let schema = doppler_auth0_state_schema();
     let builder = StateGraphBuilder::<DopplerAuth0State>::with_schema(schema.clone())
         .with_input_schema(schema.clone())
@@ -427,7 +437,12 @@ async fn build_doppler_auth0_graph_with_checkpointer(
                 emit_decision_node_event("doppler_auth0", CLASSIFY, &s.identifier)?;
                 classify_node(s).await
             },
-            node_config(CLASSIFY, checkpointer_backend, checkpointer_scope),
+            node_config(
+                CLASSIFY,
+                checkpointer_backend,
+                checkpointer_scope,
+                checkpointer_tenant_scope,
+            ),
         )
         .add_async_node_with_config(
             ALLOW,
@@ -437,7 +452,12 @@ async fn build_doppler_auth0_graph_with_checkpointer(
                 next.decision = DopplerAuth0Decision::Allow;
                 Ok::<_, NodeError>(next)
             },
-            node_config(ALLOW, checkpointer_backend, checkpointer_scope),
+            node_config(
+                ALLOW,
+                checkpointer_backend,
+                checkpointer_scope,
+                checkpointer_tenant_scope,
+            ),
         )
         .add_async_node_with_config(
             ALLOW_READ_ONLY,
@@ -447,7 +467,12 @@ async fn build_doppler_auth0_graph_with_checkpointer(
                 next.decision = DopplerAuth0Decision::AllowReadOnly;
                 Ok::<_, NodeError>(next)
             },
-            node_config(ALLOW_READ_ONLY, checkpointer_backend, checkpointer_scope),
+            node_config(
+                ALLOW_READ_ONLY,
+                checkpointer_backend,
+                checkpointer_scope,
+                checkpointer_tenant_scope,
+            ),
         )
         .add_async_node_with_config(
             ALLOW_AUTOPILOT_NONPROD,
@@ -461,6 +486,7 @@ async fn build_doppler_auth0_graph_with_checkpointer(
                 ALLOW_AUTOPILOT_NONPROD,
                 checkpointer_backend,
                 checkpointer_scope,
+                checkpointer_tenant_scope,
             ),
         )
         .add_async_node_with_config(
@@ -475,6 +501,7 @@ async fn build_doppler_auth0_graph_with_checkpointer(
                 ALLOW_SIGNED_OVERRIDE,
                 checkpointer_backend,
                 checkpointer_scope,
+                checkpointer_tenant_scope,
             ),
         )
         .add_async_node_with_config(
@@ -485,7 +512,12 @@ async fn build_doppler_auth0_graph_with_checkpointer(
                 next.decision = DopplerAuth0Decision::Block;
                 Ok::<_, NodeError>(next)
             },
-            node_config(BLOCK, checkpointer_backend, checkpointer_scope),
+            node_config(
+                BLOCK,
+                checkpointer_backend,
+                checkpointer_scope,
+                checkpointer_tenant_scope,
+            ),
         )
         .add_edge(START, CLASSIFY)
         .add_conditional_edge(CLASSIFY, |s: &DopplerAuth0State| {

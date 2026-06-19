@@ -274,12 +274,21 @@ fn expected_decision(state: &LinearPmState) -> LinearPmDecision {
     }
 }
 
-fn node_config(node: &str, checkpointer_backend: &str, checkpointer_scope: &str) -> NodeConfig {
+fn node_config(
+    node: &str,
+    checkpointer_backend: &str,
+    checkpointer_scope: &str,
+    checkpointer_tenant_scope: &str,
+) -> NodeConfig {
     NodeConfig::new()
         .with_metadata("sentinel.graph", "linear_pm")
         .with_metadata("sentinel.node", node)
         .with_metadata("sentinel.checkpointer_backend", checkpointer_backend)
         .with_metadata("sentinel.checkpointer_scope", checkpointer_scope)
+        .with_metadata(
+            "sentinel.checkpointer_tenant_scope",
+            checkpointer_tenant_scope,
+        )
         .with_timeout(NodeTimeoutPolicy::run_only(Duration::from_secs(2)))
 }
 
@@ -752,6 +761,7 @@ async fn build_linear_pm_graph_with_checkpointer(
 ) -> Result<LinearPmGraph, String> {
     let checkpointer_backend = checkpointer.backend();
     let checkpointer_scope = checkpointer.scope();
+    let checkpointer_tenant_scope = checkpointer.tenant_scope_metadata_value();
     let schema = linear_pm_state_schema();
     let builder = StateGraphBuilder::<LinearPmState>::with_schema(schema.clone())
         .with_input_schema(schema.clone())
@@ -762,7 +772,12 @@ async fn build_linear_pm_graph_with_checkpointer(
                 emit_decision_node_event("linear_pm", CLASSIFY, &s.identifier)?;
                 Ok(classify_node(s))
             },
-            node_config(CLASSIFY, checkpointer_backend, checkpointer_scope),
+            node_config(
+                CLASSIFY,
+                checkpointer_backend,
+                checkpointer_scope,
+                checkpointer_tenant_scope,
+            ),
         )
         .add_node_with_config(
             ALLOW,
@@ -772,7 +787,12 @@ async fn build_linear_pm_graph_with_checkpointer(
                 next.decision = LinearPmDecision::Allow;
                 Ok::<_, NodeError>(next)
             },
-            node_config(ALLOW, checkpointer_backend, checkpointer_scope),
+            node_config(
+                ALLOW,
+                checkpointer_backend,
+                checkpointer_scope,
+                checkpointer_tenant_scope,
+            ),
         )
         .add_node_with_config(
             BLOCK_MISSING_ISSUE_IDENTIFIER,
@@ -790,6 +810,7 @@ async fn build_linear_pm_graph_with_checkpointer(
                 BLOCK_MISSING_ISSUE_IDENTIFIER,
                 checkpointer_backend,
                 checkpointer_scope,
+                checkpointer_tenant_scope,
             ),
         )
         .add_node_with_config(
@@ -808,6 +829,7 @@ async fn build_linear_pm_graph_with_checkpointer(
                 BLOCK_LIVE_AUTHORITY_UNAVAILABLE,
                 checkpointer_backend,
                 checkpointer_scope,
+                checkpointer_tenant_scope,
             ),
         )
         .add_node_with_config(
@@ -822,6 +844,7 @@ async fn build_linear_pm_graph_with_checkpointer(
                 BLOCK_BLOCKED_TICKET,
                 checkpointer_backend,
                 checkpointer_scope,
+                checkpointer_tenant_scope,
             ),
         )
         .add_node_with_config(
@@ -836,6 +859,7 @@ async fn build_linear_pm_graph_with_checkpointer(
                 BLOCK_OVERSIZED_TICKET,
                 checkpointer_backend,
                 checkpointer_scope,
+                checkpointer_tenant_scope,
             ),
         )
         .add_node_with_config(
@@ -850,6 +874,7 @@ async fn build_linear_pm_graph_with_checkpointer(
                 BLOCK_MISSING_MILESTONE,
                 checkpointer_backend,
                 checkpointer_scope,
+                checkpointer_tenant_scope,
             ),
         )
         .add_node_with_config(
@@ -868,6 +893,7 @@ async fn build_linear_pm_graph_with_checkpointer(
                 BLOCK_HIGHER_PRIORITY_AVAILABLE,
                 checkpointer_backend,
                 checkpointer_scope,
+                checkpointer_tenant_scope,
             ),
         )
         .add_edge(START, CLASSIFY)
