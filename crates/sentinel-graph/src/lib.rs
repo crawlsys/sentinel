@@ -56,8 +56,8 @@ use tokio::sync::mpsc;
 use langgraph_core::application::services::{
     get_stream_writer, ChatModelStream, CheckpointEvent, CheckpointStateSnapshot,
     CheckpointsTransformer, CompilationResult, CompiledGraphV3Ext, CustomEvent, CustomTransformer,
-    DebugEvent, DebugTransformer, GraphCompiler, GraphRunStream, LifecycleEvent, RunV3Options,
-    StateSnapshot, StateUpdateEvent, SubgraphHandle, TaskEvent, TasksTransformer,
+    DebugEvent, DebugTransformer, GraphCompiler, GraphRunStream, LifecycleEvent, Projection,
+    RunV3Options, StateSnapshot, StateUpdateEvent, SubgraphHandle, TaskEvent, TasksTransformer,
     UpdatesTransformer, V3StreamTransformer,
 };
 use langgraph_core::domain::value_objects::{
@@ -1797,21 +1797,10 @@ impl CompiledPhaseGraph {
                 "phase stream for thread {thread_id} emitted non-v3 LangGraph stream evidence"
             )));
         }
-        if !stream.iter().any(|part| part.payload_kind == "values") {
-            return Err(GraphEngineError::Graph(format!(
-                "phase stream for thread {thread_id} omitted LangGraph values payloads"
-            )));
-        }
-        if !stream.iter().any(|part| part.payload_kind == "updates") {
-            return Err(GraphEngineError::Graph(format!(
-                "phase stream for thread {thread_id} omitted LangGraph v3 updates payloads"
-            )));
-        }
-        if !stream.iter().any(|part| part.payload_kind == "tasks") {
-            return Err(GraphEngineError::Graph(format!(
-                "phase stream for thread {thread_id} omitted LangGraph v3 task payloads"
-            )));
-        }
+        Self::require_phase_stream_payload_kind(&stream, &thread_id, "values", "values")?;
+        Self::require_phase_stream_payload_kind(&stream, &thread_id, "updates", "v3 updates")?;
+        Self::require_phase_stream_payload_kind(&stream, &thread_id, "tasks", "v3 task")?;
+        Self::require_phase_stream_payload_kind(&stream, &thread_id, "debug", "v3 debug")?;
         if !saw_expected_gate_checkpoint {
             return Err(GraphEngineError::Graph(format!(
                 "phase stream for thread {thread_id} did not persist expected gate checkpoint for node {expected_gate}; observed checkpoint sources: {}",
@@ -1866,6 +1855,21 @@ impl CompiledPhaseGraph {
         }
 
         Ok(PhaseGraphRunReport { state, stream })
+    }
+
+    fn require_phase_stream_payload_kind(
+        stream: &[PhaseGraphStreamPart],
+        thread_id: &str,
+        payload_kind: &str,
+        label: &str,
+    ) -> Result<()> {
+        if stream.iter().any(|part| part.payload_kind == payload_kind) {
+            Ok(())
+        } else {
+            Err(GraphEngineError::Graph(format!(
+                "phase stream for thread {thread_id} omitted LangGraph {label} payloads"
+            )))
+        }
     }
 
     fn phase_v3_transformers() -> Vec<Arc<dyn V3StreamTransformer>> {
@@ -2173,15 +2177,145 @@ impl CompiledPhaseGraph {
     ) -> Result<V3PhaseProjectionDrain> {
         let mut drain = V3PhaseProjectionDrain::default();
         while let Some(message) = rx.recv().await {
+            let node_id = message.node_id.to_string();
             drain.push(Self::phase_stream_part(
-                "Messages",
-                message.node_id.to_string(),
+                "MessageStreamStarted",
+                node_id.clone(),
                 chrono::Utc::now().to_rfc3339(),
                 0,
                 "messages",
                 serde_json::json!({
-                    "node_id": message.node_id.to_string(),
+                    "node_id": node_id.clone(),
                     "stream": "chat_model",
+                }),
+                Vec::new(),
+            ));
+            let text_rx = Projection::take(&message.text)
+                .map_err(|err| GraphEngineError::Graph(err.to_string()))?;
+            let reasoning_rx = Projection::take(&message.reasoning)
+                .map_err(|err| GraphEngineError::Graph(err.to_string()))?;
+            let tool_calls_rx = Projection::take(&message.tool_calls)
+                .map_err(|err| GraphEngineError::Graph(err.to_string()))?;
+            let usage_rx = Projection::take(&message.usage)
+                .map_err(|err| GraphEngineError::Graph(err.to_string()))?;
+            let output = message.output();
+            let (text, reasoning, tool_calls, usage, output) = tokio::join!(
+                Self::drain_chat_message_text(node_id.clone(), text_rx),
+                Self::drain_chat_message_reasoning(node_id.clone(), reasoning_rx),
+                Self::drain_chat_message_tool_calls(node_id.clone(), tool_calls_rx),
+                Self::drain_chat_message_usage(node_id.clone(), usage_rx),
+                output,
+            );
+            drain.extend(text?);
+            drain.extend(reasoning?);
+            drain.extend(tool_calls?);
+            drain.extend(usage?);
+
+            let output = output.map_err(|err| {
+                GraphEngineError::Graph(format!(
+                    "phase graph message stream for node {node_id} closed without output: {err}"
+                ))
+            })?;
+            drain.push(Self::phase_stream_part(
+                "MessageOutput",
+                node_id,
+                chrono::Utc::now().to_rfc3339(),
+                0,
+                "messages",
+                serde_json::json!({
+                    "channel": "output",
+                    "message": serde_json::to_value(&output)
+                        .map_err(|err| GraphEngineError::Graph(err.to_string()))?,
+                }),
+                Vec::new(),
+            ));
+        }
+        Ok(drain)
+    }
+
+    async fn drain_chat_message_text(
+        node_id: String,
+        mut rx: mpsc::Receiver<String>,
+    ) -> Result<V3PhaseProjectionDrain> {
+        let mut drain = V3PhaseProjectionDrain::default();
+        while let Some(delta) = rx.recv().await {
+            drain.push(Self::phase_stream_part(
+                "MessageTextDelta",
+                node_id.clone(),
+                chrono::Utc::now().to_rfc3339(),
+                0,
+                "messages",
+                serde_json::json!({
+                    "channel": "text",
+                    "delta": delta,
+                }),
+                Vec::new(),
+            ));
+        }
+        Ok(drain)
+    }
+
+    async fn drain_chat_message_reasoning(
+        node_id: String,
+        mut rx: mpsc::Receiver<String>,
+    ) -> Result<V3PhaseProjectionDrain> {
+        let mut drain = V3PhaseProjectionDrain::default();
+        while let Some(delta) = rx.recv().await {
+            drain.push(Self::phase_stream_part(
+                "MessageReasoningDelta",
+                node_id.clone(),
+                chrono::Utc::now().to_rfc3339(),
+                0,
+                "messages",
+                serde_json::json!({
+                    "channel": "reasoning",
+                    "delta": delta,
+                }),
+                Vec::new(),
+            ));
+        }
+        Ok(drain)
+    }
+
+    async fn drain_chat_message_tool_calls(
+        node_id: String,
+        mut rx: mpsc::Receiver<langgraph_core::domain::value_objects::ToolCall>,
+    ) -> Result<V3PhaseProjectionDrain> {
+        let mut drain = V3PhaseProjectionDrain::default();
+        while let Some(tool_call) = rx.recv().await {
+            drain.push(Self::phase_stream_part(
+                "MessageToolCall",
+                node_id.clone(),
+                chrono::Utc::now().to_rfc3339(),
+                0,
+                "messages",
+                serde_json::json!({
+                    "channel": "tool_calls",
+                    "tool_call": serde_json::to_value(&tool_call)
+                        .map_err(|err| GraphEngineError::Graph(err.to_string()))?,
+                }),
+                Vec::new(),
+            ));
+        }
+        Ok(drain)
+    }
+
+    async fn drain_chat_message_usage(
+        node_id: String,
+        mut rx: mpsc::Receiver<langgraph_core::domain::value_objects::TokenUsage>,
+    ) -> Result<V3PhaseProjectionDrain> {
+        let mut drain = V3PhaseProjectionDrain::default();
+        while let Some(usage) = rx.recv().await {
+            drain.push(Self::phase_stream_part(
+                "MessageUsage",
+                node_id.clone(),
+                chrono::Utc::now().to_rfc3339(),
+                0,
+                "messages",
+                serde_json::json!({
+                    "channel": "usage",
+                    "usage": serde_json::to_value(&usage)
+                        .map_err(|err| GraphEngineError::Graph(err.to_string()))?,
                 }),
                 Vec::new(),
             ));
@@ -2228,9 +2362,14 @@ impl CompiledPhaseGraph {
             "SubgraphCompleted" => 7,
             "SubgraphFailed" => 8,
             "Subgraph" => 9,
-            "Messages" => 10,
-            "ExecutionComplete" => 11,
-            _ => 12,
+            "MessageStreamStarted" => 10,
+            "MessageTextDelta" => 11,
+            "MessageReasoningDelta" => 12,
+            "MessageToolCall" => 13,
+            "MessageUsage" => 14,
+            "MessageOutput" => 15,
+            "ExecutionComplete" => 16,
+            _ => 17,
         }
     }
 

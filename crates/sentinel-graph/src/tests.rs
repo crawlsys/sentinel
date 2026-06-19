@@ -6,9 +6,13 @@
 //! compiled* graph (standing in for the next sentinel hook invocation) reads
 //! that checkpoint back via `load_latest`.
 
-use std::sync::Mutex;
+use std::{
+    collections::{BTreeMap, HashMap},
+    sync::Mutex,
+};
 
-use langgraph_core::domain::value_objects::START;
+use langgraph_core::application::services::ChatModelStream;
+use langgraph_core::domain::value_objects::{Message, TokenUsage, ToolCall, START};
 use sentinel_domain::judge::JudgeModel;
 use sentinel_domain::workflow::{
     DyadVerdicts, RoleDyad, SkillWorkflow, StepStatus, WorkflowPhase, WorkflowState,
@@ -23,7 +27,6 @@ use crate::{
     PhaseGraphState, PhaseGraphStreamPart, PhaseGraphWriteHistoryEntry, V3PhaseProjectionDrain,
     Verdict,
 };
-use std::collections::BTreeMap;
 
 static PHASE_CHECKPOINTER_ENV_LOCK: Mutex<()> = Mutex::new(());
 
@@ -973,6 +976,13 @@ async fn run_until_gate_report_captures_langgraph_stream_parts() {
         "stream report must include LangGraph task payloads"
     );
     assert!(
+        report
+            .stream
+            .iter()
+            .any(|part| part.payload_kind == "debug"),
+        "stream report must include LangGraph debug payloads"
+    );
+    assert!(
         report.stream.iter().any(|part| {
             part.payload_kind == "checkpoints"
                 && part
@@ -1046,6 +1056,67 @@ async fn run_until_gate_report_captures_langgraph_stream_parts() {
         latest_stream_checkpoint.payload_json["state"],
         serde_json::to_value(&report.state).expect("state serializes")
     );
+}
+
+#[tokio::test]
+async fn phase_v3_message_drain_records_all_chat_model_subchannels() {
+    let (stream, mut senders) = ChatModelStream::channels("phase_llm");
+    senders.dispatch_text_delta("phase text").await;
+    senders.dispatch_reasoning_delta("phase reasoning").await;
+    senders
+        .dispatch_tool_call(ToolCall::new(
+            "call_1",
+            "phase_lookup",
+            HashMap::from([("phase".to_string(), serde_json::json!("claim"))]),
+        ))
+        .await;
+    senders.dispatch_usage(TokenUsage::new(3, 5, 8)).await;
+    senders.finalize(Message::assistant("phase output"));
+    drop(senders);
+
+    let (tx, rx) = tokio::sync::mpsc::channel(1);
+    tx.send(stream).await.expect("send chat stream");
+    drop(tx);
+
+    let drain = crate::CompiledPhaseGraph::drain_v3_messages(rx)
+        .await
+        .expect("message drain");
+    let events: Vec<_> = drain
+        .stream
+        .iter()
+        .map(|part| part.event_type.as_str())
+        .collect();
+    for expected in [
+        "MessageStreamStarted",
+        "MessageTextDelta",
+        "MessageReasoningDelta",
+        "MessageToolCall",
+        "MessageUsage",
+        "MessageOutput",
+    ] {
+        assert!(
+            events.contains(&expected),
+            "missing {expected} in {events:?}"
+        );
+    }
+    assert!(drain.stream.iter().any(|part| {
+        part.event_type == "MessageTextDelta" && part.payload_json["delta"] == "phase text"
+    }));
+    assert!(drain.stream.iter().any(|part| {
+        part.event_type == "MessageReasoningDelta"
+            && part.payload_json["delta"] == "phase reasoning"
+    }));
+    assert!(drain.stream.iter().any(|part| {
+        part.event_type == "MessageToolCall"
+            && part.payload_json["tool_call"]["name"] == "phase_lookup"
+    }));
+    assert!(drain.stream.iter().any(|part| {
+        part.event_type == "MessageUsage" && part.payload_json["usage"]["total_tokens"] == 8
+    }));
+    assert!(drain.stream.iter().any(|part| {
+        part.event_type == "MessageOutput"
+            && part.payload_json["message"]["content"] == "phase output"
+    }));
 }
 
 #[test]
