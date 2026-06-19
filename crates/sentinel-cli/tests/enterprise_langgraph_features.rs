@@ -161,6 +161,75 @@ fn phase_graph_runtime_snapshots_tenant_scope_from_compiled_graph() {
     );
 }
 
+#[test]
+fn mcp_startup_wires_full_enterprise_langgraph_runtime() {
+    let handler_source = include_str!("../../sentinel-application/src/mcp_handler.rs");
+    let mcp_source = include_str!("../src/mcp_cmd.rs");
+
+    for required in [
+        "proof_engine.phase_graph_authority",
+        "proof_engine.step_graph_authority",
+        "workflow_catalog",
+        "proof_archive_backing",
+        "llm_port",
+        "severity_graph_auditor",
+        "pm_audit_graph_auditor",
+        "linear_health_graph_auditor",
+        "dev_scorecard_graph_auditor",
+        "token_cost_graph_auditor",
+        "token_usage_graph_auditor",
+        "cache_efficiency_graph_auditor",
+        "cost_per_point_graph_auditor",
+        "deploy_frequency_graph_auditor",
+        "pr_review_graph_auditor",
+        "roi_graph_auditor",
+        "sla_graph_auditor",
+        "code_reconciliation_auditor",
+        "mcp_proof_read_graph_auditor",
+        "eval_runner",
+        "ba_draft_runner",
+    ] {
+        assert!(
+            handler_source.contains(&format!("missing.push(\"{required}\")")),
+            "MCP enterprise LangGraph runtime validator must require {required}"
+        );
+    }
+
+    for wiring in [
+        ".with_phase_graph_authority(",
+        ".with_step_graph_authority(",
+        ".with_workflows(",
+        ".with_archive(",
+        ".with_llm(",
+        ".with_severity_graph_auditor(",
+        ".with_pm_audit_graph_auditor(",
+        ".with_linear_health_graph_auditor(",
+        ".with_dev_scorecard_graph_auditor(",
+        ".with_token_cost_graph_auditor(",
+        ".with_token_usage_graph_auditor(",
+        ".with_cache_efficiency_graph_auditor(",
+        ".with_cost_per_point_graph_auditor(",
+        ".with_deploy_frequency_graph_auditor(",
+        ".with_pr_review_graph_auditor(",
+        ".with_roi_graph_auditor(",
+        ".with_sla_graph_auditor(",
+        ".with_code_reconciliation_auditor(",
+        ".with_mcp_proof_read_graph_auditor(",
+        ".with_eval_runner(",
+        ".with_ba_draft_runner(",
+    ] {
+        assert!(
+            mcp_source.contains(wiring),
+            "sentinel mcp startup must wire {wiring} into the enterprise LangGraph runtime"
+        );
+    }
+
+    assert!(
+        mcp_source.contains(".validate_enterprise_langgraph_runtime()"),
+        "sentinel mcp startup must fail closed if any enterprise LangGraph authority is missing"
+    );
+}
+
 fn feature_values<'a>(
     features: &'a toml::map::Map<String, toml::Value>,
     name: &str,
