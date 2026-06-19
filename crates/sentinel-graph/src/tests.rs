@@ -37,12 +37,34 @@ fn with_phase_checkpointer_env<R>(
     tenant_scope: Option<&str>,
     f: impl FnOnce() -> R,
 ) -> R {
+    with_phase_checkpointer_env_full(
+        backend,
+        postgres_url,
+        postgres_schema,
+        None,
+        None,
+        tenant_scope,
+        f,
+    )
+}
+
+fn with_phase_checkpointer_env_full<R>(
+    backend: Option<&str>,
+    postgres_url: Option<&str>,
+    postgres_schema: Option<&str>,
+    redis_url: Option<&str>,
+    redis_ttl_secs: Option<&str>,
+    tenant_scope: Option<&str>,
+    f: impl FnOnce() -> R,
+) -> R {
     let _guard = PHASE_CHECKPOINTER_ENV_LOCK
         .lock()
         .expect("phase checkpointer env lock poisoned");
     let previous_backend = std::env::var_os(PhaseCheckpointerConfig::BACKEND_ENV);
     let previous_url = std::env::var_os(PhaseCheckpointerConfig::POSTGRES_URL_ENV);
     let previous_schema = std::env::var_os(PhaseCheckpointerConfig::POSTGRES_SCHEMA_ENV);
+    let previous_redis_url = std::env::var_os(PhaseCheckpointerConfig::REDIS_URL_ENV);
+    let previous_redis_ttl = std::env::var_os(PhaseCheckpointerConfig::REDIS_TTL_SECS_ENV);
     let previous_tenant = std::env::var_os(crate::LANGGRAPH_TENANT_ENV);
 
     match backend {
@@ -56,6 +78,14 @@ fn with_phase_checkpointer_env<R>(
     match postgres_schema {
         Some(value) => std::env::set_var(PhaseCheckpointerConfig::POSTGRES_SCHEMA_ENV, value),
         None => std::env::remove_var(PhaseCheckpointerConfig::POSTGRES_SCHEMA_ENV),
+    }
+    match redis_url {
+        Some(value) => std::env::set_var(PhaseCheckpointerConfig::REDIS_URL_ENV, value),
+        None => std::env::remove_var(PhaseCheckpointerConfig::REDIS_URL_ENV),
+    }
+    match redis_ttl_secs {
+        Some(value) => std::env::set_var(PhaseCheckpointerConfig::REDIS_TTL_SECS_ENV, value),
+        None => std::env::remove_var(PhaseCheckpointerConfig::REDIS_TTL_SECS_ENV),
     }
     match tenant_scope {
         Some(value) => std::env::set_var(crate::LANGGRAPH_TENANT_ENV, value),
@@ -75,6 +105,14 @@ fn with_phase_checkpointer_env<R>(
     match previous_schema {
         Some(value) => std::env::set_var(PhaseCheckpointerConfig::POSTGRES_SCHEMA_ENV, value),
         None => std::env::remove_var(PhaseCheckpointerConfig::POSTGRES_SCHEMA_ENV),
+    }
+    match previous_redis_url {
+        Some(value) => std::env::set_var(PhaseCheckpointerConfig::REDIS_URL_ENV, value),
+        None => std::env::remove_var(PhaseCheckpointerConfig::REDIS_URL_ENV),
+    }
+    match previous_redis_ttl {
+        Some(value) => std::env::set_var(PhaseCheckpointerConfig::REDIS_TTL_SECS_ENV, value),
+        None => std::env::remove_var(PhaseCheckpointerConfig::REDIS_TTL_SECS_ENV),
     }
     match previous_tenant {
         Some(value) => std::env::set_var(crate::LANGGRAPH_TENANT_ENV, value),
@@ -179,6 +217,49 @@ fn phase_checkpointer_config_uses_public_postgres_scope_without_schema() {
 }
 
 #[test]
+fn phase_checkpointer_config_accepts_redis_ttl() {
+    with_phase_checkpointer_env_full(
+        Some("redis"),
+        None,
+        None,
+        Some("redis://localhost:6379/0"),
+        Some("3600"),
+        Some("legatus_ai"),
+        || {
+            let config =
+                PhaseCheckpointerConfig::from_env("/tmp/ignored.db").expect("redis config");
+            assert_eq!(
+                config,
+                PhaseCheckpointerConfig::Redis {
+                    redis_url: "redis://localhost:6379/0".to_string(),
+                    ttl_seconds: Some(3600),
+                }
+            );
+            assert_eq!(config.backend_name(), "redis");
+            assert_eq!(config.scope_name(), "ttl_seconds:3600");
+        },
+    );
+}
+
+#[test]
+fn phase_checkpointer_config_accepts_redis_without_ttl() {
+    with_phase_checkpointer_env_full(
+        Some("redis-checkpoint"),
+        None,
+        None,
+        Some("redis://localhost:6379/1"),
+        None,
+        Some("legatus_ai"),
+        || {
+            let config =
+                PhaseCheckpointerConfig::from_env("/tmp/ignored.db").expect("redis config");
+            assert_eq!(config.backend_name(), "redis");
+            assert_eq!(config.scope_name(), "ttl_seconds:none");
+        },
+    );
+}
+
+#[test]
 fn phase_checkpointer_config_requires_postgres_url() {
     with_phase_checkpointer_env(Some("postgres"), None, None, None, || {
         let err = PhaseCheckpointerConfig::from_env("/tmp/ignored.db")
@@ -215,6 +296,44 @@ fn phase_checkpointer_config_requires_tenant_scope_for_postgres() {
 }
 
 #[test]
+fn phase_checkpointer_config_requires_redis_url() {
+    with_phase_checkpointer_env_full(Some("redis"), None, None, None, None, None, || {
+        let err = PhaseCheckpointerConfig::from_env("/tmp/ignored.db")
+            .expect_err("redis URL must be required");
+        let message = err.to_string();
+        assert!(message.contains(PhaseCheckpointerConfig::REDIS_URL_ENV));
+        assert!(
+            !message.contains("sqlite"),
+            "redis selection must not use sqlite: {message}"
+        );
+    });
+}
+
+#[test]
+fn phase_checkpointer_config_requires_tenant_scope_for_redis() {
+    with_phase_checkpointer_env_full(
+        Some("redis"),
+        None,
+        None,
+        Some("redis://localhost:6379/0"),
+        None,
+        None,
+        || {
+            let err = PhaseCheckpointerConfig::from_env("/tmp/ignored.db")
+                .expect_err("redis config must require tenant scope");
+            let message = err.to_string();
+            assert!(message.contains(PhaseCheckpointerConfig::BACKEND_ENV));
+            assert!(message.contains(crate::LANGGRAPH_TENANT_ENV));
+            assert!(message.contains("tenant-scoped"));
+            assert!(
+                !message.contains("sqlite"),
+                "redis selection must not use sqlite: {message}"
+            );
+        },
+    );
+}
+
+#[test]
 fn phase_checkpointer_config_rejects_empty_backend_env() {
     with_phase_checkpointer_env(Some("   "), None, None, None, || {
         let err = PhaseCheckpointerConfig::from_env("/tmp/ignored.db")
@@ -243,13 +362,32 @@ fn phase_checkpointer_config_rejects_empty_postgres_schema_env() {
 }
 
 #[test]
+fn phase_checkpointer_config_rejects_invalid_redis_ttl_env() {
+    with_phase_checkpointer_env_full(
+        Some("redis"),
+        None,
+        None,
+        Some("redis://localhost:6379/0"),
+        Some("0"),
+        Some("legatus_ai"),
+        || {
+            let err = PhaseCheckpointerConfig::from_env("/tmp/ignored.db")
+                .expect_err("zero Redis TTL must be rejected when configured");
+            let message = err.to_string();
+            assert!(message.contains(PhaseCheckpointerConfig::REDIS_TTL_SECS_ENV));
+            assert!(message.contains("greater than zero"));
+        },
+    );
+}
+
+#[test]
 fn phase_checkpointer_config_rejects_unknown_backend() {
     with_phase_checkpointer_env(Some("unsupported"), None, None, None, || {
         let err = PhaseCheckpointerConfig::from_env("/tmp/ignored.db")
             .expect_err("unknown backend must be rejected");
         let message = err.to_string();
         assert!(message.contains("unsupported phase graph checkpointer backend 'unsupported'"));
-        assert!(message.contains("expected sqlite or postgres"));
+        assert!(message.contains("expected sqlite, postgres, or redis"));
     });
 }
 
@@ -264,6 +402,37 @@ fn phase_thread_id_is_tenant_scoped_when_configured() {
     assert_eq!(
         scoped,
         "tenant:legatus_ai:sentinel.phase.linear.session-123"
+    );
+}
+
+#[test]
+fn public_phase_thread_id_ignores_tenant_for_local_sqlite_backend() {
+    with_phase_checkpointer_env(Some("sqlite"), None, None, Some("legatus_ai"), || {
+        let thread_id =
+            crate::phase_thread_id("linear", "session-123").expect("valid local thread id");
+
+        assert_eq!(thread_id, "sentinel.phase.linear.session-123");
+    });
+}
+
+#[test]
+fn public_phase_thread_id_uses_tenant_for_hosted_backend() {
+    with_phase_checkpointer_env_full(
+        Some("redis"),
+        None,
+        None,
+        Some("redis://localhost:6379/0"),
+        None,
+        Some("legatus_ai"),
+        || {
+            let thread_id =
+                crate::phase_thread_id("linear", "session-123").expect("valid hosted thread id");
+
+            assert_eq!(
+                thread_id,
+                "tenant:legatus_ai:sentinel.phase.linear.session-123"
+            );
+        },
     );
 }
 
@@ -295,6 +464,24 @@ async fn postgres_phase_saver_request_fails_without_postgres_feature() {
     assert!(
         err.to_string()
             .contains("built without the postgres feature"),
+        "unexpected error: {err}"
+    );
+}
+
+#[cfg(not(feature = "redis"))]
+#[tokio::test]
+async fn redis_phase_saver_request_fails_without_redis_feature() {
+    let result = crate::phase_checkpointer_for_config(PhaseCheckpointerConfig::Redis {
+        redis_url: "redis://localhost:6379/0".to_string(),
+        ttl_seconds: Some(60),
+    })
+    .await;
+    let err = match result {
+        Ok(_) => panic!("redis backend must require redis feature"),
+        Err(err) => err,
+    };
+    assert!(
+        err.to_string().contains("built without the redis feature"),
         "unexpected error: {err}"
     );
 }

@@ -704,11 +704,50 @@ impl ProofEngine {
         Ok(Some(tenant.to_string()))
     }
 
+    fn phase_checkpointer_backend_from_env() -> Result<&'static str> {
+        let backend = match std::env::var("SENTINEL_PHASE_GRAPH_CHECKPOINTER") {
+            Ok(value) => {
+                let backend = value.trim();
+                if backend.is_empty() {
+                    return Err(anyhow::anyhow!(
+                        "SENTINEL_PHASE_GRAPH_CHECKPOINTER is set but empty; expected sqlite, postgres, or redis"
+                    ));
+                }
+                backend.to_ascii_lowercase()
+            }
+            Err(std::env::VarError::NotPresent) => return Ok("sqlite"),
+            Err(err) => {
+                return Err(anyhow::anyhow!(
+                    "failed to read SENTINEL_PHASE_GRAPH_CHECKPOINTER: {err}"
+                ));
+            }
+        };
+
+        match backend.as_str() {
+            "sqlite" => Ok("sqlite"),
+            "postgres" | "postgresql" => Ok("postgres"),
+            "redis" | "redis-checkpoint" => Ok("redis"),
+            other => Err(anyhow::anyhow!(
+                "unsupported phase graph checkpointer backend '{other}' from SENTINEL_PHASE_GRAPH_CHECKPOINTER; expected sqlite, postgres, or redis"
+            )),
+        }
+    }
+
+    fn langgraph_tenant_scope_for_phase_backend_from_env() -> Result<Option<String>> {
+        match Self::phase_checkpointer_backend_from_env()? {
+            "sqlite" => Ok(None),
+            "postgres" | "redis" => Self::langgraph_tenant_scope_from_env(),
+            other => Err(anyhow::anyhow!(
+                "unsupported phase graph checkpointer backend '{other}'"
+            )),
+        }
+    }
+
     fn expected_phase_thread_id(skill: &str, session_id: &str) -> Result<String> {
         sentinel_domain::langgraph_thread::phase_thread_id(
             skill,
             session_id,
-            Self::langgraph_tenant_scope_from_env()?.as_deref(),
+            Self::langgraph_tenant_scope_for_phase_backend_from_env()?.as_deref(),
         )
         .map_err(anyhow::Error::msg)
     }
@@ -2082,22 +2121,36 @@ mod step_evidence_tests {
 
     static LANGGRAPH_TENANT_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    fn with_langgraph_tenant_env<R>(tenant: Option<&str>, f: impl FnOnce() -> R) -> R {
+    fn with_phase_graph_thread_env<R>(
+        backend: Option<&str>,
+        tenant: Option<&str>,
+        f: impl FnOnce() -> R,
+    ) -> R {
         let _guard = LANGGRAPH_TENANT_ENV_LOCK
             .lock()
             .expect("langgraph tenant env lock poisoned");
-        let key = sentinel_domain::langgraph_thread::LANGGRAPH_TENANT_ENV;
-        let previous = std::env::var_os(key);
+        let tenant_key = sentinel_domain::langgraph_thread::LANGGRAPH_TENANT_ENV;
+        let backend_key = "SENTINEL_PHASE_GRAPH_CHECKPOINTER";
+        let previous_tenant = std::env::var_os(tenant_key);
+        let previous_backend = std::env::var_os(backend_key);
+        match backend {
+            Some(value) => std::env::set_var(backend_key, value),
+            None => std::env::remove_var(backend_key),
+        }
         match tenant {
-            Some(value) => std::env::set_var(key, value),
-            None => std::env::remove_var(key),
+            Some(value) => std::env::set_var(tenant_key, value),
+            None => std::env::remove_var(tenant_key),
         }
 
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
 
-        match previous {
-            Some(value) => std::env::set_var(key, value),
-            None => std::env::remove_var(key),
+        match previous_backend {
+            Some(value) => std::env::set_var(backend_key, value),
+            None => std::env::remove_var(backend_key),
+        }
+        match previous_tenant {
+            Some(value) => std::env::set_var(tenant_key, value),
+            None => std::env::remove_var(tenant_key),
         }
 
         match result {
@@ -2107,8 +2160,18 @@ mod step_evidence_tests {
     }
 
     #[test]
-    fn expected_phase_thread_id_uses_tenant_namespace() {
-        with_langgraph_tenant_env(Some("legatus_ai"), || {
+    fn expected_phase_thread_id_ignores_tenant_for_local_sqlite_default() {
+        with_phase_graph_thread_env(None, Some("legatus_ai"), || {
+            let thread_id = ProofEngine::expected_phase_thread_id("linear", "session-123")
+                .expect("valid local thread id");
+
+            assert_eq!(thread_id, "sentinel.phase.linear.session-123");
+        });
+    }
+
+    #[test]
+    fn expected_phase_thread_id_uses_tenant_namespace_for_hosted_backend() {
+        with_phase_graph_thread_env(Some("postgres"), Some("legatus_ai"), || {
             let thread_id = ProofEngine::expected_phase_thread_id("linear", "session-123")
                 .expect("valid tenant thread id");
 
@@ -2120,8 +2183,8 @@ mod step_evidence_tests {
     }
 
     #[test]
-    fn expected_phase_thread_id_rejects_malformed_tenant_namespace() {
-        with_langgraph_tenant_env(Some("tenant:escape"), || {
+    fn expected_phase_thread_id_rejects_malformed_tenant_namespace_for_hosted_backend() {
+        with_phase_graph_thread_env(Some("redis"), Some("tenant:escape"), || {
             let err = ProofEngine::expected_phase_thread_id("linear", "session-123")
                 .expect_err("tenant delimiter injection must fail");
             assert!(err

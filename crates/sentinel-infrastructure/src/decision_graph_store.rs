@@ -12,6 +12,8 @@ use sha2::{Digest as _, Sha256};
 
 #[cfg(feature = "postgres")]
 use langgraph_core::PostgresCheckpointer;
+#[cfg(feature = "redis")]
+use langgraph_core::RedisCheckpointer;
 #[cfg(feature = "sqlite")]
 use langgraph_core::SqliteCheckpointer;
 
@@ -24,6 +26,11 @@ pub(crate) enum DecisionGraphCheckpointerConfig {
     Postgres {
         database_url: String,
         schema: Option<String>,
+    },
+    /// Durable Redis connection URL plus optional checkpoint TTL.
+    Redis {
+        redis_url: String,
+        ttl_seconds: Option<u64>,
     },
 }
 
@@ -58,11 +65,15 @@ impl DecisionGraphCheckpointerConfig {
     pub(crate) const POSTGRES_URL_ENV: &'static str = "SENTINEL_DECISION_GRAPH_POSTGRES_URL";
     /// Optional schema for Postgres checkpoints.
     pub(crate) const POSTGRES_SCHEMA_ENV: &'static str = "SENTINEL_DECISION_GRAPH_POSTGRES_SCHEMA";
+    /// Env var providing the Redis URL when backend is `redis`.
+    pub(crate) const REDIS_URL_ENV: &'static str = "SENTINEL_DECISION_GRAPH_REDIS_URL";
+    /// Optional Redis checkpoint TTL in seconds.
+    pub(crate) const REDIS_TTL_SECS_ENV: &'static str = "SENTINEL_DECISION_GRAPH_REDIS_TTL_SECS";
 
     /// Build config from process environment.
     ///
     /// No backend variable means the graph-specific SQLite path is the explicit
-    /// local default. If `postgres` is selected, the Postgres URL and tenant
+    /// local default. If `postgres` or `redis` is selected, the backend URL and tenant
     /// scope are mandatory; Sentinel never switches back to SQLite after an
     /// enterprise backend is requested.
     pub(crate) fn from_env(graph_name: &str) -> Result<Self, String> {
@@ -71,7 +82,7 @@ impl DecisionGraphCheckpointerConfig {
                 let backend = value.trim();
                 if backend.is_empty() {
                     return Err(format!(
-                        "{} is set but empty; expected sqlite or postgres",
+                        "{} is set but empty; expected sqlite, postgres, or redis",
                         Self::BACKEND_ENV
                     ));
                 }
@@ -103,14 +114,39 @@ impl DecisionGraphCheckpointerConfig {
                     ));
                 }
                 let schema = optional_non_empty_env(Self::POSTGRES_SCHEMA_ENV)?;
-                require_enterprise_tenant_scope(Self::BACKEND_ENV)?;
+                require_enterprise_tenant_scope(Self::BACKEND_ENV, "postgres")?;
                 Ok(Self::Postgres {
                     database_url,
                     schema,
                 })
             }
+            "redis" | "redis-checkpoint" => {
+                let redis_url = std::env::var(Self::REDIS_URL_ENV)
+                    .map_err(|_| {
+                        format!(
+                            "{}=redis requires {}",
+                            Self::BACKEND_ENV,
+                            Self::REDIS_URL_ENV
+                        )
+                    })?
+                    .trim()
+                    .to_string();
+                if redis_url.is_empty() {
+                    return Err(format!(
+                        "{}=redis requires non-empty {}",
+                        Self::BACKEND_ENV,
+                        Self::REDIS_URL_ENV
+                    ));
+                }
+                let ttl_seconds = optional_positive_u64_env(Self::REDIS_TTL_SECS_ENV)?;
+                require_enterprise_tenant_scope(Self::BACKEND_ENV, "redis")?;
+                Ok(Self::Redis {
+                    redis_url,
+                    ttl_seconds,
+                })
+            }
             other => Err(format!(
-                "unsupported decision graph checkpointer backend '{other}' from {}; expected sqlite or postgres",
+                "unsupported decision graph checkpointer backend '{other}' from {}; expected sqlite, postgres, or redis",
                 Self::BACKEND_ENV
             )),
         }
@@ -121,6 +157,7 @@ impl DecisionGraphCheckpointerConfig {
         match self {
             Self::Sqlite { .. } => "sqlite",
             Self::Postgres { .. } => "postgres",
+            Self::Redis { .. } => "redis",
         }
     }
 
@@ -131,6 +168,10 @@ impl DecisionGraphCheckpointerConfig {
             Self::Postgres { schema, .. } => {
                 format!("schema:{}", schema.as_deref().unwrap_or("public"))
             }
+            Self::Redis { ttl_seconds, .. } => match ttl_seconds {
+                Some(ttl_seconds) => format!("ttl_seconds:{ttl_seconds}"),
+                None => "ttl_seconds:none".to_string(),
+            },
         }
     }
 }
@@ -149,13 +190,32 @@ fn optional_non_empty_env(name: &str) -> Result<Option<String>, String> {
     }
 }
 
-fn require_enterprise_tenant_scope(backend_env: &str) -> Result<(), String> {
+fn optional_positive_u64_env(name: &str) -> Result<Option<u64>, String> {
+    let value = match std::env::var(name) {
+        Ok(value) => value,
+        Err(std::env::VarError::NotPresent) => return Ok(None),
+        Err(err) => return Err(format!("failed to read {name}: {err}")),
+    };
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(format!("{name} is set but empty"));
+    }
+    let parsed = value
+        .parse::<u64>()
+        .map_err(|err| format!("{name} must be a positive integer number of seconds: {err}"))?;
+    if parsed == 0 {
+        return Err(format!("{name} must be greater than zero"));
+    }
+    Ok(Some(parsed))
+}
+
+fn require_enterprise_tenant_scope(backend_env: &str, backend: &str) -> Result<(), String> {
     if tenant_scope_from_env()?.is_some() {
         return Ok(());
     }
 
     Err(format!(
-        "{backend_env}=postgres requires {LANGGRAPH_TENANT_ENV} so LangGraph checkpoint thread_id values are tenant-scoped"
+        "{backend_env}={backend} requires {LANGGRAPH_TENANT_ENV} so LangGraph checkpoint thread_id values are tenant-scoped"
     ))
 }
 
@@ -183,9 +243,8 @@ pub(crate) async fn checkpointer_for_graph(
 
 /// Build a durable decision-graph checkpointer from explicit config.
 ///
-/// If Postgres is selected in a build without the `postgres` feature, this
-/// errors. If SQLite is selected in a build without the `sqlite` feature, this
-/// errors. It never silently changes backend.
+/// If a selected backend is missing from the build features, this errors. It
+/// never silently changes backend.
 pub(crate) async fn checkpointer_for_config(
     config: DecisionGraphCheckpointerConfig,
 ) -> Result<DecisionGraphCheckpointer, String> {
@@ -199,6 +258,10 @@ pub(crate) async fn checkpointer_for_config(
             database_url,
             schema,
         } => postgres_checkpointer(&database_url, schema.as_deref()).await,
+        DecisionGraphCheckpointerConfig::Redis {
+            redis_url,
+            ttl_seconds,
+        } => redis_checkpointer(&redis_url, ttl_seconds).await,
     }?;
     Ok(DecisionGraphCheckpointer {
         saver,
@@ -247,6 +310,30 @@ async fn postgres_checkpointer(
     )
 }
 
+#[cfg(feature = "redis")]
+async fn redis_checkpointer(
+    redis_url: &str,
+    ttl_seconds: Option<u64>,
+) -> Result<Arc<dyn CheckpointSaver>, String> {
+    let checkpointer = match ttl_seconds {
+        Some(ttl_seconds) => RedisCheckpointer::with_ttl(redis_url, ttl_seconds).await,
+        None => RedisCheckpointer::new(redis_url).await,
+    }
+    .map_err(|e| e.to_string())?;
+    Ok(Arc::new(checkpointer))
+}
+
+#[cfg(not(feature = "redis"))]
+async fn redis_checkpointer(
+    _redis_url: &str,
+    _ttl_seconds: Option<u64>,
+) -> Result<Arc<dyn CheckpointSaver>, String> {
+    Err(
+        "decision graph Redis checkpointer requested, but sentinel-infrastructure was built without the redis feature"
+            .to_string(),
+    )
+}
+
 /// Derive a checkpoint thread id for one immutable decision-graph run.
 ///
 /// Durable LangGraph execution resumes by `thread_id`. A bare ticket id would
@@ -255,7 +342,7 @@ async fn postgres_checkpointer(
 /// while giving changed facts/verdicts a fresh run thread under the same graph.
 ///
 /// When `SENTINEL_LANGGRAPH_TENANT` is set, the tenant is part of the thread id
-/// so hosted Postgres checkpointers can safely share one schema without
+/// so hosted distributed checkpointers can safely share storage without
 /// cross-tenant resume collisions.
 pub(crate) fn run_thread_id<T: Serialize>(
     graph_name: &str,
@@ -313,6 +400,26 @@ mod tests {
         tenant_scope: Option<&str>,
         f: impl FnOnce() -> R,
     ) -> R {
+        with_decision_graph_checkpointer_env_full(
+            backend,
+            postgres_url,
+            postgres_schema,
+            None,
+            None,
+            tenant_scope,
+            f,
+        )
+    }
+
+    fn with_decision_graph_checkpointer_env_full<R>(
+        backend: Option<&str>,
+        postgres_url: Option<&str>,
+        postgres_schema: Option<&str>,
+        redis_url: Option<&str>,
+        redis_ttl_secs: Option<&str>,
+        tenant_scope: Option<&str>,
+        f: impl FnOnce() -> R,
+    ) -> R {
         let _guard = DECISION_GRAPH_CHECKPOINTER_ENV_LOCK
             .lock()
             .expect("decision graph checkpointer env lock poisoned");
@@ -320,6 +427,9 @@ mod tests {
         let previous_url = std::env::var_os(DecisionGraphCheckpointerConfig::POSTGRES_URL_ENV);
         let previous_schema =
             std::env::var_os(DecisionGraphCheckpointerConfig::POSTGRES_SCHEMA_ENV);
+        let previous_redis_url = std::env::var_os(DecisionGraphCheckpointerConfig::REDIS_URL_ENV);
+        let previous_redis_ttl =
+            std::env::var_os(DecisionGraphCheckpointerConfig::REDIS_TTL_SECS_ENV);
         let previous_tenant = std::env::var_os(LANGGRAPH_TENANT_ENV);
 
         match backend {
@@ -337,6 +447,18 @@ mod tests {
                 std::env::set_var(DecisionGraphCheckpointerConfig::POSTGRES_SCHEMA_ENV, value);
             }
             None => std::env::remove_var(DecisionGraphCheckpointerConfig::POSTGRES_SCHEMA_ENV),
+        }
+        match redis_url {
+            Some(value) => {
+                std::env::set_var(DecisionGraphCheckpointerConfig::REDIS_URL_ENV, value);
+            }
+            None => std::env::remove_var(DecisionGraphCheckpointerConfig::REDIS_URL_ENV),
+        }
+        match redis_ttl_secs {
+            Some(value) => {
+                std::env::set_var(DecisionGraphCheckpointerConfig::REDIS_TTL_SECS_ENV, value);
+            }
+            None => std::env::remove_var(DecisionGraphCheckpointerConfig::REDIS_TTL_SECS_ENV),
         }
         match tenant_scope {
             Some(value) => std::env::set_var(LANGGRAPH_TENANT_ENV, value),
@@ -362,6 +484,18 @@ mod tests {
                 std::env::set_var(DecisionGraphCheckpointerConfig::POSTGRES_SCHEMA_ENV, value);
             }
             None => std::env::remove_var(DecisionGraphCheckpointerConfig::POSTGRES_SCHEMA_ENV),
+        }
+        match previous_redis_url {
+            Some(value) => {
+                std::env::set_var(DecisionGraphCheckpointerConfig::REDIS_URL_ENV, value);
+            }
+            None => std::env::remove_var(DecisionGraphCheckpointerConfig::REDIS_URL_ENV),
+        }
+        match previous_redis_ttl {
+            Some(value) => {
+                std::env::set_var(DecisionGraphCheckpointerConfig::REDIS_TTL_SECS_ENV, value);
+            }
+            None => std::env::remove_var(DecisionGraphCheckpointerConfig::REDIS_TTL_SECS_ENV),
         }
         match previous_tenant {
             Some(value) => std::env::set_var(LANGGRAPH_TENANT_ENV, value),
@@ -393,6 +527,7 @@ mod tests {
                 DecisionGraphCheckpointerConfig::Postgres { .. } => {
                     panic!("default must be sqlite")
                 }
+                DecisionGraphCheckpointerConfig::Redis { .. } => panic!("default must be sqlite"),
             }
         });
     }
@@ -437,6 +572,49 @@ mod tests {
     }
 
     #[test]
+    fn decision_graph_checkpointer_config_accepts_redis_ttl() {
+        with_decision_graph_checkpointer_env_full(
+            Some("redis"),
+            None,
+            None,
+            Some("redis://localhost:6379/0"),
+            Some("3600"),
+            Some("legatus_ai"),
+            || {
+                let config =
+                    DecisionGraphCheckpointerConfig::from_env("ignored").expect("redis config");
+                assert_eq!(
+                    config,
+                    DecisionGraphCheckpointerConfig::Redis {
+                        redis_url: "redis://localhost:6379/0".to_string(),
+                        ttl_seconds: Some(3600),
+                    }
+                );
+                assert_eq!(config.backend_name(), "redis");
+                assert_eq!(config.scope_name(), "ttl_seconds:3600");
+            },
+        );
+    }
+
+    #[test]
+    fn decision_graph_checkpointer_config_accepts_redis_without_ttl() {
+        with_decision_graph_checkpointer_env_full(
+            Some("redis-checkpoint"),
+            None,
+            None,
+            Some("redis://localhost:6379/1"),
+            None,
+            Some("legatus_ai"),
+            || {
+                let config =
+                    DecisionGraphCheckpointerConfig::from_env("ignored").expect("redis config");
+                assert_eq!(config.backend_name(), "redis");
+                assert_eq!(config.scope_name(), "ttl_seconds:none");
+            },
+        );
+    }
+
+    #[test]
     fn decision_graph_checkpointer_config_requires_postgres_url() {
         with_decision_graph_checkpointer_env(Some("postgres"), None, None, None, || {
             let err = DecisionGraphCheckpointerConfig::from_env("severity")
@@ -465,6 +643,50 @@ mod tests {
                 assert!(
                     !err.contains("severity.db"),
                     "postgres selection must not use sqlite: {err}"
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn decision_graph_checkpointer_config_requires_redis_url() {
+        with_decision_graph_checkpointer_env_full(
+            Some("redis"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            || {
+                let err = DecisionGraphCheckpointerConfig::from_env("severity")
+                    .expect_err("redis URL must be required");
+                assert!(err.contains(DecisionGraphCheckpointerConfig::REDIS_URL_ENV));
+                assert!(
+                    !err.contains("severity.db"),
+                    "redis selection must not use sqlite: {err}"
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn decision_graph_checkpointer_config_requires_tenant_scope_for_redis() {
+        with_decision_graph_checkpointer_env_full(
+            Some("redis"),
+            None,
+            None,
+            Some("redis://localhost:6379/0"),
+            None,
+            None,
+            || {
+                let err = DecisionGraphCheckpointerConfig::from_env("severity")
+                    .expect_err("redis config must require tenant scope");
+                assert!(err.contains(DecisionGraphCheckpointerConfig::BACKEND_ENV));
+                assert!(err.contains(LANGGRAPH_TENANT_ENV));
+                assert!(err.contains("tenant-scoped"));
+                assert!(
+                    !err.contains("severity.db"),
+                    "redis selection must not use sqlite: {err}"
                 );
             },
         );
@@ -501,11 +723,29 @@ mod tests {
     }
 
     #[test]
+    fn decision_graph_checkpointer_config_rejects_invalid_redis_ttl_env() {
+        with_decision_graph_checkpointer_env_full(
+            Some("redis"),
+            None,
+            None,
+            Some("redis://localhost:6379/0"),
+            Some("0"),
+            Some("legatus_ai"),
+            || {
+                let err = DecisionGraphCheckpointerConfig::from_env("severity")
+                    .expect_err("zero Redis TTL must fail when configured");
+                assert!(err.contains(DecisionGraphCheckpointerConfig::REDIS_TTL_SECS_ENV));
+                assert!(err.contains("greater than zero"));
+            },
+        );
+    }
+
+    #[test]
     fn decision_graph_checkpointer_config_rejects_unknown_backend() {
         with_decision_graph_checkpointer_env(Some("unsupported"), None, None, None, || {
             let err = DecisionGraphCheckpointerConfig::from_env("severity")
                 .expect_err("unknown backend must fail");
-            assert!(err.contains("expected sqlite or postgres"));
+            assert!(err.contains("expected sqlite, postgres, or redis"));
         });
     }
 
@@ -541,5 +781,20 @@ mod tests {
             Err(err) => err,
         };
         assert!(err.contains("built without the postgres feature"));
+    }
+
+    #[cfg(not(feature = "redis"))]
+    #[tokio::test]
+    async fn redis_decision_checkpointer_request_fails_without_redis_feature() {
+        let result = checkpointer_for_config(DecisionGraphCheckpointerConfig::Redis {
+            redis_url: "redis://localhost:6379/0".to_string(),
+            ttl_seconds: Some(60),
+        })
+        .await;
+        let err = match result {
+            Ok(_) => panic!("redis backend must require redis feature"),
+            Err(err) => err,
+        };
+        assert!(err.contains("built without the redis feature"));
     }
 }

@@ -17,9 +17,10 @@ name = "sentinel"
 path = "src/launcher.rs"
 
 [features]
-default = ["sqlite", "postgres"]
+default = ["sqlite", "postgres", "redis"]
 sqlite = ["sentinel-graph/sqlite", "sentinel-infrastructure/sqlite"]
 postgres = ["sentinel-graph/postgres", "sentinel-infrastructure/postgres"]
+redis = ["sentinel-graph/redis", "sentinel-infrastructure/redis"]
 
 [dependencies]
 sentinel-domain = { workspace = true }

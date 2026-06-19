@@ -8,16 +8,17 @@ repository.workspace = true
 description = "Phase-progression engine for sentinel skills, powered by langgraph-core (LangGraph Rust port). Compiles workflows.toml into a durable, checkpointed StateGraph with judge-verdict interrupts and conditional Pass/Fail routing."
 
 [features]
-# Build both durable checkpoint backends by default. Runtime backend selection
+# Build all durable checkpoint backends by default. Runtime backend selection
 # still comes from SENTINEL_PHASE_GRAPH_CHECKPOINTER and remains fail-closed.
-default = ["sqlite", "postgres"]
+default = ["sqlite", "postgres", "redis"]
 sqlite = ["langgraph-core/sqlite"]
 postgres = ["langgraph-core/postgres"]
+redis = ["langgraph-core/redis-checkpoint"]
 
 [dependencies]
 # The LangGraph Rust port — path dep on the sibling repo.
-# `sqlite` is the local durable default; enabling sentinel-graph's `postgres`
-# feature lets production select LangGraph's Postgres checkpointer.
+# `sqlite` is the local durable default; `postgres` and `redis` let production
+# select distributed LangGraph checkpointers without rebuilding.
 langgraph-core = { path = "../../../langgraph-python-to-rust/langgraph-core", default-features = false }
 
 sentinel-domain = { workspace = true }

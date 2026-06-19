@@ -137,14 +137,15 @@ config/
 
 ### LangGraph Checkpoints
 
-Sentinel uses LangGraph Rust checkpoints as workflow authority. SQLite and
-Postgres checkpoint backends are compiled into the default build. Local runs use
-SQLite unless a backend is selected; production selects Postgres explicitly at
-runtime. If Postgres is selected and its URL, tenant scope, or schema config is
-invalid, Sentinel fails closed instead of switching back to SQLite.
+Sentinel uses LangGraph Rust checkpoints as workflow authority. SQLite,
+Postgres, and Redis checkpoint backends are compiled into the default build.
+Local runs use SQLite unless a backend is selected; production selects Postgres
+or Redis explicitly at runtime. If a production backend is selected and its URL,
+tenant scope, schema, or TTL config is invalid, Sentinel fails closed instead of
+switching back to SQLite.
 
-Hosted Postgres deployments must set a tenant namespace so every LangGraph
-`thread_id` is scoped, for example `tenant:legatus_ai:...`:
+Hosted deployments must set a tenant namespace so every LangGraph `thread_id` is
+scoped, for example `tenant:legatus_ai:...`:
 
 ```bash
 SENTINEL_LANGGRAPH_TENANT=legatus_ai
@@ -158,6 +159,14 @@ SENTINEL_PHASE_GRAPH_POSTGRES_URL=postgres://user:pass@host/db
 SENTINEL_PHASE_GRAPH_POSTGRES_SCHEMA=sentinel_phase_graph
 ```
 
+Phase/workflow graph using Redis:
+
+```bash
+SENTINEL_PHASE_GRAPH_CHECKPOINTER=redis
+SENTINEL_PHASE_GRAPH_REDIS_URL=redis://host:6379/0
+SENTINEL_PHASE_GRAPH_REDIS_TTL_SECS=604800
+```
+
 Infrastructure decision graphs:
 
 ```bash
@@ -166,10 +175,19 @@ SENTINEL_DECISION_GRAPH_POSTGRES_URL=postgres://user:pass@host/db
 SENTINEL_DECISION_GRAPH_POSTGRES_SCHEMA=sentinel_decision_graph
 ```
 
+Infrastructure decision graphs using Redis:
+
+```bash
+SENTINEL_DECISION_GRAPH_CHECKPOINTER=redis
+SENTINEL_DECISION_GRAPH_REDIS_URL=redis://host:6379/1
+SENTINEL_DECISION_GRAPH_REDIS_TTL_SECS=604800
+```
+
 Graph topology emitted by CLI, MCP, and API surfaces includes sanitized
-checkpoint evidence: `checkpointer_backend` (`sqlite` or `postgres`) and
+checkpoint evidence: `checkpointer_backend` (`sqlite`, `postgres`, or `redis`) and
 `checkpointer_scope` (`database_path:...` for SQLite, `schema:...` for
-Postgres). Database URLs are never exposed through topology.
+Postgres, `ttl_seconds:...` for Redis). Database and Redis URLs are never
+exposed through topology.
 
 ## Key Dependencies
 

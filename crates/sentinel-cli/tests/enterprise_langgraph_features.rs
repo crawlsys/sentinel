@@ -1,9 +1,9 @@
 //! Guard the binary feature surface for production LangGraph checkpoint stores.
 //!
-//! The graph crates already expose SQLite and Postgres checkpointers. The
-//! `sentinel` binary must forward those features itself so a production install
-//! can select `SENTINEL_*_GRAPH_CHECKPOINTER=postgres` without rebuilding
-//! dependency crates by hand.
+//! The graph crates already expose SQLite, Postgres, and Redis checkpointers.
+//! The `sentinel` binary must forward those features itself so a production
+//! install can select an enterprise `SENTINEL_*_GRAPH_CHECKPOINTER` backend
+//! without rebuilding dependency crates by hand.
 
 #[test]
 fn sentinel_binary_defaults_include_enterprise_langgraph_checkpointers() {
@@ -22,6 +22,10 @@ fn sentinel_binary_defaults_include_enterprise_langgraph_checkpointers() {
         default.contains(&"postgres"),
         "default sentinel binary must include enterprise Postgres LangGraph support"
     );
+    assert!(
+        default.contains(&"redis"),
+        "default sentinel binary must include enterprise Redis LangGraph support"
+    );
 
     assert_eq!(
         feature_values(features, "sqlite"),
@@ -35,6 +39,11 @@ fn sentinel_binary_defaults_include_enterprise_langgraph_checkpointers() {
             "sentinel-infrastructure/postgres"
         ],
         "postgres feature must forward to both phase and decision graph crates"
+    );
+    assert_eq!(
+        feature_values(features, "redis"),
+        vec!["sentinel-graph/redis", "sentinel-infrastructure/redis"],
+        "redis feature must forward to both phase and decision graph crates"
     );
 }
 
@@ -65,6 +74,10 @@ fn graph_crate_defaults_include_enterprise_langgraph_checkpointers() {
             default.contains(&"postgres"),
             "{crate_name} default features must include enterprise Postgres LangGraph support"
         );
+        assert!(
+            default.contains(&"redis"),
+            "{crate_name} default features must include enterprise Redis LangGraph support"
+        );
         assert_eq!(
             feature_values(features, "sqlite"),
             vec!["langgraph-core/sqlite"],
@@ -74,6 +87,11 @@ fn graph_crate_defaults_include_enterprise_langgraph_checkpointers() {
             feature_values(features, "postgres"),
             vec!["langgraph-core/postgres"],
             "{crate_name} postgres feature must forward to langgraph-core"
+        );
+        assert_eq!(
+            feature_values(features, "redis"),
+            vec!["langgraph-core/redis-checkpoint"],
+            "{crate_name} redis feature must forward to langgraph-core"
         );
     }
 }

@@ -19,7 +19,7 @@
 //!   ms-cold-start processes; the graph advances *one phase per async MCP
 //!   call* and checkpoints to a sqlite [`CheckpointSaver`] keyed by a
 //!   skill-scoped thread id (`sentinel.phase.<skill>.<session_id>` for local
-//!   SQLite, prefixed by `tenant:<id>:` in hosted Postgres mode). Process
+//!   SQLite, prefixed by `tenant:<id>:` in hosted distributed-checkpointer mode). Process
 //!   death between calls is fine: `load_latest` restores. This is `LangGraph`'s
 //!   durable-execution model and it is a near-exact match for sentinel's
 //!   invocation model.
@@ -67,6 +67,8 @@ use langgraph_core::domain::value_objects::{
 use langgraph_core::ports::CheckpointSaver;
 #[cfg(feature = "postgres")]
 use langgraph_core::PostgresCheckpointer;
+#[cfg(feature = "redis")]
+use langgraph_core::RedisCheckpointer;
 #[cfg(feature = "sqlite")]
 use langgraph_core::SqliteCheckpointer;
 use langgraph_core::StateGraphBuilder;
@@ -113,16 +115,13 @@ fn tenant_scope_from_env() -> Result<Option<String>> {
 /// Derive the durable LangGraph thread id for a Sentinel phase workflow.
 ///
 /// This is the public projection helper for CLI/MCP/API evidence validation.
-/// It applies the same optional `SENTINEL_LANGGRAPH_TENANT` namespace as the
-/// compiled graph so hosted multi-tenant checkpointers cannot accidentally
-/// validate against a different thread identity than the writer used.
+/// It applies the current optional `SENTINEL_LANGGRAPH_TENANT` namespace for
+/// callers that need to validate hosted multi-tenant checkpoint evidence.
 pub fn phase_thread_id(skill: &str, session_id: &str) -> Result<String> {
-    sentinel_domain::langgraph_thread::phase_thread_id(
-        skill,
-        session_id,
-        tenant_scope_from_env()?.as_deref(),
-    )
-    .map_err(GraphEngineError::Checkpointer)
+    let backend = phase_checkpointer_backend_from_env()?;
+    let tenant_scope = tenant_scope_for_checkpointer_backend(&backend)?;
+    sentinel_domain::langgraph_thread::phase_thread_id(skill, session_id, tenant_scope.as_deref())
+        .map_err(GraphEngineError::Checkpointer)
 }
 
 /// The verdict a judge returns for a phase. Serializable so it survives the
@@ -480,6 +479,11 @@ pub enum PhaseCheckpointerConfig {
         database_url: String,
         schema: Option<String>,
     },
+    /// Durable Redis connection URL plus optional checkpoint TTL.
+    Redis {
+        redis_url: String,
+        ttl_seconds: Option<u64>,
+    },
 }
 
 /// A LangGraph checkpointer plus the backend identity used to build it.
@@ -519,38 +523,24 @@ impl PhaseCheckpointerConfig {
     pub const POSTGRES_URL_ENV: &'static str = "SENTINEL_PHASE_GRAPH_POSTGRES_URL";
     /// Optional schema for Postgres checkpoints.
     pub const POSTGRES_SCHEMA_ENV: &'static str = "SENTINEL_PHASE_GRAPH_POSTGRES_SCHEMA";
+    /// Env var providing the Redis URL when backend is `redis`.
+    pub const REDIS_URL_ENV: &'static str = "SENTINEL_PHASE_GRAPH_REDIS_URL";
+    /// Optional Redis checkpoint TTL in seconds.
+    pub const REDIS_TTL_SECS_ENV: &'static str = "SENTINEL_PHASE_GRAPH_REDIS_TTL_SECS";
 
     /// Build config from process environment.
     ///
     /// No backend variable means the caller-provided SQLite path is the explicit
-    /// local default. If `postgres` is selected, the Postgres URL and tenant
+    /// local default. If `postgres` or `redis` is selected, the backend URL and tenant
     /// scope are mandatory; Sentinel refuses to switch to SQLite after an
     /// enterprise backend is requested.
     pub fn from_env(sqlite_database_path: impl Into<String>) -> Result<Self> {
-        let backend = match std::env::var(Self::BACKEND_ENV) {
-            Ok(value) => {
-                let backend = value.trim();
-                if backend.is_empty() {
-                    return Err(GraphEngineError::Checkpointer(format!(
-                        "{} is set but empty; expected sqlite or postgres",
-                        Self::BACKEND_ENV
-                    )));
-                }
-                backend.to_ascii_lowercase()
-            }
-            Err(std::env::VarError::NotPresent) => "sqlite".to_string(),
-            Err(err) => {
-                return Err(GraphEngineError::Checkpointer(format!(
-                    "failed to read {}: {err}",
-                    Self::BACKEND_ENV
-                )));
-            }
-        };
+        let backend = phase_checkpointer_backend_from_env()?;
         match backend.as_str() {
             "sqlite" => Ok(Self::Sqlite {
                 database_path: sqlite_database_path.into(),
             }),
-            "postgres" | "postgresql" => {
+            "postgres" => {
                 let database_url = std::env::var(Self::POSTGRES_URL_ENV)
                     .map_err(|_| {
                         GraphEngineError::Checkpointer(format!(
@@ -569,16 +559,38 @@ impl PhaseCheckpointerConfig {
                     )));
                 }
                 let schema = optional_non_empty_env(Self::POSTGRES_SCHEMA_ENV)?;
-                require_enterprise_tenant_scope(Self::BACKEND_ENV)?;
+                require_enterprise_tenant_scope(Self::BACKEND_ENV, "postgres")?;
                 Ok(Self::Postgres {
                     database_url,
                     schema,
                 })
             }
-            other => Err(GraphEngineError::Checkpointer(format!(
-                "unsupported phase graph checkpointer backend '{other}' from {}; expected sqlite or postgres",
-                Self::BACKEND_ENV
-            ))),
+            "redis" => {
+                let redis_url = std::env::var(Self::REDIS_URL_ENV)
+                    .map_err(|_| {
+                        GraphEngineError::Checkpointer(format!(
+                            "{}=redis requires {}",
+                            Self::BACKEND_ENV,
+                            Self::REDIS_URL_ENV
+                        ))
+                    })?
+                    .trim()
+                    .to_string();
+                if redis_url.is_empty() {
+                    return Err(GraphEngineError::Checkpointer(format!(
+                        "{}=redis requires non-empty {}",
+                        Self::BACKEND_ENV,
+                        Self::REDIS_URL_ENV
+                    )));
+                }
+                let ttl_seconds = optional_positive_u64_env(Self::REDIS_TTL_SECS_ENV)?;
+                require_enterprise_tenant_scope(Self::BACKEND_ENV, "redis")?;
+                Ok(Self::Redis {
+                    redis_url,
+                    ttl_seconds,
+                })
+            }
+            _ => unreachable!("phase_checkpointer_backend_from_env only returns known backends"),
         }
     }
 
@@ -587,6 +599,7 @@ impl PhaseCheckpointerConfig {
         match self {
             Self::Sqlite { .. } => "sqlite",
             Self::Postgres { .. } => "postgres",
+            Self::Redis { .. } => "redis",
         }
     }
 
@@ -597,7 +610,43 @@ impl PhaseCheckpointerConfig {
             Self::Postgres { schema, .. } => {
                 format!("schema:{}", schema.as_deref().unwrap_or("public"))
             }
+            Self::Redis { ttl_seconds, .. } => match ttl_seconds {
+                Some(ttl_seconds) => format!("ttl_seconds:{ttl_seconds}"),
+                None => "ttl_seconds:none".to_string(),
+            },
         }
+    }
+}
+
+fn phase_checkpointer_backend_from_env() -> Result<String> {
+    let backend = match std::env::var(PhaseCheckpointerConfig::BACKEND_ENV) {
+        Ok(value) => {
+            let backend = value.trim();
+            if backend.is_empty() {
+                return Err(GraphEngineError::Checkpointer(format!(
+                    "{} is set but empty; expected sqlite, postgres, or redis",
+                    PhaseCheckpointerConfig::BACKEND_ENV
+                )));
+            }
+            backend.to_ascii_lowercase()
+        }
+        Err(std::env::VarError::NotPresent) => return Ok("sqlite".to_string()),
+        Err(err) => {
+            return Err(GraphEngineError::Checkpointer(format!(
+                "failed to read {}: {err}",
+                PhaseCheckpointerConfig::BACKEND_ENV
+            )));
+        }
+    };
+
+    match backend.as_str() {
+        "sqlite" => Ok("sqlite".to_string()),
+        "postgres" | "postgresql" => Ok("postgres".to_string()),
+        "redis" | "redis-checkpoint" => Ok("redis".to_string()),
+        other => Err(GraphEngineError::Checkpointer(format!(
+            "unsupported phase graph checkpointer backend '{other}' from {}; expected sqlite, postgres, or redis",
+            PhaseCheckpointerConfig::BACKEND_ENV
+        ))),
     }
 }
 
@@ -619,14 +668,60 @@ fn optional_non_empty_env(name: &str) -> Result<Option<String>> {
     }
 }
 
-fn require_enterprise_tenant_scope(backend_env: &str) -> Result<()> {
+fn optional_positive_u64_env(name: &str) -> Result<Option<u64>> {
+    let value = match std::env::var(name) {
+        Ok(value) => value,
+        Err(std::env::VarError::NotPresent) => return Ok(None),
+        Err(err) => {
+            return Err(GraphEngineError::Checkpointer(format!(
+                "failed to read {name}: {err}"
+            )));
+        }
+    };
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(GraphEngineError::Checkpointer(format!(
+            "{name} is set but empty"
+        )));
+    }
+    let parsed = value.parse::<u64>().map_err(|err| {
+        GraphEngineError::Checkpointer(format!(
+            "{name} must be a positive integer number of seconds: {err}"
+        ))
+    })?;
+    if parsed == 0 {
+        return Err(GraphEngineError::Checkpointer(format!(
+            "{name} must be greater than zero"
+        )));
+    }
+    Ok(Some(parsed))
+}
+
+fn require_enterprise_tenant_scope(backend_env: &str, backend: &str) -> Result<()> {
     if tenant_scope_from_env()?.is_some() {
         return Ok(());
     }
 
     Err(GraphEngineError::Checkpointer(format!(
-        "{backend_env}=postgres requires {LANGGRAPH_TENANT_ENV} so LangGraph checkpoint thread_id values are tenant-scoped"
+        "{backend_env}={backend} requires {LANGGRAPH_TENANT_ENV} so LangGraph checkpoint thread_id values are tenant-scoped"
     )))
+}
+
+fn tenant_scope_for_checkpointer_backend(backend: &str) -> Result<Option<String>> {
+    match backend {
+        "sqlite" => Ok(None),
+        "postgres" | "redis" => tenant_scope_from_env()?.map_or_else(
+            || {
+                Err(GraphEngineError::Checkpointer(format!(
+                    "phase graph {backend} checkpointer requires {LANGGRAPH_TENANT_ENV} so LangGraph checkpoint thread_id values are tenant-scoped"
+                )))
+            },
+            |tenant| Ok(Some(tenant)),
+        ),
+        other => Err(GraphEngineError::Checkpointer(format!(
+            "unsupported phase graph checkpointer backend '{other}'"
+        ))),
+    }
 }
 
 /// Build a durable sqlite [`CheckpointSaver`] for a session. The database path
@@ -666,8 +761,8 @@ pub async fn phase_checkpointer(database_path: &str) -> Result<PhaseCheckpointer
 
 /// Build a durable phase-graph checkpointer from an explicit config.
 ///
-/// If Postgres is selected in a build without the `postgres` feature, this
-/// errors. It never silently switches to SQLite.
+/// If a selected backend is missing from the build features, this errors. It
+/// never silently switches to SQLite.
 pub async fn phase_checkpointer_for_config(
     config: PhaseCheckpointerConfig,
 ) -> Result<PhaseCheckpointer> {
@@ -679,6 +774,10 @@ pub async fn phase_checkpointer_for_config(
             database_url,
             schema,
         } => phase_saver_postgres(&database_url, schema.as_deref()).await,
+        PhaseCheckpointerConfig::Redis {
+            redis_url,
+            ttl_seconds,
+        } => phase_saver_redis(&redis_url, ttl_seconds).await,
     }?;
     Ok(PhaseCheckpointer {
         saver,
@@ -716,6 +815,29 @@ async fn phase_saver_postgres(
 ) -> Result<Arc<dyn CheckpointSaver>> {
     Err(GraphEngineError::Checkpointer(
         "phase graph Postgres checkpointer requested, but sentinel-graph was built without the postgres feature".into(),
+    ))
+}
+
+#[cfg(feature = "redis")]
+async fn phase_saver_redis(
+    redis_url: &str,
+    ttl_seconds: Option<u64>,
+) -> Result<Arc<dyn CheckpointSaver>> {
+    let saver = match ttl_seconds {
+        Some(ttl_seconds) => RedisCheckpointer::with_ttl(redis_url, ttl_seconds).await,
+        None => RedisCheckpointer::new(redis_url).await,
+    }
+    .map_err(GraphEngineError::from_graph)?;
+    Ok(Arc::new(saver))
+}
+
+#[cfg(not(feature = "redis"))]
+async fn phase_saver_redis(
+    _redis_url: &str,
+    _ttl_seconds: Option<u64>,
+) -> Result<Arc<dyn CheckpointSaver>> {
+    Err(GraphEngineError::Checkpointer(
+        "phase graph Redis checkpointer requested, but sentinel-graph was built without the redis feature".into(),
     ))
 }
 
@@ -1239,6 +1361,7 @@ fn compile_skill_graph_with_backend(
         compiled = compiled.with_interrupt(phase_id.as_str(), InterruptConfig::after());
     }
     compilation.graph = compiled;
+    let tenant_scope = tenant_scope_for_checkpointer_backend(&checkpointer_backend)?;
 
     Ok(CompiledPhaseGraph {
         inner: compilation,
@@ -1246,6 +1369,7 @@ fn compile_skill_graph_with_backend(
         workflow: workflow.clone(),
         checkpointer_backend,
         checkpointer_scope,
+        tenant_scope,
     })
 }
 
@@ -1541,11 +1665,17 @@ pub struct CompiledPhaseGraph {
     workflow: SkillWorkflow,
     checkpointer_backend: String,
     checkpointer_scope: String,
+    tenant_scope: Option<String>,
 }
 
 impl CompiledPhaseGraph {
     fn thread_id(&self, session_id: &str) -> Result<String> {
-        phase_thread_id(&self.workflow.skill, session_id)
+        sentinel_domain::langgraph_thread::phase_thread_id(
+            &self.workflow.skill,
+            session_id,
+            self.tenant_scope.as_deref(),
+        )
+        .map_err(GraphEngineError::Checkpointer)
     }
 
     /// The ordered phase ids of this workflow.

@@ -9,12 +9,13 @@ repository.workspace = true
 rust-version.workspace = true
 
 [features]
-# Build both durable LangGraph checkpoint backends by default. Runtime backend
+# Build all durable LangGraph checkpoint backends by default. Runtime backend
 # selection still comes from SENTINEL_DECISION_GRAPH_CHECKPOINTER and remains
 # fail-closed.
-default = ["sqlite", "postgres"]
+default = ["sqlite", "postgres", "redis"]
 sqlite = ["langgraph-core/sqlite"]
 postgres = ["langgraph-core/postgres"]
+redis = ["langgraph-core/redis-checkpoint"]
 
 [dependencies]
 sentinel-domain = { workspace = true }
