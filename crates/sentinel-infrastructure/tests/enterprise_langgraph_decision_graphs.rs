@@ -1,0 +1,72 @@
+//! Guard Sentinel's decision graphs against opaque LangGraph execution.
+//!
+//! Every infrastructure decision graph must run through the shared v3 streaming
+//! authority so CLI/MCP/API evidence includes typed stream parts, checkpoints,
+//! write history, and topology. Direct `execute` calls are not an enterprise
+//! audit surface.
+
+use std::path::{Path, PathBuf};
+
+#[test]
+fn all_langgraph_decision_graphs_use_v3_streaming_authority() {
+    let graph_sources = langgraph_decision_graph_sources();
+    assert!(
+        graph_sources.len() >= 50,
+        "expected broad infrastructure LangGraph decision-graph coverage, found {} files",
+        graph_sources.len()
+    );
+
+    for path in graph_sources {
+        let source = std::fs::read_to_string(&path)
+            .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
+        if !source.contains("StateGraphBuilder") {
+            continue;
+        }
+
+        let label = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("<unknown>");
+        assert!(
+            source.contains("stream_decision_run("),
+            "{label} must execute through decision_graph_introspection::stream_decision_run"
+        );
+        assert!(
+            source.contains("DecisionGraphStreamPart"),
+            "{label} must expose typed LangGraph v3 stream evidence"
+        );
+        assert!(
+            source.contains("stream: Vec<"),
+            "{label} run report must carry LangGraph stream evidence"
+        );
+        assert!(
+            source.contains("checkpoint_history("),
+            "{label} run report must carry durable checkpoint history"
+        );
+        assert!(
+            !source.contains(".execute("),
+            "{label} must not bypass the v3 streaming authority with direct execute"
+        );
+    }
+}
+
+fn langgraph_decision_graph_sources() -> Vec<PathBuf> {
+    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut files = std::fs::read_dir(&src)
+        .unwrap_or_else(|err| panic!("failed to read {}: {err}", src.display()))
+        .map(|entry| entry.expect("source entry should be readable").path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.ends_with("_graph.rs"))
+        })
+        .collect::<Vec<_>>();
+
+    let remediation = src.join("remediation.rs");
+    if remediation.exists() {
+        files.push(remediation);
+    }
+
+    files.sort();
+    files
+}
